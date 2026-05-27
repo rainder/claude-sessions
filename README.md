@@ -26,17 +26,26 @@ bin/claude-sessions-linux-arm64
 For remote deploys (macOS dev box → Linux server / Pi):
 
 ```sh
-make deploy         # scp's the matching Linux binary to BELUGA_SSH and RPI1_SSH
-# or one at a time:
-make deploy-beluga
-make deploy-rpi1
+make deploy-linux-amd64 HOST=user@server       # any Linux x86_64 box
+make deploy-linux-arm64 HOST=pi@raspberrypi    # any Linux arm64 box
 ```
 
-Override the hosts on the command line if needed:
+`HOST` is passed straight to `ssh`/`scp`, so anything `~/.ssh/config` resolves
+works (e.g. `HOST=myserver` if you have a `Host myserver` block). The binary
+lands at `~/.local/bin/claude-sessions` on the remote.
 
-```sh
-make deploy BELUGA_SSH=beluga.tail-net.ts.net RPI1_SSH=pi@rpi1.local
+If you deploy to the same hosts often, drop a `Makefile.local` (gitignored)
+beside the Makefile with shortcuts:
+
+```makefile
+deploy-beluga:
+	$(MAKE) deploy-linux-amd64 HOST=beluga
+
+deploy-rpi1:
+	$(MAKE) deploy-linux-arm64 HOST=rpi1
 ```
+
+Then `make deploy-beluga` / `make deploy-rpi1` work the same.
 
 ## Usage
 

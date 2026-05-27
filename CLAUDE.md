@@ -21,15 +21,17 @@ Python versions and shell portability.
 ## Build / install / deploy
 
 ```sh
-make                # cross-compile every arch into ./bin/
-make install        # build, then copy the host-arch binary to ~/.local/bin
-make deploy-beluga  # build + scp Linux/amd64 to beluga:.local/bin/claude-sessions
-make deploy-rpi1    # build + scp Linux/arm64 to rpi1:.local/bin/claude-sessions
-make deploy         # both of the above
-make run            # build + run host binary
+make                                       # cross-compile every arch into ./bin/
+make install                               # build, then copy host-arch binary to ~/.local/bin
+make deploy-linux-amd64 HOST=user@server   # build + scp Linux/amd64
+make deploy-linux-arm64 HOST=pi@somepi     # build + scp Linux/arm64
+make run                                   # build + run host binary
 ```
 
-Override `BELUGA_SSH` / `RPI1_SSH` on the command line if your aliases differ.
+`HOST` goes straight to ssh/scp — anything `~/.ssh/config` resolves works.
+Per-developer convenience shortcuts (`deploy-beluga` etc.) belong in
+`Makefile.local` (gitignored, auto-included).
+
 `go build .` / `go run .` work for quick single-arch iteration.
 
 No test suite yet; `go vet ./...` is fine to run.
@@ -109,11 +111,11 @@ spawns claude as the pane's foreground process — claude's pid *is* the pane
 pid, with no shell parent.
 
 **ssh attach needs an explicit user.** Tmux sessions are per-user. If the
-local username differs from the server's username (e.g. `andy` locally but
-the server runs as `beluga`), `ssh beluga tmux attach` will see "no sessions"
-because it's looking in andy's namespace. Either use `ssh_user: beluga` in
-`servers.yaml` or set `User beluga` for that host in `~/.ssh/config`.
-`ServerConfig.EffectiveSSHTarget()` builds the `user@host` string.
+local username differs from the user the server runs as, `ssh host tmux
+attach` will see "no sessions" because it's looking in the wrong namespace.
+Either set `ssh_user` in `servers.yaml` or `User <name>` for that host in
+`~/.ssh/config`. `ServerConfig.EffectiveSSHTarget()` builds the `user@host`
+string.
 
 **Remote PIDs in `Session.ID()`.** Local rows have `Host == ""` and `ID()`
 returns `"<pid>"`. Remote rows have `Host == "<name>"` and `ID()` returns
