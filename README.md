@@ -6,6 +6,8 @@ Single static binary, no runtime deps. Lists every Claude session on your machin
 
 ![ci](https://github.com/rainder/claude-sessions/actions/workflows/ci.yml/badge.svg)
 
+![claude-sessions live view showing local sessions plus a remote host section](docs/screenshot.png)
+
 ## Install
 
 ### From a release binary
