@@ -6,8 +6,8 @@
 #   make deploy-linux-amd64 HOST=user@server   # scp the linux/amd64 binary
 #   make deploy-linux-arm64 HOST=user@pi       # scp the linux/arm64 binary
 #
-# Personal shortcuts (e.g. `deploy-beluga`) go in Makefile.local (gitignored).
-# See the README for an example.
+# Personal shortcuts (e.g. a named `deploy-myserver` target) go in
+# Makefile.local (gitignored, auto-included). See the README for an example.
 
 BIN          := claude-sessions
 BIN_DIR      := bin

@@ -38,14 +38,14 @@ If you deploy to the same hosts often, drop a `Makefile.local` (gitignored)
 beside the Makefile with shortcuts:
 
 ```makefile
-deploy-beluga:
-	$(MAKE) deploy-linux-amd64 HOST=beluga
+deploy-myserver:
+	$(MAKE) deploy-linux-amd64 HOST=myserver
 
-deploy-rpi1:
-	$(MAKE) deploy-linux-arm64 HOST=rpi1
+deploy-raspi:
+	$(MAKE) deploy-linux-arm64 HOST=pi@raspi
 ```
 
-Then `make deploy-beluga` / `make deploy-rpi1` work the same.
+Then `make deploy-myserver` / `make deploy-raspi` work the same.
 
 ## Usage
 
@@ -84,16 +84,16 @@ Add servers to `~/.config/claude-sessions/servers.yaml`:
 
 ```yaml
 servers:
-  - name: beluga
+  - name: myserver
     host: 100.64.0.1            # Tailscale IPv4 of the server
     port: 8765
     token: <copy from server>
-    ssh_host: beluga            # optional, defaults to host
-    ssh_user: beluga            # optional, defaults to your local $USER
+    ssh_host: myserver          # optional, defaults to host
+    ssh_user: alice             # optional, defaults to your local $USER
                                 # tmux sessions are per-user — set this if the
                                 # server runs as a different user than you log
                                 # in as locally, or `ssh attach` shows "no sessions"
-  - name: rpi1
+  - name: raspi
     host: 100.64.0.2
     port: 8765
     token: <copy from server>

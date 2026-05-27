@@ -29,8 +29,8 @@ make run                                   # build + run host binary
 ```
 
 `HOST` goes straight to ssh/scp — anything `~/.ssh/config` resolves works.
-Per-developer convenience shortcuts (`deploy-beluga` etc.) belong in
-`Makefile.local` (gitignored, auto-included).
+Per-developer convenience shortcuts (e.g. a named `deploy-myserver` target)
+belong in `Makefile.local` (gitignored, auto-included).
 
 `go build .` / `go run .` work for quick single-arch iteration.
 
