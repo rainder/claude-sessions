@@ -8,6 +8,22 @@ Single static binary, no runtime deps. Lists every Claude session on your machin
 
 ## Install
 
+### From a release binary
+
+Pick the matching platform from [the releases page](https://github.com/rainder/claude-sessions/releases/latest)
+and drop it on your `$PATH`:
+
+```sh
+# Linux x86_64
+curl -L https://github.com/rainder/claude-sessions/releases/latest/download/claude-sessions-linux-amd64 \
+  -o ~/.local/bin/claude-sessions
+chmod +x ~/.local/bin/claude-sessions
+```
+
+Each release also includes a `SHA256SUMS` file you can verify against.
+
+### From source
+
 ```sh
 go install github.com/rainder/claude-sessions@latest
 # or, from a clone:
