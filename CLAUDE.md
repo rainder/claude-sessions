@@ -117,6 +117,14 @@ Either set `ssh_user` in `servers.yaml` or `User <name>` for that host in
 `~/.ssh/config`. `ServerConfig.EffectiveSSHTarget()` builds the `user@host`
 string.
 
+**Wall-clock tick uses `unix.Select`, not `os.Stdin.SetReadDeadline`.**
+SetReadDeadline silently no-ops on stdin inherited at process start (the Go
+runtime's netpoller doesn't auto-register it), so `Read` would block until
+input arrives and the auto-refresh tick would never fire under continuous
+typing. `readEvents` in tui.go uses `unix.Select(fd+1, &fdSet, nil, nil, tv)`
+to poll the raw fd with a real timeout. Don't "simplify" back to the
+Deadline API — it'll silently re-break ticking on PTY-inherited stdin.
+
 **Remote PIDs in `Session.ID()`.** Local rows have `Host == ""` and `ID()`
 returns `"<pid>"`. Remote rows have `Host == "<name>"` and `ID()` returns
 `"<name>:<pid>"`. Action dispatch uses `s.Host != ""` to route between local
@@ -136,6 +144,22 @@ The only OS-conditional code is `termios_bsd.go` (darwin/freebsd/openbsd/
 netbsd) and `termios_linux.go`, which provide `ioctlGetTermios` /
 `ioctlSetTermios` constants. Everything else uses `golang.org/x/sys/unix` and
 `golang.org/x/term` cross-platform.
+
+## Releases
+
+Tags matching `v*` trigger `.github/workflows/release.yml`, which
+cross-compiles all three platform binaries, generates `SHA256SUMS`, and
+creates a GitHub release with the binaries attached. Release notes are
+extracted from the matching `## [vX.Y.Z]` section in `CHANGELOG.md` — add an
+entry there before tagging or the release will have empty notes.
+
+```sh
+# example for a new release
+edit CHANGELOG.md           # add ## [v1.1.0] section at top
+git commit -am "v1.1.0"
+git tag -a v1.1.0 -m "v1.1.0"
+git push origin main v1.1.0
+```
 
 ## Dependencies
 
