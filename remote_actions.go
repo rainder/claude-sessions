@@ -167,10 +167,18 @@ func actPreviewRemote(c *actCtx, interval time.Duration) {
 		_, _ = os.Stdout.Write(resp)
 	}
 	render()
+	nextTick := time.Now().Add(interval)
 	for {
-		events := readEvents(interval)
+		timeout := time.Until(nextTick)
+		if timeout <= 0 {
+			render()
+			nextTick = time.Now().Add(interval)
+			continue
+		}
+		events := readEvents(timeout)
 		if len(events) == 0 {
 			render()
+			nextTick = time.Now().Add(interval)
 			continue
 		}
 		for _, k := range events {

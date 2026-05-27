@@ -127,10 +127,18 @@ func actPreview(c *actCtx, interval time.Duration) {
 		fmt.Print(PreviewContent(s.PID))
 	}
 	render()
+	nextTick := time.Now().Add(interval)
 	for {
-		events := readEvents(interval)
+		timeout := time.Until(nextTick)
+		if timeout <= 0 {
+			render()
+			nextTick = time.Now().Add(interval)
+			continue
+		}
+		events := readEvents(timeout)
 		if len(events) == 0 {
-			render() // tick
+			render()
+			nextTick = time.Now().Add(interval)
 			continue
 		}
 		for _, k := range events {

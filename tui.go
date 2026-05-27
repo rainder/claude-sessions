@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -65,34 +64,39 @@ func parseEvents(buf []byte) []string {
 	return out
 }
 
-// readEvents reads up to timeout for a stdin chunk and parses keystrokes.
-// Returns nil on timeout or read error. Single-threaded — no goroutine — so
-// cooked-mode prompts (bufio.Scanner) and raw-mode polling never race on
-// the same fd.
+// readEvents waits up to timeout for stdin to become readable, then reads
+// once and parses keystrokes. Returns nil on timeout or read error.
+//
+// We use unix.Select to wait rather than os.Stdin.SetReadDeadline because
+// stdin inherited at process start isn't registered with Go's netpoller —
+// SetReadDeadline silently no-ops there and Read blocks forever, which
+// broke wall-clock ticking. Single consumer: no goroutine, so cooked-mode
+// prompts (bufio.Scanner) and raw-mode polling never race.
 func readEvents(timeout time.Duration) []string {
+	fd := int(os.Stdin.Fd())
+	var fdSet unix.FdSet
+	fdSet.Set(fd)
+	var tvp *unix.Timeval
 	if timeout > 0 {
-		_ = os.Stdin.SetReadDeadline(time.Now().Add(timeout))
-	} else {
-		_ = os.Stdin.SetReadDeadline(time.Time{})
+		tv := unix.NsecToTimeval(timeout.Nanoseconds())
+		tvp = &tv
 	}
-	buf := make([]byte, 16)
-	n, err := os.Stdin.Read(buf)
+	n, err := unix.Select(fd+1, &fdSet, nil, nil, tvp)
 	if err != nil || n == 0 {
 		return nil
 	}
-	return parseEvents(buf[:n])
+	buf := make([]byte, 16)
+	nr, err := unix.Read(fd, buf)
+	if err != nil || nr == 0 {
+		return nil
+	}
+	return parseEvents(buf[:nr])
 }
 
 // readEventBlocking waits indefinitely for the next event(s) from stdin.
 // Useful inside action handlers that pause for input ("any key to continue").
 func readEventBlocking() []string {
 	return readEvents(0)
-}
-
-// isTimeoutErr returns true for the deadline-exceeded errors os.Stdin.Read
-// returns when the SetReadDeadline timer fires.
-func isTimeoutErr(err error) bool {
-	return errors.Is(err, os.ErrDeadlineExceeded)
 }
 
 // nav returns the next selection ID after moving by delta (+1 down, -1 up).
@@ -184,11 +188,25 @@ func RunTUI(interval time.Duration) error {
 	refresh(true)
 	render()
 
+	// Wall-clock auto-refresh: tick every `interval` regardless of input.
+	// readEvents takes the time remaining until the next tick; if it returns
+	// empty, the tick fired and we refresh + advance. Otherwise we handle
+	// keys and loop back without rescheduling.
+	nextTick := time.Now().Add(interval)
+
 	for {
-		events := readEvents(interval)
-		if len(events) == 0 {
-			refresh(true) // tick: full refresh including remote
+		timeout := time.Until(nextTick)
+		if timeout <= 0 {
+			refresh(true)
 			render()
+			nextTick = time.Now().Add(interval)
+			continue
+		}
+		events := readEvents(timeout)
+		if len(events) == 0 {
+			refresh(true)
+			render()
+			nextTick = time.Now().Add(interval)
 			continue
 		}
 		for _, k := range events {

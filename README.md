@@ -1,8 +1,10 @@
 # claude-sessions
 
-A live, multi-host viewer and manager for running Claude Code CLI sessions.
+A live, multi-host viewer and manager for running [Claude Code](https://claude.com/claude-code) CLI sessions.
 
-This is the Go rewrite of the original bash+python script. Single static binary, no runtime deps, copy across machines.
+Single static binary, no runtime deps. Lists every Claude session on your machine, attaches to or migrates them into tmux, runs an HTTP server so other hosts can include you in their view, and renders everything in a tight live TUI.
+
+![ci](https://github.com/rainder/claude-sessions/actions/workflows/ci.yml/badge.svg)
 
 ## Install
 
@@ -41,7 +43,9 @@ make deploy BELUGA_SSH=beluga.tail-net.ts.net RPI1_SSH=pi@rpi1.local
 ```sh
 claude-sessions                            # live TUI (default)
 claude-sessions --once                     # one-shot print
-claude-sessions -s [--port 8765]           # run HTTP server (Tailscale-bound)
+claude-sessions -s                         # run HTTP server (defaults to 127.0.0.1:8765)
+claude-sessions -s --bind tailscale        # bind to this host's Tailscale IPv4
+claude-sessions -s --bind 0.0.0.0 --port 9000   # any address / port
 
 claude-sessions kill PID [-y]              # kill a session (tmux-aware)
 claude-sessions migrate PID [-y]           # kill + resume in a new tmux session
@@ -98,6 +102,10 @@ Remote rows appear in their own section under the local one. Selection works acr
 - `~/.config/claude-sessions/view-mode` — persisted view mode (1 or 2)
 - `~/.config/claude-sessions/server-token` — bearer token (server side, 0600)
 - `~/.config/claude-sessions/servers.yaml` — client server list
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Layout
 

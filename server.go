@@ -210,8 +210,15 @@ func shortHostname() string {
 }
 
 // cmdServer is the -s subcommand: starts the HTTP server in the foreground.
+//
+// Default bind is 127.0.0.1 (safe). For remote access:
+//
+//	--bind tailscale    auto-detect this host's Tailscale IPv4
+//	--bind 0.0.0.0      every interface (not recommended)
+//	--bind <addr>       any explicit address
 func cmdServer(args []string) int {
 	port := 8765
+	bind := "127.0.0.1"
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--port":
@@ -226,10 +233,28 @@ func cmdServer(args []string) int {
 			}
 			port = p
 			i++
+		case "--bind":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "server: --bind needs a value")
+				return 2
+			}
+			bind = args[i+1]
+			i++
 		default:
 			fmt.Fprintf(os.Stderr, "server: unknown arg %q\n", args[i])
 			return 2
 		}
+	}
+
+	// Magic value: resolve "tailscale" to this host's Tailscale IPv4.
+	if bind == "tailscale" {
+		ts := tailscaleIPv4()
+		if ts == "" {
+			fmt.Fprintln(os.Stderr, "server: --bind tailscale requested but no Tailscale IPv4 found")
+			fmt.Fprintln(os.Stderr, "        is tailscaled running and authenticated?")
+			return 1
+		}
+		bind = ts
 	}
 
 	tok, err := loadOrCreateToken()
@@ -237,16 +262,15 @@ func cmdServer(args []string) int {
 		fmt.Fprintln(os.Stderr, "server:", err)
 		return 1
 	}
-	bind := tailscaleIPv4()
-	if bind == "" {
-		fmt.Fprintln(os.Stderr, "warning: no Tailscale IP found; binding to 127.0.0.1")
-		fmt.Fprintln(os.Stderr, "         install tailscale or change bind manually for remote access")
-		bind = "127.0.0.1"
-	}
 	host := shortHostname()
 
+	bindHint := ""
+	if bind == "127.0.0.1" || bind == "localhost" {
+		bindHint = "  " + dim("(loopback — pass --bind tailscale or --bind 0.0.0.0 for remote access)")
+	}
+
 	fmt.Printf(`claude-sessions server
-  bind:     %s:%d
+  bind:     %s:%d%s
   hostname: %s
   token:    %s
 
@@ -257,7 +281,7 @@ add to client's ~/.config/claude-sessions/servers.yaml:
       port: %d
       token: %s
 
-`, bind, port, host, tok, host, bind, port, tok)
+`, bind, port, bindHint, host, tok, host, bind, port, tok)
 
 	s := &server{token: tok, host: host}
 	mux := http.NewServeMux()

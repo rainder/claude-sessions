@@ -60,7 +60,9 @@ const usage = `usage: claude-sessions [SUBCOMMAND] [args]
 subcommands:
   (no args), list                 live auto-refreshing view (TUI)
   list --once, -1                 print local sessions and exit
-  -s, --server [--port N]         run HTTP server (default port 8765)
+  -s, --server [--port N] [--bind ADDR]
+                                  run HTTP server (default 127.0.0.1:8765;
+                                  --bind tailscale auto-detects Tailscale IPv4)
   kill PID [-y]                   kill a session (tmux-aware)
   migrate PID [-y]                kill + resume in a new tmux session
   new --cwd PATH [--name NAME]    spawn a new tmux+claude session
