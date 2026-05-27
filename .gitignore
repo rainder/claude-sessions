@@ -2,3 +2,8 @@
 /Makefile.local
 *.test
 *.out
+# Editor swap / backup files
+.*.swp
+.*.swo
+*~
+.DS_Store
