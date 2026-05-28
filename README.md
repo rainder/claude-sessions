@@ -10,19 +10,25 @@ Single static binary, no runtime deps. Lists every Claude session on your machin
 
 ## Install
 
-### From a release binary
-
-Pick the matching platform from [the releases page](https://github.com/rainder/claude-sessions/releases/latest)
-and drop it on your `$PATH`:
+### One-liner (auto-detect OS/arch, SHA256-verified)
 
 ```sh
-# Linux x86_64
-curl -L https://github.com/rainder/claude-sessions/releases/latest/download/claude-sessions-linux-amd64 \
-  -o ~/.local/bin/claude-sessions
-chmod +x ~/.local/bin/claude-sessions
+curl -fsSL https://raw.githubusercontent.com/rainder/claude-sessions/main/install.sh | bash
 ```
 
-Each release also includes a `SHA256SUMS` file you can verify against.
+Installs to `~/.local/bin/claude-sessions`. Override with env vars:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rainder/claude-sessions/main/install.sh | VERSION=v1.0.0 bash
+curl -fsSL https://raw.githubusercontent.com/rainder/claude-sessions/main/install.sh | INSTALL_DIR=/usr/local/bin bash
+```
+
+Supported: `darwin/arm64`, `linux/amd64`, `linux/arm64`.
+
+### Manual download
+
+Pick the matching binary from [the releases page](https://github.com/rainder/claude-sessions/releases/latest)
+and drop it on your `$PATH`. Each release ships a `SHA256SUMS` file you can verify against.
 
 ### From source
 
