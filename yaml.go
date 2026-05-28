@@ -13,7 +13,9 @@ import (
 //	    host: bar
 //	    port: 8765
 //	    token: ...
-//	    ssh_host: ... (optional, defaults to host)
+//	    ssh_host: ...    (optional, defaults to host)
+//	    ssh_user: ...    (optional)
+//	    enable: false    (optional; default true — false hides the entry)
 //
 // No nested structures, no flow style, no multiline scalars, no anchors.
 // PyYAML this isn't — but it's enough for the config format we ship.
@@ -26,6 +28,7 @@ type ServerConfig struct {
 	Token   string
 	SSHHost string // optional, defaults to Host
 	SSHUser string // optional, defaults to ssh's own default (usually $USER)
+	Enable  bool   // optional, defaults to true; false drops the entry from LoadServerConfigs
 }
 
 // EffectiveSSHTarget returns "user@host" if SSHUser is set, else just "host".
@@ -44,7 +47,8 @@ func (s ServerConfig) EffectiveSSHTarget() string {
 }
 
 // LoadServerConfigs reads ~/.config/claude-sessions/servers.yaml. Returns an
-// empty slice (no error) when the file doesn't exist.
+// empty slice (no error) when the file doesn't exist. Disabled entries
+// (enable: false) are dropped here so callers never see them.
 func LoadServerConfigs() ([]ServerConfig, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -58,7 +62,14 @@ func LoadServerConfigs() ([]ServerConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseServersYAML(string(data)), nil
+	all := parseServersYAML(string(data))
+	enabled := all[:0]
+	for _, s := range all {
+		if s.Enable {
+			enabled = append(enabled, s)
+		}
+	}
+	return enabled, nil
 }
 
 func parseServersYAML(s string) []ServerConfig {
@@ -88,7 +99,7 @@ func parseServersYAML(s string) []ServerConfig {
 			if current != nil {
 				out = append(out, *current)
 			}
-			current = &ServerConfig{Port: 8765}
+			current = &ServerConfig{Port: 8765, Enable: true}
 			kv := strings.TrimSpace(stripped[2:])
 			if k, v, ok := strings.Cut(kv, ":"); ok {
 				setField(current, strings.TrimSpace(k), trimYAMLValue(v))
@@ -133,5 +144,12 @@ func setField(s *ServerConfig, key, val string) {
 		s.SSHHost = val
 	case "ssh_user":
 		s.SSHUser = val
+	case "enable":
+		switch strings.ToLower(val) {
+		case "false", "no", "off", "0":
+			s.Enable = false
+		case "true", "yes", "on", "1":
+			s.Enable = true
+		}
 	}
 }

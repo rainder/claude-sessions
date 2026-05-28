@@ -122,6 +122,11 @@ servers:
     port: 8765
     token: <copy from server>
     ssh_user: pi
+  - name: legacy
+    host: 100.64.0.3
+    port: 8765
+    token: <copy from server>
+    enable: false               # optional, defaults to true; false hides this entry
 ```
 
 Start the server on each remote host with `claude-sessions -s`. The bind IP and token are printed; copy them into the client's `servers.yaml`. Token is auto-generated on first start and persisted at `~/.config/claude-sessions/server-token` (mode 0600).

@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.1.0] - 2026-05-28
+
+### Added
+
+- `enable: false` field in `servers.yaml` — hides an entry from the TUI,
+  remote polling, and lookups without removing it from the config. Defaults
+  to `true`, so existing configs are unaffected.
+- One-liner installer: `curl -fsSL https://raw.githubusercontent.com/rainder/claude-sessions/main/install.sh | bash`.
+  Auto-detects OS/arch, downloads the release binary, verifies SHA256.
+  Honors `VERSION=` and `INSTALL_DIR=` env vars.
+- `(loading...)` placeholder for a remote section before its first fetch
+  completes, so users can see which servers are still pending.
+
+### Changed
+
+- Remote fetches now stream asynchronously. The render loop reads from a
+  background `RemoteHub` snapshot instead of calling `FetchAllRemote()`
+  synchronously every tick, so a slow/unreachable host can no longer freeze
+  keystrokes or auto-refresh. Each server's row populates as soon as that
+  host replies; prior data is preserved across cycles so a flaky host's row
+  doesn't blink to blank.
+- Per-host HTTP timeout bumped from 2s to 5s. Made tolerable by the async
+  fetcher above.
+- `CollectLocal` now issues a single `ps -A -o pid=,ppid=,%cpu=` call
+  instead of one `ps -p` per session per tick. Drops N+1 process spawns to
+  1 per refresh, regardless of session count.
+
 ## [v1.0.0] - 2026-05-27
 
 Initial release. Single static binary; cross-compiled for darwin/arm64,
