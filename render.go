@@ -107,16 +107,17 @@ func displayCWD(cwd, home, host string) string {
 // section is one rendering block: the local sessions (label "") or one
 // remote host's sessions (label = hostname).
 type section struct {
-	label string
-	rows  []Session
-	error string
+	label   string
+	rows    []Session
+	error   string
+	loading bool
 }
 
 func buildSections(local []Session, remotes []RemoteResult) []section {
 	out := make([]section, 0, 1+len(remotes))
 	out = append(out, section{rows: local})
 	for _, r := range remotes {
-		out = append(out, section{label: r.Name, rows: r.Sessions, error: r.Error})
+		out = append(out, section{label: r.Name, rows: r.Sessions, error: r.Error, loading: r.Loading})
 	}
 	return out
 }
@@ -254,6 +255,8 @@ func renderAllFull(w io.Writer, sections []section, sel string) {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))
 		switch {
+		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
+			fmt.Fprintln(w, "  "+dim("(loading...)"))
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
@@ -363,6 +366,8 @@ func renderAllMinimal(w io.Writer, sections []section, sel string) {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))
 		switch {
+		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
+			fmt.Fprintln(w, "  "+dim("(loading...)"))
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:

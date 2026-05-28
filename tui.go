@@ -64,39 +64,63 @@ func parseEvents(buf []byte) []string {
 	return out
 }
 
-// readEvents waits up to timeout for stdin to become readable, then reads
-// once and parses keystrokes. Returns nil on timeout or read error.
+// readEvents waits up to timeout for stdin (or the optional wakeFd) to become
+// readable, then reads once and parses keystrokes. Returns nil keys on
+// timeout or read error. When wakeFd >= 0 and it becomes readable, the pipe
+// is drained and woke=true is returned — the caller should re-render to
+// reflect the updated background state.
 //
 // We use unix.Select to wait rather than os.Stdin.SetReadDeadline because
 // stdin inherited at process start isn't registered with Go's netpoller —
 // SetReadDeadline silently no-ops there and Read blocks forever, which
 // broke wall-clock ticking. Single consumer: no goroutine, so cooked-mode
 // prompts (bufio.Scanner) and raw-mode polling never race.
-func readEvents(timeout time.Duration) []string {
+func readEvents(timeout time.Duration, wakeFd int) (keys []string, woke bool) {
 	fd := int(os.Stdin.Fd())
+	maxFd := fd
 	var fdSet unix.FdSet
 	fdSet.Set(fd)
+	if wakeFd >= 0 {
+		fdSet.Set(wakeFd)
+		if wakeFd > maxFd {
+			maxFd = wakeFd
+		}
+	}
 	var tvp *unix.Timeval
 	if timeout > 0 {
 		tv := unix.NsecToTimeval(timeout.Nanoseconds())
 		tvp = &tv
 	}
-	n, err := unix.Select(fd+1, &fdSet, nil, nil, tvp)
+	n, err := unix.Select(maxFd+1, &fdSet, nil, nil, tvp)
 	if err != nil || n == 0 {
-		return nil
+		return nil, false
 	}
-	buf := make([]byte, 16)
-	nr, err := unix.Read(fd, buf)
-	if err != nil || nr == 0 {
-		return nil
+	if wakeFd >= 0 && fdSet.IsSet(wakeFd) {
+		var drain [64]byte
+		for {
+			if _, err := unix.Read(wakeFd, drain[:]); err != nil {
+				break
+			}
+		}
+		woke = true
 	}
-	return parseEvents(buf[:nr])
+	if fdSet.IsSet(fd) {
+		buf := make([]byte, 16)
+		nr, err := unix.Read(fd, buf)
+		if err == nil && nr > 0 {
+			keys = parseEvents(buf[:nr])
+		}
+	}
+	return keys, woke
 }
 
 // readEventBlocking waits indefinitely for the next event(s) from stdin.
 // Useful inside action handlers that pause for input ("any key to continue").
+// Background wakes are intentionally ignored so modal screens (e.g. help)
+// aren't dismissed by remote-data updates underneath.
 func readEventBlocking() []string {
-	return readEvents(0)
+	keys, _ := readEvents(0, -1)
+	return keys
 }
 
 // nav returns the next selection ID after moving by delta (+1 down, -1 up).
@@ -159,16 +183,29 @@ func RunTUI(interval time.Duration) error {
 	var remotes []RemoteResult
 	sel := ""
 
-	// refresh refetches local sessions (always) and remote sessions (when
-	// pollRemote is true). Arrow nav does NOT trigger remote re-poll —
-	// otherwise every keypress would hit the network.
-	refresh := func(pollRemote bool) {
+	// Remote fetches run in a background goroutine so the render loop never
+	// blocks on a slow/unreachable host (the per-host HTTP timeout is 5s,
+	// which would otherwise freeze the UI for that long every tick). Each
+	// host's row populates as its reply arrives — locals paint immediately
+	// and remotes stream in independently.
+	hub, err := NewRemoteHub(interval)
+	if err != nil {
+		return fmt.Errorf("init remote hub: %w", err)
+	}
+	defer hub.Shutdown()
+
+	// refresh re-reads local sessions and the latest remote snapshot. When
+	// kickRemote is true, the hub is also asked to refetch ASAP (used after
+	// actions and the 'r' key). Wall-clock ticks pass false because the hub
+	// has its own ticker — kicking on every tick would just double-fetch.
+	refresh := func(kickRemote bool) {
 		if s, err := CollectLocal(); err == nil {
 			local = s
 		}
-		if pollRemote {
-			remotes = FetchAllRemote()
+		if kickRemote {
+			hub.Refresh()
 		}
+		remotes = hub.Snapshot()
 		sel = validateSel(AllSessions(local, remotes), sel)
 	}
 	render := func() {
@@ -185,7 +222,7 @@ func RunTUI(interval time.Duration) error {
 		}
 	}
 
-	refresh(true)
+	refresh(false)
 	render()
 
 	// Wall-clock auto-refresh: tick every `interval` regardless of input.
@@ -197,17 +234,28 @@ func RunTUI(interval time.Duration) error {
 	for {
 		timeout := time.Until(nextTick)
 		if timeout <= 0 {
-			refresh(true)
+			refresh(false)
 			render()
 			nextTick = time.Now().Add(interval)
 			continue
 		}
-		events := readEvents(timeout)
+		events, woke := readEvents(timeout, hub.WakeFD())
 		if len(events) == 0 {
-			refresh(true)
+			// Either timeout (woke=false) or a remote-data update
+			// (woke=true). Both re-render, but a wake shouldn't reset the
+			// wall-clock tick — otherwise fast remote updates could starve
+			// the local refresh cadence.
+			refresh(false)
 			render()
-			nextTick = time.Now().Add(interval)
+			if !woke {
+				nextTick = time.Now().Add(interval)
+			}
 			continue
+		}
+		if woke {
+			// Stdin and wake fired together. Refresh once so the key
+			// handlers see the latest snapshot (e.g. nav uses fresh list).
+			refresh(false)
 		}
 		for _, k := range events {
 			switch k {

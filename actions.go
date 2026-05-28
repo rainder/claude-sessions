@@ -135,7 +135,7 @@ func actPreview(c *actCtx, interval time.Duration) {
 			nextTick = time.Now().Add(interval)
 			continue
 		}
-		events := readEvents(timeout)
+		events, _ := readEvents(timeout, -1)
 		if len(events) == 0 {
 			render()
 			nextTick = time.Now().Add(interval)
