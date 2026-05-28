@@ -54,6 +54,32 @@ func ppidMap() (map[int]int, error) {
 	return m, nil
 }
 
+// processInfo returns pid→ppid and pid→cpu% in a single `ps -A` spawn.
+// CollectLocal needs both, so folding them into one call saves N+1 ps
+// invocations per tick (one per session for CPU%) down to 1.
+func processInfo() (ppid map[int]int, cpu map[int]string, err error) {
+	out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,%cpu=").Output()
+	if err != nil {
+		return nil, nil, err
+	}
+	ppid = make(map[int]int, 256)
+	cpu = make(map[int]string, 256)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(f[0])
+		pp, err2 := strconv.Atoi(f[1])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		ppid[pid] = pp
+		cpu[pid] = f[2]
+	}
+	return ppid, cpu, nil
+}
+
 // walkTmuxPane returns the tmux pane string (session:win.pane) if pid is a
 // descendant of any tmux pane process, else "". Checks the pid itself first
 // since `tmux new-session "claude ..."` makes claude the pane_pid directly.

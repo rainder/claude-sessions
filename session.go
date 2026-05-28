@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -68,7 +67,7 @@ func CollectLocal() ([]Session, error) {
 	}
 
 	panes, _ := tmuxPaneMap() // best-effort: empty map if tmux not running
-	ppid, err := ppidMap()
+	ppid, cpu, err := processInfo()
 	if err != nil {
 		return nil, fmt.Errorf("read process tree: %w", err)
 	}
@@ -82,7 +81,11 @@ func CollectLocal() ([]Session, error) {
 		if !pidAlive(s.PID) {
 			continue
 		}
-		s.CPU = cpuPercent(s.PID)
+		if c, ok := cpu[s.PID]; ok {
+			s.CPU = c
+		} else {
+			s.CPU = "-"
+		}
 		s.Tmux = walkTmuxPane(s.PID, panes, ppid)
 		out = append(out, s)
 	}
@@ -118,12 +121,3 @@ func pidAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
-// cpuPercent shells out to ps -p PID -o %cpu= and trims. Returns "-" on
-// failure so the display stays aligned.
-func cpuPercent(pid int) string {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "%cpu=").Output()
-	if err != nil {
-		return "-"
-	}
-	return strings.TrimSpace(string(out))
-}
