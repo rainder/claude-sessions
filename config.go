@@ -15,15 +15,15 @@ func ConfigDir() string {
 	return filepath.Join(home, ".config", "claude-sessions")
 }
 
-// LoadViewMode reads the persisted view mode ("1" full, "2" minimal).
-// Defaults to "1" on any error or unrecognized value.
+// LoadViewMode reads the persisted view mode ("1" full, "2" minimal,
+// "3" intermediate). Defaults to "1" on any error or unrecognized value.
 func LoadViewMode() string {
 	data, err := os.ReadFile(filepath.Join(ConfigDir(), "view-mode"))
 	if err != nil {
 		return "1"
 	}
 	v := strings.TrimSpace(string(data))
-	if v == "1" || v == "2" {
+	if v == "1" || v == "2" || v == "3" {
 		return v
 	}
 	return "1"

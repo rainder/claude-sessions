@@ -284,9 +284,12 @@ func RunTUI(interval time.Duration) error {
 				refresh(true)
 				render()
 			case "m", "M":
-				if viewMode == "1" {
+				switch viewMode {
+				case "1":
+					viewMode = "3"
+				case "3":
 					viewMode = "2"
-				} else {
+				default:
 					viewMode = "1"
 				}
 				SaveViewMode(viewMode)
@@ -318,7 +321,7 @@ func renderHelp() {
 	fmt.Println("    p            preview (tmux pane snapshot or transcript tail)")
 	fmt.Println()
 	fmt.Println("  " + bold("VIEW"))
-	fmt.Println("    m            toggle mode (full ↔ minimal)  ·  persisted")
+	fmt.Println("    m            cycle mode (full → intermediate → minimal)  ·  persisted")
 	fmt.Println("    r            refresh now")
 	fmt.Println("    q / Ctrl-C   quit")
 	fmt.Println("    ?            this help")

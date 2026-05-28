@@ -74,7 +74,7 @@ subcommands:
 live-view keys:
   ↑/↓  navigate     n  new
   k    kill         a  attach (or migrate)
-  p    preview      m  toggle view mode
+  p    preview      m  cycle view mode
   r    refresh      ?  help     q  quit`
 
 func cmdList() error {

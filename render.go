@@ -127,9 +127,12 @@ func buildSections(local []Session, remotes []RemoteResult) []section {
 // each separated by a hostname label and a blank line.
 func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string) {
 	sections := buildSections(local, remotes)
-	if viewMode == "2" {
+	switch viewMode {
+	case "2":
 		renderAllMinimal(w, sections, sel)
-	} else {
+	case "3":
+		renderAllIntermediate(w, sections, sel)
+	default:
 		renderAllFull(w, sections, sel)
 	}
 }
@@ -251,6 +254,94 @@ func renderAllFull(w io.Writer, sections []section, sel string) {
 	// Local first.
 	rowFn(sectionRows[0])
 	// Remote sections.
+	for i := 1; i < len(sections); i++ {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))
+		switch {
+		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
+			fmt.Fprintln(w, "  "+dim("(loading...)"))
+		case sections[i].error != "":
+			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
+		case len(sectionRows[i]) == 0:
+			fmt.Fprintln(w, "  "+dim("(no sessions)"))
+		default:
+			rowFn(sectionRows[i])
+		}
+	}
+}
+
+// ============================================================================
+// Intermediate view — full's columns minus TMUX, VER, SID.
+// ============================================================================
+
+func renderAllIntermediate(w io.Writer, sections []section, sel string) {
+	home, _ := os.UserHomeDir()
+	now := time.Now()
+
+	sectionRows := make([][]drowFull, len(sections))
+	var all []drowFull
+	for si, sec := range sections {
+		sectionRows[si] = make([]drowFull, len(sec.rows))
+		for i, s := range sec.rows {
+			r := deriveFull(s, home, now)
+			sectionRows[si][i] = r
+			all = append(all, r)
+		}
+	}
+
+	nameW, dirW, statusW := len("NAME"), len("DIR"), len("STATUS")
+	for _, r := range all {
+		nameW = max(nameW, len(r.s.Name))
+		dirW = max(dirW, len(r.cwdStr))
+		statusW = max(statusW, len(r.statusStr))
+	}
+
+	tmuxCount := 0
+	for _, r := range all {
+		if r.s.Tmux != "" {
+			tmuxCount++
+		}
+	}
+	hostsInfo := ""
+	if len(sections) > 1 {
+		ok := 0
+		for _, s := range sections[1:] {
+			if s.error == "" {
+				ok++
+			}
+		}
+		hostsInfo = fmt.Sprintf(", %d/%d hosts", ok, len(sections)-1)
+	}
+	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux%s)  %s%s\n\n",
+		ansiBold, now.Format("15:04:05"), len(all), tmuxCount, hostsInfo,
+		ansiReset, dim("[intermediate]"))
+
+	hdr := fmt.Sprintf("  %-*s  %-*s  %-*s  %5s  %5s",
+		nameW, "NAME", dirW, "DIR", statusW, "STATUS", "CPU%", "AGE")
+	fmt.Fprintln(w, hdr)
+	fmt.Fprintln(w, strings.Repeat("-", visualLen(hdr)))
+
+	rowFn := func(rows []drowFull) {
+		for _, r := range rows {
+			marker := "  "
+			if r.s.ID() == sel {
+				marker = "▶ "
+			}
+			statusCell := colorize(statusColor[r.s.Status], fmt.Sprintf("%-*s", statusW, r.statusStr))
+			nameCell := fmt.Sprintf("%-*s", nameW, r.s.Name)
+			if r.s.Name == "" {
+				nameCell = dim(fmt.Sprintf("%-*s", nameW, "-"))
+			}
+			fmt.Fprintf(w, "%s%s  %-*s  %s  %5s  %5s\n",
+				marker,
+				nameCell,
+				dirW, r.cwdStr,
+				statusCell,
+				r.s.CPU, r.ageStr)
+		}
+	}
+
+	rowFn(sectionRows[0])
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))
