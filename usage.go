@@ -89,7 +89,9 @@ func loadOAuthToken() (string, error) {
 	return creds.ClaudeAiOauth.AccessToken, nil
 }
 
-// fetchUsage hits the usage endpoint with the current token. 5s timeout.
+// fetchUsage hits the usage endpoint with the current token. The HTTP leg
+// has a 5s timeout; credential loading (macOS Keychain) is unbounded but
+// runs off the render path in UsageHub's background goroutine.
 func fetchUsage() (*UsageInfo, error) {
 	tok, err := loadOAuthToken()
 	if err != nil {
