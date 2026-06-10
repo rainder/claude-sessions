@@ -324,8 +324,11 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string) {
 	rowFn := func(rows []drowFull) {
 		for _, r := range rows {
 			marker := "  "
-			if r.s.ID() == sel {
+			switch {
+			case r.s.ID() == sel:
 				marker = "▶ "
+			case r.s.Tmux != "":
+				marker = dim("· ")
 			}
 			statusCell := colorize(statusColor[r.s.Status], fmt.Sprintf("%-*s", statusW, r.statusStr))
 			nameCell := fmt.Sprintf("%-*s", nameW, r.s.Name)
@@ -435,8 +438,11 @@ func renderAllMinimal(w io.Writer, sections []section, sel string) {
 	rowFn := func(rows []drowMinimal) {
 		for _, r := range rows {
 			marker := "  "
-			if r.s.ID() == sel {
+			switch {
+			case r.s.ID() == sel:
 				marker = "▶ "
+			case r.s.Tmux != "":
+				marker = dim("· ")
 			}
 			glyph := statusGlyph[r.s.Status]
 			if glyph == "" {

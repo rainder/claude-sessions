@@ -49,16 +49,12 @@ func actKill(c *actCtx) {
 		prompt = fmt.Sprintf("\nkill PID %d? [y/N] ", s.PID)
 	}
 	if !confirm(prompt) {
-		fmt.Println("\naborted")
-		pauseForKey(c.fd, c.oldState)
 		return
 	}
 	if err := KillSession(s.PID); err != nil {
 		fmt.Printf("\nkill failed: %v\n", err)
-	} else {
-		fmt.Println("\nkilled")
+		pauseForKey(c.fd, c.oldState)
 	}
-	pauseForKey(c.fd, c.oldState)
 }
 
 // actAttach attaches to the tmux session containing the selected pid. If the
@@ -81,8 +77,6 @@ func actAttach(c *actCtx) {
 	enterCooked(c.fd, c.oldState)
 	prompt := fmt.Sprintf("\nPID %d is not in tmux. Migrate (kill + resume in tmux) first? [y/N] ", s.PID)
 	if !confirm(prompt) {
-		fmt.Println("\naborted")
-		pauseForKey(c.fd, c.oldState)
 		enterRaw(c.fd)
 		return
 	}

@@ -60,24 +60,21 @@ func actKillRemote(c *actCtx) {
 	defer enterRaw(c.fd)
 
 	if !confirm(fmt.Sprintf("\nkill PID %d on %s? [y/N] ", pid, host)) {
-		fmt.Println("\naborted")
-		pauseForKey(c.fd, c.oldState)
 		return
 	}
 	fmt.Print("\nsending remote kill... ")
 	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/kill", pid), "POST", []byte(`{}`))
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
-	} else {
-		var r actionResult
-		_ = json.Unmarshal(resp, &r)
-		if r.OK {
-			fmt.Println("ok")
-		} else {
-			fmt.Printf("failed: %s\n", r.Error)
-		}
+		pauseForKey(c.fd, c.oldState)
+		return
 	}
-	pauseForKey(c.fd, c.oldState)
+	var r actionResult
+	_ = json.Unmarshal(resp, &r)
+	if !r.OK {
+		fmt.Printf("failed: %s\n", r.Error)
+		pauseForKey(c.fd, c.oldState)
+	}
 }
 
 // actAttachRemote handles `a` on a remote-selected row. Gets the tmux session
@@ -117,8 +114,6 @@ func actAttachRemote(c *actCtx) {
 		// Not in tmux — offer migration.
 		enterCooked(c.fd, c.oldState)
 		if !confirm(fmt.Sprintf("\nPID %d on %s is not in tmux. Migrate first? [y/N] ", pid, host)) {
-			fmt.Println("\naborted")
-			pauseForKey(c.fd, c.oldState)
 			enterRaw(c.fd)
 			return
 		}
