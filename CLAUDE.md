@@ -130,6 +130,14 @@ returns `"<pid>"`. Remote rows have `Host == "<name>"` and `ID()` returns
 `"<name>:<pid>"`. Action dispatch uses `s.Host != ""` to route between local
 and remote handlers.
 
+### Usage polling
+
+`usage.go` polls Anthropic's OAuth usage endpoint (token from the macOS
+Keychain / `~/.claude/.credentials.json`) every 2 minutes in a background
+goroutine (`UsageHub`, following `RemoteHub`'s pattern minus the wake pipe)
+and the TUI header displays it as two progress bars (5-hour and weekly limits).
+The token is read-only — token refresh/rotation is Claude Code's job.
+
 ### YAML config
 
 `yaml.go` is a hand-rolled parser for exactly one shape: a top-level

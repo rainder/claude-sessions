@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Account rate-limit usage bars (5-hour + weekly, like `/usage`) in the TUI
+  header, refreshed every 2 minutes in the background. Hidden when
+  credentials or the endpoint are unavailable.
+
 ## [v1.1.0] - 2026-05-28
 
 ### Added

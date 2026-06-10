@@ -157,6 +157,7 @@ yaml.go              tiny YAML parser for servers.yaml
 remote.go            HTTP client + RemoteResult
 server.go            HTTP server (Tailscale bind, bearer auth, all endpoints)
 tui.go               alt-screen + raw mode + key reader + main loop
+usage.go             account rate-limit polling (5h/weekly bars in header)
 actions.go           local action handlers (kill/attach/preview/new)
 remote_actions.go    remote action handlers
 commands.go          scriptable subcommands (used by server shell-out)

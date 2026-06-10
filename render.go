@@ -195,7 +195,8 @@ func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo
 
 // RenderAll writes the live table (or a one-shot snapshot) to w, with all
 // rows sorted by cwd. Per-host remote sections appear after the local one,
-// each separated by a hostname label and a blank line.
+// each separated by a hostname label and a blank line. When usage is non-nil,
+// account rate-limit bars are printed below the title.
 func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo) {
 	sections := buildSections(local, remotes)
 	switch viewMode {
