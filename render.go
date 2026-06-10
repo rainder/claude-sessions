@@ -43,6 +43,48 @@ func colorize(code, s string) string {
 func bold(s string) string { return ansiBold + s + ansiReset }
 func dim(s string) string  { return ansiDim + s + ansiReset }
 
+// usageColor maps a rate-limit utilization percentage to an SGR code:
+// default below 70%, yellow 70–89%, red at 90%+.
+func usageColor(pct float64) string {
+	switch {
+	case pct >= 90:
+		return "1;31"
+	case pct >= 70:
+		return "33"
+	default:
+		return ""
+	}
+}
+
+// usageBar renders a 20-cell block bar for pct (clamped to 0–100).
+func usageBar(pct float64) string {
+	filled := int(pct/5 + 0.5)
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > 20 {
+		filled = 20
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", 20-filled)
+}
+
+// writeUsage prints the two account rate-limit lines that sit under the
+// title, or nothing when usage data isn't available (nil).
+func writeUsage(w io.Writer, u *UsageInfo) {
+	if u == nil {
+		return
+	}
+	line := func(label string, b usageBucket, reset string) {
+		fmt.Fprintf(w, "%s  %s  %3.0f%%  %s\n",
+			label,
+			colorize(usageColor(b.Pct), usageBar(b.Pct)),
+			b.Pct,
+			dim("resets "+reset))
+	}
+	line("5h", u.FiveHour, u.FiveHour.ResetsAt.Local().Format("15:04"))
+	line("wk", u.SevenDay, u.SevenDay.ResetsAt.Local().Format("Mon 15:04"))
+}
+
 // formatAge → "30s", "5m", "2h", "3d".
 func formatAge(seconds float64) string {
 	if seconds < 0 {
