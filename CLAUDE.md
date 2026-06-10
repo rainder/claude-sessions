@@ -180,5 +180,5 @@ point of the rewrite.
 ## Files at a glance
 
 (See README.md for the full layout table. The biggest files are
-`render.go` ~390, `server.go` ~280, `tui.go` ~270, `remote_actions.go` ~250,
-`actions.go` ~210.)
+`render.go` ~510, `tui.go` ~345, `server.go` ~300, `remote_actions.go` ~250,
+`actions.go` ~210, `usage.go` ~190.)
