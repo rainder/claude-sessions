@@ -210,7 +210,7 @@ func RunTUI(interval time.Duration) error {
 	}
 	render := func() {
 		fmt.Print("\033[H\033[J")
-		RenderAll(os.Stdout, viewMode, local, remotes, sel)
+		RenderAll(os.Stdout, viewMode, local, remotes, sel, nil)
 	}
 
 	makeCtx := func() *actCtx {

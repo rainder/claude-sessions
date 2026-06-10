@@ -164,30 +164,59 @@ func buildSections(local []Session, remotes []RemoteResult) []section {
 	return out
 }
 
+// renderHeader prints the title line with live counts, the optional account
+// usage bars, and the trailing blank line — shared by all three views.
+func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo) {
+	live, tmuxCount := 0, 0
+	for _, sec := range sections {
+		for _, s := range sec.rows {
+			live++
+			if s.Tmux != "" {
+				tmuxCount++
+			}
+		}
+	}
+	hostsInfo := ""
+	if len(sections) > 1 {
+		ok := 0
+		for _, s := range sections[1:] {
+			if s.error == "" {
+				ok++
+			}
+		}
+		hostsInfo = fmt.Sprintf(", %d/%d hosts", ok, len(sections)-1)
+	}
+	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux%s)  %s%s\n",
+		ansiBold, time.Now().Format("15:04:05"), live, tmuxCount, hostsInfo,
+		ansiReset, dim("["+mode+"]"))
+	writeUsage(w, usage)
+	fmt.Fprintln(w)
+}
+
 // RenderAll writes the live table (or a one-shot snapshot) to w, with all
 // rows sorted by cwd. Per-host remote sections appear after the local one,
 // each separated by a hostname label and a blank line.
-func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string) {
+func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo) {
 	sections := buildSections(local, remotes)
 	switch viewMode {
 	case "2":
-		renderAllMinimal(w, sections, sel)
+		renderAllMinimal(w, sections, sel, usage)
 	case "3":
-		renderAllIntermediate(w, sections, sel)
+		renderAllIntermediate(w, sections, sel, usage)
 	default:
-		renderAllFull(w, sections, sel)
+		renderAllFull(w, sections, sel, usage)
 	}
 }
 
 // RenderFull renders local sessions only (used by `--once` when there are no
 // remote servers configured, and by callers that want the local view alone).
 func RenderFull(w io.Writer, sessions []Session, sel string) {
-	RenderAll(w, "1", sessions, nil, sel)
+	RenderAll(w, "1", sessions, nil, sel, nil)
 }
 
 // RenderMinimal — same as RenderFull but for the compact view.
 func RenderMinimal(w io.Writer, sessions []Session, sel string) {
-	RenderAll(w, "2", sessions, nil, sel)
+	RenderAll(w, "2", sessions, nil, sel, nil)
 }
 
 // ============================================================================
@@ -217,7 +246,7 @@ func deriveFull(s Session, home string, now time.Time) drowFull {
 	}
 }
 
-func renderAllFull(w io.Writer, sections []section, sel string) {
+func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -244,26 +273,7 @@ func renderAllFull(w io.Writer, sections []section, sel string) {
 		tmuxW = max(tmuxW, len(t))
 	}
 
-	// Top header.
-	tmuxCount := 0
-	for _, r := range all {
-		if r.s.Tmux != "" {
-			tmuxCount++
-		}
-	}
-	hostsInfo := ""
-	if len(sections) > 1 {
-		ok := 0
-		for _, s := range sections[1:] {
-			if s.error == "" {
-				ok++
-			}
-		}
-		hostsInfo = fmt.Sprintf(", %d/%d hosts", ok, len(sections)-1)
-	}
-	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux%s)  %s%s\n\n",
-		ansiBold, now.Format("15:04:05"), len(all), tmuxCount, hostsInfo,
-		ansiReset, dim("[full]"))
+	renderHeader(w, sections, "full", usage)
 
 	hdr := fmt.Sprintf("  %7s  %-*s  %-*s  %-*s  %-*s  %5s  %5s  %-8s  %s",
 		"PID", nameW, "NAME", dirW, "DIR", statusW, "STATUS", tmuxW, "TMUX",
@@ -316,7 +326,7 @@ func renderAllFull(w io.Writer, sections []section, sel string) {
 // Intermediate view — full's columns minus TMUX, VER, SID.
 // ============================================================================
 
-func renderAllIntermediate(w io.Writer, sections []section, sel string) {
+func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *UsageInfo) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -338,25 +348,7 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string) {
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	tmuxCount := 0
-	for _, r := range all {
-		if r.s.Tmux != "" {
-			tmuxCount++
-		}
-	}
-	hostsInfo := ""
-	if len(sections) > 1 {
-		ok := 0
-		for _, s := range sections[1:] {
-			if s.error == "" {
-				ok++
-			}
-		}
-		hostsInfo = fmt.Sprintf(", %d/%d hosts", ok, len(sections)-1)
-	}
-	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux%s)  %s%s\n\n",
-		ansiBold, now.Format("15:04:05"), len(all), tmuxCount, hostsInfo,
-		ansiReset, dim("[intermediate]"))
+	renderHeader(w, sections, "intermediate", usage)
 
 	hdr := fmt.Sprintf("  %-*s  %-*s  %-*s  %5s  %5s",
 		nameW, "NAME", dirW, "DIR", statusW, "STATUS", "CPU%", "AGE")
@@ -432,7 +424,7 @@ func deriveMinimal(s Session, home string, now time.Time) drowMinimal {
 	}
 }
 
-func renderAllMinimal(w io.Writer, sections []section, sel string) {
+func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageInfo) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -453,25 +445,7 @@ func renderAllMinimal(w io.Writer, sections []section, sel string) {
 		nameW = max(nameW, len(r.display))
 	}
 
-	tmuxCount := 0
-	for _, r := range all {
-		if r.s.Tmux != "" {
-			tmuxCount++
-		}
-	}
-	hostsInfo := ""
-	if len(sections) > 1 {
-		ok := 0
-		for _, s := range sections[1:] {
-			if s.error == "" {
-				ok++
-			}
-		}
-		hostsInfo = fmt.Sprintf(", %d/%d hosts", ok, len(sections)-1)
-	}
-	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux%s)  %s%s\n\n",
-		ansiBold, now.Format("15:04:05"), len(all), tmuxCount, hostsInfo,
-		ansiReset, dim("[minimal]"))
+	renderHeader(w, sections, "minimal", usage)
 
 	hdr := fmt.Sprintf("  %-*s  %-*s  S  %5s", dirW, "DIR", nameW, "NAME", "AGE")
 	fmt.Fprintln(w, hdr)
