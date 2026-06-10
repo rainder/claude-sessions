@@ -34,7 +34,8 @@ belong in `Makefile.local` (gitignored, auto-included).
 
 `go build .` / `go run .` work for quick single-arch iteration.
 
-No test suite yet; `go vet ./...` is fine to run.
+Tests live next to the code (`usage_test.go`, `render_test.go`); run
+`go test ./...` plus `go vet ./...`.
 
 ## Architecture
 
