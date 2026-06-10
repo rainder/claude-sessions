@@ -26,6 +26,10 @@ func TestParseUsage(t *testing.T) {
 	if !u.FiveHour.ResetsAt.Equal(wantReset) {
 		t.Errorf("FiveHour.ResetsAt = %v, want %v", u.FiveHour.ResetsAt, wantReset)
 	}
+	wantWeeklyReset := time.Date(2026, 6, 10, 18, 0, 0, 696977000, time.UTC)
+	if !u.SevenDay.ResetsAt.Equal(wantWeeklyReset) {
+		t.Errorf("SevenDay.ResetsAt = %v, want %v", u.SevenDay.ResetsAt, wantWeeklyReset)
+	}
 }
 
 func TestParseUsageMissingBuckets(t *testing.T) {
