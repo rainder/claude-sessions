@@ -194,6 +194,12 @@ func RunTUI(interval time.Duration) error {
 	}
 	defer hub.Shutdown()
 
+	// Account usage bars: same non-blocking pattern as the remote hub. The
+	// first paint happens with no bar; it appears once the initial fetch
+	// lands (no wake pipe — the next tick repaints anyway).
+	usageHub := NewUsageHub()
+	defer usageHub.Shutdown()
+
 	// refresh re-reads local sessions and the latest remote snapshot. When
 	// kickRemote is true, the hub is also asked to refetch ASAP (used after
 	// actions and the 'r' key). Wall-clock ticks pass false because the hub
@@ -210,7 +216,7 @@ func RunTUI(interval time.Duration) error {
 	}
 	render := func() {
 		fmt.Print("\033[H\033[J")
-		RenderAll(os.Stdout, viewMode, local, remotes, sel, nil)
+		RenderAll(os.Stdout, viewMode, local, remotes, sel, usageHub.Snapshot())
 	}
 
 	makeCtx := func() *actCtx {
@@ -295,6 +301,7 @@ func RunTUI(interval time.Duration) error {
 				SaveViewMode(viewMode)
 				render()
 			case "r", "R":
+				usageHub.Kick()
 				refresh(true)
 				render()
 			case "?":
