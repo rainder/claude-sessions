@@ -1,4 +1,5 @@
 /bin/
+/claude-sessions
 /Makefile.local
 *.test
 *.out

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -214,9 +215,19 @@ func RunTUI(interval time.Duration) error {
 		remotes = hub.Snapshot()
 		sel = validateSel(AllSessions(local, remotes), sel)
 	}
+	// Render into a buffer and clip every line to the terminal width before
+	// writing. Wrap is disabled (?7l), and with autowrap off a too-long line
+	// makes each overflow char overwrite the last column — the row then ends
+	// with the line's final char (e.g. the "s"/"m" of the AGE column) instead
+	// of being cleanly cut.
 	render := func() {
-		fmt.Print("\033[H\033[J")
-		RenderAll(os.Stdout, viewMode, local, remotes, sel, usageHub.Snapshot())
+		cols, _, err := term.GetSize(fd)
+		if err != nil {
+			cols = 0
+		}
+		var buf strings.Builder
+		RenderAll(&buf, viewMode, local, remotes, sel, usageHub.Snapshot())
+		fmt.Print("\033[H\033[J" + clipLines(buf.String(), cols))
 	}
 
 	makeCtx := func() *actCtx {

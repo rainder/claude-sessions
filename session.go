@@ -21,8 +21,12 @@ type Session struct {
 	Status     string `json:"status"`
 	WaitingFor string `json:"waitingFor"`
 	Version    string `json:"version"`
+	Entrypoint string `json:"entrypoint"` // "cli" for interactive, "sdk-*" for headless runs
 	Name       string `json:"name"`
-	UpdatedAt  int64  `json:"updatedAt"` // millis since epoch
+	StartedAt  int64  `json:"startedAt"` // millis since epoch
+	UpdatedAt  int64  `json:"updatedAt"` // millis since epoch; absent for headless (sdk-cli) sessions
+
+	Model string `json:"model,omitempty"` // last main-loop assistant model from the transcript
 
 	CPU  string `json:"cpu"`
 	Tmux string `json:"tmux"` // "session:win.pane" or "" if not in tmux
@@ -48,8 +52,19 @@ func (s Session) ID() string {
 	return s.Host + ":" + strconv.Itoa(s.PID)
 }
 
-// Updated returns the parsed updated-at timestamp.
+// Headless reports whether the session came from a non-interactive entrypoint
+// (claude -p, Agent SDK). These never write name/status/updatedAt and vanish
+// when the run finishes, so the TUI renders them dimmed.
+func (s Session) Headless() bool {
+	return strings.HasPrefix(s.Entrypoint, "sdk-")
+}
+
+// Updated returns the parsed updated-at timestamp. Headless sessions never
+// write updatedAt, so fall back to startedAt rather than reporting the epoch.
 func (s Session) Updated() time.Time {
+	if s.UpdatedAt == 0 {
+		return time.UnixMilli(s.StartedAt)
+	}
 	return time.UnixMilli(s.UpdatedAt)
 }
 
@@ -87,6 +102,9 @@ func CollectLocal() ([]Session, error) {
 			s.CPU = "-"
 		}
 		s.Tmux = walkTmuxPane(s.PID, panes, ppid)
+		if p := findTranscript(home, s.SessionID); p != "" {
+			s.Model = cachedModel(p)
+		}
 		out = append(out, s)
 	}
 	// Sort by cwd (case-insensitive), recency desc as tiebreaker.
@@ -95,7 +113,7 @@ func CollectLocal() ([]Session, error) {
 		if ci != cj {
 			return ci < cj
 		}
-		return out[i].UpdatedAt > out[j].UpdatedAt
+		return out[i].Updated().After(out[j].Updated())
 	})
 	return out, nil
 }

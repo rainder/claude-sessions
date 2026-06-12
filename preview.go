@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -26,14 +25,13 @@ func PreviewContent(pid int) string {
 	}
 
 	sess, ok := readSessionByPID(pid)
-	if !ok || sess.CWD == "" || sess.SessionID == "" {
-		return "session file missing cwd or sessionId\n"
+	if !ok || sess.SessionID == "" {
+		return "session file missing sessionId\n"
 	}
 	home, _ := os.UserHomeDir()
-	enc := strings.ReplaceAll(sess.CWD, "/", "-")
-	path := filepath.Join(home, ".claude", "projects", enc, sess.SessionID+".jsonl")
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Sprintf("no transcript at %s\n", path)
+	path := findTranscript(home, sess.SessionID)
+	if path == "" {
+		return fmt.Sprintf("no transcript found for session %s\n", sess.SessionID)
 	}
 	return bold("source: ") + "transcript tail  " + dim(path) + "\n\n" +
 		formatTranscriptTail(path, 8)
