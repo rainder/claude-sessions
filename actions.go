@@ -14,6 +14,24 @@ type actCtx struct {
 	oldState *term.State // for switching back to cooked mode
 	sessions []Session   // current snapshot
 	sel      string      // selected session ID
+
+	// pause/resume suspend the background pollers (remote + usage hubs)
+	// while an external program owns the terminal — nothing renders, so
+	// fetching would be wasted traffic. Either may be nil.
+	pause  func()
+	resume func()
+}
+
+// runInteractive hands the terminal to prog with the pollers suspended,
+// resuming them (with an immediate refetch) when the program exits.
+func (c *actCtx) runInteractive(prog string, args ...string) error {
+	if c.pause != nil {
+		c.pause()
+	}
+	if c.resume != nil {
+		defer c.resume()
+	}
+	return runInteractive(c.fd, c.oldState, prog, args...)
 }
 
 // selected returns the currently-selected session, or nil if sel doesn't
@@ -97,10 +115,10 @@ func actAttach(c *actCtx) {
 // if we're inside tmux), then re-enters the UI when the user detaches.
 func runTmuxAttach(c *actCtx, sessName string) {
 	if os, _ := isInsideTmux(); os {
-		_ = runInteractive(c.fd, c.oldState, "tmux", "switch-client", "-t", sessName)
+		_ = c.runInteractive("tmux", "switch-client", "-t", sessName)
 		return
 	}
-	_ = runInteractive(c.fd, c.oldState, "tmux", "attach", "-t", sessName)
+	_ = c.runInteractive("tmux", "attach", "-t", sessName)
 }
 
 // actPreview opens a full-screen preview that auto-refreshes alongside the
@@ -154,43 +172,38 @@ func actNew(c *actCtx) {
 		actNewRemote(c)
 		return
 	}
-	enterCooked(c.fd, c.oldState)
-	defer enterRaw(c.fd)
-
 	picker := buildCwdPicker(c.selected())
-	fmt.Print("\n" + bold("New tmux+claude session") + "\n\n")
+	start := 0
+	lines := make([]string, 0, len(picker.entries)+1)
 	for i, p := range picker.entries {
-		marker := ""
 		if p.isDefault {
-			marker = "  " + dim("← selected")
+			start = i
 		}
 		freq := ""
 		if p.count > 0 {
-			freq = dim(fmt.Sprintf("(%d)", p.count))
+			freq = "  " + dim(fmt.Sprintf("(%d)", p.count))
 		}
-		fmt.Printf("  %s%2d)%s  %-50s  %s%s\n",
-			ansiBold, i+1, ansiReset, picker.shortName(p.cwd), freq, marker)
+		lines = append(lines, fmt.Sprintf("%-50s%s", picker.shortName(p.cwd), freq))
 	}
-	fmt.Println()
-	input := readLine("cwd (#, path, Enter=#1, q=cancel) > ")
+	lines = append(lines, "enter path manually…")
+	idx := pickMenu("New tmux+claude session",
+		"↑/↓ move · Enter select · q cancel", lines, start)
+	if idx < 0 {
+		return
+	}
+
+	enterCooked(c.fd, c.oldState)
+	defer enterRaw(c.fd)
 
 	var cwd string
-	switch {
-	case input == "q" || input == "Q":
-		return
-	case input == "":
-		if len(picker.entries) == 0 {
-			fmt.Println("no default")
-			pauseForKey(c.fd, c.oldState)
+	if idx < len(picker.entries) {
+		cwd = picker.entries[idx].cwd
+	} else {
+		input := readLine("\ncwd path (q=cancel) > ")
+		if input == "" || input == "q" || input == "Q" {
 			return
 		}
-		cwd = picker.entries[0].cwd
-	default:
-		if n, ok := parseIndex(input); ok && n >= 1 && n <= len(picker.entries) {
-			cwd = picker.entries[n-1].cwd
-		} else {
-			cwd = expandTilde(input)
-		}
+		cwd = expandTilde(input)
 	}
 	if !isDir(cwd) {
 		fmt.Printf("\nnot a directory: %s\n", cwd)

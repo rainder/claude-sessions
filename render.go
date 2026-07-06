@@ -57,24 +57,24 @@ func usageColor(pct float64) string {
 	}
 }
 
-// usageBar renders a 15-cell block bar for pct (clamped to 0–100). The
+// usageBar renders a width-cell block bar for pct (clamped to 0–100). The
 // unfilled track is dimmed so it doesn't visually compete with the fill.
-func usageBar(pct float64) string {
-	filled := int(pct*15/100 + 0.5)
+func usageBar(pct float64, width int) string {
+	filled := int(pct*float64(width)/100 + 0.5)
 	if filled < 0 {
 		filled = 0
 	}
-	if filled > 15 {
-		filled = 15
+	if filled > width {
+		filled = width
 	}
 	bar := strings.Repeat("█", filled)
-	if filled < 15 {
-		bar += dim(strings.Repeat("░", 15-filled))
+	if filled < width {
+		bar += dim(strings.Repeat("░", width-filled))
 	}
 	return bar
 }
 
-// formatUntil → time left until t: "<1m", "42m", "2h05m", "3d4h".
+// formatUntil → time left until t, largest unit only: "<1m", "42m", "2h", "3d".
 func formatUntil(t time.Time) string {
 	d := time.Until(t)
 	if d < time.Minute {
@@ -85,30 +85,94 @@ func formatUntil(t time.Time) string {
 	case mins < 60:
 		return fmt.Sprintf("%dm", mins)
 	case mins < 24*60:
-		return fmt.Sprintf("%dh%02dm", mins/60, mins%60)
+		return fmt.Sprintf("%dh", mins/60)
 	default:
-		return fmt.Sprintf("%dd%dh", mins/(24*60), (mins%(24*60))/60)
+		return fmt.Sprintf("%dd", mins/(24*60))
 	}
 }
 
+// moneyCompact renders a minor-unit amount rounded to whole major units,
+// abbreviating thousands: 2550¢ → "26", 100000¢ → "1k", 155000¢ → "1.6k".
+// Cent precision is deliberately dropped — the header needs magnitude, not
+// an invoice.
+func moneyCompact(minor float64, places int) string {
+	scale := 1.0
+	for i := 0; i < places; i++ {
+		scale *= 10
+	}
+	v := minor / scale
+	if v < 1000 {
+		return fmt.Sprintf("%.0f", v)
+	}
+	k := v / 1000
+	if r := fmt.Sprintf("%.1f", k); !strings.HasSuffix(r, ".0") {
+		return r + "k"
+	}
+	return fmt.Sprintf("%.0fk", k)
+}
+
+// usageBarMax is the widest a header bar gets; narrow terminals shrink bars
+// down to usageBarMin before the line gets clipped.
+const (
+	usageBarMax = 10
+	usageBarMin = 4
+)
+
 // writeUsage prints the account rate-limit line that sits under the title,
-// or nothing when usage data isn't available (nil). Both buckets share one
-// line: "5h <bar> 42% 2h05m   wk <bar> 13% 3d4h". The trailing figure is
-// the time remaining until that bucket resets.
-func writeUsage(w io.Writer, u *UsageInfo) {
+// or nothing when usage data isn't available (nil). All buckets share one
+// line: "5h <bar> 42% 2h   wk <bar> 13% 3d   cr <bar> 5% $50/1k". The
+// trailing figure is the time remaining until that bucket resets (rate
+// limits) or spent/limit credits (extra usage). The credits segment only
+// appears when extra usage is enabled on the account. Bars are sized to fit
+// cols (usageBarMin..usageBarMax cells each); cols <= 0 means unknown width
+// and gets the maximum.
+func writeUsage(w io.Writer, u *UsageInfo, cols int) {
 	if u == nil {
 		return
 	}
-	bucket := func(label string, b usageBucket) string {
-		return fmt.Sprintf("%s  %s  %3.0f%%  %s",
-			label,
-			colorize(usageColor(b.Pct), usageBar(b.Pct)),
-			b.Pct,
-			dim(formatUntil(b.ResetsAt)))
+	type seg struct {
+		label, trailer string
+		pct            float64
 	}
-	fmt.Fprintf(w, "%s   %s\n",
-		bucket("5h", u.FiveHour),
-		bucket("wk", u.SevenDay))
+	segs := []seg{
+		{"5h", formatUntil(u.FiveHour.ResetsAt), u.FiveHour.Pct},
+		{"wk", formatUntil(u.SevenDay.ResetsAt), u.SevenDay.Pct},
+	}
+	if c := u.Credits; c.Enabled && c.Limit > 0 {
+		sym := c.Currency
+		if sym == "" || sym == "USD" {
+			sym = "$"
+		}
+		segs = append(segs, seg{
+			"cr",
+			sym + moneyCompact(c.Used, c.DecimalPlaces) + "/" + moneyCompact(c.Limit, c.DecimalPlaces),
+			c.Pct(),
+		})
+	}
+	// Everything except the bars is fixed width; divide what's left of the
+	// terminal between the bars.
+	fixed := 3 * (len(segs) - 1) // inter-segment separators
+	for _, s := range segs {
+		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%.0f%%", s.pct)) + 1 + len(s.trailer)
+	}
+	barW := usageBarMax
+	if cols > 0 {
+		if b := (cols - fixed) / len(segs); b < barW {
+			barW = b
+		}
+		if barW < usageBarMin {
+			barW = usageBarMin
+		}
+	}
+	parts := make([]string, len(segs))
+	for i, s := range segs {
+		parts[i] = fmt.Sprintf("%s %s %.0f%% %s",
+			s.label,
+			colorize(usageColor(s.pct), usageBar(s.pct, barW)),
+			s.pct,
+			dim(s.trailer))
+	}
+	fmt.Fprintln(w, strings.Join(parts, "   "))
 }
 
 // formatAge → "30s", "5m", "2h", "3d".
@@ -192,7 +256,7 @@ func buildSections(local []Session, remotes []RemoteResult) []section {
 
 // renderHeader prints the title line with live counts, the optional account
 // usage bars, and the trailing blank line — shared by all three views.
-func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo) {
+func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo, cols int) {
 	live, tmuxCount, busy, shell := 0, 0, 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -215,35 +279,36 @@ func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo
 	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux, %s, %s)  %s%s\n",
 		ansiBold, time.Now().Format("15:04:05"), live, tmuxCount, busyStr, shellStr,
 		ansiReset, dim("["+mode+"]"))
-	writeUsage(w, usage)
+	writeUsage(w, usage, cols)
 	fmt.Fprintln(w)
 }
 
 // RenderAll writes the live table (or a one-shot snapshot) to w, with all
 // rows sorted by cwd. Per-host remote sections appear after the local one,
 // each separated by a hostname label and a blank line. When usage is non-nil,
-// account rate-limit bars are printed below the title.
-func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo) {
+// account rate-limit bars are printed below the title, sized to cols
+// (cols <= 0 = unknown terminal width).
+func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo, cols int) {
 	sections := buildSections(local, remotes)
 	switch viewMode {
 	case "2":
-		renderAllMinimal(w, sections, sel, usage)
+		renderAllMinimal(w, sections, sel, usage, cols)
 	case "3":
-		renderAllIntermediate(w, sections, sel, usage)
+		renderAllIntermediate(w, sections, sel, usage, cols)
 	default:
-		renderAllFull(w, sections, sel, usage)
+		renderAllFull(w, sections, sel, usage, cols)
 	}
 }
 
 // RenderFull renders local sessions only (used by `--once` when there are no
 // remote servers configured, and by callers that want the local view alone).
 func RenderFull(w io.Writer, sessions []Session, sel string) {
-	RenderAll(w, "1", sessions, nil, sel, nil)
+	RenderAll(w, "1", sessions, nil, sel, nil, 0)
 }
 
 // RenderMinimal — same as RenderFull but for the compact view.
 func RenderMinimal(w io.Writer, sessions []Session, sel string) {
-	RenderAll(w, "2", sessions, nil, sel, nil)
+	RenderAll(w, "2", sessions, nil, sel, nil, 0)
 }
 
 // ============================================================================
@@ -289,7 +354,7 @@ func modelCell(model string, width int, plain bool) string {
 	return cell
 }
 
-func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo) {
+func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo, cols int) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -317,7 +382,7 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 		tmuxW = max(tmuxW, len(t))
 	}
 
-	renderHeader(w, sections, "full", usage)
+	renderHeader(w, sections, "full", usage, cols)
 
 	hdr := fmt.Sprintf("  %7s  %-*s  %-*s  %-*s  %-*s  %-*s  %5s  %5s  %-8s  %s",
 		"PID", nameW, "NAME", dirW, "DIR", modelW, "MODEL", statusW, "STATUS", tmuxW, "TMUX",
@@ -381,7 +446,7 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 // Intermediate view — full's columns minus TMUX, VER, SID.
 // ============================================================================
 
-func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *UsageInfo) {
+func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *UsageInfo, cols int) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -404,7 +469,7 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	renderHeader(w, sections, "intermediate", usage)
+	renderHeader(w, sections, "intermediate", usage, cols)
 
 	hdr := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %5s  %5s",
 		nameW, "NAME", dirW, "DIR", modelW, "MODEL", statusW, "STATUS", "CPU%", "AGE")
@@ -492,7 +557,7 @@ func deriveMinimal(s Session, home string, now time.Time) drowMinimal {
 	}
 }
 
-func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageInfo) {
+func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageInfo, cols int) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -513,7 +578,7 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 		nameW = max(nameW, len(r.display))
 	}
 
-	renderHeader(w, sections, "minimal", usage)
+	renderHeader(w, sections, "minimal", usage, cols)
 
 	hdr := fmt.Sprintf("  %-*s  %-*s  S  %5s", dirW, "DIR", nameW, "NAME", "AGE")
 	fmt.Fprintln(w, hdr)

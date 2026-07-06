@@ -139,7 +139,7 @@ func actAttachRemote(c *actCtx) {
 	}
 
 	// SSH into the host and attach to the tmux session.
-	_ = runInteractive(c.fd, c.oldState, "ssh", "-t", sshTarget, "tmux", "attach", "-t", tname)
+	_ = c.runInteractive("ssh", "-t", sshTarget, "tmux", "attach", "-t", tname)
 }
 
 // actPreviewRemote shows the remote /preview output in a loop.
@@ -237,7 +237,7 @@ func actNewRemote(c *actCtx) {
 	srv, _ := LookupServer(host)
 	sshTarget := srv.EffectiveSSHTarget()
 	enterRaw(c.fd)
-	_ = runInteractive(c.fd, c.oldState, "ssh", "-t", sshTarget, "tmux", "attach", "-t", r.Tmux)
+	_ = c.runInteractive("ssh", "-t", sshTarget, "tmux", "attach", "-t", r.Tmux)
 }
 
 // pidPart extracts the integer pid from a "host:pid" ID. Returns 0 if not a

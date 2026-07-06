@@ -83,6 +83,6 @@ func cmdList() error {
 		return err
 	}
 	remotes := FetchAllRemote()
-	RenderAll(os.Stdout, LoadViewMode(), local, remotes, "", nil)
+	RenderAll(os.Stdout, LoadViewMode(), local, remotes, "", nil, 0)
 	return nil
 }

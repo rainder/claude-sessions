@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -115,6 +116,7 @@ func LookupServer(name string) (ServerConfig, bool) {
 type RemoteHub struct {
 	mu      sync.Mutex
 	results []RemoteResult
+	paused  atomic.Bool
 	kick    chan struct{}
 	stop    chan struct{}
 	wakeR   int // read end: passed to unix.Select in the TUI loop
@@ -162,8 +164,22 @@ func (h *RemoteHub) run(interval time.Duration) {
 		case <-t.C:
 		case <-h.kick:
 		}
+		if h.paused.Load() {
+			continue
+		}
 		h.fetchAll()
 	}
+}
+
+// Pause makes the poller ignore ticks and kicks — used while an external
+// program (tmux attach, ssh) owns the terminal and nothing renders.
+func (h *RemoteHub) Pause() { h.paused.Store(true) }
+
+// Resume re-enables polling and kicks an immediate refetch so the first
+// repaint after the pause shows fresh data.
+func (h *RemoteHub) Resume() {
+	h.paused.Store(false)
+	h.Refresh()
 }
 
 // fetchAll spawns one goroutine per configured server and lets each update

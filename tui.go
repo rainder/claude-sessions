@@ -226,7 +226,7 @@ func RunTUI(interval time.Duration) error {
 			cols = 0
 		}
 		var buf strings.Builder
-		RenderAll(&buf, viewMode, local, remotes, sel, usageHub.Snapshot())
+		RenderAll(&buf, viewMode, local, remotes, sel, usageHub.Snapshot(), cols)
 		fmt.Print("\033[H\033[J" + clipLines(buf.String(), cols))
 	}
 
@@ -236,6 +236,8 @@ func RunTUI(interval time.Duration) error {
 			oldState: oldState,
 			sessions: AllSessions(local, remotes),
 			sel:      sel,
+			pause:    func() { hub.Pause(); usageHub.Pause() },
+			resume:   func() { hub.Resume(); usageHub.Resume() },
 		}
 	}
 
@@ -259,14 +261,13 @@ func RunTUI(interval time.Duration) error {
 		events, woke := readEvents(timeout, hub.WakeFD())
 		if len(events) == 0 {
 			// Either timeout (woke=false) or a remote-data update
-			// (woke=true). Both re-render, but a wake shouldn't reset the
-			// wall-clock tick — otherwise fast remote updates could starve
-			// the local refresh cadence.
+			// (woke=true). Both paths refresh locals and re-render, so a
+			// wake also resets the wall-clock tick — otherwise the hub
+			// ticker and this tick double-render every cycle, drifting
+			// past each other.
 			refresh(false)
 			render()
-			if !woke {
-				nextTick = time.Now().Add(interval)
-			}
+			nextTick = time.Now().Add(interval)
 			continue
 		}
 		if woke {

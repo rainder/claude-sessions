@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,10 +20,31 @@ type usageBucket struct {
 	ResetsAt time.Time
 }
 
+// creditsInfo is the extra-usage (pay-as-you-go credits) state from the
+// usage endpoint. Amounts are in minor currency units (e.g. cents when
+// DecimalPlaces is 2).
+type creditsInfo struct {
+	Enabled       bool
+	Used          float64
+	Limit         float64
+	Currency      string
+	DecimalPlaces int
+}
+
+// Pct is credits utilization 0–100 (the endpoint's own utilization field is
+// often null, so it's derived from used/limit).
+func (c creditsInfo) Pct() float64 {
+	if c.Limit <= 0 {
+		return 0
+	}
+	return c.Used / c.Limit * 100
+}
+
 // UsageInfo is the parsed account rate-limit snapshot shown in the header.
 type UsageInfo struct {
 	FiveHour usageBucket
 	SevenDay usageBucket
+	Credits  creditsInfo
 }
 
 // parseUsage decodes the /api/oauth/usage response body. Only the overall
@@ -34,8 +56,15 @@ func parseUsage(body []byte) (*UsageInfo, error) {
 		ResetsAt    time.Time `json:"resets_at"`
 	}
 	var raw struct {
-		FiveHour *bucket `json:"five_hour"`
-		SevenDay *bucket `json:"seven_day"`
+		FiveHour   *bucket `json:"five_hour"`
+		SevenDay   *bucket `json:"seven_day"`
+		ExtraUsage *struct {
+			IsEnabled     bool    `json:"is_enabled"`
+			MonthlyLimit  float64 `json:"monthly_limit"`
+			UsedCredits   float64 `json:"used_credits"`
+			Currency      string  `json:"currency"`
+			DecimalPlaces int     `json:"decimal_places"`
+		} `json:"extra_usage"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
@@ -43,10 +72,20 @@ func parseUsage(body []byte) (*UsageInfo, error) {
 	if raw.FiveHour == nil || raw.SevenDay == nil {
 		return nil, fmt.Errorf("usage response missing five_hour/seven_day")
 	}
-	return &UsageInfo{
+	u := &UsageInfo{
 		FiveHour: usageBucket{Pct: raw.FiveHour.Utilization, ResetsAt: raw.FiveHour.ResetsAt},
 		SevenDay: usageBucket{Pct: raw.SevenDay.Utilization, ResetsAt: raw.SevenDay.ResetsAt},
-	}, nil
+	}
+	if e := raw.ExtraUsage; e != nil {
+		u.Credits = creditsInfo{
+			Enabled:       e.IsEnabled,
+			Used:          e.UsedCredits,
+			Limit:         e.MonthlyLimit,
+			Currency:      e.Currency,
+			DecimalPlaces: e.DecimalPlaces,
+		}
+	}
+	return u, nil
 }
 
 // usageURL is the endpoint Claude Code's /usage command reads.
@@ -124,6 +163,57 @@ func fetchUsage() (*UsageInfo, error) {
 // the endpoint.
 const usageRefreshInterval = 2 * time.Minute
 
+// usageRetryMin seeds the failed-fetch backoff. The endpoint 429s readily
+// (every Claude Code session shares the account's per-token budget), so a
+// failed fetch retries at 5s, 10s, 20s… capped at the refresh interval,
+// instead of leaving the header bar blank until the next 2-minute tick.
+const usageRetryMin = 5 * time.Second
+
+// usageCacheMaxAge bounds how stale a disk-cached snapshot may be and still
+// seed the header on startup. Beyond this the percentages are more likely to
+// mislead than inform, so the bar waits for a live fetch instead.
+const usageCacheMaxAge = 15 * time.Minute
+
+// usageCachePath is where the last successful fetch is persisted so a
+// restart during an endpoint throttle still has something to show. UID in
+// the name keeps multi-user /tmp collisions (and permission errors) away.
+func usageCachePath() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("claude-sessions-usage-%d.json", os.Getuid()))
+}
+
+// cachedUsage is the on-disk envelope: the snapshot plus when it was fetched.
+type cachedUsage struct {
+	FetchedAt time.Time `json:"fetched_at"`
+	Info      UsageInfo `json:"info"`
+}
+
+// saveUsageCache persists a successful fetch. Best-effort: a read-only /tmp
+// just means no warm start next launch.
+func saveUsageCache(info *UsageInfo) {
+	data, err := json.Marshal(cachedUsage{FetchedAt: time.Now(), Info: *info})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(usageCachePath(), data, 0600)
+}
+
+// loadUsageCache returns the cached snapshot, or nil if absent, unreadable,
+// or older than usageCacheMaxAge.
+func loadUsageCache() *UsageInfo {
+	data, err := os.ReadFile(usageCachePath())
+	if err != nil {
+		return nil
+	}
+	var c cachedUsage
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil
+	}
+	if c.FetchedAt.IsZero() || time.Since(c.FetchedAt) > usageCacheMaxAge {
+		return nil
+	}
+	return &c.Info
+}
+
 // UsageHub polls the usage endpoint in a background goroutine so the render
 // loop never blocks on credentials or the network (RemoteHub's pattern,
 // minus the wake pipe — the TUI repaints on its own tick, and a slightly
@@ -131,16 +221,19 @@ const usageRefreshInterval = 2 * time.Minute
 // the bar lazily appears on a later repaint; a failed refresh keeps the
 // previous value visible instead of blinking the bar away.
 type UsageHub struct {
-	mu   sync.Mutex
-	info *UsageInfo
-	kick chan struct{}
-	stop chan struct{}
+	mu     sync.Mutex
+	info   *UsageInfo
+	paused atomic.Bool
+	kick   chan struct{}
+	stop   chan struct{}
 }
 
 // NewUsageHub starts the poller and returns immediately; the first fetch is
-// kicked off asynchronously.
+// kicked off asynchronously. A recent disk-cached snapshot seeds the header
+// so a restart while the endpoint is throttling still shows a (stale) bar.
 func NewUsageHub() *UsageHub {
 	h := &UsageHub{
+		info: loadUsageCache(),
 		kick: make(chan struct{}, 1),
 		stop: make(chan struct{}),
 	}
@@ -152,17 +245,32 @@ func NewUsageHub() *UsageHub {
 func (h *UsageHub) run() {
 	t := time.NewTicker(usageRefreshInterval)
 	defer t.Stop()
+	backoff := usageRetryMin
+	var retry <-chan time.Time
 	for {
 		select {
 		case <-h.stop:
 			return
 		case <-t.C:
 		case <-h.kick:
+		case <-retry:
+		}
+		retry = nil
+		if h.paused.Load() {
+			continue
 		}
 		if info, err := fetchUsage(); err == nil {
 			h.mu.Lock()
 			h.info = info
 			h.mu.Unlock()
+			saveUsageCache(info)
+			backoff = usageRetryMin
+		} else {
+			retry = time.After(backoff)
+			backoff *= 2
+			if backoff > usageRefreshInterval {
+				backoff = usageRefreshInterval
+			}
 		}
 	}
 }
@@ -172,6 +280,16 @@ func (h *UsageHub) Snapshot() *UsageInfo {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.info
+}
+
+// Pause makes the poller ignore ticks and kicks — used while an external
+// program owns the terminal and nothing renders.
+func (h *UsageHub) Pause() { h.paused.Store(true) }
+
+// Resume re-enables polling and kicks an immediate refetch.
+func (h *UsageHub) Resume() {
+	h.paused.Store(false)
+	h.Kick()
 }
 
 // Kick requests an immediate refetch. Non-blocking; coalesces when one is

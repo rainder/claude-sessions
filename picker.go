@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -162,15 +161,6 @@ func expandTilde(p string) string {
 		return filepath.Join(home, p[2:])
 	}
 	return p
-}
-
-// parseIndex returns the integer at the start of s if any (e.g. "3" → 3).
-func parseIndex(s string) (int, bool) {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return 0, false
-	}
-	return n, true
 }
 
 // isInsideTmux returns true when $TMUX is set, meaning we're already in a

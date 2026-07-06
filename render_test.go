@@ -8,19 +8,22 @@ import (
 
 func TestUsageBar(t *testing.T) {
 	cases := []struct {
-		pct  float64
-		want string
+		pct   float64
+		width int
+		want  string
 	}{
-		{0, dim(strings.Repeat("░", 15))},
-		{100, strings.Repeat("█", 15)},
-		{9, "█" + dim(strings.Repeat("░", 14))},   // 9*15/100 = 1.35 → rounds to 1
-		{13, "██" + dim(strings.Repeat("░", 13))}, // 13*15/100 = 1.95 → rounds to 2
-		{150, strings.Repeat("█", 15)},            // clamped
-		{-5, dim(strings.Repeat("░", 15))},        // clamped
+		{0, 15, dim(strings.Repeat("░", 15))},
+		{100, 15, strings.Repeat("█", 15)},
+		{9, 15, "█" + dim(strings.Repeat("░", 14))},   // 9*15/100 = 1.35 → rounds to 1
+		{13, 15, "██" + dim(strings.Repeat("░", 13))}, // 13*15/100 = 1.95 → rounds to 2
+		{150, 15, strings.Repeat("█", 15)},            // clamped
+		{-5, 15, dim(strings.Repeat("░", 15))},        // clamped
+		{50, 10, strings.Repeat("█", 5) + dim(strings.Repeat("░", 5))},
+		{100, 4, strings.Repeat("█", 4)},
 	}
 	for _, c := range cases {
-		if got := usageBar(c.pct); got != c.want {
-			t.Errorf("usageBar(%v) = %q, want %q", c.pct, got, c.want)
+		if got := usageBar(c.pct, c.width); got != c.want {
+			t.Errorf("usageBar(%v, %d) = %q, want %q", c.pct, c.width, got, c.want)
 		}
 	}
 }
@@ -41,7 +44,7 @@ func TestUsageColor(t *testing.T) {
 
 func TestWriteUsageNil(t *testing.T) {
 	var b strings.Builder
-	writeUsage(&b, nil)
+	writeUsage(&b, nil, 0)
 	if b.Len() != 0 {
 		t.Errorf("writeUsage(nil) wrote %q, want nothing", b.String())
 	}
@@ -68,7 +71,7 @@ func TestHeadlessRowsDimmed(t *testing.T) {
 
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
-		RenderAll(&b, mode, []Session{normal, ghost}, nil, "", nil)
+		RenderAll(&b, mode, []Session{normal, ghost}, nil, "", nil, 0)
 		out := b.String()
 
 		ghostRow := findRow(t, out, "ghostdir")
@@ -115,7 +118,7 @@ func TestWriteUsage(t *testing.T) {
 	writeUsage(&b, &UsageInfo{
 		FiveHour: usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay: usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
-	})
+	}, 0)
 	out := b.String()
 	if lines := strings.Count(out, "\n"); lines != 1 {
 		t.Errorf("writeUsage wrote %d lines, want 1: %q", lines, out)
@@ -126,11 +129,80 @@ func TestWriteUsage(t *testing.T) {
 	if !strings.Contains(out, "9%") || !strings.Contains(out, "13%") {
 		t.Errorf("missing percentages: %q", out)
 	}
-	if !strings.Contains(out, "1h59m") && !strings.Contains(out, "2h00m") {
+	if !strings.Contains(out, "1h") && !strings.Contains(out, "2h") {
 		t.Errorf("missing 5h reset countdown: %q", out)
 	}
-	if !strings.Contains(out, "1d23h") && !strings.Contains(out, "2d0h") {
+	if !strings.Contains(out, "1d") && !strings.Contains(out, "2d") {
 		t.Errorf("missing weekly reset countdown: %q", out)
+	}
+	if strings.Contains(out, "cr") {
+		t.Errorf("credits segment shown with credits disabled: %q", out)
+	}
+	if got := strings.Count(out, "█") + strings.Count(out, "░"); got != 2*usageBarMax {
+		t.Errorf("bar cells = %d, want %d (2 bars × max width)", got, 2*usageBarMax)
+	}
+}
+
+func TestWriteUsageCredits(t *testing.T) {
+	var b strings.Builder
+	writeUsage(&b, &UsageInfo{
+		FiveHour: usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
+		SevenDay: usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
+		Credits:  creditsInfo{Enabled: true, Used: 2550, Limit: 100000, Currency: "USD", DecimalPlaces: 2},
+	}, 0)
+	out := b.String()
+	if lines := strings.Count(out, "\n"); lines != 1 {
+		t.Errorf("writeUsage wrote %d lines, want 1: %q", lines, out)
+	}
+	if !strings.Contains(out, "cr") {
+		t.Errorf("missing cr label: %q", out)
+	}
+	if !strings.Contains(out, "3%") {
+		t.Errorf("missing rounded credits percentage: %q", out)
+	}
+	if !strings.Contains(out, "$26/1k") {
+		t.Errorf("missing spent/limit figure: %q", out)
+	}
+}
+
+func TestWriteUsageAdaptiveWidth(t *testing.T) {
+	u := &UsageInfo{
+		FiveHour: usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
+		SevenDay: usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
+	}
+	bars := func(cols int) int {
+		var b strings.Builder
+		writeUsage(&b, u, cols)
+		return strings.Count(b.String(), "█") + strings.Count(b.String(), "░")
+	}
+	if got := bars(200); got != 2*usageBarMax {
+		t.Errorf("wide terminal: bar cells = %d, want %d", got, 2*usageBarMax)
+	}
+	if got := bars(35); got >= 2*usageBarMax || got < 2*usageBarMin {
+		t.Errorf("narrow terminal: bar cells = %d, want shrunk into [%d, %d)", got, 2*usageBarMin, 2*usageBarMax)
+	}
+	if got := bars(10); got != 2*usageBarMin {
+		t.Errorf("tiny terminal: bar cells = %d, want floor %d", got, 2*usageBarMin)
+	}
+}
+
+func TestMoneyCompact(t *testing.T) {
+	cases := []struct {
+		minor  float64
+		places int
+		want   string
+	}{
+		{0, 2, "0"},
+		{2550, 2, "26"},
+		{100000, 2, "1k"},
+		{155000, 2, "1.6k"},
+		{500, 0, "500"},
+		{1500, 0, "1.5k"},
+	}
+	for _, c := range cases {
+		if got := moneyCompact(c.minor, c.places); got != c.want {
+			t.Errorf("moneyCompact(%v, %d) = %q, want %q", c.minor, c.places, got, c.want)
+		}
 	}
 }
 
@@ -144,8 +216,8 @@ func TestFormatUntil(t *testing.T) {
 		{"past", now.Add(-time.Hour), "<1m"},
 		{"seconds", now.Add(30 * time.Second), "<1m"},
 		{"minutes", now.Add(42*time.Minute + 30*time.Second), "42m"},
-		{"hours", now.Add(2*time.Hour + 5*time.Minute + 30*time.Second), "2h05m"},
-		{"days", now.Add(3*24*time.Hour + 4*time.Hour + 30*time.Minute), "3d4h"},
+		{"hours", now.Add(2*time.Hour + 5*time.Minute + 30*time.Second), "2h"},
+		{"days", now.Add(3*24*time.Hour + 4*time.Hour + 30*time.Minute), "3d"},
 	}
 	for _, c := range cases {
 		if got := formatUntil(c.t); got != c.want {
