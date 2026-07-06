@@ -38,9 +38,13 @@ build:
 	  GOOS=$$os GOARCH=$$arch $(GO_BUILD) -o $(BIN_DIR)/$(BIN)-$$os-$$arch .; \
 	done
 
+# rm before cp: cp over an existing file keeps the inode, and macOS caches
+# code signatures per-inode — the next exec gets SIGKILL "Code Signature
+# Invalid". Unlinking first gives the copy a fresh inode.
 install: build
 	@os=$$(go env GOOS); arch=$$(go env GOARCH); \
 	  mkdir -p $(INSTALL_DIR); \
+	  rm -f $(INSTALL_DIR)/$(BIN); \
 	  cp $(BIN_DIR)/$(BIN)-$$os-$$arch $(INSTALL_DIR)/$(BIN); \
 	  echo "installed → $(INSTALL_DIR)/$(BIN)  ($$os/$$arch)"
 
