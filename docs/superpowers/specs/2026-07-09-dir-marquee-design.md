@@ -13,11 +13,13 @@ entirely, and long paths are still unreadable.
 ## Decision
 
 When the table doesn't fit, shrink the DIR column (never below **16** cells)
-and marquee-scroll any path that overflows its shrunken cell: classic loop
-with a 3-space gap, all overflowing rows animate on a shared clock.
+and marquee-scroll any path that overflows its shrunken cell: bounce
+(ping-pong) — hold at the start, slide until the tail is visible, hold, slide
+back — all overflowing rows on a shared clock. (Originally specced as
+loop-with-gap; flipped to bounce after seeing it live, 2026-07-09.)
 
-Chosen over: bounce/ping-pong scrolling, static middle-ellipsis, and
-animating only the selected row.
+Chosen over: loop-with-gap scrolling, static middle-ellipsis, and animating
+only the selected row.
 
 ## Design
 
@@ -35,10 +37,11 @@ table), narrow, and headless.
 ### 2. marqueeCell(s string, width, offset int) string
 
 - `runeLen(s) <= width`: return `s` padded with spaces to `width` (static).
-- Otherwise: treat `s + "   "` (3-space gap) as a ring of period
-  `p = runeLen(s) + 3`; starting at `offset % p`, take `width` runes,
-  wrapping around the ring. Rune-safe (UTF-8), no ANSI inside `s` — color
-  is applied by the caller after slicing, so selection highlight survives.
+- Otherwise bounce with slide distance `d = runeLen(s) - width` and end-pause
+  `P = 3` steps: hold at position 0 for `P`, slide 1..d, hold at `d` for `P`,
+  slide back d-1..1; period `2P + 2d - 1`. Rune-safe (UTF-8), no ANSI inside
+  `s` — color is applied by the caller after slicing, so selection highlight
+  survives.
 
 ### 3. Shared clock
 
