@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -115,5 +117,28 @@ func TestScanSessionAgentsNoSubagents(t *testing.T) {
 	writeLines(t, parent, `{"type":"assistant"}`)
 	if got := scanSessionAgents(parent, time.Now()); got != 0 {
 		t.Errorf("running = %d, want 0", got)
+	}
+}
+
+func TestSessionAgentsRunningJSONRoundTrip(t *testing.T) {
+	s := Session{PID: 1, AgentsRunning: 3}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"agentsRunning":3`) {
+		t.Errorf("marshal missing agentsRunning: %s", b)
+	}
+	var back Session
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.AgentsRunning != 3 {
+		t.Errorf("round-trip AgentsRunning = %d, want 3", back.AgentsRunning)
+	}
+	// omitempty: zero count stays out of the wire format.
+	b, _ = json.Marshal(Session{PID: 1})
+	if strings.Contains(string(b), "agentsRunning") {
+		t.Errorf("zero count serialized: %s", b)
 	}
 }
