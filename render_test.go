@@ -506,8 +506,10 @@ func TestRenderAgentsColumnAndHeaderTotal(t *testing.T) {
 	if !strings.Contains(out, "AGENTS") {
 		t.Errorf("full view missing AGENTS column header:\n%s", out)
 	}
-	// 2 sessions + 3 running subagents = 5 concurrent agent loops.
-	if !strings.Contains(out, "5 agents (2 sessions + 3 sub)") {
+	// 2 sessions + 3 running subagents = 5 concurrent agent loops; one main
+	// loop occupied (busy). The busy count is colorized, so match it apart
+	// from the plain-text prefix.
+	if !strings.Contains(out, "5 agents, 2 sessions,") || !strings.Contains(out, "1 busy") {
 		t.Errorf("header missing grand total:\n%s", out)
 	}
 
@@ -525,7 +527,7 @@ func TestRenderAgentsColumnAndHeaderTotal(t *testing.T) {
 	if strings.Contains(out, "AGENTS") {
 		t.Errorf("minimal view must not have AGENTS column:\n%s", out)
 	}
-	if !strings.Contains(out, "5 agents (2 sessions + 3 sub)") {
+	if !strings.Contains(out, "5 agents, 2 sessions,") {
 		t.Errorf("minimal header missing grand total:\n%s", out)
 	}
 }
@@ -537,8 +539,11 @@ func TestRenderHeaderTotalNoSubagents(t *testing.T) {
 	var buf bytes.Buffer
 	RenderAll(&buf, "1", local, nil, "", nil, 0, 0, "dir")
 	out := buf.String()
-	if !strings.Contains(out, "1 agent (1 session)") {
-		t.Errorf("degraded zero-subagent form missing:\n%s", out)
+	if !strings.Contains(out, "1 agent, 1 session,") {
+		t.Errorf("singular zero-subagent form missing:\n%s", out)
+	}
+	if !strings.Contains(out, "0 busy") {
+		t.Errorf("idle-only header missing busy count:\n%s", out)
 	}
 	if strings.Contains(out, "1 agents") {
 		t.Errorf("singular count must not pluralize:\n%s", out)

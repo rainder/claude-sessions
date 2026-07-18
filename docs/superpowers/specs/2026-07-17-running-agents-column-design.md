@@ -73,19 +73,23 @@ other-work    opus    $0.15           12%
 
 ### Header grand total
 
-Header line shows total concurrent agent loops: every *alive* session counts
-as 1, plus all running subagents (incl. nested), summed across local and all
-reachable remote hosts:
+Header line replaces the old `(N live, N in tmux, N busy, N shell)` counts
+with three figures:
 
 ```
-claude-sessions   9 agents (4 sessions + 5 sub)
+claude-sessions   (9 agents, 4 sessions, 3 busy)
 ```
 
-Alive = sessions currently listed as running (same liveness the table already
-uses); dead/stale sessions contribute nothing. When zero subagents anywhere,
-degrade to just the session count, with counts pluralizing correctly
-(`1 agent (1 session)`; `4 agents (4 sessions)`). Unreachable remotes are
-simply excluded (same as their rows).
+- **agents** — total concurrent agent loops: every *alive* session counts as
+  1, plus all running subagents (incl. nested), summed across local and all
+  reachable remote hosts.
+- **sessions** — main loops only (alive sessions).
+- **busy** — main loops whose status is `busy` or `shell`; rendered red.
+
+Counts pluralize correctly (`1 agent, 1 session, 0 busy`). Alive = sessions
+currently listed as running (same liveness the table already uses);
+dead/stale sessions contribute nothing. Unreachable remotes are simply
+excluded (same as their rows).
 
 ## Testing
 

@@ -408,35 +408,26 @@ func plural(n int, word string) string {
 // renderHeader prints the title line with live counts, the optional account
 // usage bars, and the trailing blank line — shared by all three views.
 func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo, cols int) {
-	live, tmuxCount, busy, shell, subs := 0, 0, 0, 0, 0
+	live, busy, subs := 0, 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
 			live++
 			subs += s.AgentsRunning
-			if s.Tmux != "" {
-				tmuxCount++
-			}
-			switch s.Status {
-			case "busy":
+			// "busy" here means the main loop is occupied: working or in a shell.
+			if s.Status == "busy" || s.Status == "shell" {
 				busy++
-			case "shell":
-				shell++
 			}
 		}
 	}
-	// colorize ends with a full reset, so re-assert bold after each count to
-	// keep the rest of the title line bold.
+	// Three counts: total concurrent agent loops (each live session is one,
+	// plus every running subagent incl. nested, across local and remote),
+	// main loops only, and occupied main loops. colorize ends with a full
+	// reset, so re-assert bold after the busy count to keep the title bold.
 	busyStr := colorize(statusColor["busy"], fmt.Sprintf("%d busy", busy)) + ansiBold
-	shellStr := colorize(statusColor["shell"], fmt.Sprintf("%d shell", shell)) + ansiBold
-	// Grand total of concurrent agent loops: each live session is one, plus
-	// every running subagent (incl. nested), across local and remote.
-	agentsStr := fmt.Sprintf("%s (%s)", plural(live, "agent"), plural(live, "session"))
-	if subs > 0 {
-		agentsStr = fmt.Sprintf("%s (%s + %d sub)", plural(live+subs, "agent"), plural(live, "session"), subs)
-	}
-	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux, %s, %s)  %s  %s%s\n",
-		ansiBold, time.Now().Format("15:04:05"), live, tmuxCount, busyStr, shellStr,
-		agentsStr, ansiReset, dim("["+mode+"]"))
+	fmt.Fprintf(w, "%sClaude sessions  %s  (%s, %s, %s)  %s%s\n",
+		ansiBold, time.Now().Format("15:04:05"),
+		plural(live+subs, "agent"), plural(live, "session"), busyStr,
+		ansiReset, dim("["+mode+"]"))
 	writeUsage(w, usage, cols)
 	fmt.Fprintln(w)
 }
