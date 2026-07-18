@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 // agentUseLine builds an assistant line spawning a subagent via the Agent tool.
 func agentUseLine(toolUseID string) string {
@@ -37,5 +43,77 @@ func TestLineCostAgentPending(t *testing.T) {
 	lineCost([]byte(`{"type":"user","message":{"content":"hello"}}`), e)
 	if len(e.agentPending) != 1 {
 		t.Fatalf("after plain user line pending = %v, want {toolu_2}", e.agentPending)
+	}
+}
+
+// makeSubagent writes agent-<id>.meta.json and agent-<id>.jsonl under
+// dir/subagents, returning the jsonl path.
+func makeSubagent(t *testing.T, dir, id, toolUseID string, depth int, lines ...string) string {
+	t.Helper()
+	subs := filepath.Join(dir, "subagents")
+	meta := `{"agentType":"scout","description":"d","toolUseId":"` + toolUseID + `","spawnDepth":` + fmt.Sprint(depth) + `}`
+	if err := os.MkdirAll(subs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subs, "agent-"+id+".meta.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(subs, "agent-"+id+".jsonl")
+	writeLines(t, p, lines...)
+	return p
+}
+
+func TestScanSessionAgentsRunning(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	// Two spawns; toolu_a completed, toolu_b still pending.
+	writeLines(t, parent,
+		agentUseLine("toolu_a"),
+		toolResultLine("toolu_a"),
+		agentUseLine("toolu_b"),
+	)
+	makeSubagent(t, filepath.Join(dir, "sess"), "aaa", "toolu_a", 1, `{"type":"assistant"}`)
+	makeSubagent(t, filepath.Join(dir, "sess"), "bbb", "toolu_b", 1, `{"type":"assistant"}`)
+
+	if got := scanSessionAgents(parent, time.Now()); got != 1 {
+		t.Errorf("running = %d, want 1 (toolu_b pending, toolu_a done)", got)
+	}
+}
+
+func TestScanSessionAgentsNested(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	writeLines(t, parent, agentUseLine("toolu_p")) // parent spawns agent p, unfinished
+	// Agent p itself spawned agent n (nested, depth 2), also unfinished; the
+	// nested spawn's tool_use lives in p's own transcript.
+	makeSubagent(t, filepath.Join(dir, "sess"), "ppp", "toolu_p", 1, agentUseLine("toolu_n"))
+	makeSubagent(t, filepath.Join(dir, "sess"), "nnn", "toolu_n", 2, `{"type":"assistant"}`)
+
+	if got := scanSessionAgents(parent, time.Now()); got != 2 {
+		t.Errorf("running = %d, want 2 (direct + nested)", got)
+	}
+}
+
+func TestScanSessionAgentsStale(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	writeLines(t, parent, agentUseLine("toolu_s")) // never completed
+	p := makeSubagent(t, filepath.Join(dir, "sess"), "sss", "toolu_s", 1, `{"type":"assistant"}`)
+	// Crash-stale: transcript last touched 10 minutes ago.
+	old := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := scanSessionAgents(parent, time.Now()); got != 0 {
+		t.Errorf("running = %d, want 0 (unmatched but stale)", got)
+	}
+}
+
+func TestScanSessionAgentsNoSubagents(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "sess.jsonl")
+	writeLines(t, parent, `{"type":"assistant"}`)
+	if got := scanSessionAgents(parent, time.Now()); got != 0 {
+		t.Errorf("running = %d, want 0", got)
 	}
 }
