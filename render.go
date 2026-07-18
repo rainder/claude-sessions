@@ -91,24 +91,28 @@ func formatUntil(t time.Time) string {
 	}
 }
 
-// moneyCompact renders a minor-unit amount rounded to whole major units,
-// abbreviating thousands: 2550¢ → "26", 100000¢ → "1k", 155000¢ → "1.6k".
-// Cent precision is deliberately dropped — the header needs magnitude, not
-// an invoice.
-func moneyCompact(minor float64, places int) string {
+// moneyGrouped renders a minor-unit amount as whole major units with
+// thousands separators: 2550¢ → "26", 112345¢ → "1,123". Cent precision is
+// deliberately dropped — the header needs magnitude, not an invoice.
+func moneyGrouped(minor float64, places int) string {
 	scale := 1.0
 	for i := 0; i < places; i++ {
 		scale *= 10
 	}
-	v := minor / scale
-	if v < 1000 {
-		return fmt.Sprintf("%.0f", v)
+	n := int64(minor/scale + 0.5)
+	digits := fmt.Sprintf("%d", n)
+	var b strings.Builder
+	if n < 0 {
+		b.WriteByte('-')
+		digits = digits[1:]
 	}
-	k := v / 1000
-	if r := fmt.Sprintf("%.1f", k); !strings.HasSuffix(r, ".0") {
-		return r + "k"
+	for i := 0; i < len(digits); i++ {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte(digits[i])
 	}
-	return fmt.Sprintf("%.0fk", k)
+	return b.String()
 }
 
 // usageBarMax is the widest a header bar gets; narrow terminals shrink bars
@@ -120,9 +124,11 @@ const (
 
 // writeUsage prints the account rate-limit line that sits under the title,
 // or nothing when usage data isn't available (nil). All buckets share one
-// line: "5h <bar> 42% 2h   wk <bar> 13% 3d   cr <bar> 5% $50/1k". The
-// trailing figure is the time remaining until that bucket resets (rate
-// limits) or spent/limit credits (extra usage). The credits segment only
+// line: "5h <bar> 42% 2h   wk <bar> 13% 3d   Fable <bar> 10% 5d   cr <bar> 5% $1,123".
+// The trailing figure is the time remaining until that bucket resets (rate
+// limits) or the amount of credits spent (extra usage). The model-scoped
+// weekly segment (labeled with the model's display name, e.g. "Fable") only
+// appears when the account has such a limit; the credits segment only
 // appears when extra usage is enabled on the account. Bars are sized to fit
 // cols (usageBarMin..usageBarMax cells each); cols <= 0 means unknown width
 // and gets the maximum.
@@ -138,6 +144,13 @@ func writeUsage(w io.Writer, u *UsageInfo, cols int) {
 		{"5h", formatUntil(u.FiveHour.ResetsAt), u.FiveHour.Pct},
 		{"wk", formatUntil(u.SevenDay.ResetsAt), u.SevenDay.Pct},
 	}
+	if u.WeeklyScopedLabel != "" {
+		segs = append(segs, seg{
+			u.WeeklyScopedLabel,
+			formatUntil(u.WeeklyScoped.ResetsAt),
+			u.WeeklyScoped.Pct,
+		})
+	}
 	if c := u.Credits; c.Enabled && c.Limit > 0 {
 		sym := c.Currency
 		if sym == "" || sym == "USD" {
@@ -145,7 +158,7 @@ func writeUsage(w io.Writer, u *UsageInfo, cols int) {
 		}
 		segs = append(segs, seg{
 			"cr",
-			sym + moneyCompact(c.Used, c.DecimalPlaces) + "/" + moneyCompact(c.Limit, c.DecimalPlaces),
+			sym + moneyGrouped(c.Used, c.DecimalPlaces),
 			c.Pct(),
 		})
 	}
@@ -173,6 +186,79 @@ func writeUsage(w io.Writer, u *UsageInfo, cols int) {
 			dim(s.trailer))
 	}
 	fmt.Fprintln(w, strings.Join(parts, "   "))
+}
+
+// formatTokens renders a context-token count compactly: 0 → "-", under 1k as
+// plain digits, thousands as "124k" (rounded), millions as "1.2M".
+func formatTokens(n int) string {
+	switch {
+	case n <= 0:
+		return "-"
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%dk", (n+500)/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+}
+
+// formatAgents renders a running-subagent count: blank at zero so idle rows
+// stay quiet, plain digits otherwise.
+func formatAgents(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+// contextWindow is the assumed model context limit used to color the CTX
+// column. Flat 300k; per-model limits aren't tracked in the session file.
+const contextWindow = 300_000
+
+// ctxCell right-aligns the formatted token count in 5 columns and colors it
+// by context utilization (usageColor thresholds: yellow ≥70%, red ≥90%).
+// plain skips the color for rows dimmed as a whole (no embedded resets).
+func ctxCell(ctxStr string, tokens int, plain bool) string {
+	cell := fmt.Sprintf("%5s", ctxStr)
+	if plain || tokens <= 0 {
+		return cell
+	}
+	return colorize(usageColor(float64(tokens)/contextWindow*100), cell)
+}
+
+// dollars formats a single dollar amount: "$1.23" below $100, "$123" (cents
+// dropped) at $100+ to keep the column narrow.
+func dollars(c float64) string {
+	if c < 100 {
+		return fmt.Sprintf("$%.2f", c)
+	}
+	return fmt.Sprintf("$%.0f", c)
+}
+
+// formatCost renders a session's cost for the table: "—" when both parts are
+// zero, otherwise the parent-transcript cost with a " (+$x.xx)" subagent
+// suffix. The suffix is omitted when the subagent part rounds to under a cent.
+func formatCost(main, subagents float64) string {
+	if main+subagents <= 0 {
+		return "—"
+	}
+	s := dollars(main)
+	if subagents >= 0.005 {
+		s += " (+" + dollars(subagents) + ")"
+	}
+	return s
+}
+
+// costCell right-aligns a formatted cost in a column of the given width. The
+// "—" placeholder is a single display column despite being three bytes, so the
+// padding is computed on rune count rather than byte length.
+func costCell(cost string, width int) string {
+	pad := width - utf8.RuneCountInString(cost)
+	if pad < 0 {
+		pad = 0
+	}
+	return strings.Repeat(" ", pad) + cost
 }
 
 // formatAge → "30s", "5m", "2h", "3d".
@@ -227,6 +313,62 @@ func squashPath(p string) string {
 	return strings.Join(append(head, parts[len(parts)-1]), "/")
 }
 
+// minDirW is the floor the DIR column shrinks to on a narrow terminal before
+// marquee scrolling takes over; a squashed path below this is unreadable anyway.
+const minDirW = 16
+
+// marqueeCell renders s into a cell exactly width columns wide. When s fits it
+// is left-aligned and space-padded (static). When it overflows, the window
+// bounces: it holds at the start for marqueePause steps, slides right one rune
+// per step until the tail is visible, holds again, then slides back — so both
+// ends of the path get dwell time. Rune-safe and ANSI-free: the caller applies
+// any color after slicing so a whole-row dim (or future highlight) survives.
+func marqueeCell(s string, width, offset int) string {
+	if width <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= width {
+		return s + strings.Repeat(" ", width-len(r))
+	}
+	// d is the slide distance; one full cycle is hold(P) → out(d) → hold(P)
+	// → back(d-1), so the period is 2P+2d-1 and pos walks 0..d..1.
+	const marqueePause = 3
+	d := len(r) - width
+	period := 2*marqueePause + 2*d - 1
+	t := ((offset % period) + period) % period
+	var pos int
+	switch {
+	case t < marqueePause:
+		pos = 0
+	case t < marqueePause+d:
+		pos = t - marqueePause + 1
+	case t < 2*marqueePause+d:
+		pos = d
+	default:
+		pos = 2*marqueePause + 2*d - 1 - t
+	}
+	return string(r[pos : pos+width])
+}
+
+// shrinkDirW reduces dirW so a row of total visible width lineW fits within
+// cols, never dropping below minDirW. cols <= 0 (unknown terminal width) leaves
+// dirW untouched. lineW must have been measured with the current dirW.
+func shrinkDirW(dirW, lineW, cols int) int {
+	if cols <= 0 {
+		return dirW
+	}
+	if over := lineW - cols; over > 0 {
+		// The floor never exceeds the starting width: a column already
+		// narrower than minDirW must not be widened by the clamp.
+		floor := min(minDirW, dirW)
+		if dirW -= over; dirW < floor {
+			dirW = floor
+		}
+	}
+	return dirW
+}
+
 // displayCWD collapses the local $HOME prefix to "~". Remote paths are left
 // alone since the remote host's $HOME differs from ours.
 func displayCWD(cwd, home, host string) string {
@@ -257,10 +399,11 @@ func buildSections(local []Session, remotes []RemoteResult) []section {
 // renderHeader prints the title line with live counts, the optional account
 // usage bars, and the trailing blank line — shared by all three views.
 func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo, cols int) {
-	live, tmuxCount, busy, shell := 0, 0, 0, 0
+	live, tmuxCount, busy, shell, subs := 0, 0, 0, 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
 			live++
+			subs += s.AgentsRunning
 			if s.Tmux != "" {
 				tmuxCount++
 			}
@@ -276,9 +419,15 @@ func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo
 	// keep the rest of the title line bold.
 	busyStr := colorize(statusColor["busy"], fmt.Sprintf("%d busy", busy)) + ansiBold
 	shellStr := colorize(statusColor["shell"], fmt.Sprintf("%d shell", shell)) + ansiBold
-	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux, %s, %s)  %s%s\n",
+	// Grand total of concurrent agent loops: each live session is one, plus
+	// every running subagent (incl. nested), across local and remote.
+	agentsStr := fmt.Sprintf("%d agents (%d sessions)", live, live)
+	if subs > 0 {
+		agentsStr = fmt.Sprintf("%d agents (%d sessions + %d sub)", live+subs, live, subs)
+	}
+	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux, %s, %s)  %s  %s%s\n",
 		ansiBold, time.Now().Format("15:04:05"), live, tmuxCount, busyStr, shellStr,
-		ansiReset, dim("["+mode+"]"))
+		agentsStr, ansiReset, dim("["+mode+"]"))
 	writeUsage(w, usage, cols)
 	fmt.Fprintln(w)
 }
@@ -287,28 +436,54 @@ func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo
 // rows sorted by cwd. Per-host remote sections appear after the local one,
 // each separated by a hostname label and a blank line. When usage is non-nil,
 // account rate-limit bars are printed below the title, sized to cols
-// (cols <= 0 = unknown terminal width).
-func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo, cols int) {
+// (cols <= 0 = unknown terminal width). step is the shared marquee clock (see
+// marqueeCell); overflowing reports whether any visible DIR cell was scrolled,
+// so the caller can drive animation ticks only when needed.
+func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	sections := buildSections(local, remotes)
 	switch viewMode {
 	case "2":
-		renderAllMinimal(w, sections, sel, usage, cols)
+		return renderAllMinimal(w, sections, sel, usage, cols, step, sortMode)
 	case "3":
-		renderAllIntermediate(w, sections, sel, usage, cols)
+		return renderAllIntermediate(w, sections, sel, usage, cols, step, sortMode)
 	default:
-		renderAllFull(w, sections, sel, usage, cols)
+		return renderAllFull(w, sections, sel, usage, cols, step, sortMode)
 	}
+}
+
+// sortLabels returns the DIR and AGE header labels, suffixing ▲/▼ on the
+// column that carries the active sort: DIR for the dir mode (ascending), AGE
+// for the time modes. In created modes the AGE column shows age since start
+// (see ageBasis), so the arrow always sits on the column being sorted.
+func sortLabels(sortMode string) (dirLabel, ageLabel string) {
+	switch sortMode {
+	case "created", "updated":
+		return "DIR", "AGE▼"
+	case "created-asc", "updated-asc":
+		return "DIR", "AGE▲"
+	default: // dir
+		return "DIR▲", "AGE"
+	}
+}
+
+// ageBasis is the timestamp the AGE column counts from: session start in the
+// created sort modes, last update otherwise.
+func ageBasis(s Session, sortMode string) time.Time {
+	if sortMode == "created" || sortMode == "created-asc" {
+		return time.UnixMilli(s.StartedAt)
+	}
+	return s.Updated()
 }
 
 // RenderFull renders local sessions only (used by `--once` when there are no
 // remote servers configured, and by callers that want the local view alone).
 func RenderFull(w io.Writer, sessions []Session, sel string) {
-	RenderAll(w, "1", sessions, nil, sel, nil, 0)
+	RenderAll(w, "1", sessions, nil, sel, nil, 0, 0, "dir")
 }
 
 // RenderMinimal — same as RenderFull but for the compact view.
 func RenderMinimal(w io.Writer, sessions []Session, sel string) {
-	RenderAll(w, "2", sessions, nil, sel, nil, 0)
+	RenderAll(w, "2", sessions, nil, sel, nil, 0, 0, "dir")
 }
 
 // ============================================================================
@@ -317,25 +492,36 @@ func RenderMinimal(w io.Writer, sessions []Session, sel string) {
 
 type drowFull struct {
 	s         Session
+	nameStr   string // resolved NAME label (name → tmux → worktree → "-")
+	nameDim   bool   // true when nameStr is auto-derived, not user-set
 	statusStr string
 	cwdStr    string
 	modelStr  string
+	ctxStr    string
+	costStr   string
+	agentsStr string // running-subagent count, "" when zero
 	ageStr    string
 	sidShort  string
 }
 
-func deriveFull(s Session, home string, now time.Time) drowFull {
+func deriveFull(s Session, home string, now time.Time, sortMode string) drowFull {
 	cwd := displayCWD(s.CWD, home, s.Host)
 	sid := s.SessionID
 	if len(sid) > 8 {
 		sid = sid[:8]
 	}
+	name, nameDim := s.DisplayName()
 	return drowFull{
 		s:         s,
+		nameStr:   name,
+		nameDim:   nameDim,
 		statusStr: s.StatusDisplay(),
 		cwdStr:    squashPath(cwd),
 		modelStr:  shortModel(s.Model),
-		ageStr:    formatAge(now.Sub(s.Updated()).Seconds()),
+		ctxStr:    formatTokens(s.ContextTokens),
+		costStr:   formatCost(s.CostUSD, s.CostSubagentsUSD),
+		agentsStr: formatAgents(s.AgentsRunning),
+		ageStr:    formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
 		sidShort:  sid,
 	}
 }
@@ -354,7 +540,7 @@ func modelCell(model string, width int, plain bool) string {
 	return cell
 }
 
-func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo, cols int) {
+func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -363,17 +549,20 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowFull, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveFull(s, home, now)
+			r := deriveFull(s, home, now, sortMode)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
 	}
 
-	nameW, dirW, modelW, statusW, tmuxW := len("NAME"), len("DIR"), len("MODEL"), len("STATUS"), len("TMUX")
+	dirLabel, ageLabel := sortLabels(sortMode)
+	nameW, dirW, modelW, costW, agentsW, statusW, tmuxW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), len("AGENTS"), len("STATUS"), len("TMUX")
 	for _, r := range all {
-		nameW = max(nameW, len(r.s.Name))
+		nameW = max(nameW, len(r.nameStr))
 		dirW = max(dirW, len(r.cwdStr))
 		modelW = max(modelW, len(r.modelStr))
+		costW = max(costW, len(r.costStr))
+		agentsW = max(agentsW, len(r.agentsStr))
 		statusW = max(statusW, len(r.statusStr))
 		t := r.s.Tmux
 		if t == "" {
@@ -384,9 +573,16 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 
 	renderHeader(w, sections, "full", usage, cols)
 
-	hdr := fmt.Sprintf("  %7s  %-*s  %-*s  %-*s  %-*s  %-*s  %5s  %5s  %-8s  %s",
-		"PID", nameW, "NAME", dirW, "DIR", modelW, "MODEL", statusW, "STATUS", tmuxW, "TMUX",
-		"CPU%", "AGE", "VER", "SID")
+	buildHdr := func() string {
+		return fmt.Sprintf("  %7s  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s",
+			"PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, "STATUS", costW, "COST", agentsW, "AGENTS", "CTX", tmuxW, "TMUX",
+			"CPU%", ageLabel, "VER", "SID")
+	}
+	hdr := buildHdr()
+	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
+		dirW = nd
+		hdr = buildHdr()
+	}
 	fmt.Fprintln(w, hdr)
 	fmt.Fprintln(w, strings.Repeat("-", visualLen(hdr)))
 
@@ -409,12 +605,23 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 			if !ghost {
 				statusCell = colorize(statusColor[r.s.Status], statusCell)
 			}
-			row := fmt.Sprintf("%7d  %-*s  %-*s  %s  %s  %s  %5s  %5s  %-8s  %s",
+			nameCell := fmt.Sprintf("%-*s", nameW, r.nameStr)
+			if r.nameDim && !ghost {
+				nameCell = dim(nameCell)
+			}
+			if utf8.RuneCountInString(r.cwdStr) > dirW {
+				overflowing = true
+			}
+			row := fmt.Sprintf("%7d  %s  %s  %s  %s  %s  %*s  %s  %s  %5s  %5s  %-8s  %s",
 				r.s.PID,
-				nameW, r.s.Name,
-				dirW, r.cwdStr,
+				nameCell,
+				marqueeCell(r.cwdStr, dirW, step),
 				modelCell(r.modelStr, modelW, ghost),
-				statusCell, tmuxCell,
+				statusCell,
+				costCell(r.costStr, costW),
+				agentsW, r.agentsStr,
+				ctxCell(r.ctxStr, r.s.ContextTokens, ghost),
+				tmuxCell,
 				r.s.CPU, r.ageStr, r.s.Version, r.sidShort)
 			if ghost {
 				row = dim(row)
@@ -440,13 +647,14 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 			rowFn(sectionRows[i])
 		}
 	}
+	return overflowing
 }
 
 // ============================================================================
 // Intermediate view — full's columns minus TMUX, VER, SID.
 // ============================================================================
 
-func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *UsageInfo, cols int) {
+func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -455,24 +663,34 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowFull, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveFull(s, home, now)
+			r := deriveFull(s, home, now, sortMode)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
 	}
 
-	nameW, dirW, modelW, statusW := len("NAME"), len("DIR"), len("MODEL"), len("STATUS")
+	dirLabel, ageLabel := sortLabels(sortMode)
+	nameW, dirW, modelW, costW, agentsW, statusW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), len("AGENTS"), len("STATUS")
 	for _, r := range all {
-		nameW = max(nameW, len(r.s.Name))
+		nameW = max(nameW, len(r.nameStr))
 		dirW = max(dirW, len(r.cwdStr))
 		modelW = max(modelW, len(r.modelStr))
+		costW = max(costW, len(r.costStr))
+		agentsW = max(agentsW, len(r.agentsStr))
 		statusW = max(statusW, len(r.statusStr))
 	}
 
 	renderHeader(w, sections, "intermediate", usage, cols)
 
-	hdr := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %5s  %5s",
-		nameW, "NAME", dirW, "DIR", modelW, "MODEL", statusW, "STATUS", "CPU%", "AGE")
+	buildHdr := func() string {
+		return fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s  %5s",
+			nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, "STATUS", costW, "COST", agentsW, "AGENTS", "CTX", "CPU%", ageLabel)
+	}
+	hdr := buildHdr()
+	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
+		dirW = nd
+		hdr = buildHdr()
+	}
 	fmt.Fprintln(w, hdr)
 	fmt.Fprintln(w, strings.Repeat("-", visualLen(hdr)))
 
@@ -490,19 +708,21 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 			if !ghost {
 				statusCell = colorize(statusColor[r.s.Status], statusCell)
 			}
-			nameStr := r.s.Name
-			if nameStr == "" {
-				nameStr = "-"
-			}
-			nameCell := fmt.Sprintf("%-*s", nameW, nameStr)
-			if r.s.Name == "" && !ghost {
+			nameCell := fmt.Sprintf("%-*s", nameW, r.nameStr)
+			if r.nameDim && !ghost {
 				nameCell = dim(nameCell)
 			}
-			row := fmt.Sprintf("%s  %-*s  %s  %s  %5s  %5s",
+			if utf8.RuneCountInString(r.cwdStr) > dirW {
+				overflowing = true
+			}
+			row := fmt.Sprintf("%s  %s  %s  %s  %s  %*s  %s  %5s  %5s",
 				nameCell,
-				dirW, r.cwdStr,
+				marqueeCell(r.cwdStr, dirW, step),
 				modelCell(r.modelStr, modelW, ghost),
 				statusCell,
+				costCell(r.costStr, costW),
+				agentsW, r.agentsStr,
+				ctxCell(r.ctxStr, r.s.ContextTokens, ghost),
 				r.s.CPU, r.ageStr)
 			if ghost {
 				row = dim(row)
@@ -526,6 +746,7 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 			rowFn(sectionRows[i])
 		}
 	}
+	return overflowing
 }
 
 // ============================================================================
@@ -535,29 +756,28 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 type drowMinimal struct {
 	s       Session
 	dir     string // cwd basename
-	display string // name with tmux fallback
+	display string // resolved NAME label (name → tmux → worktree → "-")
+	nameDim bool   // true when display is auto-derived, not user-set
 	ageStr  string
 }
 
-func deriveMinimal(s Session, home string, now time.Time) drowMinimal {
+func deriveMinimal(s Session, home string, now time.Time, sortMode string) drowMinimal {
 	cwd := displayCWD(s.CWD, home, s.Host)
 	dir := filepath.Base(strings.TrimRight(cwd, "/"))
 	if dir == "" {
 		dir = cwd
 	}
-	disp := s.Name
-	if disp == "" && s.Tmux != "" {
-		disp = s.Tmux
-	}
+	disp, dimName := s.DisplayName()
 	return drowMinimal{
 		s:       s,
 		dir:     dir,
 		display: disp,
-		ageStr:  formatAge(now.Sub(s.Updated()).Seconds()),
+		nameDim: dimName,
+		ageStr:  formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
 	}
 }
 
-func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageInfo, cols int) {
+func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -566,13 +786,14 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowMinimal, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveMinimal(s, home, now)
+			r := deriveMinimal(s, home, now, sortMode)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
 	}
 
-	dirW, nameW := len("DIR"), len("NAME")
+	dirLabel, ageLabel := sortLabels(sortMode)
+	dirW, nameW := utf8.RuneCountInString(dirLabel), len("NAME")
 	for _, r := range all {
 		dirW = max(dirW, len(r.dir))
 		nameW = max(nameW, len(r.display))
@@ -580,7 +801,14 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 
 	renderHeader(w, sections, "minimal", usage, cols)
 
-	hdr := fmt.Sprintf("  %-*s  %-*s  S  %5s", dirW, "DIR", nameW, "NAME", "AGE")
+	buildHdr := func() string {
+		return fmt.Sprintf("  %-*s  %-*s  S  %5s", dirW, dirLabel, nameW, "NAME", ageLabel)
+	}
+	hdr := buildHdr()
+	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
+		dirW = nd
+		hdr = buildHdr()
+	}
 	fmt.Fprintln(w, hdr)
 	fmt.Fprintln(w, strings.Repeat("-", visualLen(hdr)))
 
@@ -603,11 +831,14 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 				statusCell = colorize(statusColor[r.s.Status], glyph)
 			}
 			nameCell := fmt.Sprintf("%-*s", nameW, r.display)
-			if r.s.Name == "" && !ghost {
+			if r.nameDim && !ghost {
 				nameCell = dim(nameCell)
 			}
-			row := fmt.Sprintf("%-*s  %s  %s  %5s",
-				dirW, r.dir, nameCell, statusCell, r.ageStr)
+			if utf8.RuneCountInString(r.dir) > dirW {
+				overflowing = true
+			}
+			row := fmt.Sprintf("%s  %s  %s  %5s",
+				marqueeCell(r.dir, dirW, step), nameCell, statusCell, r.ageStr)
 			if ghost {
 				row = dim(row)
 			}
@@ -630,6 +861,7 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 			rowFn(sectionRows[i])
 		}
 	}
+	return overflowing
 }
 
 // visualLen returns the display width of a string with ANSI escapes stripped.

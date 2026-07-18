@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,7 @@ func TestHeadlessRowsDimmed(t *testing.T) {
 
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
-		RenderAll(&b, mode, []Session{normal, ghost}, nil, "", nil, 0)
+		RenderAll(&b, mode, []Session{normal, ghost}, nil, "", nil, 0, 0, "dir")
 		out := b.String()
 
 		ghostRow := findRow(t, out, "ghostdir")
@@ -87,6 +88,38 @@ func TestHeadlessRowsDimmed(t *testing.T) {
 		normalRow := findRow(t, out, "normaldir")
 		if strings.HasPrefix(strings.TrimPrefix(normalRow, "  "), ansiDim) {
 			t.Errorf("mode %s: interactive row unexpectedly dimmed: %q", mode, normalRow)
+		}
+	}
+}
+
+func TestDerivedNameDimmed(t *testing.T) {
+	now := time.Now().UnixMilli()
+	derived := Session{PID: 100, Name: "der-name", NameSource: "derived",
+		CWD: "/tmp/derdir", Status: "busy", Entrypoint: "cli", UpdatedAt: now}
+	userSet := Session{PID: 200, Name: "usr-name", NameSource: "user",
+		CWD: "/tmp/usrdir", Status: "busy", Entrypoint: "cli", UpdatedAt: now}
+	fallback := Session{PID: 300, Tmux: "tmux-sess:0.1",
+		CWD: "/tmp/fbdir", Status: "busy", Entrypoint: "cli", UpdatedAt: now}
+
+	for _, mode := range []string{"1", "2", "3"} {
+		var b strings.Builder
+		RenderAll(&b, mode, []Session{derived, userSet, fallback}, nil, "", nil, 0, 0, "dir")
+		out := b.String()
+
+		if row := findRow(t, out, "derdir"); !strings.Contains(row, ansiDim+"der-name") {
+			t.Errorf("mode %s: derived name not dimmed: %q", mode, row)
+		}
+		if row := findRow(t, out, "usrdir"); strings.Contains(row, ansiDim+"usr-name") {
+			t.Errorf("mode %s: user-set name unexpectedly dimmed: %q", mode, row)
+		}
+		// A session with nothing but a tmux locator falls all the way through to
+		// the "-" placeholder — the tmux session name is never a name fallback.
+		row := findRow(t, out, "fbdir")
+		if strings.Contains(row, "tmux-sess") && mode != "1" {
+			t.Errorf("mode %s: tmux name leaked outside the TMUX column: %q", mode, row)
+		}
+		if !strings.Contains(row, ansiDim+"-") {
+			t.Errorf("mode %s: tmux-only session did not fall back to dimmed %q: %q", mode, "-", row)
 		}
 	}
 }
@@ -143,6 +176,29 @@ func TestWriteUsage(t *testing.T) {
 	}
 }
 
+func TestWriteUsageScopedWeekly(t *testing.T) {
+	var b strings.Builder
+	writeUsage(&b, &UsageInfo{
+		FiveHour:          usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
+		SevenDay:          usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
+		WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: time.Now().Add(72 * time.Hour)},
+		WeeklyScopedLabel: "Fable",
+	}, 0)
+	out := b.String()
+	if lines := strings.Count(out, "\n"); lines != 1 {
+		t.Errorf("writeUsage wrote %d lines, want 1: %q", lines, out)
+	}
+	if !strings.Contains(out, "Fable") {
+		t.Errorf("missing scoped weekly label: %q", out)
+	}
+	if !strings.Contains(out, "10%") {
+		t.Errorf("missing scoped weekly percentage: %q", out)
+	}
+	if got := strings.Count(out, "█") + strings.Count(out, "░"); got != 3*usageBarMax {
+		t.Errorf("bar cells = %d, want %d (3 bars × max width)", got, 3*usageBarMax)
+	}
+}
+
 func TestWriteUsageCredits(t *testing.T) {
 	var b strings.Builder
 	writeUsage(&b, &UsageInfo{
@@ -160,8 +216,8 @@ func TestWriteUsageCredits(t *testing.T) {
 	if !strings.Contains(out, "3%") {
 		t.Errorf("missing rounded credits percentage: %q", out)
 	}
-	if !strings.Contains(out, "$26/1k") {
-		t.Errorf("missing spent/limit figure: %q", out)
+	if !strings.Contains(out, "$26") || strings.Contains(out, "/") {
+		t.Errorf("want spent-only figure $26, no limit: %q", out)
 	}
 }
 
@@ -186,7 +242,7 @@ func TestWriteUsageAdaptiveWidth(t *testing.T) {
 	}
 }
 
-func TestMoneyCompact(t *testing.T) {
+func TestMoneyGrouped(t *testing.T) {
 	cases := []struct {
 		minor  float64
 		places int
@@ -194,15 +250,181 @@ func TestMoneyCompact(t *testing.T) {
 	}{
 		{0, 2, "0"},
 		{2550, 2, "26"},
-		{100000, 2, "1k"},
-		{155000, 2, "1.6k"},
+		{100000, 2, "1,000"},
+		{112345, 2, "1,123"},
+		{155000, 2, "1,550"},
 		{500, 0, "500"},
-		{1500, 0, "1.5k"},
+		{1500, 0, "1,500"},
+		{123456789, 2, "1,234,568"},
 	}
 	for _, c := range cases {
-		if got := moneyCompact(c.minor, c.places); got != c.want {
-			t.Errorf("moneyCompact(%v, %d) = %q, want %q", c.minor, c.places, got, c.want)
+		if got := moneyGrouped(c.minor, c.places); got != c.want {
+			t.Errorf("moneyGrouped(%v, %d) = %q, want %q", c.minor, c.places, got, c.want)
 		}
+	}
+}
+
+func TestFormatTokens(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "-"},
+		{-5, "-"},
+		{1, "1"},
+		{999, "999"},
+		{1000, "1k"},
+		{1499, "1k"},
+		{1500, "2k"},
+		{124362, "124k"},
+		{999999, "1000k"},
+		{1000000, "1.0M"},
+		{1234567, "1.2M"},
+	}
+	for _, c := range cases {
+		if got := formatTokens(c.n); got != c.want {
+			t.Errorf("formatTokens(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
+func TestFormatCost(t *testing.T) {
+	cases := []struct {
+		main, sub float64
+		want      string
+	}{
+		{0, 0, "—"},
+		{-1, 0, "—"},
+		{0.5, 0, "$0.50"},
+		{1.234, 0, "$1.23"},
+		{99.99, 0, "$99.99"},
+		{100, 0, "$100"},
+		{1234.5, 0, "$1234"},
+		{17.36, 2.56, "$17.36 (+$2.56)"},
+		{5, 0.004, "$5.00"},          // subagent part under a cent → suffix omitted
+		{5, 0.006, "$5.00 (+$0.01)"}, // just over the threshold → shown
+		{150, 20, "$150 (+$20.00)"},  // magnitude rule applies per part
+		{0, 3, "$0.00 (+$3.00)"},     // main zero but subagents present
+	}
+	for _, c := range cases {
+		if got := formatCost(c.main, c.sub); got != c.want {
+			t.Errorf("formatCost(%v, %v) = %q, want %q", c.main, c.sub, got, c.want)
+		}
+	}
+}
+
+func TestRenderCostColumn(t *testing.T) {
+	priced := Session{PID: 1, Name: "paid", CWD: "/tmp/paid", Status: "idle",
+		Model: "claude-fable-5", CostUSD: 12.34, CostSubagentsUSD: 2.56,
+		UpdatedAt: time.Now().UnixMilli()}
+	free := Session{PID: 2, Name: "free", CWD: "/tmp/free", Status: "idle",
+		Model: "claude-fable-5", CostUSD: 0, UpdatedAt: time.Now().UnixMilli()}
+
+	// Full and intermediate views carry the column; minimal does not.
+	for _, view := range []string{"1", "3"} {
+		var b strings.Builder
+		RenderAll(&b, view, []Session{priced, free}, nil, "", nil, 0, 0, "dir")
+		out := b.String()
+		if !strings.Contains(out, "COST") {
+			t.Errorf("view %s: missing COST header:\n%s", view, out)
+		}
+		if !strings.Contains(findRow(t, out, "paid"), "$12.34 (+$2.56)") {
+			t.Errorf("view %s: missing split cost:\n%s", view, out)
+		}
+		if !strings.Contains(findRow(t, out, "free"), "—") {
+			t.Errorf("view %s: zero cost not rendered as em-dash:\n%s", view, out)
+		}
+	}
+
+	var b strings.Builder
+	RenderAll(&b, "2", []Session{priced}, nil, "", nil, 0, 0, "dir")
+	if strings.Contains(b.String(), "COST") {
+		t.Errorf("minimal view unexpectedly has COST column:\n%s", b.String())
+	}
+}
+
+func TestMarqueeCell(t *testing.T) {
+	cases := []struct {
+		name   string
+		s      string
+		width  int
+		offset int
+		want   string
+	}{
+		{"fits pads", "abc", 5, 0, "abc  "},
+		{"fits offset ignored", "abc", 5, 3, "abc  "},
+		{"exact fit", "hello", 5, 0, "hello"},
+		// "abcdef" w3: d=3, pause=3, period=11. pos by t:
+		// 0,0,0, 1,2,3, 3,3,3, 2,1 then wrap.
+		{"overflow hold at start", "abcdef", 3, 0, "abc"},
+		{"overflow still holding", "abcdef", 3, 2, "abc"},
+		{"overflow first slide", "abcdef", 3, 3, "bcd"},
+		{"overflow tail reached", "abcdef", 3, 5, "def"},
+		{"overflow hold at tail", "abcdef", 3, 8, "def"},
+		{"overflow slide back", "abcdef", 3, 9, "cde"},
+		{"overflow last step back", "abcdef", 3, 10, "bcd"},
+		{"period wraps to zero", "abcdef", 3, 11, "abc"},
+		{"multibyte static", "αβ", 4, 0, "αβ  "},
+		{"multibyte overflow", "αβγδε", 3, 0, "αβγ"},
+		{"multibyte tail", "αβγδε", 3, 4, "γδε"},   // d=2, t=4 → pos 2
+		{"multibyte return", "αβγδε", 3, 8, "βγδ"}, // period 9, t=8 → pos 1
+		{"zero width", "abcdef", 0, 0, ""},
+		{"negative width", "abc", -3, 0, ""},
+	}
+	for _, c := range cases {
+		if got := marqueeCell(c.s, c.width, c.offset); got != c.want {
+			t.Errorf("%s: marqueeCell(%q, %d, %d) = %q, want %q", c.name, c.s, c.width, c.offset, got, c.want)
+		}
+	}
+}
+
+func TestShrinkDirW(t *testing.T) {
+	cases := []struct {
+		name              string
+		dirW, lineW, cols int
+		want              int
+	}{
+		{"unknown width", 40, 120, 0, 40},
+		{"fits", 40, 100, 120, 40},
+		{"exact fit", 40, 120, 120, 40},
+		{"shrink by deficit", 40, 130, 120, 30}, // over 10 → 40-10
+		{"clamp at min", 40, 200, 120, minDirW}, // over 80 → 40-80 < 16 → 16
+		{"never widens", 10, 130, 120, 10},      // dirW already < minDirW: clamp must not grow it
+	}
+	for _, c := range cases {
+		if got := shrinkDirW(c.dirW, c.lineW, c.cols); got != c.want {
+			t.Errorf("%s: shrinkDirW(%d, %d, %d) = %d, want %d", c.name, c.dirW, c.lineW, c.cols, got, c.want)
+		}
+	}
+}
+
+func TestRenderMarqueeOverflow(t *testing.T) {
+	// A long, character-varied basename forces the minimal-view DIR cell to
+	// overflow once the column is shrunk to its floor on a narrow terminal.
+	longDir := "abcdefghijklmnopqrstuvwxyz0123456789ABCD" // 40 distinct-ish runes
+	s := Session{PID: 1, Name: "marq", CWD: "/tmp/" + longDir, Status: "idle",
+		UpdatedAt: time.Now().UnixMilli()}
+
+	// Wide terminal: no shrink, DIR fits, nothing overflows.
+	var wide strings.Builder
+	if RenderAll(&wide, "2", []Session{s}, nil, "", nil, 200, 0, "dir") {
+		t.Errorf("wide terminal reported overflow: %s", wide.String())
+	}
+	if !strings.Contains(wide.String(), longDir) {
+		t.Errorf("wide terminal clipped the full path: %s", wide.String())
+	}
+
+	// Narrow terminal: DIR shrinks and the cell marquees, so RenderAll reports
+	// overflow and successive steps render different windows.
+	frame := func(step int) string {
+		var b strings.Builder
+		if !RenderAll(&b, "2", []Session{s}, nil, "", nil, 30, step, "dir") {
+			t.Fatalf("narrow terminal did not report overflow at step %d", step)
+		}
+		return findRow(t, b.String(), "marq")
+	}
+	if frame(0) == frame(3) {
+		t.Errorf("marquee did not advance between steps 0 and 3:\n%s", frame(0))
 	}
 }
 
@@ -222,6 +444,120 @@ func TestFormatUntil(t *testing.T) {
 	for _, c := range cases {
 		if got := formatUntil(c.t); got != c.want {
 			t.Errorf("%s: formatUntil = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSortIndicator(t *testing.T) {
+	now := time.Now()
+	// Started 2h ago, updated just now: the AGE cell distinguishes the
+	// created basis ("2h") from the updated basis ("0s").
+	s := Session{PID: 7, Name: "srt", CWD: "/tmp/srt", Status: "idle",
+		StartedAt: now.Add(-2 * time.Hour).UnixMilli(), UpdatedAt: now.UnixMilli()}
+
+	renderWith := func(view, mode string) string {
+		var b strings.Builder
+		RenderAll(&b, view, []Session{s}, nil, "", nil, 0, 0, mode)
+		return b.String()
+	}
+
+	for _, view := range []string{"1", "2", "3"} {
+		if out := renderWith(view, "dir"); !strings.Contains(out, "DIR▲") || strings.Contains(out, "AGE▲") || strings.Contains(out, "AGE▼") {
+			t.Errorf("view %s dir: want DIR▲ only, got header in:\n%s", view, out)
+		}
+		if out := renderWith(view, "updated"); !strings.Contains(out, "AGE▼") || strings.Contains(out, "DIR▲") {
+			t.Errorf("view %s updated: want AGE▼ only:\n%s", view, out)
+		}
+		if out := renderWith(view, "created-asc"); !strings.Contains(out, "AGE▲") {
+			t.Errorf("view %s created-asc: want AGE▲:\n%s", view, out)
+		}
+		row := findRow(t, renderWith(view, "created"), "srt")
+		if !strings.Contains(row, "2h") {
+			t.Errorf("view %s created: AGE should count from start (2h): %q", view, row)
+		}
+		row = findRow(t, renderWith(view, "updated"), "srt")
+		if strings.Contains(row, "2h") {
+			t.Errorf("view %s updated: AGE should count from update, not start: %q", view, row)
+		}
+	}
+}
+
+func TestFormatAgents(t *testing.T) {
+	if got := formatAgents(0); got != "" {
+		t.Errorf("formatAgents(0) = %q, want empty", got)
+	}
+	if got := formatAgents(-1); got != "" {
+		t.Errorf("formatAgents(-1) = %q, want empty", got)
+	}
+	if got := formatAgents(3); got != "3" {
+		t.Errorf("formatAgents(3) = %q, want 3", got)
+	}
+}
+
+func TestRenderAgentsColumnAndHeaderTotal(t *testing.T) {
+	local := []Session{
+		{PID: 100, SessionID: "aaaa", CWD: "/w1", Status: "busy", StartedAt: 1, AgentsRunning: 3},
+		{PID: 200, SessionID: "bbbb", CWD: "/w2", Status: "idle", StartedAt: 2},
+	}
+	var buf bytes.Buffer
+	RenderAll(&buf, "1", local, nil, "", nil, 0, 0, "dir")
+	out := buf.String()
+
+	if !strings.Contains(out, "AGENTS") {
+		t.Errorf("full view missing AGENTS column header:\n%s", out)
+	}
+	// 2 sessions + 3 running subagents = 5 concurrent agent loops.
+	if !strings.Contains(out, "5 agents (2 sessions + 3 sub)") {
+		t.Errorf("header missing grand total:\n%s", out)
+	}
+
+	// Intermediate view carries the column too.
+	buf.Reset()
+	RenderAll(&buf, "3", local, nil, "", nil, 0, 0, "dir")
+	if !strings.Contains(buf.String(), "AGENTS") {
+		t.Errorf("intermediate view missing AGENTS column header")
+	}
+
+	// Minimal view: no column, but header total still present.
+	buf.Reset()
+	RenderAll(&buf, "2", local, nil, "", nil, 0, 0, "dir")
+	out = buf.String()
+	if strings.Contains(out, "AGENTS") {
+		t.Errorf("minimal view must not have AGENTS column:\n%s", out)
+	}
+	if !strings.Contains(out, "5 agents (2 sessions + 3 sub)") {
+		t.Errorf("minimal header missing grand total:\n%s", out)
+	}
+}
+
+func TestRenderHeaderTotalNoSubagents(t *testing.T) {
+	local := []Session{
+		{PID: 100, SessionID: "aaaa", CWD: "/w1", Status: "idle", StartedAt: 1},
+	}
+	var buf bytes.Buffer
+	RenderAll(&buf, "1", local, nil, "", nil, 0, 0, "dir")
+	if !strings.Contains(buf.String(), "1 agents (1 sessions)") {
+		t.Errorf("degraded zero-subagent form missing:\n%s", buf.String())
+	}
+}
+
+func TestCtxCell(t *testing.T) {
+	cases := []struct {
+		name   string
+		ctxStr string
+		tokens int
+		plain  bool
+		want   string
+	}{
+		{"low usage uncolored", "50k", 50_000, false, "  50k"},
+		{"warn at 70%", "210k", 210_000, false, colorize("33", " 210k")},
+		{"hot at 90%", "280k", 280_000, false, colorize("1;31", " 280k")},
+		{"ghost stays plain", "280k", 280_000, true, " 280k"},
+		{"empty tokens plain", "-", 0, false, "    -"},
+	}
+	for _, c := range cases {
+		if got := ctxCell(c.ctxStr, c.tokens, c.plain); got != c.want {
+			t.Errorf("%s: ctxCell(%q, %d, %v) = %q, want %q", c.name, c.ctxStr, c.tokens, c.plain, got, c.want)
 		}
 	}
 }
