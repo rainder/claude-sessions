@@ -396,6 +396,15 @@ func buildSections(local []Session, remotes []RemoteResult) []section {
 	return out
 }
 
+// plural renders a count with its word, pluralizing the word for counts other
+// than 1: plural(1, "agent") → "1 agent", plural(2, "agent") → "2 agents".
+func plural(n int, word string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, word)
+	}
+	return fmt.Sprintf("%d %ss", n, word)
+}
+
 // renderHeader prints the title line with live counts, the optional account
 // usage bars, and the trailing blank line — shared by all three views.
 func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo, cols int) {
@@ -421,9 +430,9 @@ func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo
 	shellStr := colorize(statusColor["shell"], fmt.Sprintf("%d shell", shell)) + ansiBold
 	// Grand total of concurrent agent loops: each live session is one, plus
 	// every running subagent (incl. nested), across local and remote.
-	agentsStr := fmt.Sprintf("%d agents (%d sessions)", live, live)
+	agentsStr := fmt.Sprintf("%s (%s)", plural(live, "agent"), plural(live, "session"))
 	if subs > 0 {
-		agentsStr = fmt.Sprintf("%d agents (%d sessions + %d sub)", live+subs, live, subs)
+		agentsStr = fmt.Sprintf("%s (%s + %d sub)", plural(live+subs, "agent"), plural(live, "session"), subs)
 	}
 	fmt.Fprintf(w, "%sClaude sessions  %s  (%d live, %d in tmux, %s, %s)  %s  %s%s\n",
 		ansiBold, time.Now().Format("15:04:05"), live, tmuxCount, busyStr, shellStr,

@@ -536,8 +536,12 @@ func TestRenderHeaderTotalNoSubagents(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	RenderAll(&buf, "1", local, nil, "", nil, 0, 0, "dir")
-	if !strings.Contains(buf.String(), "1 agents (1 sessions)") {
-		t.Errorf("degraded zero-subagent form missing:\n%s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "1 agent (1 session)") {
+		t.Errorf("degraded zero-subagent form missing:\n%s", out)
+	}
+	if strings.Contains(out, "1 agents") {
+		t.Errorf("singular count must not pluralize:\n%s", out)
 	}
 }
 

@@ -83,8 +83,9 @@ claude-sessions   9 agents (4 sessions + 5 sub)
 
 Alive = sessions currently listed as running (same liveness the table already
 uses); dead/stale sessions contribute nothing. When zero subagents anywhere,
-degrade to just the session count (`4 agents (4 sessions)`). Unreachable
-remotes are simply excluded (same as their rows).
+degrade to just the session count, with counts pluralizing correctly
+(`1 agent (1 session)`; `4 agents (4 sessions)`). Unreachable remotes are
+simply excluded (same as their rows).
 
 ## Testing
 

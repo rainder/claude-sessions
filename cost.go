@@ -105,6 +105,10 @@ func lineCost(line []byte, e *costCacheEntry) (cost float64, ok bool) {
 	}
 	for _, b := range ev.Message.Content {
 		switch {
+		// The subagent-spawning tool is named "Agent" in current Claude Code
+		// transcripts (earlier builds used "Task"). This match is coupled to
+		// that name: if a future build renames the tool again, this silently
+		// detects zero running agents instead of erroring.
 		case ev.Type == "assistant" && b.Type == "tool_use" && b.Name == "Agent":
 			e.agentPending[b.ID] = true
 		case ev.Type == "user" && b.Type == "tool_result":

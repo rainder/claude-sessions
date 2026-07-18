@@ -142,3 +142,37 @@ func TestSessionAgentsRunningJSONRoundTrip(t *testing.T) {
 		t.Errorf("zero count serialized: %s", b)
 	}
 }
+
+func TestLineCostAgentPendingReplay(t *testing.T) {
+	e := newCostCacheEntry()
+	// Streaming re-emission: the same spawn line appears twice.
+	lineCost([]byte(agentUseLine("toolu_r")), e)
+	lineCost([]byte(agentUseLine("toolu_r")), e)
+	if len(e.agentPending) != 1 || !e.agentPending["toolu_r"] {
+		t.Fatalf("after duplicate spawns pending = %v, want {toolu_r}", e.agentPending)
+	}
+	// The result replayed twice: second delete is a safe no-op.
+	lineCost([]byte(toolResultLine("toolu_r")), e)
+	lineCost([]byte(toolResultLine("toolu_r")), e)
+	if len(e.agentPending) != 0 {
+		t.Fatalf("after duplicate results pending = %v, want empty", e.agentPending)
+	}
+}
+
+func TestScanSessionAgentsJustSpawned(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	writeLines(t, parent, agentUseLine("toolu_j")) // spawned, no result yet
+	subs := filepath.Join(dir, "sess", "subagents")
+	if err := os.MkdirAll(subs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"agentType":"scout","description":"d","toolUseId":"toolu_j","spawnDepth":1}`
+	if err := os.WriteFile(filepath.Join(subs, "agent-jjj.meta.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No agent-jjj.jsonl: freshness falls back to the meta file's mtime.
+	if got := scanSessionAgents(parent, time.Now()); got != 1 {
+		t.Errorf("running = %d, want 1 (just-spawned, meta-mtime fallback)", got)
+	}
+}
