@@ -100,31 +100,66 @@ func SpawnNew(cwd, displayName string) (string, error) {
 	return tname, nil
 }
 
-// KillSession kills the Claude session, tmux-aware: if pid is in a tmux pane,
-// kill the whole tmux session (which SIGHUPs the pane process). Otherwise
-// SIGTERM the pid directly, escalating to SIGKILL after a few seconds.
-func KillSession(pid int) error {
-	panes, _ := tmuxPaneMap()
-	ppid, _ := ppidMap()
-	loc := walkTmuxPane(pid, panes, ppid)
-	if loc != "" {
-		sessName := strings.SplitN(loc, ":", 2)[0]
-		if err := exec.Command("tmux", "kill-session", "-t", sessName).Run(); err != nil {
-			return fmt.Errorf("tmux kill-session %s: %w", sessName, err)
+// killDeps are the side-effecting operations KillSession performs, injected so
+// the kill routing can be tested without signalling a real PID or sleeping.
+type killDeps struct {
+	killTmux func(string) error
+	signal   func(int, syscall.Signal) error
+	alive    func(int) bool
+	sleep    func(time.Duration)
+}
+
+// defaultKillDeps wires the production side effects.
+var defaultKillDeps = killDeps{
+	killTmux: func(name string) error {
+		return exec.Command("tmux", "kill-session", "-t", name).Run()
+	},
+	signal: syscall.Kill,
+	alive:  pidAlive,
+	sleep:  time.Sleep,
+}
+
+// tmuxSessionName extracts the tmux session name from a "session:win.pane"
+// location string. Malformed metadata (no colon, or an empty session name) is a
+// hard error so callers never guess at a target.
+func tmuxSessionName(tmux string) (string, error) {
+	i := strings.IndexByte(tmux, ':')
+	if i <= 0 {
+		return "", fmt.Errorf("malformed tmux metadata %q", tmux)
+	}
+	return tmux[:i], nil
+}
+
+// KillSession kills the Claude session using the session's own trusted metadata
+// (no live re-discovery): if s.Tmux is set, kill the whole tmux session (which
+// SIGHUPs the pane process); otherwise SIGTERM the pid, escalating to SIGKILL
+// after a few seconds.
+func KillSession(s Session) error {
+	return killSessionWith(s, defaultKillDeps)
+}
+
+func killSessionWith(s Session, deps killDeps) error {
+	if s.Tmux != "" {
+		name, err := tmuxSessionName(s.Tmux)
+		if err != nil {
+			return err
+		}
+		if err := deps.killTmux(name); err != nil {
+			return fmt.Errorf("tmux kill-session %s: %w", name, err)
 		}
 		return nil
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		return fmt.Errorf("SIGTERM %d: %w", pid, err)
+	if err := deps.signal(s.PID, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("SIGTERM %d: %w", s.PID, err)
 	}
 	for i := 0; i < 5; i++ {
-		time.Sleep(time.Second)
-		if !pidAlive(pid) {
+		deps.sleep(time.Second)
+		if !deps.alive(s.PID) {
 			return nil
 		}
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-	time.Sleep(time.Second)
+	_ = deps.signal(s.PID, syscall.SIGKILL)
+	deps.sleep(time.Second)
 	return nil
 }
 

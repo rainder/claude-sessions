@@ -93,7 +93,12 @@ func actKill(c *actCtx) {
 
 	var prompt string
 	if s.Tmux != "" {
-		sessName := strings.SplitN(s.Tmux, ":", 2)[0]
+		sessName, err := tmuxSessionName(s.Tmux)
+		if err != nil {
+			fmt.Printf("\nkill failed: %v\n", err)
+			pauseForKey(c.fd, c.oldState)
+			return
+		}
 		prompt = fmt.Sprintf("\nkill tmux session %q (PID %d)? [y/N] ", sessName, s.PID)
 	} else {
 		prompt = fmt.Sprintf("\nkill PID %d? [y/N] ", s.PID)
@@ -101,7 +106,7 @@ func actKill(c *actCtx) {
 	if !confirm(prompt) {
 		return
 	}
-	if err := KillSession(s.PID); err != nil {
+	if err := KillSession(*s); err != nil {
 		fmt.Printf("\nkill failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 	}

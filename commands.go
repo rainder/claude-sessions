@@ -22,21 +22,39 @@ func cmdKill(args []string) int {
 		return 2
 	}
 	assumeYes := len(args) > 1 && args[1] == "-y"
-	if _, ok := readSessionByPID(pid); !ok {
+	sess, ok := readSessionByPID(pid)
+	if !ok {
 		fmt.Fprintf(os.Stderr, "PID %d is not a live Claude session\n", pid)
 		return 1
 	}
+	// Resolve the live tmux location once and let it drive the kill, so the
+	// confirmation, execution, and result text all agree on the same target.
+	sess.Tmux = tmuxLocForPID(pid)
+	tmuxName := ""
+	if sess.Tmux != "" {
+		if n, err := tmuxSessionName(sess.Tmux); err == nil {
+			tmuxName = n
+		}
+	}
 	if !assumeYes {
-		if !confirm(fmt.Sprintf("kill PID %d? [y/N] ", pid)) {
+		prompt := fmt.Sprintf("kill PID %d? [y/N] ", pid)
+		if tmuxName != "" {
+			prompt = fmt.Sprintf("kill tmux session %q (PID %d)? [y/N] ", tmuxName, pid)
+		}
+		if !confirm(prompt) {
 			fmt.Println("aborted")
 			return 0
 		}
 	}
-	if err := KillSession(pid); err != nil {
+	if err := KillSession(sess); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	fmt.Printf("killed PID %d\n", pid)
+	if tmuxName != "" {
+		fmt.Printf("killed tmux session %s (PID %d)\n", tmuxName, pid)
+	} else {
+		fmt.Printf("killed PID %d\n", pid)
+	}
 	return 0
 }
 

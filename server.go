@@ -20,18 +20,37 @@ import (
 // actionResult is the JSON shape returned by mutating endpoints.
 // Mirrors the bash version so existing scripts/clients keep working.
 type actionResult struct {
-	OK     bool   `json:"ok"`
-	Tmux   string `json:"tmux,omitempty"`  // tmux session name for migrate/new
-	Error  string `json:"error,omitempty"` // human-readable failure reason
+	OK    bool   `json:"ok"`
+	Tmux  string `json:"tmux,omitempty"`  // tmux session name for migrate/new
+	Error string `json:"error,omitempty"` // human-readable failure reason
 }
 
 type server struct {
 	token string
 	host  string
+
+	// collect/terminate are injectable seams for tests; nil in production,
+	// where they fall back to CollectLocal / KillSession.
+	collect   func() ([]Session, error)
+	terminate func(Session) error
 }
 
 func (s *server) authed(r *http.Request) bool {
 	return r.Header.Get("Authorization") == "Bearer "+s.token
+}
+
+func (s *server) collectLocal() ([]Session, error) {
+	if s.collect != nil {
+		return s.collect()
+	}
+	return CollectLocal()
+}
+
+func (s *server) terminateSession(target Session) error {
+	if s.terminate != nil {
+		return s.terminate(target)
+	}
+	return KillSession(target)
 }
 
 func writeJSON(w http.ResponseWriter, code int, data any) {
@@ -45,7 +64,7 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	sessions, err := CollectLocal()
+	sessions, err := s.collectLocal()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -97,11 +116,26 @@ func (s *server) kill(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad pid", http.StatusBadRequest)
 		return
 	}
-	if _, ok := readSessionByPID(pid); !ok {
+	// Trust only server-collected metadata: resolve the PID against this host's
+	// own sessions and terminate that full row. The request body carries no
+	// tmux metadata — the client cannot steer which target we signal.
+	sessions, err := s.collectLocal()
+	if err != nil {
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
+	var target *Session
+	for i := range sessions {
+		if sessions[i].PID == pid {
+			target = &sessions[i]
+			break
+		}
+	}
+	if target == nil {
 		writeJSON(w, http.StatusOK, actionResult{Error: fmt.Sprintf("PID %d is not a live Claude session", pid)})
 		return
 	}
-	if err := KillSession(pid); err != nil {
+	if err := s.terminateSession(*target); err != nil {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return
 	}
