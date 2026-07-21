@@ -184,7 +184,13 @@ func RunTUI(interval time.Duration) error {
 		// we never race the hub goroutine that owns them.
 		remotes = sortRemotes(hub.Snapshot(), sortMode)
 		targets = buildSelectionTargets(local, remotes)
+		// A fallback that moves the selection (its row vanished) re-anchors the
+		// viewport to the new selection on the next render.
+		prevSel := state.sel
 		state.sel = validateTargetSel(targets, state.sel)
+		if state.sel != prevSel {
+			state.anchorSelection = true
+		}
 	}
 
 	// markInspectorEndedIfGone flags the inspector as ended when the session it
@@ -234,12 +240,6 @@ func RunTUI(interval time.Duration) error {
 		}
 
 		frame := BuildTableFrame(viewMode, local, remotes, state.sel, usageHub.Snapshot(), cols, 0, sortMode)
-		// tableFrame.lines carries a phantom trailing "" from the frame's
-		// terminating newline; the effective count for scroll clamps is one less.
-		effLines := len(frame.lines)
-		if effLines > 0 {
-			effLines--
-		}
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if toastActive {
@@ -248,22 +248,11 @@ func RunTUI(interval time.Duration) error {
 		if viewRows < 0 {
 			viewRows = 0
 		}
-		// Keep the selection on screen; when there's no resolvable selection
-		// (e.g. empty list) clamp the wheel-driven offset directly.
-		if line := frame.targetLine(state.sel); line >= 0 {
-			state.listOffset = ensureLineVisible(state.listOffset, line, viewRows, effLines)
-		} else {
-			maxOff := effLines - viewRows
-			if maxOff < 0 {
-				maxOff = 0
-			}
-			if state.listOffset > maxOff {
-				state.listOffset = maxOff
-			}
-			if state.listOffset < 0 {
-				state.listOffset = 0
-			}
-		}
+		// Free-scroll model: wheel moves listOffset and the selection may leave
+		// the viewport; resolveListOffset only re-anchors the view to the
+		// selection when a selection change requested it, otherwise it just
+		// clamps the current offset.
+		state.resolveListOffset(frame, viewRows)
 
 		var out string
 		if cols <= 0 {
@@ -427,9 +416,11 @@ func RunTUI(interval time.Duration) error {
 				return nil
 			case KeyUp:
 				state.sel = navTargets(targets, state.sel, -1)
+				state.anchorSelection = true
 				render()
 			case KeyDown:
 				state.sel = navTargets(targets, state.sel, 1)
+				state.anchorSelection = true
 				render()
 			case "k", "K":
 				actKill(makeCtx())

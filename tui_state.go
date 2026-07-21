@@ -166,13 +166,19 @@ func inspectorKeyCommand(key string) tuiCommand {
 // regions for the frame last drawn, the double-click tracking pair, and the
 // fullscreen inspector's scroll/follow state.
 type tuiState struct {
-	mode        screenMode
-	sel         string
-	listOffset  int
-	hits        []hitRegion
-	lastClickID string
-	lastClickAt time.Time
-	inspector   inspectorViewState
+	mode       screenMode
+	sel        string
+	listOffset int
+	// anchorSelection requests that the next session-list render scroll the
+	// selected row into view. It is set when the selection changes (keyboard
+	// nav, click-select, or a validateTargetSel fallback) and cleared once
+	// consumed; plain re-renders and wheel scrolling leave it unset, so the
+	// viewport is free to move off the selection.
+	anchorSelection bool
+	hits            []hitRegion
+	lastClickID     string
+	lastClickAt     time.Time
+	inspector       inspectorViewState
 	// inspectorTargetGone is set when the inspected session has left the
 	// session list; render overlays a terminal "ended" verdict so the view
 	// stops reading as live while preserving the last content.
@@ -196,9 +202,11 @@ func (s *tuiState) hitAt(x, y int) *hitRegion {
 }
 
 // handleListMouse applies a mouse event to the session-list screen. Release
-// events are ignored; wheel events scroll three lines; a left press selects the
-// row under the cursor; a second left press on the same openable row within
-// doubleClickWindow opens the inspector.
+// events are ignored; wheel events scroll three lines and leave the selection
+// where it is (free scroll — the render path does not re-anchor to it); a left
+// press selects the row under the cursor and requests a re-anchor; a second
+// left press on the same openable row within doubleClickWindow opens the
+// inspector.
 func (s *tuiState) handleListMouse(m mouseEvent, now time.Time) tuiCommand {
 	if m.release {
 		return commandNone
@@ -231,9 +239,40 @@ func (s *tuiState) handleListMouse(m mouseEvent, now time.Time) tuiCommand {
 		}
 		s.lastClickID = hit.targetID
 		s.lastClickAt = now
+		s.anchorSelection = true
 		return commandRender
 	default:
 		return commandNone
+	}
+}
+
+// resolveListOffset settles the session-list scroll offset for a freshly-built
+// frame of viewRows visible rows. When a selection change requested a re-anchor
+// it scrolls the selected row into view exactly once (via ensureLineVisible)
+// and clears the request; otherwise it preserves the current wheel-driven
+// offset. Either way the result is clamped to the frame's valid range. The
+// frame's phantom trailing "" line (from the terminating newline) is excluded
+// from the effective line count.
+func (s *tuiState) resolveListOffset(frame tableFrame, viewRows int) {
+	effLines := len(frame.lines)
+	if effLines > 0 {
+		effLines--
+	}
+	if s.anchorSelection {
+		if line := frame.targetLine(s.sel); line >= 0 {
+			s.listOffset = ensureLineVisible(s.listOffset, line, viewRows, effLines)
+		}
+		s.anchorSelection = false
+	}
+	maxOff := effLines - viewRows
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	if s.listOffset > maxOff {
+		s.listOffset = maxOff
+	}
+	if s.listOffset < 0 {
+		s.listOffset = 0
 	}
 }
 
