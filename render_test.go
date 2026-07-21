@@ -622,10 +622,41 @@ func TestEmptyLocalHostUnselectedMarker(t *testing.T) {
 }
 
 func TestEmptyRemoteHostUnselectedMarker(t *testing.T) {
+	// Populated local keeps the empty-local row out of the way so findRow lands
+	// on beluga's row — the one this test is about.
+	local := []Session{{PID: 1, CWD: "/local"}}
 	var b strings.Builder
-	RenderAll(&b, "1", nil, []RemoteResult{{Name: "beluga"}}, "", nil, 0, 0, "dir")
+	RenderAll(&b, "1", local, []RemoteResult{{Name: "beluga"}}, "", nil, 0, 0, "dir")
 	row := findRow(t, b.String(), "(no sessions)")
 	if !strings.HasPrefix(row, "  ") || strings.HasPrefix(row, "▶ ") {
 		t.Fatalf("unselected empty-host row has wrong marker: %q", row)
+	}
+}
+
+func TestEmptyLocalAndRemoteCoexist(t *testing.T) {
+	// Empty local + empty remote both render "(no sessions)". Selecting the
+	// local row marks only it, and two empty hosts must not inflate the counts.
+	var b strings.Builder
+	RenderAll(&b, "1", nil, []RemoteResult{{Name: "beluga"}}, emptyHostSelectionID(""), nil, 0, 0, "dir")
+	out := b.String()
+
+	var rows []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "(no sessions)") {
+			rows = append(rows, line)
+		}
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 (no sessions) rows (local + beluga), got %d:\n%s", len(rows), out)
+	}
+	// Local is section 0, so its row renders first and is the selected one.
+	if !strings.HasPrefix(rows[0], "▶ ") {
+		t.Fatalf("selected empty-local row lacks marker: %q", rows[0])
+	}
+	if strings.HasPrefix(rows[1], "▶ ") {
+		t.Fatalf("unselected empty-remote row wrongly marked: %q", rows[1])
+	}
+	if !strings.Contains(out, "0 agents, 0 sessions,") {
+		t.Fatalf("two empty hosts inflated header counts:\n%s", out)
 	}
 }
