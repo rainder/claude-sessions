@@ -398,6 +398,42 @@ func TestShrinkDirW(t *testing.T) {
 	}
 }
 
+func TestDisplayCWD(t *testing.T) {
+	cases := []struct{ cwd, home, want string }{
+		{"/home/andy", "/home/andy", "~"},
+		{"/home/andy/project", "/home/andy", "~/project"},
+		{"/home/andy-other/project", "/home/andy", "/home/andy-other/project"},
+		{"/var/tmp", "/home/andy", "/var/tmp"},
+		{"/home/andy/project", "", "/home/andy/project"},
+	}
+	for _, tc := range cases {
+		if got := displayCWD(tc.cwd, tc.home); got != tc.want {
+			t.Errorf("displayCWD(%q, %q) = %q, want %q", tc.cwd, tc.home, got, tc.want)
+		}
+	}
+}
+
+func TestDeriveFullUsesSessionHome(t *testing.T) {
+	now := time.Unix(100, 0)
+	cases := []struct {
+		name string
+		s    Session
+		want string
+	}{
+		{"local", Session{CWD: "/home/andy/project", Home: "/home/andy"}, "~/project"},
+		{"remote", Session{CWD: "/home/rue/service", Home: "/home/rue", Host: "beluga"}, "~/service"},
+		// No Home (older server): no tilde collapse. cwdStr is post-squashPath,
+		// which abbreviates every non-tail component of the absolute path.
+		{"old remote", Session{CWD: "/home/rue/service", Host: "beluga"}, "/h/r/service"},
+	}
+	for _, tc := range cases {
+		row := deriveFull(tc.s, now, "dir")
+		if row.cwdStr != tc.want {
+			t.Errorf("%s cwd = %q, want %q", tc.name, row.cwdStr, tc.want)
+		}
+	}
+}
+
 func TestRenderMarqueeOverflow(t *testing.T) {
 	// A long, character-varied basename forces the minimal-view DIR cell to
 	// overflow once the column is shrunk to its floor on a narrow terminal.

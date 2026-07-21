@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -369,10 +368,20 @@ func shrinkDirW(dirW, lineW, cols int) int {
 	return dirW
 }
 
-// displayCWD collapses the local $HOME prefix to "~". Remote paths are left
-// alone since the remote host's $HOME differs from ours.
-func displayCWD(cwd, home, host string) string {
-	if host == "" && home != "" && strings.HasPrefix(cwd, home) {
+// displayCWD collapses a path's own collector $HOME prefix to "~". Each row
+// carries the home of the host that produced it (Session.Home), so local and
+// remote rows both collapse against the correct home; an empty home (rows from
+// older servers that don't report it) is left absolute. The prefix match
+// requires an exact home or a "home/" boundary so a sibling like
+// /home/andy-other never collapses against /home/andy.
+func displayCWD(cwd, home string) string {
+	if home == "" {
+		return cwd
+	}
+	if cwd == home {
+		return "~"
+	}
+	if strings.HasPrefix(cwd, home+"/") {
 		return "~" + strings.TrimPrefix(cwd, home)
 	}
 	return cwd
@@ -515,8 +524,8 @@ type drowFull struct {
 	sidShort  string
 }
 
-func deriveFull(s Session, home string, now time.Time, sortMode string) drowFull {
-	cwd := displayCWD(s.CWD, home, s.Host)
+func deriveFull(s Session, now time.Time, sortMode string) drowFull {
+	cwd := displayCWD(s.CWD, s.Home)
 	sid := s.SessionID
 	if len(sid) > 8 {
 		sid = sid[:8]
@@ -552,7 +561,6 @@ func modelCell(model string, width int, plain bool) string {
 }
 
 func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
-	home, _ := os.UserHomeDir()
 	now := time.Now()
 
 	sectionRows := make([][]drowFull, len(sections))
@@ -560,7 +568,7 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowFull, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveFull(s, home, now, sortMode)
+			r := deriveFull(s, now, sortMode)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
@@ -670,7 +678,6 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 // ============================================================================
 
 func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
-	home, _ := os.UserHomeDir()
 	now := time.Now()
 
 	sectionRows := make([][]drowFull, len(sections))
@@ -678,7 +685,7 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowFull, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveFull(s, home, now, sortMode)
+			r := deriveFull(s, now, sortMode)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
@@ -780,8 +787,8 @@ type drowMinimal struct {
 	ageStr  string
 }
 
-func deriveMinimal(s Session, home string, now time.Time, sortMode string) drowMinimal {
-	cwd := displayCWD(s.CWD, home, s.Host)
+func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
+	cwd := displayCWD(s.CWD, s.Home)
 	dir := filepath.Base(strings.TrimRight(cwd, "/"))
 	if dir == "" {
 		dir = cwd
@@ -797,7 +804,6 @@ func deriveMinimal(s Session, home string, now time.Time, sortMode string) drowM
 }
 
 func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
-	home, _ := os.UserHomeDir()
 	now := time.Now()
 
 	sectionRows := make([][]drowMinimal, len(sections))
@@ -805,7 +811,7 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowMinimal, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveMinimal(s, home, now, sortMode)
+			r := deriveMinimal(s, now, sortMode)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
