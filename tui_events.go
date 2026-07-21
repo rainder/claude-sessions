@@ -148,41 +148,63 @@ func (d *inputDecoder) decodeOne() (ev *inputEvent, n int, complete bool) {
 		return d.decodeSGRMouse()
 	}
 
-	// CSI ("\x1b[") or SS3 ("\x1bO") sequence.
-	if buf[1] == '[' || buf[1] == 'O' {
+	// CSI ("\x1b[...") sequence. Per ECMA-48, the body after "ESC [" is
+	// parameter bytes (0x30-0x3F) then intermediate bytes (0x20-0x2F),
+	// terminated by exactly one final byte (0x40-0x7E); that range split
+	// covers all of 0x20-0x7E, so scanning for the first byte >= 0x40
+	// finds the true end of the sequence. Scanning to the real final byte
+	// (rather than stopping at the first non-digit) is what lets modified
+	// sequences like "\x1b[1;5A" (Ctrl+Up) and unmapped ones like "\x1b[Z"
+	// (Shift+Tab) be consumed as a whole instead of leaking their trailing
+	// parameter/final bytes as literal keys.
+	if buf[1] == '[' {
+		const maxLen = 64
+		i := 2
+		for i < len(buf) && i < maxLen {
+			b := buf[i]
+			if b >= 0x40 && b <= 0x7e {
+				seq := string(buf[:i+1])
+				if key, ok := fixedSequences[seq]; ok {
+					return &inputEvent{kind: eventKey, key: key}, i + 1, true
+				}
+				// Recognized CSI shape but not a mapped key (modified
+				// arrows, function keys, shift-tab, ...): discard the
+				// whole sequence rather than leak its bytes.
+				return nil, i + 1, true
+			}
+			if b < 0x20 || b == 0x7f {
+				// Not a valid CSI parameter/intermediate byte (e.g. a
+				// control key like Enter or Ctrl+C arrived before the
+				// sequence finished). This was never a real CSI sequence,
+				// so treat the ESC on its own and leave the rest of buf
+				// — including this byte — to be reprocessed
+				// independently, rather than swallowing a real keystroke
+				// as part of a discarded sequence.
+				return &inputEvent{kind: eventKey, key: KeyEsc}, 1, true
+			}
+			i++
+		}
+		if i >= maxLen {
+			// Runaway/malformed sequence with no final byte after maxLen
+			// body bytes: discard what's buffered so far.
+			return nil, i, true
+		}
+		// Final byte not seen yet; keep buffering.
+		return nil, 0, false
+	}
+
+	// SS3 ("\x1bO<byte>") sequence: always exactly 3 bytes, no parameter or
+	// intermediate bytes.
+	if buf[1] == 'O' {
 		if len(buf) < 3 {
 			return nil, 0, false
 		}
-		third := buf[2]
-
-		// Fixed 3-byte sequences like "\x1b[A" / "\x1bOH".
 		if key, ok := fixedSequences[string(buf[:3])]; ok {
 			return &inputEvent{kind: eventKey, key: key}, 3, true
 		}
-
-		// VT220-style "\x1b[<digits>~" sequences.
-		if buf[1] == '[' && third >= '0' && third <= '9' {
-			i := 2
-			for i < len(buf) && buf[i] >= '0' && buf[i] <= '9' {
-				i++
-			}
-			if i >= len(buf) {
-				return nil, 0, false
-			}
-			if buf[i] != '~' {
-				// Unrecognized CSI numeric sequence; discard it whole.
-				return nil, i + 1, true
-			}
-			if key, ok := fixedSequences[string(buf[:i+1])]; ok {
-				return &inputEvent{kind: eventKey, key: key}, i + 1, true
-			}
-			// Recognized shape but not a mapped key: discard silently.
-			return nil, i + 1, true
-		}
-
-		// Unrecognized CSI/SS3 final byte: treat as a bare ESC (rest of
-		// buf is left for the next iteration to reprocess).
-		return &inputEvent{kind: eventKey, key: KeyEsc}, 1, true
+		// Unrecognized SS3 final byte (e.g. F1-F4 "\x1bOP".."\x1bOS"):
+		// discard the whole sequence instead of leaking its bytes.
+		return nil, 3, true
 	}
 
 	// ESC followed by something that isn't '[' or 'O': treat ESC on its
