@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestInputDecoderArrowSplitAtEveryBoundary(t *testing.T) {
@@ -152,5 +154,47 @@ func TestInputDecoderBareEscapeFlushes(t *testing.T) {
 	got := d.Flush(now.Add(escapeSequenceDelay))
 	if len(got) != 1 || got[0].key != KeyEsc {
 		t.Fatalf("Flush = %#v, want KeyEsc", got)
+	}
+}
+
+// testPipe returns a non-blocking pipe closed automatically at test end.
+func testPipe(t *testing.T) (r, w int) {
+	t.Helper()
+	var p [2]int
+	if err := unix.Pipe(p[:]); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	_ = unix.SetNonblock(p[0], true)
+	_ = unix.SetNonblock(p[1], true)
+	t.Cleanup(func() { _ = unix.Close(p[0]); _ = unix.Close(p[1]) })
+	return p[0], p[1]
+}
+
+func TestPollEventsReportsEachWakeSource(t *testing.T) {
+	remoteR, remoteW := testPipe(t)
+	inspectorR, inspectorW := testPipe(t)
+	_, _ = unix.Write(remoteW, []byte{1})
+	_, _ = unix.Write(inspectorW, []byte{1})
+
+	_, woke := pollEvents(newInputDecoder(), 50*time.Millisecond, []wakeFD{
+		{fd: remoteR, kind: wakeRemote},
+		{fd: inspectorR, kind: wakeInspector},
+	})
+	if woke != wakeRemote|wakeInspector {
+		t.Fatalf("woke = %b, want remote|inspector", woke)
+	}
+}
+
+func TestResizeWakeSignals(t *testing.T) {
+	r, err := newResizeWake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	r.Signal()
+	_, woke := pollEvents(newInputDecoder(), 50*time.Millisecond,
+		[]wakeFD{{fd: r.FD(), kind: wakeResize}})
+	if woke&wakeResize == 0 {
+		t.Fatalf("woke = %b, want resize", woke)
 	}
 }

@@ -1,9 +1,15 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // escapeSequenceDelay is how long the decoder waits after a lone ESC (or an
@@ -311,4 +317,147 @@ func (d *inputDecoder) PendingTimeout(now time.Time) (time.Duration, bool) {
 		remaining = 0
 	}
 	return remaining, true
+}
+
+// wakeKind identifies which background source woke a pollEvents call. It is
+// a bitmask: a single select can be woken by more than one source at once
+// (e.g. the remote hub and the resize pipe both firing in the same tick), so
+// callers OR-test with & rather than switching on an exact value.
+type wakeKind uint8
+
+const (
+	wakeNone   wakeKind = 0
+	wakeRemote wakeKind = 1 << iota
+	wakeInspector
+	wakeResize
+)
+
+// wakeFD pairs a wake pipe's read-end descriptor with the kind reported when
+// it fires. A negative fd is treated as "no source" and skipped — this lets
+// callers pass a fixed-shape slice even when a source (e.g. the inspector)
+// isn't active yet.
+type wakeFD struct {
+	fd   int
+	kind wakeKind
+}
+
+// pollEvents waits up to timeout for stdin or any of wakes to become
+// readable, decodes any stdin bytes through dec, and reports which wake
+// sources fired as a bitmask. It generalizes readEvents (tui.go) from a
+// single optional wake descriptor to an arbitrary list, so the render loop
+// can multiplex the remote hub, the fullscreen inspector, and SIGWINCH-driven
+// resize wakes over one select call instead of one.
+//
+// timeout == 0 blocks indefinitely, except when dec has a pending incomplete
+// escape sequence (a lone ESC that might still be the start of a longer
+// sequence) — in that case the wait is capped at dec.PendingTimeout so Flush
+// gets a chance to resolve it without waiting for the next real keystroke.
+//
+// Every ready wake descriptor is drained in a loop until EAGAIN (matching
+// signalWake's best-effort single-byte write) and its kind OR'd into the
+// returned mask. Stdin is read at most once per call, up to 256 bytes; a
+// zero-byte or EAGAIN read (e.g. stdin redirected from /dev/null, as happens
+// under `go test`) is treated as no input rather than fed to the decoder.
+func pollEvents(dec *inputDecoder, timeout time.Duration, wakes []wakeFD) ([]inputEvent, wakeKind) {
+	fd := int(os.Stdin.Fd())
+	maxFd := fd
+	var fdSet unix.FdSet
+	fdSet.Set(fd)
+	for _, w := range wakes {
+		if w.fd < 0 {
+			continue
+		}
+		fdSet.Set(w.fd)
+		if w.fd > maxFd {
+			maxFd = w.fd
+		}
+	}
+
+	if pending, ok := dec.PendingTimeout(time.Now()); ok {
+		if timeout == 0 || pending < timeout {
+			timeout = pending
+		}
+	}
+
+	var tvp *unix.Timeval
+	if timeout > 0 {
+		tv := unix.NsecToTimeval(timeout.Nanoseconds())
+		tvp = &tv
+	}
+
+	n, err := unix.Select(maxFd+1, &fdSet, nil, nil, tvp)
+	if err != nil {
+		return nil, wakeNone
+	}
+	if n == 0 {
+		return dec.Flush(time.Now()), wakeNone
+	}
+
+	var woke wakeKind
+	for _, w := range wakes {
+		if w.fd < 0 || !fdSet.IsSet(w.fd) {
+			continue
+		}
+		var drain [64]byte
+		for {
+			if _, err := unix.Read(w.fd, drain[:]); err != nil {
+				break
+			}
+		}
+		woke |= w.kind
+	}
+
+	var events []inputEvent
+	if fdSet.IsSet(fd) {
+		buf := make([]byte, 256)
+		nr, err := unix.Read(fd, buf)
+		if err == nil && nr > 0 {
+			events = dec.Feed(buf[:nr], time.Now())
+		}
+	}
+	return events, woke
+}
+
+// resizeWake is a non-blocking, close-on-exec pipe used to wake a blocked
+// pollEvents call from a SIGWINCH handler. It carries no payload beyond
+// "something changed" — pollEvents just needs the read end to become
+// readable, matching the wakeR/wakeW pipe RemoteHub uses for its own updates
+// (see NewRemoteHub in remote.go).
+type resizeWake struct {
+	wakeR int
+	wakeW int
+	once  sync.Once
+}
+
+// newResizeWake creates the pipe. Both ends are non-blocking so Signal never
+// blocks the signal handler and pollEvents' drain loop always terminates on
+// EAGAIN.
+func newResizeWake() (*resizeWake, error) {
+	var p [2]int
+	if err := unix.Pipe(p[:]); err != nil {
+		return nil, fmt.Errorf("resize wake pipe: %w", err)
+	}
+	syscall.CloseOnExec(p[0])
+	syscall.CloseOnExec(p[1])
+	_ = unix.SetNonblock(p[0], true)
+	_ = unix.SetNonblock(p[1], true)
+	return &resizeWake{wakeR: p[0], wakeW: p[1]}, nil
+}
+
+// FD returns the read end, for inclusion in a pollEvents wakes slice.
+func (r *resizeWake) FD() int { return r.wakeR }
+
+// Signal performs a best-effort single-byte write to wake a blocked
+// pollEvents call. A full pipe just means a wake is already pending, so a
+// failed write here is fine to ignore.
+func (r *resizeWake) Signal() {
+	_, _ = unix.Write(r.wakeW, []byte{1})
+}
+
+// Close closes both pipe ends. Safe to call more than once.
+func (r *resizeWake) Close() {
+	r.once.Do(func() {
+		_ = unix.Close(r.wakeW)
+		_ = unix.Close(r.wakeR)
+	})
 }
