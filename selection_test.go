@@ -117,3 +117,19 @@ func TestValidateTargetSelUsesExistingFallbackForOtherMissingRows(t *testing.T) 
 		t.Fatalf("validateTargetSel empty targets = %q, want empty", got)
 	}
 }
+
+func TestFindSelectionTarget(t *testing.T) {
+	targets := []selectionTarget{
+		sessionSelectionTarget(Session{PID: 11}),
+		emptyHostSelectionTarget("dev"),
+	}
+	if got := findSelectionTarget(targets, "11"); got == nil || got.session.PID != 11 {
+		t.Fatalf("find local = %#v", got)
+	}
+	if got := findSelectionTarget(targets, emptyHostSelectionID("dev")); got == nil || got.session != nil {
+		t.Fatalf("find empty host = %#v", got)
+	}
+	if got := findSelectionTarget(targets, "missing"); got != nil {
+		t.Fatalf("find missing = %#v", got)
+	}
+}

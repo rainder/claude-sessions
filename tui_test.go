@@ -2,6 +2,25 @@ package main
 
 import "testing"
 
+func TestSessionScreenOpenKeys(t *testing.T) {
+	for _, key := range []string{KeyEnter, "p", "P"} {
+		if got := sessionKeyCommand(key); got != commandOpenInspector {
+			t.Errorf("key %q command = %v", key, got)
+		}
+	}
+}
+
+func TestInspectorBackAndQuitKeys(t *testing.T) {
+	for _, key := range []string{KeyEsc, "q", "Q", "p", "P"} {
+		if got := inspectorKeyCommand(key); got != commandBack {
+			t.Errorf("key %q command = %v", key, got)
+		}
+	}
+	if got := inspectorKeyCommand("\x03"); got != commandQuit {
+		t.Fatalf("Ctrl-C command = %v", got)
+	}
+}
+
 func TestCycleSortMode(t *testing.T) {
 	cases := []struct {
 		mode  string

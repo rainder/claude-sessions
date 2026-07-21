@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -20,14 +21,17 @@ import (
 // actionResult is the JSON shape returned by mutating endpoints.
 // Mirrors the bash version so existing scripts/clients keep working.
 type actionResult struct {
-	OK     bool   `json:"ok"`
-	Tmux   string `json:"tmux,omitempty"`  // tmux session name for migrate/new
-	Error  string `json:"error,omitempty"` // human-readable failure reason
+	OK    bool   `json:"ok"`
+	Tmux  string `json:"tmux,omitempty"`  // tmux session name for migrate/new
+	Error string `json:"error,omitempty"` // human-readable failure reason
 }
 
 type server struct {
 	token string
 	host  string
+	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
+	// a stub to assert bounds and header wiring without touching tmux.
+	previewLoader func(int, PreviewLimits) (PreviewResult, error)
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -57,6 +61,16 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *server) cwdSuggestions(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Suggestions []cwdSuggestion `json:"suggestions"`
+	}{Suggestions: collectCwdSuggestions()})
+}
+
 func (s *server) preview(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -67,8 +81,52 @@ func (s *server) preview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad pid", http.StatusBadRequest)
 		return
 	}
+	limits, err := previewLimitsFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	load := s.previewLoader
+	if load == nil {
+		load = LoadPreview
+	}
+	result, err := load(pid, limits)
+	if err != nil {
+		if errors.Is(err, errSessionEnded) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(PreviewContent(pid)))
+	w.Header().Set("X-Claude-Sessions-Preview-Source", result.Source)
+	w.Header().Set("X-Claude-Sessions-Preview-Label", result.Label)
+	_, _ = w.Write([]byte(result.Content))
+}
+
+// previewLimitsFromRequest reads optional lines/bytes query params, defaulting
+// to DefaultPreviewLimits. Values are accepted only within 1..2000 lines and
+// 1024..524288 bytes; anything else (non-numeric, negative, out of range) is an
+// error the handler turns into 400.
+func previewLimitsFromRequest(r *http.Request) (PreviewLimits, error) {
+	limits := DefaultPreviewLimits()
+	q := r.URL.Query()
+	if v := q.Get("lines"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 2000 {
+			return PreviewLimits{}, fmt.Errorf("bad lines value: %s", v)
+		}
+		limits.MaxLines = n
+	}
+	if v := q.Get("bytes"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1024 || n > 524288 {
+			return PreviewLimits{}, fmt.Errorf("bad bytes value: %s", v)
+		}
+		limits.MaxBytes = n
+	}
+	return limits, nil
 }
 
 func (s *server) tmuxInfo(w http.ResponseWriter, r *http.Request) {
@@ -132,8 +190,9 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		CWD  string `json:"cwd"`
-		Name string `json:"name"`
+		CWD     string `json:"cwd"`
+		Name    string `json:"name"`
+		Command string `json:"command"` // preset name, never raw command text
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -143,11 +202,30 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cwd required", http.StatusBadRequest)
 		return
 	}
+	body.CWD = expandTilde(body.CWD)
 	if !isDir(body.CWD) {
 		writeJSON(w, http.StatusOK, actionResult{Error: "not a directory: " + body.CWD})
 		return
 	}
-	tname, err := SpawnNew(body.CWD, body.Name)
+	presets, err := LoadCommandPresets()
+	if err != nil {
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
+	// LoadCommandPresets always yields a non-empty slice (falls back to the
+	// default Claude preset), so presets[0] is a safe backward-compatible
+	// default for clients that omit command. A named command must match this
+	// server's own allowlist — raw command text is never accepted.
+	preset := presets[0]
+	if body.Command != "" {
+		var ok bool
+		preset, ok = findCommandPreset(presets, body.Command)
+		if !ok {
+			writeJSON(w, http.StatusOK, actionResult{Error: "command preset not configured: " + body.Command})
+			return
+		}
+	}
+	tname, err := SpawnNew(body.CWD, body.Name, preset.Command)
 	if err != nil {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return
@@ -286,6 +364,7 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	s := &server{token: tok, host: host}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
+	mux.HandleFunc("GET /cwd-suggestions", s.cwdSuggestions)
 	mux.HandleFunc("GET /sessions/{pid}/preview", s.preview)
 	mux.HandleFunc("GET /sessions/{pid}/tmux-info", s.tmuxInfo)
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)

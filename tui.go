@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -27,7 +29,8 @@ func enableOutputProcessing(fd int) {
 // RunTUI) and trimmed cells render statically at step 0.
 const marqueeInterval = 300 * time.Millisecond
 
-// Key constants returned by parseEvents.
+// Key constants for arrow keys and Esc, shared with the inputDecoder in
+// tui_events.go (which returns them alongside its own KeyEnter/KeyHome/… set).
 const (
 	KeyUp    = "\x00up"
 	KeyDown  = "\x00down"
@@ -36,101 +39,43 @@ const (
 	KeyEsc   = "\x00esc"
 )
 
-// parseEvents extracts keystrokes from a raw input chunk read from a terminal
-// in raw mode. ESC sequences for arrow keys are recognized as KeyUp / KeyDown /
-// KeyLeft / KeyRight; bare ESC becomes KeyEsc; everything else is the literal
-// byte as a 1-rune string.
-func parseEvents(buf []byte) []string {
-	var out []string
-	for len(buf) > 0 {
-		if buf[0] == 0x1b {
-			if len(buf) >= 3 && (buf[1] == '[' || buf[1] == 'O') {
-				switch buf[2] {
-				case 'A':
-					out = append(out, KeyUp)
-				case 'B':
-					out = append(out, KeyDown)
-				case 'C':
-					out = append(out, KeyRight)
-				case 'D':
-					out = append(out, KeyLeft)
-				default:
-					out = append(out, KeyEsc)
-				}
-				buf = buf[3:]
-				continue
-			}
-			out = append(out, KeyEsc)
-			buf = buf[1:]
-			continue
-		}
-		out = append(out, string(buf[0]))
-		buf = buf[1:]
-	}
-	return out
-}
-
-// readEvents waits up to timeout for stdin (or the optional wakeFd) to become
-// readable, then reads once and parses keystrokes. Returns nil keys on
-// timeout or read error. When wakeFd >= 0 and it becomes readable, the pipe
-// is drained and woke=true is returned — the caller should re-render to
-// reflect the updated background state.
+// readEventBlocking waits indefinitely for the next key event(s) from stdin and
+// returns them as key strings. Used inside modal handlers (the help screen, the
+// new-session picker) that pause for input. Mouse events are decoded but
+// filtered out — modal menus ignore the mouse — and background wakes are not
+// watched, so a modal isn't dismissed by remote-data updates underneath.
 //
-// We use unix.Select to wait rather than os.Stdin.SetReadDeadline because
-// stdin inherited at process start isn't registered with Go's netpoller —
-// SetReadDeadline silently no-ops there and Read blocks forever, which
-// broke wall-clock ticking. Single consumer: no goroutine, so cooked-mode
-// prompts (bufio.Scanner) and raw-mode polling never race.
-func readEvents(timeout time.Duration, wakeFd int) (keys []string, woke bool) {
-	fd := int(os.Stdin.Fd())
-	maxFd := fd
-	var fdSet unix.FdSet
-	fdSet.Set(fd)
-	if wakeFd >= 0 {
-		fdSet.Set(wakeFd)
-		if wakeFd > maxFd {
-			maxFd = wakeFd
-		}
-	}
-	var tvp *unix.Timeval
-	if timeout > 0 {
-		tv := unix.NsecToTimeval(timeout.Nanoseconds())
-		tvp = &tv
-	}
-	n, err := unix.Select(maxFd+1, &fdSet, nil, nil, tvp)
-	if err != nil || n == 0 {
-		return nil, false
-	}
-	if wakeFd >= 0 && fdSet.IsSet(wakeFd) {
-		var drain [64]byte
-		for {
-			if _, err := unix.Read(wakeFd, drain[:]); err != nil {
-				break
+// A persistent decoder is kept across the internal poll loop so a multi-byte
+// escape sequence split across reads still decodes, and a lone Esc resolves via
+// pollEvents' pending-flush path rather than being dropped: pollEvents caps its
+// wait at the decoder's pending-escape deadline, so we simply loop until at
+// least one key surfaces.
+func readEventBlocking() []string {
+	dec := newInputDecoder()
+	for {
+		events, _ := pollEvents(dec, 0, nil)
+		var keys []string
+		for _, ev := range events {
+			if ev.kind == eventKey {
+				keys = append(keys, ev.key)
 			}
 		}
-		woke = true
-	}
-	if fdSet.IsSet(fd) {
-		buf := make([]byte, 16)
-		nr, err := unix.Read(fd, buf)
-		if err == nil && nr > 0 {
-			keys = parseEvents(buf[:nr])
+		if len(keys) > 0 {
+			return keys
 		}
 	}
-	return keys, woke
 }
 
-// readEventBlocking waits indefinitely for the next event(s) from stdin.
-// Useful inside action handlers that pause for input ("any key to continue").
-// Background wakes are intentionally ignored so modal screens (e.g. help)
-// aren't dismissed by remote-data updates underneath.
-func readEventBlocking() []string {
-	keys, _ := readEvents(0, -1)
-	return keys
-}
+// inspectorChromeRows is the number of fixed rows RenderInspector reserves
+// around the scrolling body (title, metadata, separator, footer). The viewport
+// height is the terminal height minus this, and must match the body arithmetic
+// in RenderInspector.
+const inspectorChromeRows = 4
 
-// RunTUI is the live view: alt-screen, raw mode, render-loop, key handler.
-// Returns nil on clean quit (q / Ctrl-C / Ctrl-D), or an error if setup failed.
+// RunTUI is the live view: alt-screen, raw mode, mouse reporting, and a single
+// event loop owning two screens — the session list and the fullscreen
+// inspector. Returns nil on clean quit (q / Ctrl-C / Ctrl-D), or an error if
+// setup failed.
 func RunTUI(interval time.Duration) error {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
@@ -144,16 +89,21 @@ func RunTUI(interval time.Duration) error {
 	// Re-enable output processing so '\n' still translates to '\r\n'.
 	enableOutputProcessing(fd)
 
-	// Alt-screen, hide cursor, disable line-wrap. Restored on return.
+	// Enable mouse reporting, then alt-screen, hide cursor, disable line-wrap.
+	// All restored on return (mouse off first, mirroring the setup order in
+	// reverse).
+	writeMouseMode(os.Stdout, true)
 	fmt.Print("\033[?1049h\033[?25l\033[?7l")
-	defer fmt.Print("\033[?7h\033[?25h\033[?1049l")
+	defer func() {
+		writeMouseMode(os.Stdout, false)
+		fmt.Print("\033[?7h\033[?25h\033[?1049l")
+	}()
 
 	viewMode := LoadViewMode()
 	sortMode := LoadSortMode()
 	var local []Session
 	var remotes []RemoteResult
 	var targets []selectionTarget
-	sel := ""
 
 	// Remote fetches run in a background goroutine so the render loop never
 	// blocks on a slow/unreachable host (the per-host HTTP timeout is 5s,
@@ -172,6 +122,52 @@ func RunTUI(interval time.Duration) error {
 	usageHub := NewUsageHub()
 	defer usageHub.Shutdown()
 
+	// Resize handling: a SIGWINCH-driven wake pipe lets a blocked pollEvents
+	// return so we redraw at the new size. One goroutine translates the signal
+	// to a pipe write and never touches stdin (single-consumer invariant).
+	rw, err := newResizeWake()
+	if err != nil {
+		return fmt.Errorf("init resize wake: %w", err)
+	}
+	defer rw.Close()
+	resizeSignals := make(chan os.Signal, 1)
+	signal.Notify(resizeSignals, syscall.SIGWINCH)
+	stopResize := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stopResize:
+				return
+			case <-resizeSignals:
+				rw.Signal()
+			}
+		}
+	}()
+	// Teardown order: stop signal delivery, unblock the goroutine, then (via
+	// the earlier defer, which runs last) close the pipe.
+	defer func() {
+		signal.Stop(resizeSignals)
+		close(stopResize)
+	}()
+
+	decoder := newInputDecoder()
+	state := newTUIState()
+
+	// inspectorHub polls the previewed session while the inspector screen is
+	// open; nil on the session list. Shut down on exit if still open.
+	var inspectorHub *InspectorHub
+	defer func() {
+		if inspectorHub != nil {
+			inspectorHub.Shutdown()
+		}
+	}()
+
+	// toast is a transient one-liner (the sort mode after pressing 's') pinned
+	// to the terminal's bottom row until toastUntil; the main loop caps its
+	// wait at the deadline so the line vanishes on time.
+	var toast string
+	var toastUntil time.Time
+
 	// refresh re-reads local sessions and the latest remote snapshot. When
 	// kickRemote is true, the hub is also asked to refetch ASAP (used after
 	// actions and the 'r' key). Wall-clock ticks pass false because the hub
@@ -188,32 +184,88 @@ func RunTUI(interval time.Duration) error {
 		// we never race the hub goroutine that owns them.
 		remotes = sortRemotes(hub.Snapshot(), sortMode)
 		targets = buildSelectionTargets(local, remotes)
-		sel = validateTargetSel(targets, sel)
+		// A fallback that moves the selection (its row vanished) re-anchors the
+		// viewport to the new selection on the next render.
+		prevSel := state.sel
+		state.sel = validateTargetSel(targets, state.sel)
+		if state.sel != prevSel {
+			state.anchorSelection = true
+		}
 	}
-	// Render into a buffer and clip every line to the terminal width before
-	// writing. Wrap is disabled (?7l), and with autowrap off a too-long line
-	// makes each overflow char overwrite the last column — the row then ends
-	// with the line's final char (e.g. the "s"/"m" of the AGE column) instead
-	// of being cleanly cut.
-	// Marquee animation is disabled for now: step stays 0, so an overflowing
-	// DIR cell shows its static trimmed prefix. To re-enable, track step and
-	// RenderAll's overflowing result here, cap the Select timeout below at
-	// marqueeInterval while overflowing, and advance step on those expiries.
+
+	// markInspectorEndedIfGone flags the inspector as ended when the session it
+	// is watching has dropped out of the freshly-refreshed target list, so the
+	// view stops reading as live even before the hub's own next poll notices.
+	// The render overlay keeps the last content on screen.
+	markInspectorEndedIfGone := func() {
+		if inspectorHub == nil {
+			return
+		}
+		if findSelectionTarget(targets, state.inspector.targetID) == nil {
+			state.inspectorTargetGone = true
+		}
+	}
+
+	// render paints the active screen. On the session list it builds the table
+	// frame, keeps the selected row visible, reserves the bottom row for an
+	// active toast, and crops to the terminal viewport (recording hit regions
+	// for mouse routing). On the inspector it applies the latest hub snapshot,
+	// sizes the viewport, and lets RenderInspector draw + report its controls.
 	//
-	// toast is a transient one-liner (the sort mode after pressing 's')
-	// pinned to the terminal's bottom row until toastUntil; the main loop
-	// caps its wait at the deadline so the line vanishes on time.
-	var toast string
-	var toastUntil time.Time
+	// Wrap is disabled (?7l): clipLine/cropTableFrame cut each line to the
+	// terminal width so an overflowing line can't smear the last column.
+	// Marquee animation stays disabled (step 0).
 	render := func() {
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
 			cols, rows = 0, 0
 		}
-		var buf strings.Builder
-		RenderAll(&buf, viewMode, local, remotes, sel, usageHub.Snapshot(), cols, 0, sortMode)
-		out := clipLines(buf.String(), cols)
-		if rows > 0 && time.Now().Before(toastUntil) {
+
+		if state.mode == screenInspector {
+			if inspectorHub != nil {
+				state.inspector.applySnapshot(inspectorHub.Snapshot())
+			}
+			if state.inspectorTargetGone {
+				// Overlay a terminal "ended" verdict that survives snapshot
+				// re-application; content (Lines) is untouched.
+				state.inspector.snapshot.Ended = true
+				state.inspector.snapshot.Loading = false
+				state.inspector.snapshot.Stale = false
+			}
+			state.inspector.resize(rows - inspectorChromeRows)
+			var buf strings.Builder
+			state.hits = RenderInspector(&buf, state.inspector, cols, rows)
+			fmt.Print("\033[H\033[J" + buf.String())
+			return
+		}
+
+		frame := BuildTableFrame(viewMode, local, remotes, state.sel, usageHub.Snapshot(), cols, 0, sortMode)
+		toastActive := rows > 0 && time.Now().Before(toastUntil)
+		viewRows := rows
+		if toastActive {
+			viewRows--
+		}
+		if viewRows < 0 {
+			viewRows = 0
+		}
+		// Free-scroll model: wheel moves listOffset and the selection may leave
+		// the viewport; resolveListOffset only re-anchors the view to the
+		// selection when a selection change requested it, otherwise it just
+		// clamps the current offset.
+		state.resolveListOffset(frame, viewRows)
+
+		var out string
+		if cols <= 0 {
+			// Unknown width: cropTableFrame has no cols<=0 guard, so render
+			// uncropped like clipLines does for an unknown terminal size.
+			state.hits = nil
+			out = strings.Join(frame.lines, "\n")
+		} else {
+			visible := cropTableFrame(frame, state.listOffset, viewRows, cols)
+			state.hits = visible.hits
+			out = visible.text
+		}
+		if toastActive {
 			out += fmt.Sprintf("\033[%d;1H%s", rows, clipLine(bold(toast), cols))
 		}
 		fmt.Print("\033[H\033[J" + out)
@@ -224,19 +276,55 @@ func RunTUI(interval time.Duration) error {
 			fd:       fd,
 			oldState: oldState,
 			targets:  targets,
-			sel:      sel,
+			sel:      state.sel,
 			pause:    func() { hub.Pause(); usageHub.Pause() },
 			resume:   func() { hub.Resume(); usageHub.Resume() },
 		}
+	}
+
+	// openInspector enters the fullscreen inspector for the selected session.
+	// Empty-host placeholder rows have no session and are ignored. The hub is
+	// built from a private copy of the target so a later list refresh can't
+	// mutate what it polls.
+	openInspector := func() {
+		target := findSelectionTarget(targets, state.sel)
+		if target == nil || target.session == nil {
+			return
+		}
+		sess := *target.session
+		tcopy := selectionTarget{id: target.id, host: target.host, session: &sess}
+		ih, err := NewInspectorHub(tcopy, interval)
+		if err != nil {
+			return
+		}
+		inspectorHub = ih
+		state.mode = screenInspector
+		state.inspector = newInspectorViewState(target.id)
+		state.inspectorTargetGone = false
+		render()
+	}
+
+	// closeInspector tears the hub down (which closes its wake fd — so nil the
+	// reference before the next pollEvents rebuilds the wakes slice), resets the
+	// inspector state, and returns to a freshly-refreshed session list.
+	closeInspector := func() {
+		if inspectorHub != nil {
+			inspectorHub.Shutdown()
+			inspectorHub = nil
+		}
+		state.mode = screenSessions
+		state.inspector = inspectorViewState{}
+		state.inspectorTargetGone = false
+		refresh(false)
+		render()
 	}
 
 	refresh(false)
 	render()
 
 	// Wall-clock auto-refresh: tick every `interval` regardless of input.
-	// readEvents takes the time remaining until the next tick; if it returns
-	// empty, the tick fired and we refresh + advance. Otherwise we handle
-	// keys and loop back without rescheduling.
+	// pollEvents takes the time remaining until the next tick; if it returns
+	// empty and unwoken, the tick fired and we refresh + advance.
 	nextTick := time.Now().Add(interval)
 
 	for {
@@ -255,38 +343,84 @@ func RunTUI(interval time.Duration) error {
 			nextTick = time.Now().Add(interval)
 			continue
 		}
-		events, woke := readEvents(timeout, hub.WakeFD())
+
+		// Rebuild the wakes slice each iteration: the inspector hub comes and
+		// goes, and its fd must never be polled after Shutdown closed it.
+		wakes := []wakeFD{
+			{fd: hub.WakeFD(), kind: wakeRemote},
+			{fd: rw.FD(), kind: wakeResize},
+		}
+		if inspectorHub != nil {
+			wakes = append(wakes, wakeFD{fd: inspectorHub.WakeFD(), kind: wakeInspector})
+		}
+		events, woke := pollEvents(decoder, timeout, wakes)
+
 		if len(events) == 0 {
-			// A toast deadline expired before the wall clock and without a
-			// remote wake: repaint only (render drops the expired toast).
-			if toastTick && !woke && time.Now().Before(nextTick) {
+			switch {
+			case woke == wakeNone:
+				// Timed out. A toast deadline that expired before the wall
+				// clock repaints only (render drops the expired toast);
+				// otherwise the wall-clock tick fired.
+				if toastTick && time.Now().Before(nextTick) {
+					render()
+					continue
+				}
+				refresh(false)
 				render()
-				continue
+				nextTick = time.Now().Add(interval)
+			case woke&wakeRemote != 0:
+				// Remote data landed: refresh locals + list and re-render. This
+				// also resets the wall clock so the hub ticker and this loop
+				// don't double-render every cycle and drift.
+				refresh(false)
+				markInspectorEndedIfGone()
+				render()
+				nextTick = time.Now().Add(interval)
+			default:
+				// Resize and/or inspector update only: redraw at the current
+				// size (render re-reads it) without disturbing the wall clock.
+				render()
 			}
-			// Either the wall-clock tick fired (woke=false) or a remote-data
-			// update landed (woke=true). Both paths refresh locals and
-			// re-render, so a wake also resets the wall-clock tick — otherwise
-			// the hub ticker and this tick double-render every cycle, drifting
-			// past each other.
-			refresh(false)
-			render()
-			nextTick = time.Now().Add(interval)
 			continue
 		}
-		if woke {
-			// Stdin and wake fired together. Refresh once so the key
-			// handlers see the latest snapshot (e.g. nav uses fresh list).
+
+		if woke&wakeRemote != 0 {
+			// Stdin and a remote update fired together: refresh so key handlers
+			// see the latest snapshot (e.g. nav uses the fresh list).
 			refresh(false)
+			markInspectorEndedIfGone()
 		}
-		for _, k := range events {
+		for _, ev := range events {
+			if state.mode == screenInspector {
+				if handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render) {
+					return nil
+				}
+				continue
+			}
+			if ev.kind == eventMouse {
+				switch state.handleListMouse(ev.mouse, time.Now()) {
+				case commandOpenInspector:
+					openInspector()
+				case commandRender:
+					render()
+				}
+				continue
+			}
+			k := ev.key
+			if sessionKeyCommand(k) == commandOpenInspector {
+				openInspector()
+				continue
+			}
 			switch k {
 			case "q", "Q", "\x03", "\x04":
 				return nil
 			case KeyUp:
-				sel = navTargets(targets, sel, -1)
+				state.sel = navTargets(targets, state.sel, -1)
+				state.anchorSelection = true
 				render()
 			case KeyDown:
-				sel = navTargets(targets, sel, 1)
+				state.sel = navTargets(targets, state.sel, 1)
+				state.anchorSelection = true
 				render()
 			case "k", "K":
 				actKill(makeCtx())
@@ -294,10 +428,6 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "a", "A":
 				actAttach(makeCtx())
-				refresh(true)
-				render()
-			case "p", "P":
-				actPreview(makeCtx(), interval)
 				refresh(true)
 				render()
 			case "n", "N":
@@ -337,6 +467,53 @@ func RunTUI(interval time.Duration) error {
 			}
 		}
 	}
+}
+
+// handleInspectorEvent dispatches one decoded event while the inspector screen
+// is active. It returns true when the app should quit (Ctrl-C/Ctrl-D). Back
+// commands close the inspector; refresh/follow touch the hub or viewport;
+// scrolling keys and the wheel mutate the view and repaint. hubPtr is the loop's
+// inspectorHub variable so a Refresh reaches the live hub.
+func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render func()) (quit bool) {
+	if ev.kind == eventMouse {
+		switch state.handleInspectorMouse(ev.mouse) {
+		case commandBack:
+			closeInspector()
+		case commandRefreshInspector:
+			if *hubPtr != nil {
+				(*hubPtr).Refresh()
+			}
+		case commandFollowInspector:
+			state.inspector.followBottom()
+			render()
+		case commandRender:
+			render()
+		}
+		return false
+	}
+
+	switch inspectorKeyCommand(ev.key) {
+	case commandQuit:
+		return true
+	case commandBack:
+		closeInspector()
+		return false
+	}
+
+	switch state.handleInspectorKey(ev.key) {
+	case commandBack:
+		closeInspector()
+	case commandRefreshInspector:
+		if *hubPtr != nil {
+			(*hubPtr).Refresh()
+		}
+	case commandFollowInspector:
+		state.inspector.followBottom()
+		render()
+	case commandRender:
+		render()
+	}
+	return false
 }
 
 // sortRemotes returns a copy of the hub snapshot with each section's sessions
@@ -394,12 +571,20 @@ func renderHelp(sortMode string) {
 	fmt.Println()
 	fmt.Println("  " + bold("NAVIGATION"))
 	fmt.Println("    ↑ / ↓        move selection")
+	fmt.Println("    mouse click  select row · double-click opens")
+	fmt.Println("    mouse wheel  scroll list or inspector")
 	fmt.Println()
 	fmt.Println("  " + bold("ACTIONS") + "  (on selected row)")
-	fmt.Println("    n            new tmux+claude session (cwd picker)")
+	fmt.Println("    n            new tmux session (↑/↓ cwd · ←/→ command)")
 	fmt.Println("    k            kill the session (tmux-aware)")
 	fmt.Println("    a            attach (or migrate to tmux first)")
-	fmt.Println("    p            preview (tmux pane snapshot or transcript tail)")
+	fmt.Println("    Enter / p    open full-screen inspector")
+	fmt.Println()
+	fmt.Println("  " + bold("INSPECTOR"))
+	fmt.Println("    Home / End   oldest output / resume live follow")
+	fmt.Println("    PgUp / PgDn  scroll inspector by page")
+	fmt.Println("    r            refresh now")
+	fmt.Println("    Esc / q / p  return from inspector")
 	fmt.Println()
 	fmt.Println("  " + bold("VIEW"))
 	fmt.Println("    m            cycle mode (full → intermediate → minimal)  ·  persisted")

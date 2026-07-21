@@ -660,3 +660,27 @@ func TestEmptyLocalAndRemoteCoexist(t *testing.T) {
 		t.Fatalf("two empty hosts inflated header counts:\n%s", out)
 	}
 }
+
+// TestRenderAllMatchesBuildTableFrame locks the compatibility invariant: the
+// text RenderAll writes must be byte-identical to the joined frame lines, and
+// its overflow return must match the frame's, across all three views and a mix
+// of local + empty-remote rows.
+func TestRenderAllMatchesBuildTableFrame(t *testing.T) {
+	now := time.Now().UnixMilli()
+	local := []Session{
+		{PID: 1, Name: "one", CWD: "/tmp/one", Status: "busy", UpdatedAt: now},
+		{PID: 2, Name: "two", CWD: "/tmp/two", Status: "idle", UpdatedAt: now},
+	}
+	remotes := []RemoteResult{{Name: "dev"}}
+	for _, mode := range []string{"1", "2", "3"} {
+		var b strings.Builder
+		overflow := RenderAll(&b, mode, local, remotes, "1", nil, 120, 0, "dir")
+		frame := BuildTableFrame(mode, local, remotes, "1", nil, 120, 0, "dir")
+		if got := strings.Join(frame.lines, "\n"); got != b.String() {
+			t.Errorf("mode %s: RenderAll text diverged from frame:\nRenderAll: %q\nframe:     %q", mode, b.String(), got)
+		}
+		if frame.overflowing != overflow {
+			t.Errorf("mode %s: overflow mismatch RenderAll=%v frame=%v", mode, overflow, frame.overflowing)
+		}
+	}
+}

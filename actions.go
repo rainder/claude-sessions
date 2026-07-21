@@ -2,11 +2,17 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
-	"time"
 
 	"golang.org/x/term"
 )
+
+// terminalOutput is where actCtx.enterRaw writes the mouse-enable sequence when
+// returning to the main TUI. A package var (defaulting to os.Stdout) so tests
+// can capture the write; restore it with t.Cleanup.
+var terminalOutput io.Writer = os.Stdout
 
 // actCtx is the runtime state passed to action handlers.
 type actCtx struct {
@@ -34,15 +40,19 @@ func (c *actCtx) runInteractive(prog string, args ...string) error {
 	return runInteractive(c.fd, c.oldState, prog, args...)
 }
 
+// enterRaw returns to the main raw-mode TUI and re-enables mouse reporting. Bare
+// enterRaw(fd) is deliberately mouse-neutral (see helpers.go), so every action
+// handler that finishes a cooked prompt or subprocess must re-enable the mouse;
+// centralizing that here keeps the two calls paired.
+func (c *actCtx) enterRaw() {
+	enterRaw(c.fd)
+	writeMouseMode(terminalOutput, true)
+}
+
 // selectedTarget returns the currently-selected target, or nil if sel doesn't
 // resolve to anything in the current snapshot.
 func (c *actCtx) selectedTarget() *selectionTarget {
-	for i := range c.targets {
-		if c.targets[i].id == c.sel {
-			return &c.targets[i]
-		}
-	}
-	return nil
+	return findSelectionTarget(c.targets, c.sel)
 }
 
 // selected returns the currently-selected session, or nil if sel doesn't
@@ -82,7 +92,7 @@ func actKill(c *actCtx) {
 		return
 	}
 	enterCooked(c.fd, c.oldState)
-	defer enterRaw(c.fd)
+	defer c.enterRaw()
 
 	var prompt string
 	if s.Tmux != "" {
@@ -120,7 +130,7 @@ func actAttach(c *actCtx) {
 	enterCooked(c.fd, c.oldState)
 	prompt := fmt.Sprintf("\nPID %d is not in tmux. Migrate (kill + resume in tmux) first? [y/N] ", s.PID)
 	if !confirm(prompt) {
-		enterRaw(c.fd)
+		c.enterRaw()
 		return
 	}
 	fmt.Printf("\nmigrating PID %d... ", s.PID)
@@ -128,11 +138,11 @@ func actAttach(c *actCtx) {
 	if err != nil {
 		fmt.Printf("\nmigrate failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
-		enterRaw(c.fd)
+		c.enterRaw()
 		return
 	}
 	fmt.Printf("ok → %s\n", tname)
-	enterRaw(c.fd)
+	c.enterRaw()
 	runTmuxAttach(c, tname)
 }
 
@@ -146,57 +156,24 @@ func runTmuxAttach(c *actCtx, sessName string) {
 	_ = c.runInteractive("tmux", "attach", "-t", sessName)
 }
 
-// actPreview opens a full-screen preview that auto-refreshes alongside the
-// caller's interval. Returns on q/p/ESC/Ctrl-C.
-func actPreview(c *actCtx, interval time.Duration) {
-	s := c.selected()
-	if s == nil {
-		return
-	}
-	if s.Host != "" {
-		actPreviewRemote(c, interval)
-		return
-	}
-	render := func() {
-		fmt.Print("\033[H\033[J")
-		fmt.Printf("%sPreview: PID %d%s  %s(q/p=back · r=refresh · auto-refresh %s)%s\n\n",
-			ansiBold, s.PID, ansiReset, ansiDim, interval, ansiReset)
-		fmt.Print(PreviewContent(s.PID))
-	}
-	render()
-	nextTick := time.Now().Add(interval)
-	for {
-		timeout := time.Until(nextTick)
-		if timeout <= 0 {
-			render()
-			nextTick = time.Now().Add(interval)
-			continue
-		}
-		events, _ := readEvents(timeout, -1)
-		if len(events) == 0 {
-			render()
-			nextTick = time.Now().Add(interval)
-			continue
-		}
-		for _, k := range events {
-			switch k {
-			case "q", "Q", "p", "P", KeyEsc, "\x03":
-				return
-			case "r", "R":
-				render()
-			}
-		}
-	}
-}
-
-// actNew prompts for a cwd (with picker of recent + history), then spawns a
-// new tmux+claude session there and attaches to it. If the selected row is
-// remote, asks the remote server to spawn it via /sessions/new.
+// actNew prompts for a cwd (with picker of recent + history) and a command
+// preset, then spawns a new tmux session there and attaches to it. If the
+// selected row is remote, asks the remote server to spawn it via /sessions/new.
 func actNew(c *actCtx) {
 	if host, defaultCWD, ok := c.selectedRemoteNewTarget(); ok {
 		actNewRemote(c, host, defaultCWD)
 		return
 	}
+	presets, err := LoadCommandPresets()
+	if err != nil {
+		enterCooked(c.fd, c.oldState)
+		fmt.Printf("\nload commands: %v\n", err)
+		pauseForKey(c.fd, c.oldState)
+		c.enterRaw()
+		return
+	}
+	presetStart := LoadCommandPresetIndex(presets)
+
 	picker := buildCwdPicker(c.selected())
 	start := 0
 	lines := make([]string, 0, len(picker.entries)+1)
@@ -211,18 +188,19 @@ func actNew(c *actCtx) {
 		lines = append(lines, fmt.Sprintf("%-50s%s", picker.shortName(p.cwd), freq))
 	}
 	lines = append(lines, "enter path manually…")
-	idx := pickMenu("New tmux+claude session",
-		"↑/↓ move · Enter select · q cancel", lines, start)
-	if idx < 0 {
+	row, presetIndex, ok := pickNewSession("New tmux session", lines, start, presets, presetStart, "")
+	if !ok {
 		return
 	}
+	preset := presets[presetIndex]
+	SaveCommandPresetName(preset.Name)
 
 	enterCooked(c.fd, c.oldState)
-	defer enterRaw(c.fd)
+	defer c.enterRaw()
 
 	var cwd string
-	if idx < len(picker.entries) {
-		cwd = picker.entries[idx].cwd
+	if row < len(picker.entries) {
+		cwd = picker.entries[row].cwd
 	} else {
 		input := readLine("\ncwd path (q=cancel) > ")
 		if input == "" || input == "q" || input == "Q" {
@@ -236,13 +214,13 @@ func actNew(c *actCtx) {
 		return
 	}
 	fmt.Printf("\nspawning in %s... ", cwd)
-	tname, err := SpawnNew(cwd, "")
+	tname, err := SpawnNew(cwd, "", preset.Command)
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		return
 	}
 	fmt.Printf("ok → %s\n", tname)
-	enterRaw(c.fd)
+	c.enterRaw()
 	runTmuxAttach(c, tname)
 }

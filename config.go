@@ -63,3 +63,35 @@ func SaveSortMode(mode string) {
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, "sort-mode"), []byte(mode+"\n"), 0o644)
 }
+
+// commandPresetIndex returns the index of the preset named remembered, or 0
+// (the default first preset) if remembered is empty, stale, or presets is empty.
+func commandPresetIndex(presets []CommandPreset, remembered string) int {
+	for i, preset := range presets {
+		if preset.Name == remembered {
+			return i
+		}
+	}
+	return 0
+}
+
+// LoadCommandPresetIndex reads the persisted command preset name and resolves
+// it against presets. Defaults to 0 on any error or unrecognized value.
+func LoadCommandPresetIndex(presets []CommandPreset) int {
+	data, err := os.ReadFile(filepath.Join(ConfigDir(), "command-preset"))
+	if err != nil {
+		return 0
+	}
+	return commandPresetIndex(presets, strings.TrimSpace(string(data)))
+}
+
+// SaveCommandPresetName persists the remembered command preset name.
+// Best-effort, like SaveViewMode.
+func SaveCommandPresetName(name string) {
+	dir := ConfigDir()
+	if dir == "" {
+		return
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "command-preset"), []byte(name+"\n"), 0o644)
+}

@@ -1,8 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
-	"time"
 )
 
 func TestActCtxEmptyHostSelectionIsNotSession(t *testing.T) {
@@ -74,9 +75,41 @@ func TestSessionActionsIgnoreEmptyHostTarget(t *testing.T) {
 
 	actKill(c)
 	actAttach(c)
-	actPreview(c, time.Millisecond)
 
 	if got := c.selected(); got != nil {
 		t.Fatalf("session-only actions resolved empty host as %#v", got)
+	}
+}
+
+func TestActCtxEnterRawEnablesMouse(t *testing.T) {
+	var buf bytes.Buffer
+	prev := terminalOutput
+	terminalOutput = &buf
+	t.Cleanup(func() { terminalOutput = prev })
+
+	// fd -1: term.MakeRaw no-ops on a non-terminal; the mouse-enable write is
+	// the behavior under test and goes to the injected terminalOutput.
+	c := &actCtx{fd: -1}
+	c.enterRaw()
+
+	if !strings.Contains(buf.String(), mouseEnableSequence) {
+		t.Fatalf("enterRaw did not write mouse-enable sequence; got %q", buf.String())
+	}
+}
+
+func TestRemoteNewRowsSuggestionsAndFallback(t *testing.T) {
+	lines, start, entries := remoteNewRows("/selected", []cwdSuggestion{{CWD: "/history", Count: 4}, {CWD: "/selected", Count: 2}})
+	if start != 0 || len(lines) != 3 || !strings.Contains(lines[0], "/selected") || !strings.Contains(lines[1], "/history") {
+		t.Fatalf("rows = %#v start=%d", lines, start)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %#v", entries)
+	}
+	fallback, _, fallbackEntries := remoteNewRows("", nil)
+	if len(fallback) != 1 || fallback[0] != "enter path manually…" {
+		t.Fatalf("fallback rows = %#v", fallback)
+	}
+	if len(fallbackEntries) != 0 {
+		t.Fatalf("fallback entries = %#v", fallbackEntries)
 	}
 }

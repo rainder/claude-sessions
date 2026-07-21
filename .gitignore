@@ -8,3 +8,6 @@
 .*.swo
 *~
 .DS_Store
+.claude
+.scratch
+.superpowers
