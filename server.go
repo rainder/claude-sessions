@@ -143,6 +143,7 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cwd required", http.StatusBadRequest)
 		return
 	}
+	body.CWD = expandTilde(body.CWD)
 	if !isDir(body.CWD) {
 		writeJSON(w, http.StatusOK, actionResult{Error: "not a directory: " + body.CWD})
 		return
