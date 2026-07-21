@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -122,7 +121,7 @@ func actKillRemote(c *actCtx) {
 	}
 	host, pid := s.Host, s.PID
 	enterCooked(c.fd, c.oldState)
-	defer enterRaw(c.fd)
+	defer c.enterRaw()
 
 	if !confirm(fmt.Sprintf("\nkill PID %d on %s? [y/N] ", pid, host)) {
 		return
@@ -155,7 +154,7 @@ func actAttachRemote(c *actCtx) {
 		enterCooked(c.fd, c.oldState)
 		fmt.Printf("\nunknown server: %s\n", host)
 		pauseForKey(c.fd, c.oldState)
-		enterRaw(c.fd)
+		c.enterRaw()
 		return
 	}
 	sshTarget := srv.EffectiveSSHTarget()
@@ -166,7 +165,7 @@ func actAttachRemote(c *actCtx) {
 		enterCooked(c.fd, c.oldState)
 		fmt.Printf("\ntmux-info failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
-		enterRaw(c.fd)
+		c.enterRaw()
 		return
 	}
 	var info struct {
@@ -179,7 +178,7 @@ func actAttachRemote(c *actCtx) {
 		// Not in tmux — offer migration.
 		enterCooked(c.fd, c.oldState)
 		if !confirm(fmt.Sprintf("\nPID %d on %s is not in tmux. Migrate first? [y/N] ", pid, host)) {
-			enterRaw(c.fd)
+			c.enterRaw()
 			return
 		}
 		fmt.Print("\nmigrating... ")
@@ -187,7 +186,7 @@ func actAttachRemote(c *actCtx) {
 		if merr != nil {
 			fmt.Printf("failed: %v\n", merr)
 			pauseForKey(c.fd, c.oldState)
-			enterRaw(c.fd)
+			c.enterRaw()
 			return
 		}
 		var r actionResult
@@ -195,61 +194,16 @@ func actAttachRemote(c *actCtx) {
 		if !r.OK || r.Tmux == "" {
 			fmt.Printf("failed: %s\n", r.Error)
 			pauseForKey(c.fd, c.oldState)
-			enterRaw(c.fd)
+			c.enterRaw()
 			return
 		}
 		tname = r.Tmux
 		fmt.Printf("ok → %s\n", tname)
-		enterRaw(c.fd)
+		c.enterRaw()
 	}
 
 	// SSH into the host and attach to the tmux session.
 	_ = c.runInteractive("ssh", "-t", sshTarget, "tmux", "attach", "-t", tname)
-}
-
-// actPreviewRemote shows the remote /preview output in a loop.
-func actPreviewRemote(c *actCtx, interval time.Duration) {
-	s := c.selected()
-	if s == nil {
-		return
-	}
-	host, pid := s.Host, s.PID
-
-	render := func() {
-		fmt.Print("\033[H\033[J")
-		fmt.Printf("%sPreview: PID %d on %s%s  %s(q/p=back · r=refresh · auto-refresh %s)%s\n\n",
-			ansiBold, pid, host, ansiReset, ansiDim, interval, ansiReset)
-		resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/preview", pid), "GET", nil)
-		if err != nil {
-			fmt.Printf("preview failed: %v\n", err)
-			return
-		}
-		_, _ = os.Stdout.Write(resp)
-	}
-	render()
-	nextTick := time.Now().Add(interval)
-	for {
-		timeout := time.Until(nextTick)
-		if timeout <= 0 {
-			render()
-			nextTick = time.Now().Add(interval)
-			continue
-		}
-		events, _ := readEvents(timeout, -1)
-		if len(events) == 0 {
-			render()
-			nextTick = time.Now().Add(interval)
-			continue
-		}
-		for _, k := range events {
-			switch k {
-			case "q", "Q", "p", "P", KeyEsc, "\x03":
-				return
-			case "r", "R":
-				render()
-			}
-		}
-	}
 }
 
 // remoteNewRows renders the picker rows for a remote new-session modal. It
@@ -281,7 +235,7 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 	if err != nil {
 		fmt.Printf("\nload commands: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
-		enterRaw(c.fd)
+		c.enterRaw()
 		return
 	}
 	presetStart := LoadCommandPresetIndex(presets)
@@ -305,7 +259,7 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 	SaveCommandPresetName(preset.Name)
 
 	enterCooked(c.fd, c.oldState)
-	defer enterRaw(c.fd)
+	defer c.enterRaw()
 
 	var cwd string
 	if row < len(entries) {
@@ -342,7 +296,7 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 
 	srv, _ := LookupServer(host)
 	sshTarget := srv.EffectiveSSHTarget()
-	enterRaw(c.fd)
+	c.enterRaw()
 	_ = c.runInteractive("ssh", "-t", sshTarget, "tmux", "attach", "-t", r.Tmux)
 }
 

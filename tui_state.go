@@ -128,7 +128,38 @@ const (
 	commandBack
 	commandRefreshInspector
 	commandFollowInspector
+	commandQuit
 )
+
+// sessionKeyCommand maps a keystroke on the session-list screen to the
+// screen-transition command it triggers, or commandNone when the key is not a
+// screen transition (navigation, actions, sort, etc. are handled inline by the
+// render loop because they need runtime dependencies). Enter and p/P open the
+// fullscreen inspector for the selected row.
+func sessionKeyCommand(key string) tuiCommand {
+	switch key {
+	case KeyEnter, "p", "P":
+		return commandOpenInspector
+	default:
+		return commandNone
+	}
+}
+
+// inspectorKeyCommand maps a keystroke on the inspector screen to a fixed
+// loop-level command independent of scroll state: Back on Esc/q/Q/p/P (p toggles
+// the inspector, mirroring its open key), Quit on Ctrl-C/Ctrl-D. Scrolling and
+// refresh/follow keys return commandNone here and are dispatched through
+// handleInspectorKey, which mutates the viewport.
+func inspectorKeyCommand(key string) tuiCommand {
+	switch key {
+	case KeyEsc, "q", "Q", "p", "P":
+		return commandBack
+	case "\x03", "\x04":
+		return commandQuit
+	default:
+		return commandNone
+	}
+}
 
 // tuiState is the mutable screen state owned by the render loop: which screen
 // is showing, the current selection, the session-list scroll offset, the hit
@@ -142,6 +173,10 @@ type tuiState struct {
 	lastClickID string
 	lastClickAt time.Time
 	inspector   inspectorViewState
+	// inspectorTargetGone is set when the inspected session has left the
+	// session list; render overlays a terminal "ended" verdict so the view
+	// stops reading as live while preserving the last content.
+	inspectorTargetGone bool
 }
 
 // newTUIState starts on the session list with no selection.

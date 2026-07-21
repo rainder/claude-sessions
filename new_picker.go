@@ -24,7 +24,7 @@ func (s *newPickerState) handle(key string) (confirm, cancel bool) {
 		s.Preset = (s.Preset + s.PresetCount - 1) % s.PresetCount
 	case KeyRight:
 		s.Preset = (s.Preset + 1) % s.PresetCount
-	case "\r", "\n":
+	case "\r", "\n", KeyEnter:
 		return true, false
 	case "q", "Q", KeyEsc, "\x03":
 		return false, true

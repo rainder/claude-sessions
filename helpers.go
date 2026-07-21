@@ -56,7 +56,7 @@ func enterRaw(fd int) {
 
 // readLine prompts and reads a line in cooked mode. Empty string on EOF.
 // Clears any pending read deadline first so the scanner doesn't inherit a
-// stale timeout from the TUI loop's previous readEvents call.
+// stale timeout left on stdin by an earlier reader (e.g. pauseForKey).
 func readLine(prompt string) string {
 	fmt.Print(prompt)
 	_ = os.Stdin.SetReadDeadline(time.Time{})
