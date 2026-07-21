@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,6 +29,9 @@ type actionResult struct {
 type server struct {
 	token string
 	host  string
+	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
+	// a stub to assert bounds and header wiring without touching tmux.
+	previewLoader func(int, PreviewLimits) (PreviewResult, error)
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -77,8 +81,52 @@ func (s *server) preview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad pid", http.StatusBadRequest)
 		return
 	}
+	limits, err := previewLimitsFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	load := s.previewLoader
+	if load == nil {
+		load = LoadPreview
+	}
+	result, err := load(pid, limits)
+	if err != nil {
+		if errors.Is(err, errSessionEnded) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(PreviewContent(pid)))
+	w.Header().Set("X-Claude-Sessions-Preview-Source", result.Source)
+	w.Header().Set("X-Claude-Sessions-Preview-Label", result.Label)
+	_, _ = w.Write([]byte(result.Content))
+}
+
+// previewLimitsFromRequest reads optional lines/bytes query params, defaulting
+// to DefaultPreviewLimits. Values are accepted only within 1..2000 lines and
+// 1024..524288 bytes; anything else (non-numeric, negative, out of range) is an
+// error the handler turns into 400.
+func previewLimitsFromRequest(r *http.Request) (PreviewLimits, error) {
+	limits := DefaultPreviewLimits()
+	q := r.URL.Query()
+	if v := q.Get("lines"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 2000 {
+			return PreviewLimits{}, fmt.Errorf("bad lines value: %s", v)
+		}
+		limits.MaxLines = n
+	}
+	if v := q.Get("bytes"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1024 || n > 524288 {
+			return PreviewLimits{}, fmt.Errorf("bad bytes value: %s", v)
+		}
+		limits.MaxBytes = n
+	}
+	return limits, nil
 }
 
 func (s *server) tmuxInfo(w http.ResponseWriter, r *http.Request) {

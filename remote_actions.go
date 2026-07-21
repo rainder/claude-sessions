@@ -56,6 +56,47 @@ func remoteRequest(name, path, method string, body []byte) ([]byte, error) {
 	return remoteRequestWithTimeout(name, path, method, body, 30*time.Second)
 }
 
+// fetchRemotePreview retrieves a bounded, sanitized preview from the named
+// server, passing its limits as query params so the remote output matches the
+// caller's ceiling. A 404 (session/transcript gone) maps to errSessionEnded;
+// other non-200s surface the same concise HTTP error style as remoteRequest.
+// The body is capped via io.LimitReader and rejected if it exceeds MaxBytes.
+func fetchRemotePreview(host string, pid int, limits PreviewLimits) (PreviewResult, error) {
+	srv, ok := LookupServer(host)
+	if !ok {
+		return PreviewResult{}, fmt.Errorf("unknown server: %s", host)
+	}
+	url := fmt.Sprintf("http://%s:%d/sessions/%d/preview?lines=%d&bytes=%d",
+		srv.Host, srv.Port, pid, limits.MaxLines, limits.MaxBytes)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return PreviewResult{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+srv.Token)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return PreviewResult{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return PreviewResult{}, errSessionEnded
+	}
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, int64(limits.MaxBytes)+1))
+	if resp.StatusCode != http.StatusOK {
+		return PreviewResult{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	if len(data) > limits.MaxBytes {
+		return PreviewResult{}, fmt.Errorf("preview exceeds %d bytes", limits.MaxBytes)
+	}
+	return PreviewResult{
+		Source:  resp.Header.Get("X-Claude-Sessions-Preview-Source"),
+		Label:   resp.Header.Get("X-Claude-Sessions-Preview-Label"),
+		Content: string(data),
+	}, nil
+}
+
 // fetchRemoteCwdSuggestions retrieves the ranked cwd history from the named
 // server's /cwd-suggestions endpoint, using a short 5s timeout so a slow or
 // unreachable host doesn't stall the picker.

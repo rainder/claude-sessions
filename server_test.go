@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +145,176 @@ func TestNewSessionMissingCommandUsesFirstPreset(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "<claude><Enter>") {
 		t.Fatalf("tmux argv:\n%s", data)
+	}
+}
+
+func TestPreviewHandlerDefaultsAndHeaders(t *testing.T) {
+	var got PreviewLimits
+	s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+		got = limits
+		return PreviewResult{Source: "tmux", Label: "dev:0.0", Content: "hello\n"}, nil
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview", nil)
+	req.SetPathValue("pid", "42")
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	s.preview(rec, req)
+	if got != DefaultPreviewLimits() {
+		t.Fatalf("limits = %#v", got)
+	}
+	if rec.Header().Get("X-Claude-Sessions-Preview-Source") != "tmux" {
+		t.Fatalf("headers = %#v", rec.Header())
+	}
+	if rec.Header().Get("X-Claude-Sessions-Preview-Label") != "dev:0.0" {
+		t.Fatalf("label header = %q", rec.Header().Get("X-Claude-Sessions-Preview-Label"))
+	}
+	if rec.Body.String() != "hello\n" {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+}
+
+func TestPreviewHandlerParsesQueryLimits(t *testing.T) {
+	var got PreviewLimits
+	s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+		got = limits
+		return PreviewResult{Source: "tmux", Content: "x"}, nil
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview?lines=40&bytes=4096", nil)
+	req.SetPathValue("pid", "42")
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	s.preview(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got != (PreviewLimits{MaxLines: 40, MaxBytes: 4096}) {
+		t.Fatalf("limits = %#v", got)
+	}
+}
+
+func TestPreviewHandlerRejectsBadLimits(t *testing.T) {
+	cases := []string{
+		"lines=0", "lines=-5", "lines=2001", "lines=abc",
+		"bytes=0", "bytes=1023", "bytes=524289", "bytes=xyz",
+	}
+	for _, q := range cases {
+		s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+			t.Fatalf("loader must not run for %q", q)
+			return PreviewResult{}, nil
+		}}
+		req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview?"+q, nil)
+		req.SetPathValue("pid", "42")
+		req.Header.Set("Authorization", "Bearer test")
+		rec := httptest.NewRecorder()
+		s.preview(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("query %q: status = %d, want 400", q, rec.Code)
+		}
+	}
+}
+
+func TestPreviewHandlerMapsSessionEndedTo404(t *testing.T) {
+	s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+		return PreviewResult{}, errSessionEnded
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview", nil)
+	req.SetPathValue("pid", "42")
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	s.preview(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestPreviewHandlerMapsOtherErrorsTo500(t *testing.T) {
+	s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+		return PreviewResult{}, errors.New("tmux capture-pane: boom")
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview", nil)
+	req.SetPathValue("pid", "42")
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	s.preview(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+// writeServerYAML points a single named remote server at addr (host:port).
+func writeServerYAML(t *testing.T, home, name, host, port, token string) {
+	t.Helper()
+	dir := filepath.Join(home, ".config", "claude-sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf("servers:\n  - name: %s\n    host: %s\n    port: %s\n    token: %s\n",
+		name, host, port, token)
+	if err := os.WriteFile(filepath.Join(dir, "servers.yaml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFetchRemotePreview(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Query().Get("lines") == "" || r.URL.Query().Get("bytes") == "" {
+			t.Errorf("missing limit query params: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("X-Claude-Sessions-Preview-Source", "tmux")
+		w.Header().Set("X-Claude-Sessions-Preview-Label", "dev:0.0")
+		_, _ = w.Write([]byte("remote hello\n"))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	got, err := fetchRemotePreview("box", 42, DefaultPreviewLimits())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got.Source != "tmux" || got.Label != "dev:0.0" || got.Content != "remote hello\n" {
+		t.Fatalf("result = %#v", got)
+	}
+}
+
+func TestFetchRemotePreviewMaps404ToSessionEnded(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "session ended", http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	_, err := fetchRemotePreview("box", 42, DefaultPreviewLimits())
+	if !errors.Is(err, errSessionEnded) {
+		t.Fatalf("err = %v, want errSessionEnded", err)
+	}
+}
+
+func TestFetchRemotePreviewRejectsOversizedBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	_, err := fetchRemotePreview("box", 42, PreviewLimits{MaxLines: 10, MaxBytes: 1024})
+	if err == nil {
+		t.Fatal("want error for oversized body")
 	}
 }
 
