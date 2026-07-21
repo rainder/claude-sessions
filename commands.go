@@ -104,7 +104,12 @@ func cmdNew(args []string) int {
 		fmt.Fprintf(os.Stderr, "not a directory: %s\n", cwd)
 		return 1
 	}
-	tname, err := SpawnNew(cwd, name)
+	presets, err := LoadCommandPresets()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	tname, err := SpawnNew(cwd, name, presets[0].Command)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

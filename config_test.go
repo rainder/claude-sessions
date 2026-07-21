@@ -37,3 +37,25 @@ func TestLoadSortModeValid(t *testing.T) {
 		t.Errorf("LoadSortMode() after SaveSortMode = %q, want %q", got, "updated")
 	}
 }
+
+func TestCommandPresetIndex(t *testing.T) {
+	presets := []CommandPreset{{Name: "Claude"}, {Name: "Fable"}}
+	if got := commandPresetIndex(presets, "Fable"); got != 1 {
+		t.Fatalf("valid remembered index = %d, want 1", got)
+	}
+	if got := commandPresetIndex(presets, "removed"); got != 0 {
+		t.Fatalf("stale remembered index = %d, want 0", got)
+	}
+	if got := commandPresetIndex(nil, "Fable"); got != 0 {
+		t.Fatalf("empty preset index = %d, want 0", got)
+	}
+}
+
+func TestCommandPresetNameRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	SaveCommandPresetName("Fable")
+	presets := []CommandPreset{{Name: "Claude"}, {Name: "Fable"}}
+	if got := LoadCommandPresetIndex(presets); got != 1 {
+		t.Fatalf("loaded preset index = %d, want 1", got)
+	}
+}

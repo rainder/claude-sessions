@@ -396,7 +396,7 @@ func renderHelp(sortMode string) {
 	fmt.Println("    ↑ / ↓        move selection")
 	fmt.Println()
 	fmt.Println("  " + bold("ACTIONS") + "  (on selected row)")
-	fmt.Println("    n            new tmux+claude session (cwd picker)")
+	fmt.Println("    n            new tmux session (↑/↓ cwd · ←/→ command)")
 	fmt.Println("    k            kill the session (tmux-aware)")
 	fmt.Println("    a            attach (or migrate to tmux first)")
 	fmt.Println("    p            preview (tmux pane snapshot or transcript tail)")

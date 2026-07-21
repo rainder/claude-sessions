@@ -87,14 +87,14 @@ func MigrateLocal(pid int) (string, error) {
 	return tname, nil
 }
 
-// SpawnNew creates a fresh tmux session with `claude` running inside the
-// user's shell at cwd. Returns the tmux session name.
-func SpawnNew(cwd, displayName string) (string, error) {
+// SpawnNew creates a fresh tmux session at cwd and sends command to it inside
+// the user's shell. Returns the tmux session name.
+func SpawnNew(cwd, displayName, command string) (string, error) {
 	tname := MakeTmuxName(cwd, randomSlug(), displayName)
 	if err := exec.Command("tmux", "new-session", "-d", "-s", tname, "-c", cwd).Run(); err != nil {
 		return "", fmt.Errorf("tmux new-session: %w", err)
 	}
-	if err := exec.Command("tmux", "send-keys", "-t", tname, "claude", "Enter").Run(); err != nil {
+	if err := exec.Command("tmux", "send-keys", "-t", tname, command, "Enter").Run(); err != nil {
 		return "", fmt.Errorf("tmux send-keys: %w", err)
 	}
 	return tname, nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,5 +61,22 @@ func TestSessionActionsIgnoreEmptyHostTarget(t *testing.T) {
 
 	if got := c.selected(); got != nil {
 		t.Fatalf("session-only actions resolved empty host as %#v", got)
+	}
+}
+
+func TestRemoteNewRowsSuggestionsAndFallback(t *testing.T) {
+	lines, start, entries := remoteNewRows("/selected", []cwdSuggestion{{CWD: "/history", Count: 4}, {CWD: "/selected", Count: 2}})
+	if start != 0 || len(lines) != 3 || !strings.Contains(lines[0], "/selected") || !strings.Contains(lines[1], "/history") {
+		t.Fatalf("rows = %#v start=%d", lines, start)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %#v", entries)
+	}
+	fallback, _, fallbackEntries := remoteNewRows("", nil)
+	if len(fallback) != 1 || fallback[0] != "enter path manually…" {
+		t.Fatalf("fallback rows = %#v", fallback)
+	}
+	if len(fallbackEntries) != 0 {
+		t.Fatalf("fallback entries = %#v", fallbackEntries)
 	}
 }

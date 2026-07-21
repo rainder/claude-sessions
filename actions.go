@@ -189,14 +189,23 @@ func actPreview(c *actCtx, interval time.Duration) {
 	}
 }
 
-// actNew prompts for a cwd (with picker of recent + history), then spawns a
-// new tmux+claude session there and attaches to it. If the selected row is
-// remote, asks the remote server to spawn it via /sessions/new.
+// actNew prompts for a cwd (with picker of recent + history) and a command
+// preset, then spawns a new tmux session there and attaches to it. If the
+// selected row is remote, asks the remote server to spawn it via /sessions/new.
 func actNew(c *actCtx) {
 	if host, defaultCWD, ok := c.selectedRemoteNewTarget(); ok {
 		actNewRemote(c, host, defaultCWD)
 		return
 	}
+	presets, err := LoadCommandPresets()
+	if err != nil {
+		fmt.Printf("\nload commands: %v\n", err)
+		pauseForKey(c.fd, c.oldState)
+		enterRaw(c.fd)
+		return
+	}
+	presetStart := LoadCommandPresetIndex(presets)
+
 	picker := buildCwdPicker(c.selected())
 	start := 0
 	lines := make([]string, 0, len(picker.entries)+1)
@@ -211,18 +220,19 @@ func actNew(c *actCtx) {
 		lines = append(lines, fmt.Sprintf("%-50s%s", picker.shortName(p.cwd), freq))
 	}
 	lines = append(lines, "enter path manually…")
-	idx := pickMenu("New tmux+claude session",
-		"↑/↓ move · Enter select · q cancel", lines, start)
-	if idx < 0 {
+	row, presetIndex, ok := pickNewSession("New tmux session", lines, start, presets, presetStart, "")
+	if !ok {
 		return
 	}
+	preset := presets[presetIndex]
+	SaveCommandPresetName(preset.Name)
 
 	enterCooked(c.fd, c.oldState)
 	defer enterRaw(c.fd)
 
 	var cwd string
-	if idx < len(picker.entries) {
-		cwd = picker.entries[idx].cwd
+	if row < len(picker.entries) {
+		cwd = picker.entries[row].cwd
 	} else {
 		input := readLine("\ncwd path (q=cancel) > ")
 		if input == "" || input == "q" || input == "Q" {
@@ -236,7 +246,7 @@ func actNew(c *actCtx) {
 		return
 	}
 	fmt.Printf("\nspawning in %s... ", cwd)
-	tname, err := SpawnNew(cwd, "")
+	tname, err := SpawnNew(cwd, "", preset.Command)
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)

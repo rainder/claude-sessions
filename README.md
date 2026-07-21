@@ -93,7 +93,7 @@ claude-sessions tmux-info PID              # tmux session name for a pid
 | Key  | Action                                         |
 | ---- | ---------------------------------------------- |
 | ↑/↓  | navigate                                       |
-| n    | new tmux+claude session (cwd picker)           |
+| n    | new tmux session (↑/↓ cwd · ←/→ command)       |
 | k    | kill (tmux-aware)                              |
 | a    | attach (or migrate to tmux first)              |
 | p    | preview (tmux pane snapshot or transcript)     |
@@ -101,6 +101,39 @@ claude-sessions tmux-info PID              # tmux session name for a pid
 | r    | refresh now                                    |
 | ?    | help modal                                     |
 | q    | quit (Ctrl-C / Ctrl-D also work)               |
+
+### Command presets
+
+Add a `commands:` block to `~/.config/claude-sessions/servers.yaml` to offer a
+choice of launch commands from the `n` (new session) modal:
+
+```yaml
+commands:
+  - name: Claude
+    command: claude
+  - name: ClaudeX
+    command: claudex
+  - name: Fable
+    command: claude --model fable
+```
+
+- If `commands:` is absent (or empty/invalid), it defaults to a single preset,
+  `Claude` running `claude`.
+- In the `n` modal, left/right cycles command presets without moving the CWD
+  selection; up/down cycles CWD suggestions without changing the command.
+- The last confirmed preset is remembered (`~/.config/claude-sessions/command-preset`)
+  and is preselected the next time the modal opens; canceling the modal does
+  not change the remembered preset.
+- Remote hosts resolve presets from their *own* `servers.yaml` — give a remote
+  host's config matching preset names if you want the same picker options
+  there. The command text for a given preset name may legitimately differ per
+  host (e.g. a different binary path).
+- Remote CWD suggestions load on demand over the HTTP API when a remote host
+  is selected in the modal; if they don't arrive in time, the modal falls back
+  to a note plus a manual path-entry row instead of blocking.
+- Command strings are trusted shell input — anything in `command:` runs
+  as-is inside the spawned tmux pane. Don't wire this to input you don't
+  control.
 
 ### Multi-host
 
@@ -139,7 +172,8 @@ Remote rows appear in their own section under the local one. Selection works acr
 - `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` — conversation transcripts
 - `~/.config/claude-sessions/view-mode` — persisted view mode (1 or 2)
 - `~/.config/claude-sessions/server-token` — bearer token (server side, 0600)
-- `~/.config/claude-sessions/servers.yaml` — client server list
+- `~/.config/claude-sessions/servers.yaml` — client server list + `commands:` presets
+- `~/.config/claude-sessions/command-preset` — remembered command preset name
 
 ## License
 
@@ -164,6 +198,7 @@ commands.go          scriptable subcommands (used by server shell-out)
 migrate.go           shared migrate/spawn logic
 preview.go           tmux capture / JSONL transcript renderer
 picker.go            cwd suggestions for `new` (live + history)
+new_picker.go        two-axis new-session modal (command preset x cwd)
 helpers.go           terminal mode helpers, prompts
 termios_*.go         platform ioctl constants (BSD vs Linux)
 ```

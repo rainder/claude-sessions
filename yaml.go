@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -46,25 +47,72 @@ func (s ServerConfig) EffectiveSSHTarget() string {
 	return host
 }
 
+// CommandPreset is one entry under `commands:` — a named launch command
+// offered when spawning a new session.
+type CommandPreset struct {
+	Name    string
+	Command string
+}
+
+// appConfig is the fully parsed contents of servers.yaml.
+type appConfig struct {
+	Servers  []ServerConfig
+	Commands []CommandPreset
+}
+
+// defaultCommandPresets is used when no (valid) commands: block is present.
+func defaultCommandPresets() []CommandPreset {
+	return []CommandPreset{{Name: "Claude", Command: "claude"}}
+}
+
+// findCommandPreset looks up a preset by exact name match.
+func findCommandPreset(presets []CommandPreset, name string) (CommandPreset, bool) {
+	for _, preset := range presets {
+		if preset.Name == name {
+			return preset, true
+		}
+	}
+	return CommandPreset{}, false
+}
+
+// loadAppConfig reads ~/.config/claude-sessions/servers.yaml and parses both
+// the servers: and commands: blocks. Missing file => default command presets,
+// no servers.
+func loadAppConfig() (appConfig, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return appConfig{}, err
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".config", "claude-sessions", "servers.yaml"))
+	if os.IsNotExist(err) {
+		return appConfig{Commands: defaultCommandPresets()}, nil
+	}
+	if err != nil {
+		return appConfig{}, err
+	}
+	return parseConfigYAML(string(data)), nil
+}
+
+// LoadCommandPresets returns the configured command presets, falling back to
+// the default "Claude" preset when none are configured.
+func LoadCommandPresets() ([]CommandPreset, error) {
+	cfg, err := loadAppConfig()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Commands, nil
+}
+
 // LoadServerConfigs reads ~/.config/claude-sessions/servers.yaml. Returns an
 // empty slice (no error) when the file doesn't exist. Disabled entries
 // (enable: false) are dropped here so callers never see them.
 func LoadServerConfigs() ([]ServerConfig, error) {
-	home, err := os.UserHomeDir()
+	cfg, err := loadAppConfig()
 	if err != nil {
 		return nil, err
 	}
-	path := home + "/.config/claude-sessions/servers.yaml"
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	all := parseServersYAML(string(data))
-	enabled := all[:0]
-	for _, s := range all {
+	enabled := cfg.Servers[:0]
+	for _, s := range cfg.Servers {
 		if s.Enable {
 			enabled = append(enabled, s)
 		}
@@ -72,50 +120,83 @@ func LoadServerConfigs() ([]ServerConfig, error) {
 	return enabled, nil
 }
 
-func parseServersYAML(s string) []ServerConfig {
-	var out []ServerConfig
-	var current *ServerConfig
-	inServers := false
+// parseConfigYAML parses the top-level servers: and commands: blocks.
+func parseConfigYAML(input string) appConfig {
+	var cfg appConfig
+	block := ""
+	var server *ServerConfig
+	var command *CommandPreset
 
-	for _, raw := range strings.Split(s, "\n") {
+	flushServer := func() {
+		if server != nil {
+			cfg.Servers = append(cfg.Servers, *server)
+			server = nil
+		}
+	}
+	flushCommand := func() {
+		if command == nil {
+			return
+		}
+		command.Name = strings.TrimSpace(command.Name)
+		command.Command = strings.TrimSpace(command.Command)
+		if command.Name != "" && command.Command != "" {
+			if _, exists := findCommandPreset(cfg.Commands, command.Name); !exists {
+				cfg.Commands = append(cfg.Commands, *command)
+			}
+		}
+		command = nil
+	}
+	flush := func() {
+		flushServer()
+		flushCommand()
+	}
+
+	for _, raw := range strings.Split(input, "\n") {
 		line := strings.TrimRight(raw, " \t\r")
 		stripped := strings.TrimLeft(line, " \t")
 		if stripped == "" || strings.HasPrefix(stripped, "#") {
 			continue
 		}
 		indent := len(line) - len(stripped)
-
-		// Top-level key — toggle in/out of the servers block.
 		if indent == 0 && strings.Contains(line, ":") {
-			key := strings.TrimSpace(strings.SplitN(line, ":", 2)[0])
-			inServers = (key == "servers")
+			flush()
+			block = strings.TrimSpace(strings.SplitN(line, ":", 2)[0])
 			continue
 		}
-		if !inServers {
+		if block != "servers" && block != "commands" {
 			continue
 		}
-
 		if strings.HasPrefix(stripped, "- ") {
-			if current != nil {
-				out = append(out, *current)
+			flush()
+			if block == "servers" {
+				server = &ServerConfig{Port: 8765, Enable: true}
+			} else {
+				command = &CommandPreset{}
 			}
-			current = &ServerConfig{Port: 8765, Enable: true}
-			kv := strings.TrimSpace(stripped[2:])
-			if k, v, ok := strings.Cut(kv, ":"); ok {
-				setField(current, strings.TrimSpace(k), trimYAMLValue(v))
-			}
+			stripped = strings.TrimSpace(stripped[2:])
+		}
+		key, val, ok := strings.Cut(stripped, ":")
+		if !ok {
 			continue
 		}
-		if current != nil {
-			if k, v, ok := strings.Cut(stripped, ":"); ok {
-				setField(current, strings.TrimSpace(k), trimYAMLValue(v))
+		key, val = strings.TrimSpace(key), trimYAMLValue(val)
+		if block == "servers" && server != nil {
+			setField(server, key, val)
+		}
+		if block == "commands" && command != nil {
+			switch key {
+			case "name":
+				command.Name = val
+			case "command":
+				command.Command = val
 			}
 		}
 	}
-	if current != nil {
-		out = append(out, *current)
+	flush()
+	if len(cfg.Commands) == 0 {
+		cfg.Commands = defaultCommandPresets()
 	}
-	return out
+	return cfg
 }
 
 func trimYAMLValue(v string) string {
