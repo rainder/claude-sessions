@@ -17,10 +17,27 @@ func TestActCtxEmptyHostSelectionIsNotSession(t *testing.T) {
 	}
 }
 
+func TestActNewEmptyLocalTargetRoutesLocal(t *testing.T) {
+	target := emptyHostSelectionTarget("")
+	c := &actCtx{targets: []selectionTarget{target}, sel: target.id}
+
+	// Empty-local must NOT take the remote-new branch.
+	if _, _, ok := c.selectedRemoteNewTarget(); ok {
+		t.Fatalf("empty-local target routed to remote new")
+	}
+	// The local branch feeds c.selected() into buildCwdPicker; it is nil here
+	// and must be tolerated without a panic.
+	if got := c.selected(); got != nil {
+		t.Fatalf("selected() = %#v, want nil for empty-local target", got)
+	}
+	_ = buildCwdPicker(c.selected())
+}
+
 func TestSelectedRemoteNewTarget(t *testing.T) {
 	local := sessionSelectionTarget(Session{PID: 10, CWD: "/local"})
 	remote := sessionSelectionTarget(Session{PID: 20, Host: "orca", CWD: "/remote"})
 	empty := emptyHostSelectionTarget("beluga")
+	emptyLocal := emptyHostSelectionTarget("")
 
 	cases := []struct {
 		name       string
@@ -33,6 +50,7 @@ func TestSelectedRemoteNewTarget(t *testing.T) {
 		{"local session", &local, "", "", false},
 		{"remote session", &remote, "orca", "/remote", true},
 		{"empty remote host", &empty, "beluga", "", true},
+		{"empty local host", &emptyLocal, "", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
