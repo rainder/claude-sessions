@@ -1,6 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -131,6 +136,56 @@ func TestSortSessionsStable(t *testing.T) {
 	}
 	if want := []string{"a", "b", "c"}; !equalStrings(got, want) {
 		t.Errorf("SortSessions stability = %v, want %v", got, want)
+	}
+}
+
+func TestCollectLocalSetsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	data, err := json.Marshal(Session{PID: pid, SessionID: "home-test", CWD: filepath.Join(home, "project"), StartedAt: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(pid)+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := CollectLocal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, r := range rows {
+		if r.PID == pid {
+			found = true
+			if r.Home != home {
+				t.Errorf("Home = %q, want %q", r.Home, home)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("pid %d not found in CollectLocal() rows", pid)
+	}
+}
+
+func TestSessionHomeJSONCompatibility(t *testing.T) {
+	data, err := json.Marshal(Session{Home: "/home/andy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"home":"/home/andy"`) {
+		t.Fatalf("marshaled JSON missing home field: %s", data)
+	}
+	var old Session
+	if err := json.Unmarshal([]byte(`{"pid":1,"cwd":"/home/andy/project"}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Home != "" {
+		t.Errorf("Home = %q, want empty", old.Home)
 	}
 }
 
