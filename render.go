@@ -399,11 +399,12 @@ func buildSections(local []Session, remotes []RemoteResult) []section {
 // renderEmptyHostRow prints the "(no sessions)" placeholder for a reachable
 // remote host with no sessions, prefixed with the selection marker when that
 // empty-host row is the current selection.
-func renderEmptyHostRow(w io.Writer, host, sel string) {
+func renderEmptyHostRow(w *frameWriter, host, sel string) {
 	marker := "  "
 	if sel == emptyHostSelectionID(host) {
 		marker = "▶ "
 	}
+	w.record(emptyHostSelectionID(host), false)
 	fmt.Fprintln(w, marker+dim("(no sessions)"))
 }
 
@@ -443,6 +444,57 @@ func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo
 	fmt.Fprintln(w)
 }
 
+// frameWriter is the sink BuildTableFrame renders into. It accumulates the
+// frame text while tracking the current (zero-based) line index so a row writer
+// can, immediately before printing a selectable row, record which line that row
+// landed on. Every render write is newline-terminated, so line counts the
+// newlines seen so far, which equals the index of the line about to be written.
+type frameWriter struct {
+	buf  strings.Builder
+	line int
+	rows []tableRow
+}
+
+func (w *frameWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b == '\n' {
+			w.line++
+		}
+	}
+	return w.buf.Write(p)
+}
+
+// record notes that the row about to be printed occupies the current line and
+// maps to targetID (matching the row's selectionTarget.id).
+func (w *frameWriter) record(targetID string, openable bool) {
+	w.rows = append(w.rows, tableRow{line: w.line, targetID: targetID, openable: openable})
+}
+
+// BuildTableFrame renders the live table into a tableFrame: the frame text
+// split into lines, the line/target metadata for every selectable row, and the
+// marquee-overflow flag. It is the structured sibling of RenderAll — the render
+// loop uses the frame to crop a viewport and resolve mouse clicks, while
+// RenderAll wraps it for callers that only want the text. Arguments mirror
+// RenderAll (see its doc for cols/step/sortMode semantics).
+func BuildTableFrame(viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) tableFrame {
+	sections := buildSections(local, remotes)
+	w := &frameWriter{}
+	var overflowing bool
+	switch viewMode {
+	case "2":
+		overflowing = renderAllMinimal(w, sections, sel, usage, cols, step, sortMode)
+	case "3":
+		overflowing = renderAllIntermediate(w, sections, sel, usage, cols, step, sortMode)
+	default:
+		overflowing = renderAllFull(w, sections, sel, usage, cols, step, sortMode)
+	}
+	return tableFrame{
+		lines:       strings.Split(w.buf.String(), "\n"),
+		rows:        w.rows,
+		overflowing: overflowing,
+	}
+}
+
 // RenderAll writes the live table (or a one-shot snapshot) to w, with all
 // rows sorted by cwd. Per-host remote sections appear after the local one,
 // each separated by a hostname label and a blank line. When usage is non-nil,
@@ -450,16 +502,14 @@ func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo
 // (cols <= 0 = unknown terminal width). step is the shared marquee clock (see
 // marqueeCell); overflowing reports whether any visible DIR cell was scrolled,
 // so the caller can drive animation ticks only when needed.
+//
+// It is a thin compatibility wrapper over BuildTableFrame: joining the frame
+// lines with newlines reproduces the exact bytes the row writers emitted, so
+// the `--once` path and existing callers/tests keep the same output and return.
 func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
-	sections := buildSections(local, remotes)
-	switch viewMode {
-	case "2":
-		return renderAllMinimal(w, sections, sel, usage, cols, step, sortMode)
-	case "3":
-		return renderAllIntermediate(w, sections, sel, usage, cols, step, sortMode)
-	default:
-		return renderAllFull(w, sections, sel, usage, cols, step, sortMode)
-	}
+	frame := BuildTableFrame(viewMode, local, remotes, sel, usage, cols, step, sortMode)
+	io.WriteString(w, strings.Join(frame.lines, "\n"))
+	return frame.overflowing
 }
 
 // sortLabels returns the DIR and AGE header labels, suffixing ▲/▼ on the
@@ -551,7 +601,7 @@ func modelCell(model string, width int, plain bool) string {
 	return cell
 }
 
-func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
+func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -637,6 +687,7 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 			if ghost {
 				row = dim(row)
 			}
+			w.record(r.s.ID(), true)
 			fmt.Fprintf(w, "%s%s\n", marker, row)
 		}
 	}
@@ -665,7 +716,7 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 // Intermediate view — full's columns minus TMUX, VER, SID.
 // ============================================================================
 
-func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
+func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -738,6 +789,7 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 			if ghost {
 				row = dim(row)
 			}
+			w.record(r.s.ID(), true)
 			fmt.Fprintf(w, "%s%s\n", marker, row)
 		}
 	}
@@ -788,7 +840,7 @@ func deriveMinimal(s Session, home string, now time.Time, sortMode string) drowM
 	}
 }
 
-func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
+func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
@@ -853,6 +905,7 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 			if ghost {
 				row = dim(row)
 			}
+			w.record(r.s.ID(), true)
 			fmt.Fprintf(w, "%s%s\n", marker, row)
 		}
 	}

@@ -41,6 +41,17 @@ func buildSelectionTargets(local []Session, remotes []RemoteResult) []selectionT
 	return targets
 }
 
+// findSelectionTarget returns the target whose id matches, or nil if none does.
+// The returned pointer aliases the caller's slice element.
+func findSelectionTarget(targets []selectionTarget, id string) *selectionTarget {
+	for i := range targets {
+		if targets[i].id == id {
+			return &targets[i]
+		}
+	}
+	return nil
+}
+
 func navTargets(targets []selectionTarget, sel string, delta int) string {
 	n := len(targets)
 	if n == 0 {
