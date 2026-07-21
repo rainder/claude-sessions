@@ -60,6 +60,9 @@ func remoteRequest(name, path, method string, body []byte) ([]byte, error) {
 // caller's ceiling. A 404 (session/transcript gone) maps to errSessionEnded;
 // other non-200s surface the same concise HTTP error style as remoteRequest.
 // The body is capped via io.LimitReader and rejected if it exceeds MaxBytes.
+// The content is re-sanitized client-side (the server already sanitizes, but an
+// old or compromised server could feed raw escapes, and clipLine passes escapes
+// through) so nothing untrusted reaches the viewer's terminal.
 func fetchRemotePreview(host string, pid int, limits PreviewLimits) (PreviewResult, error) {
 	srv, ok := LookupServer(host)
 	if !ok {
@@ -92,7 +95,7 @@ func fetchRemotePreview(host string, pid int, limits PreviewLimits) (PreviewResu
 	return PreviewResult{
 		Source:  resp.Header.Get("X-Claude-Sessions-Preview-Source"),
 		Label:   resp.Header.Get("X-Claude-Sessions-Preview-Label"),
-		Content: string(data),
+		Content: sanitizeTerminalText(string(data)),
 	}, nil
 }
 
@@ -233,6 +236,7 @@ func remoteNewRows(defaultCWD string, suggestions []cwdSuggestion) (lines []stri
 func actNewRemote(c *actCtx, host, defaultCWD string) {
 	presets, err := LoadCommandPresets()
 	if err != nil {
+		enterCooked(c.fd, c.oldState)
 		fmt.Printf("\nload commands: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		c.enterRaw()

@@ -166,6 +166,7 @@ func actNew(c *actCtx) {
 	}
 	presets, err := LoadCommandPresets()
 	if err != nil {
+		enterCooked(c.fd, c.oldState)
 		fmt.Printf("\nload commands: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		c.enterRaw()

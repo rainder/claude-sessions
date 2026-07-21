@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -146,6 +147,46 @@ func TestInspectorHubSnapshotsRetainDistinctTargetIDs(t *testing.T) {
 	}
 	if rs.TargetID != "dev:42" || strings.Join(rs.Lines, "\n") != "dev:42" {
 		t.Fatalf("remote snapshot = %#v", rs)
+	}
+}
+
+// TestInspectorHubShutdownDuringInFlightFetch exercises Shutdown racing a slow
+// in-flight fetch. The fetcher blocks until released; Shutdown runs (flagging the
+// hub closed and closing the wake fds) while the fetch is stuck, then the fetch
+// is released so its trailing signalWake fires only after the fds are gone —
+// which the closed guard turns into a no-op. The spec's fix guards signalWake,
+// not fetchOnce's snapshot write, so the completed fetch still folds its result
+// into the snapshot exactly once ("snapshot unchanged" means stable afterward,
+// not identical to the initial Loading snapshot). Asserts no panic, the result
+// lands once, and two consecutive reads are identical.
+func TestInspectorHubShutdownDuringInFlightFetch(t *testing.T) {
+	var once sync.Once
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	fetch := func(target selectionTarget, _ PreviewLimits) (PreviewResult, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return PreviewResult{Source: "tmux", Content: "late\n"}, nil
+	}
+	h, err := newInspectorHub(sessionSelectionTarget(Session{PID: 42}), time.Hour, fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	<-entered      // the first fetch is in-flight, blocked on release
+	h.Shutdown()   // close the wake pipe while the fetch is stuck
+	close(release) // let the fetch finish; its signalWake must no-op
+
+	// The completed fetch folds its result in once, then the goroutine exits and
+	// no further mutation happens.
+	got := waitForInspectorSnapshot(t, h, func(s InspectorSnapshot) bool {
+		return len(s.Lines) == 1
+	})
+	if strings.Join(got.Lines, "\n") != "late" {
+		t.Fatalf("snapshot = %#v", got)
+	}
+	if again := h.Snapshot(); again.Updated != got.Updated || len(again.Lines) != 1 {
+		t.Fatalf("snapshot changed after shutdown: %#v -> %#v", got, again)
 	}
 }
 

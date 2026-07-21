@@ -54,6 +54,22 @@ func TestSanitizeTerminalTextStripsC1Controls(t *testing.T) {
 	}
 }
 
+func TestSanitizeTerminalTextStripsPrivateAndIntermediateCSI(t *testing.T) {
+	// Private-parameter CSI sequences that happen to end in 'm' (XTMODKEYS
+	// "\x1b[>4;2m", DECRQM-style "\x1b[?4m") must be stripped, not replayed —
+	// their body carries private markers ('>' 0x3e, '?' 0x3f) outside the
+	// pure-numeric SGR body range.
+	if got := sanitizeTerminalText("\x1b[>4;2mx\x1b[?4m"); got != "x" {
+		t.Fatalf("private CSI = %q, want %q", got, "x")
+	}
+	// A genuine multi-parameter SGR (256-colour foreground) with a numeric-only
+	// body must still be preserved intact.
+	in := "\x1b[38;5;196mred\x1b[0m"
+	if got := sanitizeTerminalText(in); got != in {
+		t.Fatalf("SGR = %q, want %q", got, in)
+	}
+}
+
 func TestLimitPreviewKeepsNewestLinesWithinBytes(t *testing.T) {
 	in := strings.Repeat("old\n", 20) + "new-a\nnew-b\n"
 	got := limitPreview(in, PreviewLimits{MaxLines: 2, MaxBytes: 64})

@@ -175,16 +175,25 @@ func sanitizeEscape(s string, i int, b *strings.Builder) int {
 	switch s[i+1] {
 	case '[': // CSI
 		j := i + 2
+		numeric := true // every body byte so far is a digit, ':' or ';'
 		for j < n {
 			c := s[j]
 			if c >= 0x40 && c <= 0x7e { // final byte
-				if c == 'm' { // SGR — keep the complete sequence
+				// Keep only a complete SGR ("m") sequence whose body is purely
+				// numeric parameters (0x30–0x3b: digits, ':', ';'). Private and
+				// intermediate markers — '<','=','>','?' and 0x20–0x2f — are
+				// excluded so sequences like "\x1b[>4;2m" (XTMODKEYS) or
+				// "\x1b[?4m" are stripped rather than replayed to the terminal.
+				if c == 'm' && numeric {
 					b.WriteString(s[i : j+1])
 				}
 				return j + 1
 			}
 			if c < 0x20 || c > 0x3f { // not a param/intermediate byte — malformed
 				return j // leave the offending byte for the main loop
+			}
+			if c < 0x30 || c > 0x3b { // private/intermediate marker — not a pure SGR
+				numeric = false
 			}
 			j++
 		}

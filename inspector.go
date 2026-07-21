@@ -166,8 +166,9 @@ type InspectorHub struct {
 	fetch    inspectorFetcher
 	kick     chan struct{}
 	stop     chan struct{}
-	wakeR    int // read end: passed to unix.Select in the TUI loop
-	wakeW    int // write end: signaled after each snapshot update
+	wakeR    int  // read end: passed to unix.Select in the TUI loop
+	wakeW    int  // write end: signaled after each snapshot update
+	closed   bool // set under mu by Shutdown before the wake fds are closed
 	once     sync.Once
 }
 
@@ -310,15 +311,31 @@ func (h *InspectorHub) Refresh() {
 	}
 }
 
+// signalWake nudges the render loop by writing one byte to the wake pipe. It
+// takes h.mu and no-ops once Shutdown has flagged the hub closed, so a wake from
+// an in-flight fetch that completes after Shutdown can never write to the closed
+// (and possibly reused) descriptor. Unlike the process-lifetime RemoteHub, an
+// InspectorHub is created and torn down per inspector open, so this teardown
+// race is reachable.
 func (h *InspectorHub) signalWake() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
 	_, _ = unix.Write(h.wakeW, []byte{1})
 }
 
 // Shutdown stops the background goroutine and closes the wake pipe. Safe to call
-// more than once — the teardown runs exactly once via sync.Once.
+// more than once — the teardown runs exactly once via sync.Once. closed is set
+// under h.mu before the fds are closed so signalWake (which checks it under the
+// same lock) can never write to a descriptor Shutdown has already closed.
 func (h *InspectorHub) Shutdown() {
 	h.once.Do(func() {
 		close(h.stop)
+		h.mu.Lock()
+		h.closed = true
+		h.mu.Unlock()
 		_ = unix.Close(h.wakeW)
 		_ = unix.Close(h.wakeR)
 	})
