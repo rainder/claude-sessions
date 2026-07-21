@@ -11,9 +11,9 @@ import (
 // actCtx is the runtime state passed to action handlers.
 type actCtx struct {
 	fd       int
-	oldState *term.State // for switching back to cooked mode
-	sessions []Session   // current snapshot
-	sel      string      // selected session ID
+	oldState *term.State       // for switching back to cooked mode
+	targets  []selectionTarget // current snapshot
+	sel      string            // selected target ID
 
 	// pause/resume suspend the background pollers (remote + usage hubs)
 	// while an external program owns the terminal — nothing renders, so
@@ -34,15 +34,40 @@ func (c *actCtx) runInteractive(prog string, args ...string) error {
 	return runInteractive(c.fd, c.oldState, prog, args...)
 }
 
-// selected returns the currently-selected session, or nil if sel doesn't
+// selectedTarget returns the currently-selected target, or nil if sel doesn't
 // resolve to anything in the current snapshot.
-func (c *actCtx) selected() *Session {
-	for i := range c.sessions {
-		if c.sessions[i].ID() == c.sel {
-			return &c.sessions[i]
+func (c *actCtx) selectedTarget() *selectionTarget {
+	for i := range c.targets {
+		if c.targets[i].id == c.sel {
+			return &c.targets[i]
 		}
 	}
 	return nil
+}
+
+// selected returns the currently-selected session, or nil if sel doesn't
+// resolve to a session-backed target (e.g. an empty remote-host row).
+func (c *actCtx) selected() *Session {
+	target := c.selectedTarget()
+	if target == nil {
+		return nil
+	}
+	return target.session
+}
+
+// selectedRemoteNewTarget reports the host and default cwd for spawning a new
+// remote session on the selected row. A populated remote row supplies its cwd;
+// an empty remote-host row has none. Returns ok=false for no selection or a
+// local row.
+func (c *actCtx) selectedRemoteNewTarget() (host, defaultCWD string, ok bool) {
+	target := c.selectedTarget()
+	if target == nil || target.host == "" {
+		return "", "", false
+	}
+	if target.session != nil {
+		defaultCWD = target.session.CWD
+	}
+	return target.host, defaultCWD, true
 }
 
 // actKill confirms then kills the selected session. Tmux-aware: kills the
@@ -168,8 +193,8 @@ func actPreview(c *actCtx, interval time.Duration) {
 // new tmux+claude session there and attaches to it. If the selected row is
 // remote, asks the remote server to spawn it via /sessions/new.
 func actNew(c *actCtx) {
-	if s := c.selected(); s != nil && s.Host != "" {
-		actNewRemote(c)
+	if host, defaultCWD, ok := c.selectedRemoteNewTarget(); ok {
+		actNewRemote(c, host, defaultCWD)
 		return
 	}
 	picker := buildCwdPicker(c.selected())
@@ -221,4 +246,3 @@ func actNew(c *actCtx) {
 	enterRaw(c.fd)
 	runTmuxAttach(c, tname)
 }
-

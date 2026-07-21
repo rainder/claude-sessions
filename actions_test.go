@@ -1,0 +1,64 @@
+package main
+
+import (
+	"testing"
+	"time"
+)
+
+func TestActCtxEmptyHostSelectionIsNotSession(t *testing.T) {
+	target := emptyHostSelectionTarget("beluga")
+	c := &actCtx{targets: []selectionTarget{target}, sel: target.id}
+
+	if got := c.selectedTarget(); got == nil || got.host != "beluga" {
+		t.Fatalf("selectedTarget() = %#v, want beluga target", got)
+	}
+	if got := c.selected(); got != nil {
+		t.Fatalf("selected() = %#v, want nil for empty host", got)
+	}
+}
+
+func TestSelectedRemoteNewTarget(t *testing.T) {
+	local := sessionSelectionTarget(Session{PID: 10, CWD: "/local"})
+	remote := sessionSelectionTarget(Session{PID: 20, Host: "orca", CWD: "/remote"})
+	empty := emptyHostSelectionTarget("beluga")
+
+	cases := []struct {
+		name       string
+		target     *selectionTarget
+		wantHost   string
+		wantCWD    string
+		wantRemote bool
+	}{
+		{"no selection", nil, "", "", false},
+		{"local session", &local, "", "", false},
+		{"remote session", &remote, "orca", "/remote", true},
+		{"empty remote host", &empty, "beluga", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &actCtx{}
+			if tc.target != nil {
+				c.targets = []selectionTarget{*tc.target}
+				c.sel = tc.target.id
+			}
+			host, cwd, ok := c.selectedRemoteNewTarget()
+			if host != tc.wantHost || cwd != tc.wantCWD || ok != tc.wantRemote {
+				t.Fatalf("selectedRemoteNewTarget() = (%q, %q, %v), want (%q, %q, %v)",
+					host, cwd, ok, tc.wantHost, tc.wantCWD, tc.wantRemote)
+			}
+		})
+	}
+}
+
+func TestSessionActionsIgnoreEmptyHostTarget(t *testing.T) {
+	target := emptyHostSelectionTarget("beluga")
+	c := &actCtx{targets: []selectionTarget{target}, sel: target.id}
+
+	actKill(c)
+	actAttach(c)
+	actPreview(c, time.Millisecond)
+
+	if got := c.selected(); got != nil {
+		t.Fatalf("session-only actions resolved empty host as %#v", got)
+	}
+}

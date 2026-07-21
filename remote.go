@@ -85,18 +85,6 @@ func shortErr(err error) string {
 	return s
 }
 
-// AllSessions flattens local + every remote section into one ordered slice,
-// matching how the renderer lays things out. Used for nav and selection
-// validation.
-func AllSessions(local []Session, remotes []RemoteResult) []Session {
-	out := make([]Session, 0, len(local))
-	out = append(out, local...)
-	for _, r := range remotes {
-		out = append(out, r.Sessions...)
-	}
-	return out
-}
-
 // LookupServer finds a configured server by name.
 func LookupServer(name string) (ServerConfig, bool) {
 	cfgs, _ := LoadServerConfigs()

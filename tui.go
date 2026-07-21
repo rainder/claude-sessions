@@ -22,6 +22,11 @@ func enableOutputProcessing(fd int) {
 	_ = unix.IoctlSetTermios(fd, ioctlSetTermios, t)
 }
 
+// marqueeInterval is the frame period for scrolling overflowing DIR cells.
+// Currently unused: marquee animation is disabled (see the render closure in
+// RunTUI) and trimmed cells render statically at step 0.
+const marqueeInterval = 300 * time.Millisecond
+
 // Key constants returned by parseEvents.
 const (
 	KeyUp    = "\x00up"
@@ -124,42 +129,6 @@ func readEventBlocking() []string {
 	return keys
 }
 
-// nav returns the next selection ID after moving by delta (+1 down, -1 up).
-// Wraps at the ends. Defaults to the first/last row when sel is empty.
-func nav(sessions []Session, sel string, delta int) string {
-	n := len(sessions)
-	if n == 0 {
-		return ""
-	}
-	if sel == "" {
-		if delta > 0 {
-			return sessions[0].ID()
-		}
-		return sessions[n-1].ID()
-	}
-	for i, s := range sessions {
-		if s.ID() == sel {
-			j := ((i+delta)%n + n) % n
-			return sessions[j].ID()
-		}
-	}
-	return sessions[0].ID()
-}
-
-// validateSel ensures sel still exists in the session list, defaulting to the
-// first row when not (covers the case where the selected session died).
-func validateSel(sessions []Session, sel string) string {
-	for _, s := range sessions {
-		if s.ID() == sel {
-			return sel
-		}
-	}
-	if len(sessions) > 0 {
-		return sessions[0].ID()
-	}
-	return ""
-}
-
 // RunTUI is the live view: alt-screen, raw mode, render-loop, key handler.
 // Returns nil on clean quit (q / Ctrl-C / Ctrl-D), or an error if setup failed.
 func RunTUI(interval time.Duration) error {
@@ -180,8 +149,10 @@ func RunTUI(interval time.Duration) error {
 	defer fmt.Print("\033[?7h\033[?25h\033[?1049l")
 
 	viewMode := LoadViewMode()
+	sortMode := LoadSortMode()
 	var local []Session
 	var remotes []RemoteResult
+	var targets []selectionTarget
 	sel := ""
 
 	// Remote fetches run in a background goroutine so the render loop never
@@ -209,32 +180,50 @@ func RunTUI(interval time.Duration) error {
 		if s, err := CollectLocal(); err == nil {
 			local = s
 		}
+		SortSessions(local, sortMode)
 		if kickRemote {
 			hub.Refresh()
 		}
-		remotes = hub.Snapshot()
-		sel = validateSel(AllSessions(local, remotes), sel)
+		// Snapshot() returns the hub's shared slices; sort remotes on copies so
+		// we never race the hub goroutine that owns them.
+		remotes = sortRemotes(hub.Snapshot(), sortMode)
+		targets = buildSelectionTargets(local, remotes)
+		sel = validateTargetSel(targets, sel)
 	}
 	// Render into a buffer and clip every line to the terminal width before
 	// writing. Wrap is disabled (?7l), and with autowrap off a too-long line
 	// makes each overflow char overwrite the last column — the row then ends
 	// with the line's final char (e.g. the "s"/"m" of the AGE column) instead
 	// of being cleanly cut.
+	// Marquee animation is disabled for now: step stays 0, so an overflowing
+	// DIR cell shows its static trimmed prefix. To re-enable, track step and
+	// RenderAll's overflowing result here, cap the Select timeout below at
+	// marqueeInterval while overflowing, and advance step on those expiries.
+	//
+	// toast is a transient one-liner (the sort mode after pressing 's')
+	// pinned to the terminal's bottom row until toastUntil; the main loop
+	// caps its wait at the deadline so the line vanishes on time.
+	var toast string
+	var toastUntil time.Time
 	render := func() {
-		cols, _, err := term.GetSize(fd)
+		cols, rows, err := term.GetSize(fd)
 		if err != nil {
-			cols = 0
+			cols, rows = 0, 0
 		}
 		var buf strings.Builder
-		RenderAll(&buf, viewMode, local, remotes, sel, usageHub.Snapshot(), cols)
-		fmt.Print("\033[H\033[J" + clipLines(buf.String(), cols))
+		RenderAll(&buf, viewMode, local, remotes, sel, usageHub.Snapshot(), cols, 0, sortMode)
+		out := clipLines(buf.String(), cols)
+		if rows > 0 && time.Now().Before(toastUntil) {
+			out += fmt.Sprintf("\033[%d;1H%s", rows, clipLine(bold(toast), cols))
+		}
+		fmt.Print("\033[H\033[J" + out)
 	}
 
 	makeCtx := func() *actCtx {
 		return &actCtx{
 			fd:       fd,
 			oldState: oldState,
-			sessions: AllSessions(local, remotes),
+			targets:  targets,
 			sel:      sel,
 			pause:    func() { hub.Pause(); usageHub.Pause() },
 			resume:   func() { hub.Resume(); usageHub.Resume() },
@@ -252,6 +241,14 @@ func RunTUI(interval time.Duration) error {
 
 	for {
 		timeout := time.Until(nextTick)
+		// While a toast is showing, wake at its deadline so the bottom line
+		// clears on time. toastTick marks a wait capped for that reason: its
+		// expiry repaints only, leaving the wall-clock cadence untouched.
+		toastTick := false
+		if until := time.Until(toastUntil); until > 0 && until < timeout {
+			timeout = until
+			toastTick = true
+		}
 		if timeout <= 0 {
 			refresh(false)
 			render()
@@ -260,10 +257,16 @@ func RunTUI(interval time.Duration) error {
 		}
 		events, woke := readEvents(timeout, hub.WakeFD())
 		if len(events) == 0 {
-			// Either timeout (woke=false) or a remote-data update
-			// (woke=true). Both paths refresh locals and re-render, so a
-			// wake also resets the wall-clock tick — otherwise the hub
-			// ticker and this tick double-render every cycle, drifting
+			// A toast deadline expired before the wall clock and without a
+			// remote wake: repaint only (render drops the expired toast).
+			if toastTick && !woke && time.Now().Before(nextTick) {
+				render()
+				continue
+			}
+			// Either the wall-clock tick fired (woke=false) or a remote-data
+			// update landed (woke=true). Both paths refresh locals and
+			// re-render, so a wake also resets the wall-clock tick — otherwise
+			// the hub ticker and this tick double-render every cycle, drifting
 			// past each other.
 			refresh(false)
 			render()
@@ -280,10 +283,10 @@ func RunTUI(interval time.Duration) error {
 			case "q", "Q", "\x03", "\x04":
 				return nil
 			case KeyUp:
-				sel = nav(AllSessions(local, remotes), sel, -1)
+				sel = navTargets(targets, sel, -1)
 				render()
 			case KeyDown:
-				sel = nav(AllSessions(local, remotes), sel, 1)
+				sel = navTargets(targets, sel, 1)
 				render()
 			case "k", "K":
 				actKill(makeCtx())
@@ -312,12 +315,23 @@ func RunTUI(interval time.Duration) error {
 				}
 				SaveViewMode(viewMode)
 				render()
+			case "s", "S":
+				delta := 1 // s cycles forward, shift-s backward
+				if k == "S" {
+					delta = -1
+				}
+				sortMode = cycleSortMode(sortMode, delta)
+				SaveSortMode(sortMode)
+				toast = "sort: " + sortDesc(sortMode)
+				toastUntil = time.Now().Add(4 * time.Second)
+				refresh(false)
+				render()
 			case "r", "R":
 				usageHub.Kick()
 				refresh(true)
 				render()
 			case "?":
-				renderHelp()
+				renderHelp(sortMode)
 				readEventBlocking()
 				render()
 			}
@@ -325,8 +339,56 @@ func RunTUI(interval time.Duration) error {
 	}
 }
 
+// sortRemotes returns a copy of the hub snapshot with each section's sessions
+// sorted per mode. The snapshot's Session slices are shared with the hub
+// goroutine, so the sort runs on fresh copies to avoid a data race.
+// sortModeOrder is the 's'-key cycle; shift-s walks it backward.
+var sortModeOrder = []string{"dir", "created", "created-asc", "updated", "updated-asc"}
+
+// cycleSortMode returns the mode delta steps away in sortModeOrder, wrapping
+// at both ends. An unknown mode is treated as "dir" (index 0).
+func cycleSortMode(mode string, delta int) string {
+	i := 0
+	for j, m := range sortModeOrder {
+		if m == mode {
+			i = j
+			break
+		}
+	}
+	n := len(sortModeOrder)
+	return sortModeOrder[((i+delta)%n+n)%n]
+}
+
+// sortDesc is the human-readable label shown in the toast after cycling the
+// sort mode with 's'.
+func sortDesc(mode string) string {
+	switch mode {
+	case "created":
+		return "created ▼ (newest first)"
+	case "created-asc":
+		return "created ▲ (oldest first)"
+	case "updated":
+		return "updated ▼ (recently active first)"
+	case "updated-asc":
+		return "updated ▲ (least recently active first)"
+	default:
+		return "dir ▲ (cwd a→z)"
+	}
+}
+
+func sortRemotes(remotes []RemoteResult, mode string) []RemoteResult {
+	out := make([]RemoteResult, len(remotes))
+	for i, r := range remotes {
+		sorted := append([]Session(nil), r.Sessions...)
+		SortSessions(sorted, mode)
+		r.Sessions = sorted
+		out[i] = r
+	}
+	return out
+}
+
 // renderHelp paints the help modal. Caller waits for a keypress to dismiss.
-func renderHelp() {
+func renderHelp(sortMode string) {
 	fmt.Print("\033[H\033[J")
 	fmt.Println(bold("claude-sessions  ·  help"))
 	fmt.Println()
@@ -341,6 +403,8 @@ func renderHelp() {
 	fmt.Println()
 	fmt.Println("  " + bold("VIEW"))
 	fmt.Println("    m            cycle mode (full → intermediate → minimal)  ·  persisted")
+	fmt.Println("    s / S        cycle sort forward / back (dir → created → updated, +asc)")
+	fmt.Println("                 current sort: " + sortMode)
 	fmt.Println("    r            refresh now")
 	fmt.Println("    q / Ctrl-C   quit")
 	fmt.Println("    ?            this help")

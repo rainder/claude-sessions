@@ -81,13 +81,21 @@ func shortModel(id string) string {
 // modelTailBytes bounds how much of the transcript tail we scan per read.
 const modelTailBytes = 256 * 1024
 
-// modelFromTranscript returns the model id of the last main-loop (non-
-// sidechain) assistant entry in the transcript, scanning only the file's
-// tail. Returns "" on any error or if no such entry exists.
-func modelFromTranscript(path string) string {
+// transcriptMeta is the per-session data extracted from a transcript tail.
+type transcriptMeta struct {
+	Model         string // last main-loop assistant model id
+	ContextTokens int    // context size of that session's last main-loop turn
+}
+
+// scanTranscript returns the model id and context-token count of the last
+// main-loop (non-sidechain) assistant entry in the transcript, scanning only
+// the file's tail. Model and context are tracked independently ("last wins"),
+// so an entry without a usage block does not clobber a previously seen count.
+// Returns the zero value on any error or if no such entry exists.
+func scanTranscript(path string) transcriptMeta {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return transcriptMeta{}
 	}
 	defer f.Close()
 
@@ -103,52 +111,63 @@ func modelFromTranscript(path string) string {
 	if seeked {
 		scanner.Scan() // discard the partial first line
 	}
-	model := ""
+	var meta transcriptMeta
 	for scanner.Scan() {
 		var e struct {
 			Type        string `json:"type"`
 			IsSidechain bool   `json:"isSidechain"`
 			Message     struct {
 				Model string `json:"model"`
+				Usage *struct {
+					InputTokens         int `json:"input_tokens"`
+					CacheCreationTokens int `json:"cache_creation_input_tokens"`
+					CacheReadTokens     int `json:"cache_read_input_tokens"`
+				} `json:"usage"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue
 		}
-		if e.Type == "assistant" && !e.IsSidechain && e.Message.Model != "" {
-			model = e.Message.Model
+		if e.Type != "assistant" || e.IsSidechain {
+			continue
+		}
+		if e.Message.Model != "" {
+			meta.Model = e.Message.Model
+		}
+		if u := e.Message.Usage; u != nil {
+			meta.ContextTokens = u.InputTokens + u.CacheCreationTokens + u.CacheReadTokens
 		}
 	}
-	return model
+	return meta
 }
 
-// cachedModel wraps modelFromTranscript with an mtime+size cache so the
-// steady-state cost per refresh tick is one stat per session.
+// cachedMeta wraps scanTranscript with an mtime+size cache so the steady-state
+// cost per refresh tick is one stat per session.
 var (
-	modelCacheMu sync.Mutex
-	modelCache   = map[string]modelCacheEntry{}
+	metaCacheMu sync.Mutex
+	metaCache   = map[string]metaCacheEntry{}
 )
 
-type modelCacheEntry struct {
+type metaCacheEntry struct {
 	mtime time.Time
 	size  int64
-	model string
+	meta  transcriptMeta
 }
 
-func cachedModel(path string) string {
+func cachedMeta(path string) transcriptMeta {
 	st, err := os.Stat(path)
 	if err != nil {
-		return ""
+		return transcriptMeta{}
 	}
-	modelCacheMu.Lock()
-	e, ok := modelCache[path]
-	modelCacheMu.Unlock()
+	metaCacheMu.Lock()
+	e, ok := metaCache[path]
+	metaCacheMu.Unlock()
 	if ok && e.mtime.Equal(st.ModTime()) && e.size == st.Size() {
-		return e.model
+		return e.meta
 	}
-	model := modelFromTranscript(path)
-	modelCacheMu.Lock()
-	modelCache[path] = modelCacheEntry{mtime: st.ModTime(), size: st.Size(), model: model}
-	modelCacheMu.Unlock()
-	return model
+	meta := scanTranscript(path)
+	metaCacheMu.Lock()
+	metaCache[path] = metaCacheEntry{mtime: st.ModTime(), size: st.Size(), meta: meta}
+	metaCacheMu.Unlock()
+	return meta
 }

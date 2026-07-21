@@ -44,12 +44,19 @@ func (c creditsInfo) Pct() float64 {
 type UsageInfo struct {
 	FiveHour usageBucket
 	SevenDay usageBucket
-	Credits  creditsInfo
+	// WeeklyScoped is the model-scoped weekly limit (the "limits" array's
+	// weekly_scoped entry). Zero value with an empty WeeklyScopedLabel means
+	// the account has no scoped limit and the header hides that bar.
+	WeeklyScoped      usageBucket
+	WeeklyScopedLabel string
+	Credits           creditsInfo
 }
 
-// parseUsage decodes the /api/oauth/usage response body. Only the overall
-// five_hour and seven_day buckets are kept; per-model buckets are ignored
-// by design (see the spec).
+// parseUsage decodes the /api/oauth/usage response body. The overall
+// five_hour and seven_day buckets are kept; per-model buckets are ignored by
+// design. The model-scoped weekly limit is pulled from the "limits" array's
+// weekly_scoped entry (label carried from its scope.model.display_name); its
+// absence is not an error — the header just hides that bar.
 func parseUsage(body []byte) (*UsageInfo, error) {
 	type bucket struct {
 		Utilization float64   `json:"utilization"`
@@ -65,6 +72,17 @@ func parseUsage(body []byte) (*UsageInfo, error) {
 			Currency      string  `json:"currency"`
 			DecimalPlaces int     `json:"decimal_places"`
 		} `json:"extra_usage"`
+		Limits []struct {
+			Kind     string    `json:"kind"`
+			Group    string    `json:"group"`
+			Percent  float64   `json:"percent"`
+			ResetsAt time.Time `json:"resets_at"`
+			Scope    *struct {
+				Model *struct {
+					DisplayName string `json:"display_name"`
+				} `json:"model"`
+			} `json:"scope"`
+		} `json:"limits"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
@@ -75,6 +93,20 @@ func parseUsage(body []byte) (*UsageInfo, error) {
 	u := &UsageInfo{
 		FiveHour: usageBucket{Pct: raw.FiveHour.Utilization, ResetsAt: raw.FiveHour.ResetsAt},
 		SevenDay: usageBucket{Pct: raw.SevenDay.Utilization, ResetsAt: raw.SevenDay.ResetsAt},
+	}
+	// First weekly_scoped entry wins (fallback: any weekly limit with a named
+	// model scope). is_active is intentionally ignored — the live response's
+	// scoped entry is often is_active:false, and filtering it would drop the
+	// bar.
+	for _, l := range raw.Limits {
+		scoped := l.Kind == "weekly_scoped" ||
+			(l.Group == "weekly" && l.Scope != nil && l.Scope.Model != nil)
+		if !scoped || l.Scope == nil || l.Scope.Model == nil || l.Scope.Model.DisplayName == "" {
+			continue
+		}
+		u.WeeklyScoped = usageBucket{Pct: l.Percent, ResetsAt: l.ResetsAt}
+		u.WeeklyScopedLabel = l.Scope.Model.DisplayName
+		break
 	}
 	if e := raw.ExtraUsage; e != nil {
 		u.Credits = creditsInfo{

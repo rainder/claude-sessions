@@ -187,16 +187,9 @@ func actPreviewRemote(c *actCtx, interval time.Duration) {
 	}
 }
 
-// actNewRemote prompts for a cwd (default = selected remote row's cwd) and
-// POSTs /sessions/new to the remote server. Then SSH-attaches to the result.
-func actNewRemote(c *actCtx) {
-	s := c.selected()
-	if s == nil {
-		return
-	}
-	host := s.Host
-	defaultCWD := s.CWD
-
+// actNewRemote prompts for a cwd and POSTs /sessions/new to the named remote
+// server. A populated remote row supplies defaultCWD; an empty host does not.
+func actNewRemote(c *actCtx, host, defaultCWD string) {
 	enterCooked(c.fd, c.oldState)
 	defer enterRaw(c.fd)
 

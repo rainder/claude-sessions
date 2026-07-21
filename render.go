@@ -396,6 +396,17 @@ func buildSections(local []Session, remotes []RemoteResult) []section {
 	return out
 }
 
+// renderEmptyHostRow prints the "(no sessions)" placeholder for a reachable
+// remote host with no sessions, prefixed with the selection marker when that
+// empty-host row is the current selection.
+func renderEmptyHostRow(w io.Writer, host, sel string) {
+	marker := "  "
+	if sel == emptyHostSelectionID(host) {
+		marker = "▶ "
+	}
+	fmt.Fprintln(w, marker+dim("(no sessions)"))
+}
+
 // plural renders a count with its word, pluralizing the word for counts other
 // than 1: plural(1, "agent") → "1 agent", plural(2, "agent") → "2 agents".
 func plural(n int, word string) string {
@@ -642,7 +653,7 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
-			fmt.Fprintln(w, "  "+dim("(no sessions)"))
+			renderEmptyHostRow(w, sections[i].label, sel)
 		default:
 			rowFn(sectionRows[i])
 		}
@@ -741,7 +752,7 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
-			fmt.Fprintln(w, "  "+dim("(no sessions)"))
+			renderEmptyHostRow(w, sections[i].label, sel)
 		default:
 			rowFn(sectionRows[i])
 		}
@@ -856,7 +867,7 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
-			fmt.Fprintln(w, "  "+dim("(no sessions)"))
+			renderEmptyHostRow(w, sections[i].label, sel)
 		default:
 			rowFn(sectionRows[i])
 		}

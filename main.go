@@ -75,7 +75,8 @@ live-view keys:
   ↑/↓  navigate     n  new
   k    kill         a  attach (or migrate)
   p    preview      m  cycle view mode
-  r    refresh      ?  help     q  quit`
+  s    cycle sort   r  refresh
+  ?    help         q  quit`
 
 func cmdList() error {
 	local, err := CollectLocal()
@@ -83,6 +84,9 @@ func cmdList() error {
 		return err
 	}
 	remotes := FetchAllRemote()
-	RenderAll(os.Stdout, LoadViewMode(), local, remotes, "", nil, 0)
+	sortMode := LoadSortMode()
+	SortSessions(local, sortMode)
+	remotes = sortRemotes(remotes, sortMode)
+	RenderAll(os.Stdout, LoadViewMode(), local, remotes, "", nil, 0, 0, sortMode)
 	return nil
 }

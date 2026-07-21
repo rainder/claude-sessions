@@ -570,3 +570,31 @@ func TestCtxCell(t *testing.T) {
 		}
 	}
 }
+
+func TestEmptyRemoteHostSelectionMarker(t *testing.T) {
+	remotes := []RemoteResult{{Name: "beluga"}}
+	selected := emptyHostSelectionID("beluga")
+
+	for _, mode := range []string{"1", "3", "2"} {
+		t.Run(mode, func(t *testing.T) {
+			var b strings.Builder
+			RenderAll(&b, mode, nil, remotes, selected, nil, 0, 0, "dir")
+			row := findRow(t, b.String(), "(no sessions)")
+			if !strings.HasPrefix(row, "▶ ") {
+				t.Fatalf("mode %s empty-host row lacks selection marker: %q", mode, row)
+			}
+			if !strings.Contains(b.String(), "0 agents, 0 sessions,") {
+				t.Fatalf("mode %s empty host changed header counts:\n%s", mode, b.String())
+			}
+		})
+	}
+}
+
+func TestEmptyRemoteHostUnselectedMarker(t *testing.T) {
+	var b strings.Builder
+	RenderAll(&b, "1", nil, []RemoteResult{{Name: "beluga"}}, "", nil, 0, 0, "dir")
+	row := findRow(t, b.String(), "(no sessions)")
+	if !strings.HasPrefix(row, "  ") || strings.HasPrefix(row, "▶ ") {
+		t.Fatalf("unselected empty-host row has wrong marker: %q", row)
+	}
+}

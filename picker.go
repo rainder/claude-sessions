@@ -44,7 +44,7 @@ func buildCwdPicker(selected *Session) cwdPicker {
 		matches, _ := filepath.Glob(filepath.Join(home, ".claude", "sessions", "*.json"))
 		for _, path := range matches {
 			s, ok := readSessionFile(path)
-			if ok && s.CWD != "" {
+			if ok && s.CWD != "" && !hiddenCwd(s.CWD) {
 				counts[s.CWD]++
 			}
 		}
@@ -65,7 +65,7 @@ func buildCwdPicker(selected *Session) cwdPicker {
 				continue
 			}
 			cwd := extractCWDFromJSONL(jsonls[0])
-			if cwd != "" && isDir(cwd) && counts[cwd] < len(jsonls) {
+			if cwd != "" && !hiddenCwd(cwd) && isDir(cwd) && counts[cwd] < len(jsonls) {
 				counts[cwd] = len(jsonls)
 			}
 		}
@@ -105,7 +105,7 @@ func buildCwdPicker(selected *Session) cwdPicker {
 	}
 
 	// Always offer $PWD if not already present.
-	if pwd, err := os.Getwd(); err == nil && !seen[pwd] && isDir(pwd) {
+	if pwd, err := os.Getwd(); err == nil && !seen[pwd] && !hiddenCwd(pwd) && isDir(pwd) {
 		p.entries = append(p.entries, cwdEntry{cwd: pwd})
 	}
 
@@ -134,6 +134,14 @@ func extractCWDFromJSONL(path string) string {
 		}
 	}
 	return ""
+}
+
+// hiddenCwd reports cwds that are never worth suggesting: everything under
+// /private, which on macOS is where scratchpads and /tmp (a symlink to
+// /private/tmp) live. The selected row's own cwd bypasses this — it's an
+// explicit context, not a suggestion.
+func hiddenCwd(cwd string) bool {
+	return strings.HasPrefix(cwd, "/private/") || cwd == "/private"
 }
 
 // isDir returns true if path is a directory.

@@ -37,6 +37,59 @@ func TestParseUsage(t *testing.T) {
 	}
 }
 
+func TestParseUsageScopedWeekly(t *testing.T) {
+	body := []byte(`{
+		"five_hour": {"utilization": 9.0,  "resets_at": "2026-06-10T15:19:59+00:00"},
+		"seven_day": {"utilization": 13.0, "resets_at": "2026-06-10T18:00:00+00:00"},
+		"limits": [
+			{"kind":"session","group":"session","percent":41,"severity":"normal","resets_at":"2026-07-08T20:00:00+00:00","scope":null,"is_active":true},
+			{"kind":"weekly_all","group":"weekly","percent":9,"severity":"normal","resets_at":"2026-07-15T17:59:59+00:00","scope":null,"is_active":false},
+			{"kind":"weekly_scoped","group":"weekly","percent":10,"severity":"normal","resets_at":"2026-07-15T17:59:59.879088+00:00","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}
+		]
+	}`)
+	u, err := parseUsage(body)
+	if err != nil {
+		t.Fatalf("parseUsage: %v", err)
+	}
+	if u.WeeklyScopedLabel != "Fable" {
+		t.Errorf("WeeklyScopedLabel = %q, want Fable", u.WeeklyScopedLabel)
+	}
+	if u.WeeklyScoped.Pct != 10 {
+		t.Errorf("WeeklyScoped.Pct = %v, want 10", u.WeeklyScoped.Pct)
+	}
+	wantReset := time.Date(2026, 7, 15, 17, 59, 59, 879088000, time.UTC)
+	if !u.WeeklyScoped.ResetsAt.Equal(wantReset) {
+		t.Errorf("WeeklyScoped.ResetsAt = %v, want %v", u.WeeklyScoped.ResetsAt, wantReset)
+	}
+}
+
+func TestParseUsageNoScopedWeekly(t *testing.T) {
+	// No limits array at all, and a limits array with no weekly_scoped entry,
+	// both leave the scoped bucket empty without erroring.
+	bodies := [][]byte{
+		[]byte(`{
+			"five_hour": {"utilization": 9.0,  "resets_at": "2026-06-10T15:19:59+00:00"},
+			"seven_day": {"utilization": 13.0, "resets_at": "2026-06-10T18:00:00+00:00"}
+		}`),
+		[]byte(`{
+			"five_hour": {"utilization": 9.0,  "resets_at": "2026-06-10T15:19:59+00:00"},
+			"seven_day": {"utilization": 13.0, "resets_at": "2026-06-10T18:00:00+00:00"},
+			"limits": [
+				{"kind":"weekly_all","group":"weekly","percent":9,"resets_at":"2026-07-15T17:59:59+00:00","scope":null,"is_active":false}
+			]
+		}`),
+	}
+	for i, body := range bodies {
+		u, err := parseUsage(body)
+		if err != nil {
+			t.Fatalf("case %d parseUsage: %v", i, err)
+		}
+		if u.WeeklyScopedLabel != "" || u.WeeklyScoped.Pct != 0 {
+			t.Errorf("case %d: WeeklyScoped = %+v/%q, want empty", i, u.WeeklyScoped, u.WeeklyScopedLabel)
+		}
+	}
+}
+
 func TestParseUsageCredits(t *testing.T) {
 	body := []byte(`{
 		"five_hour": {"utilization": 9.0,  "resets_at": "2026-06-10T15:19:59+00:00"},
@@ -89,9 +142,11 @@ func TestUsageCacheRoundTrip(t *testing.T) {
 		t.Fatalf("loadUsageCache with no file = %+v, want nil", got)
 	}
 	want := &UsageInfo{
-		FiveHour: usageBucket{Pct: 85, ResetsAt: time.Now().Add(time.Hour).UTC()},
-		SevenDay: usageBucket{Pct: 46, ResetsAt: time.Now().Add(48 * time.Hour).UTC()},
-		Credits:  creditsInfo{Enabled: true, Used: 2550, Limit: 100000, Currency: "USD", DecimalPlaces: 2},
+		FiveHour:          usageBucket{Pct: 85, ResetsAt: time.Now().Add(time.Hour).UTC()},
+		SevenDay:          usageBucket{Pct: 46, ResetsAt: time.Now().Add(48 * time.Hour).UTC()},
+		WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: time.Now().Add(72 * time.Hour).UTC()},
+		WeeklyScopedLabel: "Fable",
+		Credits:           creditsInfo{Enabled: true, Used: 2550, Limit: 100000, Currency: "USD", DecimalPlaces: 2},
 	}
 	saveUsageCache(want)
 	got := loadUsageCache()
@@ -100,6 +155,32 @@ func TestUsageCacheRoundTrip(t *testing.T) {
 	}
 	if got.FiveHour.Pct != 85 || got.SevenDay.Pct != 46 || !got.Credits.Enabled || got.Credits.Used != 2550 {
 		t.Errorf("round-trip mismatch: %+v", got)
+	}
+	if got.WeeklyScopedLabel != "Fable" || got.WeeklyScoped.Pct != 10 {
+		t.Errorf("scoped weekly round-trip mismatch: %+v/%q", got.WeeklyScoped, got.WeeklyScopedLabel)
+	}
+}
+
+// A cache written before the scoped-weekly fields existed must still load,
+// degrading to no scoped bar rather than erroring.
+func TestUsageCacheOldFormatNoScoped(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	old, _ := json.Marshal(cachedUsage{
+		FetchedAt: time.Now(),
+		Info: UsageInfo{
+			FiveHour: usageBucket{Pct: 85, ResetsAt: time.Now().Add(time.Hour).UTC()},
+			SevenDay: usageBucket{Pct: 46, ResetsAt: time.Now().Add(48 * time.Hour).UTC()},
+		},
+	})
+	if err := os.WriteFile(usageCachePath(), old, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := loadUsageCache()
+	if got == nil {
+		t.Fatal("loadUsageCache of pre-scoped cache = nil")
+	}
+	if got.WeeklyScopedLabel != "" || got.WeeklyScoped.Pct != 0 {
+		t.Errorf("scoped fields = %+v/%q, want empty", got.WeeklyScoped, got.WeeklyScopedLabel)
 	}
 }
 

@@ -11,7 +11,10 @@ cost") as a `COST` column in the session table, for local and remote rows.
 ## Data source
 
 No precomputed cost exists on disk. Cost is derived from the session's
-transcript JSONL (`~/.claude/projects/<slug>/<session-uuid>.jsonl`):
+transcript JSONL (`~/.claude/projects/<slug>/<session-uuid>.jsonl`) plus its
+Task-tool subagent transcripts (`<slug>/<session-uuid>/subagents/agent-*.jsonl`
+— Claude Code writes subagent turns to separate files, so subagent usage never
+appears in the parent transcript):
 
 - Each assistant line carries `message.model`, `message.id`, and
   `message.usage` with `input_tokens`, `output_tokens`,
@@ -19,8 +22,11 @@ transcript JSONL (`~/.claude/projects/<slug>/<session-uuid>.jsonl`):
   format) `cache_creation.ephemeral_5m_input_tokens` /
   `ephemeral_1h_input_tokens`.
 - Dedupe repeated usage lines by `message.id` + `requestId` (streaming can
-  re-emit the same usage on multiple lines).
+  re-emit the same usage on multiple lines). Each file has its own dedup set;
+  parent and subagent files are disjoint, so no cross-file dedup is needed.
 - Sum tokens per model, multiply by the pricing table.
+- Cost is split by transcript source: the parent transcript's cost (the main
+  loop) versus the summed cost of all subagent files.
 
 ## Pricing table (hardcoded, $/MTok)
 
@@ -44,22 +50,30 @@ exactly; fable rows require the 5m/1h split.)
 
 ## Architecture
 
-- **`cost.go` (new)**: pricing table + `scanCostIncremental`. Maintains an
-  in-memory cache keyed by transcript path: `{offset int64, seen map, per-model
-  token sums, costUSD}`. On each call: stat file; if size < cached offset
+- **`cost.go` (new)**: pricing table + `scanCostIncremental` (one transcript
+  file) + `scanSessionCost` (parent + subagents). `scanCostIncremental`
+  maintains an in-memory cache keyed by file path: `{offset int64, seen map,
+  costUSD}`. On each call: stat file; if size < cached offset
   (rotation/truncation) reset; read from offset with bufio, parse only needed
-  fields per line, update sums; store new offset. First scan reads the whole
-  file once; subsequent ticks parse only appended bytes.
-- **`Session.CostUSD float64`** new field, `json:"costUsd,omitempty"` —
-  server responses carry it to remote clients automatically (server.go
-  marshals `[]Session` as-is; no server change).
+  fields per line, update the running cost; store new offset. First scan reads
+  the whole file once; subsequent ticks parse only appended bytes.
+  `scanSessionCost` globs `<uuid>/subagents/*.jsonl` each call (new files
+  appear mid-session) and runs each through the same per-path cache, returning
+  `(parent, subagentsSum)`.
+- **`Session.CostUSD` / `Session.CostSubagentsUSD` (float64)** new fields,
+  `json:"costUsd,omitempty"` / `json:"costSubagentsUsd,omitempty"` — server
+  responses carry both to remote clients automatically (server.go marshals
+  `[]Session` as-is; no server change). The split is computed at collection
+  time so render stays dumb and remote rows render identically client-side.
 - **Enrichment**: in the same place MODEL/CTX are attached (model.go
-  transcript-scan path from the in-flight uncommitted diff), also attach
-  CostUSD via the cost scanner. Dedup `seen` map bounded to the session
-  (persists in cache entry).
+  transcript-scan path from the in-flight uncommitted diff), also attach the
+  cost pair via `scanSessionCost`. Each file's dedup `seen` map persists in its
+  cache entry.
 - **Render**: `COST` column in full + intermediate views only (render.go),
-  right-aligned, formatted `$%.2f` (`$1,234` style not needed; ≥$100 →
-  `$123` no cents to keep width ≤7). Empty/zero → `—`.
+  right-aligned, dynamic width. Rendered as `$<parent> (+$<subagents>)` — the
+  ` (+$x.xx)` suffix is omitted when the subagent part rounds under a cent.
+  Each dollar figure is `$%.2f` below $100 and `$%.0f` (no cents) at $100+.
+  Both parts zero → `—`.
 
 ## Error handling
 
@@ -74,7 +88,10 @@ exactly; fable rows require the 5m/1h split.)
 - Incremental scan: write temp jsonl, scan, append lines, rescan — verify
   only delta parsed (offset advanced) and totals correct.
 - Truncation reset.
-- Render: cost column formatting and width in full + intermediate views.
+- Subagent aggregation: parent jsonl + `<uuid>/subagents/agent-*.jsonl` layout,
+  verify `(parent, subagentsSum)` split.
+- Render: cost column formatting (incl. ` (+$x.xx)` suffix and its omission)
+  and width in full + intermediate views.
 
 ## Out of scope
 

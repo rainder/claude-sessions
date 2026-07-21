@@ -99,7 +99,7 @@ func writeTranscript(t *testing.T, lines ...string) string {
 	return p
 }
 
-func TestModelFromTranscript(t *testing.T) {
+func TestScanTranscript(t *testing.T) {
 	p := writeTranscript(t,
 		`{"type":"user","message":{"role":"user","content":"hi"}}`,
 		`{"type":"assistant","isSidechain":true,"message":{"role":"assistant","model":"claude-haiku-4-5-20251001"}}`,
@@ -107,30 +107,56 @@ func TestModelFromTranscript(t *testing.T) {
 		`not json at all`,
 		`{"type":"assistant","message":{"role":"assistant"}}`,
 	)
-	if got := modelFromTranscript(p); got != "claude-fable-5" {
-		t.Errorf("modelFromTranscript = %q, want %q", got, "claude-fable-5")
+	if got := scanTranscript(p).Model; got != "claude-fable-5" {
+		t.Errorf("scanTranscript model = %q, want %q", got, "claude-fable-5")
 	}
 }
 
-func TestModelFromTranscriptMissing(t *testing.T) {
-	if got := modelFromTranscript(filepath.Join(t.TempDir(), "nope.jsonl")); got != "" {
-		t.Errorf("missing transcript: got %q, want \"\"", got)
+func TestScanTranscriptMissing(t *testing.T) {
+	if got := scanTranscript(filepath.Join(t.TempDir(), "nope.jsonl")); got != (transcriptMeta{}) {
+		t.Errorf("missing transcript: got %+v, want zero", got)
 	}
 }
 
-func TestModelFromTranscriptNoAssistant(t *testing.T) {
+func TestScanTranscriptNoAssistant(t *testing.T) {
 	p := writeTranscript(t, `{"type":"user","message":{"role":"user","content":"hi"}}`)
-	if got := modelFromTranscript(p); got != "" {
-		t.Errorf("no assistant entries: got %q, want \"\"", got)
+	if got := scanTranscript(p); got != (transcriptMeta{}) {
+		t.Errorf("no assistant entries: got %+v, want zero", got)
+	}
+}
+
+func TestScanTranscriptContextTokens(t *testing.T) {
+	p := writeTranscript(t,
+		// Sidechain usage must be ignored.
+		`{"type":"assistant","isSidechain":true,"message":{"role":"assistant","model":"claude-haiku-4-5","usage":{"input_tokens":999,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-fable-5","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}}}`,
+		// Last main-loop usage wins over the earlier one.
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-fable-5","usage":{"input_tokens":100,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}}`,
+		// An entry without usage must not clobber the count above.
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-fable-5"}}`,
+	)
+	got := scanTranscript(p)
+	if got.ContextTokens != 600 {
+		t.Errorf("ContextTokens = %d, want 600", got.ContextTokens)
+	}
+	if got.Model != "claude-fable-5" {
+		t.Errorf("Model = %q, want claude-fable-5", got.Model)
+	}
+}
+
+func TestScanTranscriptContextEmpty(t *testing.T) {
+	p := writeTranscript(t)
+	if got := scanTranscript(p).ContextTokens; got != 0 {
+		t.Errorf("empty file: ContextTokens = %d, want 0", got)
 	}
 }
 
 func TestRenderModelColumn(t *testing.T) {
 	s := Session{PID: 1, Name: "x", CWD: "/tmp", Status: "idle",
-		Model: "claude-fable-5", UpdatedAt: time.Now().UnixMilli()}
+		Model: "claude-fable-5", ContextTokens: 124362, UpdatedAt: time.Now().UnixMilli()}
 	for _, view := range []string{"1", "3"} {
 		var b strings.Builder
-		RenderAll(&b, view, []Session{s}, nil, "", nil, 0)
+		RenderAll(&b, view, []Session{s}, nil, "", nil, 0, 0, "dir")
 		out := b.String()
 		if !strings.Contains(out, "MODEL") {
 			t.Errorf("view %s: missing MODEL header:\n%s", view, out)
@@ -138,18 +164,24 @@ func TestRenderModelColumn(t *testing.T) {
 		if !strings.Contains(out, "fable-5") {
 			t.Errorf("view %s: missing shortened model value:\n%s", view, out)
 		}
+		if !strings.Contains(out, "CTX") {
+			t.Errorf("view %s: missing CTX header:\n%s", view, out)
+		}
+		if !strings.Contains(out, "124k") {
+			t.Errorf("view %s: missing formatted context tokens:\n%s", view, out)
+		}
 	}
 }
 
-func TestCachedModelInvalidation(t *testing.T) {
+func TestCachedMetaInvalidation(t *testing.T) {
 	p := writeTranscript(t,
 		`{"type":"assistant","message":{"role":"assistant","model":"claude-fable-5"}}`,
 	)
-	if got := cachedModel(p); got != "claude-fable-5" {
+	if got := cachedMeta(p).Model; got != "claude-fable-5" {
 		t.Fatalf("first read = %q, want claude-fable-5", got)
 	}
 	// Same mtime+size → cache hit even though content scan would still agree.
-	if got := cachedModel(p); got != "claude-fable-5" {
+	if got := cachedMeta(p).Model; got != "claude-fable-5" {
 		t.Fatalf("cached read = %q, want claude-fable-5", got)
 	}
 	// Append a model switch and bump mtime → cache must refresh.
@@ -163,7 +195,7 @@ func TestCachedModelInvalidation(t *testing.T) {
 	if err := os.Chtimes(p, later, later); err != nil {
 		t.Fatal(err)
 	}
-	if got := cachedModel(p); got != "claude-opus-4-8" {
+	if got := cachedMeta(p).Model; got != "claude-opus-4-8" {
 		t.Errorf("after append = %q, want claude-opus-4-8", got)
 	}
 }
