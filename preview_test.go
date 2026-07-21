@@ -26,6 +26,34 @@ func TestSanitizeTerminalTextExpandsTabsAndKeepsUTF8(t *testing.T) {
 	}
 }
 
+func TestSanitizeTerminalTextStripsC1Controls(t *testing.T) {
+	// Raw single-byte C1 controls (0x9b = CSI, 0x9d = OSC) must be dropped.
+	if got := sanitizeTerminalText("a\x9bb\x9dc"); got != "abc" {
+		t.Fatalf("raw C1 = %q, want %q", got, "abc")
+	}
+
+	// C1 encoded as UTF-8 (U+009B = 0xc2 0x9b, a CSI introducer on
+	// C1-honoring terminals) must leave no C1 byte or rune behind; the trailing
+	// literal "[31mx" is inert text.
+	got := sanitizeTerminalText("\xc2\x9b[31mx")
+	if got != "[31mx" {
+		t.Fatalf("utf8 C1 = %q, want %q", got, "[31mx")
+	}
+	for _, r := range got {
+		if r >= 0x80 && r <= 0x9f {
+			t.Fatalf("C1 rune U+%04X survived in %q", r, got)
+		}
+	}
+
+	// Legitimate UTF-8 at or above U+00A0 must be preserved intact — including
+	// characters whose continuation bytes fall inside 0x80–0x9f (→ = e2 86 92,
+	// whose middle byte 0x86 lies in the C1 range).
+	in := "café →   └─"
+	if got := sanitizeTerminalText(in); got != in {
+		t.Fatalf("utf8 preserved = %q, want %q", got, in)
+	}
+}
+
 func TestLimitPreviewKeepsNewestLinesWithinBytes(t *testing.T) {
 	in := strings.Repeat("old\n", 20) + "new-a\nnew-b\n"
 	got := limitPreview(in, PreviewLimits{MaxLines: 2, MaxBytes: 64})

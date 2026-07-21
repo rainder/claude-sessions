@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // errSessionEnded signals that a session's live pane and transcript are both
@@ -121,23 +122,44 @@ func sanitizeTerminalText(s string) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
 		c := s[i]
-		if c == 0x1b { // ESC — start of an escape sequence
-			i = sanitizeEscape(s, i, &b)
+		if c < 0x80 { // ASCII fast path
+			if c == 0x1b { // ESC — start of an escape sequence
+				i = sanitizeEscape(s, i, &b)
+				continue
+			}
+			switch {
+			case c == '\n':
+				b.WriteByte('\n')
+			case c == '\t':
+				b.WriteString("    ")
+			case c == '\r':
+				// drop carriage returns
+			case c < 0x20 || c == 0x7f:
+				// drop other C0 controls and DEL
+			default:
+				b.WriteByte(c) // printable ASCII
+			}
+			i++
 			continue
 		}
-		switch {
-		case c == '\n':
-			b.WriteByte('\n')
-		case c == '\t':
-			b.WriteString("    ")
-		case c == '\r':
-			// drop carriage returns
-		case c < 0x20 || c == 0x7f:
-			// drop other C0 controls and DEL
-		default:
-			b.WriteByte(c) // printable ASCII or UTF-8 continuation byte
+		// Non-ASCII: decode a full rune so multi-byte characters stay intact
+		// (a naive per-byte drop of 0x80–0x9f would shred continuation bytes of
+		// legitimate runes such as "→" = e2 86 92). Invalid bytes — raw C1 like
+		// 0x9b/0x9d and stray continuations — decode to RuneError with size 1
+		// and are dropped. C1 controls (U+0080–U+009F, e.g. the UTF-8 pair
+		// 0xc2 0x9b) are dropped as whole runes so they can never reach a
+		// C1-honoring terminal as a CSI/OSC/DCS/PM/APC introducer.
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
 		}
-		i++
+		if r >= 0x80 && r <= 0x9f {
+			i += size
+			continue
+		}
+		b.WriteString(s[i : i+size])
+		i += size
 	}
 	return b.String()
 }
@@ -219,6 +241,9 @@ func limitPreview(s string, limits PreviewLimits) string {
 			s = s[cut:]
 		} else {
 			s = s[len(s)-limits.MaxBytes:] // single line longer than MaxBytes
+			for len(s) > 0 && s[0] >= 0x80 && s[0] < 0xc0 {
+				s = s[1:] // don't begin on a UTF-8 continuation byte
+			}
 		}
 	}
 	return s
