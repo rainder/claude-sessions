@@ -642,7 +642,11 @@ func renderAllFull(w io.Writer, sections []section, sel string, usage *UsageInfo
 	}
 
 	// Local first.
-	rowFn(sectionRows[0])
+	if len(sectionRows[0]) == 0 {
+		renderEmptyHostRow(w, "", sel)
+	} else {
+		rowFn(sectionRows[0])
+	}
 	// Remote sections.
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
@@ -742,7 +746,11 @@ func renderAllIntermediate(w io.Writer, sections []section, sel string, usage *U
 		}
 	}
 
-	rowFn(sectionRows[0])
+	if len(sectionRows[0]) == 0 {
+		renderEmptyHostRow(w, "", sel)
+	} else {
+		rowFn(sectionRows[0])
+	}
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))
@@ -857,7 +865,11 @@ func renderAllMinimal(w io.Writer, sections []section, sel string, usage *UsageI
 		}
 	}
 
-	rowFn(sectionRows[0])
+	if len(sectionRows[0]) == 0 {
+		renderEmptyHostRow(w, "", sel)
+	} else {
+		rowFn(sectionRows[0])
+	}
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))

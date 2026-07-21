@@ -572,21 +572,52 @@ func TestCtxCell(t *testing.T) {
 }
 
 func TestEmptyRemoteHostSelectionMarker(t *testing.T) {
+	// A populated local session keeps the local section from rendering its own
+	// "(no sessions)" row, isolating this test to the remote empty-host row.
+	local := []Session{{PID: 1, CWD: "/local"}}
 	remotes := []RemoteResult{{Name: "beluga"}}
 	selected := emptyHostSelectionID("beluga")
 
 	for _, mode := range []string{"1", "3", "2"} {
 		t.Run(mode, func(t *testing.T) {
 			var b strings.Builder
-			RenderAll(&b, mode, nil, remotes, selected, nil, 0, 0, "dir")
+			RenderAll(&b, mode, local, remotes, selected, nil, 0, 0, "dir")
 			row := findRow(t, b.String(), "(no sessions)")
 			if !strings.HasPrefix(row, "▶ ") {
 				t.Fatalf("mode %s empty-host row lacks selection marker: %q", mode, row)
 			}
-			if !strings.Contains(b.String(), "0 agents, 0 sessions,") {
+			// The empty remote host must not inflate counts: 1 local session
+			// (1 agent), 0 from beluga.
+			if !strings.Contains(b.String(), "1 agent, 1 session,") {
 				t.Fatalf("mode %s empty host changed header counts:\n%s", mode, b.String())
 			}
 		})
+	}
+}
+
+func TestEmptyLocalHostSelectionMarker(t *testing.T) {
+	selected := emptyHostSelectionID("")
+	for _, mode := range []string{"1", "3", "2"} {
+		t.Run(mode, func(t *testing.T) {
+			var b strings.Builder
+			RenderAll(&b, mode, nil, nil, selected, nil, 0, 0, "dir")
+			row := findRow(t, b.String(), "(no sessions)")
+			if !strings.HasPrefix(row, "▶ ") {
+				t.Fatalf("mode %s empty-local row lacks selection marker: %q", mode, row)
+			}
+			if !strings.Contains(b.String(), "0 agents, 0 sessions,") {
+				t.Fatalf("mode %s empty local changed header counts:\n%s", mode, b.String())
+			}
+		})
+	}
+}
+
+func TestEmptyLocalHostUnselectedMarker(t *testing.T) {
+	var b strings.Builder
+	RenderAll(&b, "1", nil, nil, "", nil, 0, 0, "dir")
+	row := findRow(t, b.String(), "(no sessions)")
+	if !strings.HasPrefix(row, "  ") || strings.HasPrefix(row, "▶ ") {
+		t.Fatalf("unselected empty-local row has wrong marker: %q", row)
 	}
 }
 
