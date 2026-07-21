@@ -27,6 +27,9 @@ func buildSelectionTargets(local []Session, remotes []RemoteResult) []selectionT
 	for _, session := range local {
 		targets = append(targets, sessionSelectionTarget(session))
 	}
+	if len(local) == 0 {
+		targets = append(targets, emptyHostSelectionTarget(""))
+	}
 	for _, remote := range remotes {
 		if len(remote.Sessions) > 0 {
 			for _, session := range remote.Sessions {

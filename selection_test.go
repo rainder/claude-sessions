@@ -36,6 +36,24 @@ func TestBuildSelectionTargets(t *testing.T) {
 	}
 }
 
+func TestBuildSelectionTargetsEmptyLocal(t *testing.T) {
+	got := targetIDs(buildSelectionTargets(nil, nil))
+	want := []string{emptyHostSelectionID("")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("empty local targets = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSelectionTargetsEmptyLocalWithRemote(t *testing.T) {
+	got := targetIDs(buildSelectionTargets(nil, []RemoteResult{
+		{Name: "orca", Sessions: []Session{{PID: 20, Host: "orca"}}},
+	}))
+	want := []string{emptyHostSelectionID(""), "orca:20"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("empty local + remote targets = %q, want %q", got, want)
+	}
+}
+
 func TestEmptyHostSelectionIDUsesReservedNamespace(t *testing.T) {
 	id := emptyHostSelectionID("42")
 	if !strings.HasPrefix(id, "\x00host:") {
