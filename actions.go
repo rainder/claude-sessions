@@ -20,6 +20,13 @@ type actCtx struct {
 	// fetching would be wasted traffic. Either may be nil.
 	pause  func()
 	resume func()
+
+	// spawnedHost/spawnedTmux record a tmux session just created by this
+	// action (actNew / actNewRemote), so the caller can re-target the
+	// selection onto it once a post-action refresh picks it up. Empty when
+	// no new session was spawned (cancelled, or spawn failed).
+	spawnedHost string
+	spawnedTmux string
 }
 
 // runInteractive hands the terminal to prog with the pollers suspended,
@@ -243,6 +250,7 @@ func actNew(c *actCtx) {
 		return
 	}
 	fmt.Printf("ok → %s\n", tname)
+	c.spawnedTmux = tname
 	enterRaw(c.fd)
 	runTmuxAttach(c, tname)
 }

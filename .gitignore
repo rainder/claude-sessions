@@ -1,6 +1,7 @@
 /bin/
 /claude-sessions
 /Makefile.local
+/.claude/
 *.test
 *.out
 # Editor swap / backup files
