@@ -254,23 +254,31 @@ func (h *InspectorHub) fetchOnce() {
 		}
 	case errors.Is(err, errSessionEnded):
 		// The session's pane and transcript are both gone: keep the last lines,
-		// flag it ended, and stop showing the spinner.
+		// flag it ended, and stop showing the spinner. Ended is terminal, not a
+		// transient hiccup, so clear any prior Stale/Error the snapshot carried.
 		prev.Ended = true
+		prev.Stale = false
+		prev.Error = ""
 		prev.Loading = false
 		prev.Updated = now
 		h.snapshot = prev
 	case len(prev.Lines) > 0:
 		// A transient failure with content already on screen: retain the lines
-		// and mark them stale with a concise reason.
+		// and mark them stale with a concise reason. Clear Ended in case a prior
+		// "ended" verdict is now contradicted by the host answering again.
 		prev.Stale = true
+		prev.Ended = false
 		prev.Loading = false
-		prev.Error = err.Error()
+		prev.Error = shortErr(err)
 		prev.Updated = now
 		h.snapshot = prev
 	default:
-		// Never loaded successfully: surface the error in place of content.
+		// Never loaded successfully: surface the error in place of content, with
+		// no stale/ended flags since there are no prior lines to qualify.
+		prev.Stale = false
+		prev.Ended = false
 		prev.Loading = false
-		prev.Error = err.Error()
+		prev.Error = shortErr(err)
 		prev.Updated = now
 		h.snapshot = prev
 	}

@@ -57,6 +57,69 @@ func TestInspectorHubRetainsSnapshotOnRefreshError(t *testing.T) {
 	}
 }
 
+// TestInspectorHubStaleThenEndedClearsStale drives success → transient error →
+// session-ended and proves the ended verdict clears the stale/error siblings.
+func TestInspectorHubStaleThenEndedClearsStale(t *testing.T) {
+	calls := 0
+	fetch := func(target selectionTarget, _ PreviewLimits) (PreviewResult, error) {
+		calls++
+		switch calls {
+		case 1:
+			return PreviewResult{Source: "tmux", Content: "ok\n"}, nil
+		case 2:
+			return PreviewResult{}, errors.New("offline")
+		default:
+			return PreviewResult{}, errSessionEnded
+		}
+	}
+	h, err := newInspectorHub(sessionSelectionTarget(Session{PID: 42}), time.Hour, fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Shutdown()
+
+	waitForInspectorSnapshot(t, h, func(s InspectorSnapshot) bool { return len(s.Lines) == 1 })
+	h.Refresh()
+	waitForInspectorSnapshot(t, h, func(s InspectorSnapshot) bool { return s.Stale })
+	h.Refresh()
+	got := waitForInspectorSnapshot(t, h, func(s InspectorSnapshot) bool { return s.Ended })
+	if got.Stale || got.Error != "" || strings.Join(got.Lines, "\n") != "ok" {
+		t.Fatalf("ended snapshot = %#v", got)
+	}
+}
+
+// TestInspectorHubEndedThenTransientClearsEnded drives success → session-ended →
+// transient error and proves a host answering again clears the ended verdict and
+// re-marks the retained lines stale.
+func TestInspectorHubEndedThenTransientClearsEnded(t *testing.T) {
+	calls := 0
+	fetch := func(target selectionTarget, _ PreviewLimits) (PreviewResult, error) {
+		calls++
+		switch calls {
+		case 1:
+			return PreviewResult{Source: "tmux", Content: "ok\n"}, nil
+		case 2:
+			return PreviewResult{}, errSessionEnded
+		default:
+			return PreviewResult{}, errors.New("offline")
+		}
+	}
+	h, err := newInspectorHub(sessionSelectionTarget(Session{PID: 42}), time.Hour, fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Shutdown()
+
+	waitForInspectorSnapshot(t, h, func(s InspectorSnapshot) bool { return len(s.Lines) == 1 })
+	h.Refresh()
+	waitForInspectorSnapshot(t, h, func(s InspectorSnapshot) bool { return s.Ended })
+	h.Refresh()
+	got := waitForInspectorSnapshot(t, h, func(s InspectorSnapshot) bool { return s.Stale })
+	if got.Ended || got.Error != "offline" || strings.Join(got.Lines, "\n") != "ok" {
+		t.Fatalf("transient snapshot = %#v", got)
+	}
+}
+
 // TestInspectorHubSnapshotsRetainDistinctTargetIDs proves a local pid 42 hub and
 // a remote dev:42 hub keep their own TargetID (and hand the fetcher the matching
 // target) rather than sharing a single mutable snapshot.
