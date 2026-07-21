@@ -75,6 +75,24 @@ func navTargets(targets []selectionTarget, sel string, delta int) string {
 	return targets[0].id
 }
 
+// selectionForTmux returns the id of the target whose session is running in
+// the given tmux session (matched on the host + "<name>:" prefix of its Tmux
+// pane string), or "" if no target has picked it up yet. Used after spawning
+// a new tmux session so the caller can move the selection onto it once it
+// shows up in a fresh snapshot.
+func selectionForTmux(targets []selectionTarget, host, tmuxSession string) string {
+	if tmuxSession == "" {
+		return ""
+	}
+	prefix := tmuxSession + ":"
+	for _, target := range targets {
+		if target.host == host && target.session != nil && strings.HasPrefix(target.session.Tmux, prefix) {
+			return target.id
+		}
+	}
+	return ""
+}
+
 func validateTargetSel(targets []selectionTarget, sel string) string {
 	for _, target := range targets {
 		if target.id == sel {

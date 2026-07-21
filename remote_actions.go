@@ -297,6 +297,8 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 		return
 	}
 	fmt.Printf("ok → %s\n", r.Tmux)
+	c.spawnedHost = host
+	c.spawnedTmux = r.Tmux
 
 	srv, _ := LookupServer(host)
 	sshTarget := srv.EffectiveSSHTarget()

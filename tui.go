@@ -431,8 +431,13 @@ func RunTUI(interval time.Duration) error {
 				refresh(true)
 				render()
 			case "n", "N":
-				actNew(makeCtx())
+				ctx := makeCtx()
+				actNew(ctx)
 				refresh(true)
+				if id := selectionForTmux(targets, ctx.spawnedHost, ctx.spawnedTmux); id != "" {
+					state.sel = id
+					state.anchorSelection = true
+				}
 				render()
 			case "m", "M":
 				switch viewMode {

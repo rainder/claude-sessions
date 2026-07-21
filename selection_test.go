@@ -108,6 +108,43 @@ func TestValidateTargetSelFollowsPopulatedHost(t *testing.T) {
 	}
 }
 
+func TestSelectionForTmuxMatchesLocalSessionByPaneName(t *testing.T) {
+	targets := buildSelectionTargets(
+		[]Session{
+			{PID: 10, Tmux: "other-abc123:0.0"},
+			{PID: 11, Tmux: "myproj-def456:0.0"},
+		},
+		nil,
+	)
+	if got := selectionForTmux(targets, "", "myproj-def456"); got != "11" {
+		t.Fatalf("selectionForTmux = %q, want %q", got, "11")
+	}
+}
+
+func TestSelectionForTmuxMatchesRemoteSessionByHostAndPaneName(t *testing.T) {
+	targets := buildSelectionTargets(nil, []RemoteResult{
+		{Name: "orca", Sessions: []Session{
+			{PID: 20, Host: "orca", Tmux: "proj-abc:0.0"},
+		}},
+		{Name: "beluga", Sessions: []Session{
+			{PID: 21, Host: "beluga", Tmux: "proj-abc:0.0"},
+		}},
+	})
+	if got := selectionForTmux(targets, "beluga", "proj-abc"); got != "beluga:21" {
+		t.Fatalf("selectionForTmux = %q, want %q", got, "beluga:21")
+	}
+}
+
+func TestSelectionForTmuxReturnsEmptyWhenNothingSpawnedOrNotFoundYet(t *testing.T) {
+	targets := buildSelectionTargets([]Session{{PID: 10, Tmux: "other:0.0"}}, nil)
+	if got := selectionForTmux(targets, "", ""); got != "" {
+		t.Fatalf("selectionForTmux with no spawned session = %q, want empty", got)
+	}
+	if got := selectionForTmux(targets, "", "not-yet-visible"); got != "" {
+		t.Fatalf("selectionForTmux before session file appears = %q, want empty", got)
+	}
+}
+
 func TestValidateTargetSelUsesExistingFallbackForOtherMissingRows(t *testing.T) {
 	targets := buildSelectionTargets([]Session{{PID: 10}, {PID: 11}}, nil)
 	if got := validateTargetSel(targets, "999"); got != "10" {

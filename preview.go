@@ -400,14 +400,24 @@ func trunc(s string, n int) string {
 	return strings.ReplaceAll(s, "\n", "\n  │ ")
 }
 
+// tmuxLocForPID returns the full "session:win.pane" tmux location for the given
+// pid by live discovery, or "" if the pid is not in a tmux pane.
+func tmuxLocForPID(pid int) string {
+	panes, _ := tmuxPaneMap()
+	ppid, _ := ppidMap()
+	return walkTmuxPane(pid, panes, ppid)
+}
+
 // tmuxSessionForPID returns the tmux session name (without :win.pane suffix)
 // for the given pid, or "" if not in tmux.
 func tmuxSessionForPID(pid int) string {
-	panes, _ := tmuxPaneMap()
-	ppid, _ := ppidMap()
-	loc := walkTmuxPane(pid, panes, ppid)
+	loc := tmuxLocForPID(pid)
 	if loc == "" {
 		return ""
 	}
-	return strings.SplitN(loc, ":", 2)[0]
+	name, err := tmuxSessionName(loc)
+	if err != nil {
+		return ""
+	}
+	return name
 }
