@@ -92,9 +92,9 @@ func collectCwdSuggestions() []cwdSuggestion {
 	return out
 }
 
-// buildCwdPicker assembles the list of cwd suggestions, ordered as: the
-// selected row's cwd first, then by frequency descending (from
-// collectCwdSuggestions), and finally the local $PWD if not already present.
+// buildCwdPicker assembles the list of cwd suggestions, ordered by frequency
+// descending (from collectCwdSuggestions), with the local $PWD appended if
+// not already present.
 func buildCwdPicker(selected *Session) cwdPicker {
 	home, _ := os.UserHomeDir()
 	p := cwdPicker{home: home}
@@ -102,24 +102,6 @@ func buildCwdPicker(selected *Session) cwdPicker {
 	suggestions := collectCwdSuggestions()
 
 	seen := map[string]bool{}
-	// Selected row's cwd at the top. Bypasses hiddenCwd — it's an explicit
-	// context, not a suggestion — but must still be a real directory.
-	if selected != nil && selected.CWD != "" && isDir(selected.CWD) {
-		count := 0
-		for _, sg := range suggestions {
-			if sg.CWD == selected.CWD {
-				count = sg.Count
-				break
-			}
-		}
-		p.entries = append(p.entries, cwdEntry{
-			cwd:       selected.CWD,
-			count:     count,
-			isDefault: true,
-		})
-		seen[selected.CWD] = true
-	}
-
 	for _, sg := range suggestions {
 		if seen[sg.CWD] {
 			continue
