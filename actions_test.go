@@ -99,7 +99,7 @@ func TestActCtxEnterRawEnablesMouse(t *testing.T) {
 
 func TestRemoteNewRowsSuggestionsAndFallback(t *testing.T) {
 	lines, start, entries := remoteNewRows("/selected", []cwdSuggestion{{CWD: "/history", Count: 4}, {CWD: "/selected", Count: 2}})
-	if start != 0 || len(lines) != 3 || !strings.Contains(lines[0], "/selected") || !strings.Contains(lines[1], "/history") {
+	if start != 0 || len(lines) != 3 || !strings.Contains(lines[0], "/history") || !strings.Contains(lines[1], "/selected") {
 		t.Fatalf("rows = %#v start=%d", lines, start)
 	}
 	if len(entries) != 2 {

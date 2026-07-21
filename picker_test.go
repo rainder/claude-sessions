@@ -65,7 +65,7 @@ func TestCollectCwdSuggestionsFiltersAndRanks(t *testing.T) {
 func TestMergeRemoteCwdEntries(t *testing.T) {
 	suggestions := []cwdSuggestion{{CWD: "/a", Count: 3}, {CWD: "/b", Count: 2}}
 	got := mergeRemoteCwdEntries("/b", suggestions)
-	want := []cwdEntry{{cwd: "/b", count: 2, isDefault: true}, {cwd: "/a", count: 3}}
+	want := []cwdEntry{{cwd: "/a", count: 3}, {cwd: "/b", count: 2}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("merged entries = %#v, want %#v", got, want)
 	}

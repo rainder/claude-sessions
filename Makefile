@@ -51,13 +51,15 @@ install: build
 deploy-linux-amd64: build
 	@if [ -z "$(HOST)" ]; then echo "error: set HOST=user@host (or just host)"; exit 1; fi
 	ssh $(HOST) 'mkdir -p $(REMOTE_INSTALL_DIR)'
-	scp $(BIN_DIR)/$(BIN)-linux-amd64 $(HOST):$(REMOTE_INSTALL_DIR)/$(BIN)
+	scp $(BIN_DIR)/$(BIN)-linux-amd64 $(HOST):$(REMOTE_INSTALL_DIR)/$(BIN).new
+	ssh $(HOST) 'chmod +x $(REMOTE_INSTALL_DIR)/$(BIN).new && mv $(REMOTE_INSTALL_DIR)/$(BIN).new $(REMOTE_INSTALL_DIR)/$(BIN)'
 	@echo "deployed to $(HOST):$(REMOTE_INSTALL_DIR)/$(BIN)"
 
 deploy-linux-arm64: build
 	@if [ -z "$(HOST)" ]; then echo "error: set HOST=user@host (or just host)"; exit 1; fi
 	ssh $(HOST) 'mkdir -p $(REMOTE_INSTALL_DIR)'
-	scp $(BIN_DIR)/$(BIN)-linux-arm64 $(HOST):$(REMOTE_INSTALL_DIR)/$(BIN)
+	scp $(BIN_DIR)/$(BIN)-linux-arm64 $(HOST):$(REMOTE_INSTALL_DIR)/$(BIN).new
+	ssh $(HOST) 'chmod +x $(REMOTE_INSTALL_DIR)/$(BIN).new && mv $(REMOTE_INSTALL_DIR)/$(BIN).new $(REMOTE_INSTALL_DIR)/$(BIN)'
 	@echo "deployed to $(HOST):$(REMOTE_INSTALL_DIR)/$(BIN)"
 
 run: build

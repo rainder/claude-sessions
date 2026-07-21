@@ -121,25 +121,13 @@ func buildCwdPicker(selected *Session) cwdPicker {
 	return p
 }
 
-// mergeRemoteCwdEntries turns remote-collected cwd suggestions into picker rows,
-// placing defaultCWD first (marked isDefault, with its count from the list if
-// present) and the remaining suggestions after in their existing order. Unlike
-// buildCwdPicker it applies no isDir/hiddenCwd filtering — the paths live on the
-// remote host, so local existence checks are meaningless.
+// mergeRemoteCwdEntries turns remote-collected cwd suggestions into picker
+// rows, in their existing (frequency-ranked) order — no special-cased first
+// row. Unlike buildCwdPicker it applies no isDir/hiddenCwd filtering — the
+// paths live on the remote host, so local existence checks are meaningless.
 func mergeRemoteCwdEntries(defaultCWD string, suggestions []cwdSuggestion) []cwdEntry {
 	entries := make([]cwdEntry, 0, len(suggestions)+1)
 	seen := map[string]bool{}
-	if defaultCWD != "" {
-		count := 0
-		for _, suggestion := range suggestions {
-			if suggestion.CWD == defaultCWD {
-				count = suggestion.Count
-				break
-			}
-		}
-		entries = append(entries, cwdEntry{cwd: defaultCWD, count: count, isDefault: true})
-		seen[defaultCWD] = true
-	}
 	for _, suggestion := range suggestions {
 		if suggestion.CWD == "" || seen[suggestion.CWD] {
 			continue
