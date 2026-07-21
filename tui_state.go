@@ -132,10 +132,8 @@ const (
 
 // tuiState is the mutable screen state owned by the render loop: which screen
 // is showing, the current selection, the session-list scroll offset, the hit
-// regions for the frame last drawn, and the double-click tracking pair.
-//
-// Task 6 adds an `inspector inspectorViewState` field for the fullscreen
-// inspector screen; it is intentionally omitted until then.
+// regions for the frame last drawn, the double-click tracking pair, and the
+// fullscreen inspector's scroll/follow state.
 type tuiState struct {
 	mode        screenMode
 	sel         string
@@ -143,6 +141,7 @@ type tuiState struct {
 	hits        []hitRegion
 	lastClickID string
 	lastClickAt time.Time
+	inspector   inspectorViewState
 }
 
 // newTUIState starts on the session list with no selection.
@@ -198,6 +197,72 @@ func (s *tuiState) handleListMouse(m mouseEvent, now time.Time) tuiCommand {
 		s.lastClickID = hit.targetID
 		s.lastClickAt = now
 		return commandRender
+	default:
+		return commandNone
+	}
+}
+
+// handleInspectorKey applies a keystroke to the inspector viewport and returns
+// the command the render loop should run. Pure scrolling (arrows, page keys,
+// Home) mutates the view state directly and asks for a repaint; Back, Refresh,
+// and Follow defer to the render loop via their commands because they touch the
+// hub (leave the screen, refetch, or jump to the live tail and resume polling).
+func (s *tuiState) handleInspectorKey(key string) tuiCommand {
+	switch key {
+	case "q", "Q", KeyEsc, KeyLeft:
+		return commandBack
+	case "r", "R":
+		return commandRefreshInspector
+	case "G", KeyEnd:
+		return commandFollowInspector
+	case "g", KeyHome:
+		s.inspector.home()
+		return commandRender
+	case "k", KeyUp:
+		s.inspector.scroll(-1)
+		return commandRender
+	case "j", KeyDown:
+		s.inspector.scroll(1)
+		return commandRender
+	case KeyPageUp:
+		s.inspector.page(-1)
+		return commandRender
+	case " ", KeyPageDown:
+		s.inspector.page(1)
+		return commandRender
+	default:
+		return commandNone
+	}
+}
+
+// handleInspectorMouse applies a mouse event to the inspector viewport. Release
+// events are ignored; the wheel scrolls three lines; a left click on a control
+// region returns that control's command (Back, Refresh, or Follow).
+func (s *tuiState) handleInspectorMouse(m mouseEvent) tuiCommand {
+	if m.release {
+		return commandNone
+	}
+	switch m.button {
+	case mouseWheelUp:
+		s.inspector.scroll(-3)
+		return commandRender
+	case mouseWheelDown:
+		s.inspector.scroll(3)
+		return commandRender
+	case mouseLeft:
+		hit := s.hitAt(m.x, m.y)
+		if hit == nil {
+			return commandNone
+		}
+		switch hit.action {
+		case hitInspectorBack:
+			return commandBack
+		case hitInspectorRefresh:
+			return commandRefreshInspector
+		case hitInspectorFollow:
+			return commandFollowInspector
+		}
+		return commandNone
 	default:
 		return commandNone
 	}

@@ -58,6 +58,93 @@ func TestListMouseEmptyHostNeverOpens(t *testing.T) {
 	}
 }
 
+func TestInspectorKeyHandlers(t *testing.T) {
+	setup := func() *tuiState {
+		s := newTUIState()
+		s.inspector = newInspectorViewState("42")
+		s.inspector.resize(3)
+		s.inspector.applySnapshot(InspectorSnapshot{
+			TargetID: "42",
+			Lines:    []string{"1", "2", "3", "4", "5", "6"},
+		})
+		// follow mode parks the view at the bottom: top = 6 - 3 = 3.
+		return s
+	}
+
+	s := setup()
+	if cmd := s.handleInspectorKey(KeyUp); cmd != commandRender || s.inspector.top != 2 || s.inspector.follow {
+		t.Fatalf("KeyUp: cmd=%v view=%#v", cmd, s.inspector)
+	}
+	if cmd := s.handleInspectorKey(KeyDown); cmd != commandRender || s.inspector.top != 3 || !s.inspector.follow {
+		t.Fatalf("KeyDown: cmd=%v view=%#v", cmd, s.inspector)
+	}
+	if cmd := s.handleInspectorKey(KeyPageUp); cmd != commandRender || s.inspector.top != 0 {
+		t.Fatalf("KeyPageUp: cmd=%v view=%#v", cmd, s.inspector)
+	}
+	if cmd := s.handleInspectorKey(KeyHome); cmd != commandRender || s.inspector.top != 0 || s.inspector.follow {
+		t.Fatalf("KeyHome: cmd=%v view=%#v", cmd, s.inspector)
+	}
+
+	// Follow / refresh / back defer to the render loop via their commands and
+	// do not mutate the view state directly.
+	s = setup()
+	s.handleInspectorKey(KeyUp) // leave follow mode so End has an effect to defer
+	if cmd := s.handleInspectorKey(KeyEnd); cmd != commandFollowInspector || s.inspector.follow {
+		t.Fatalf("KeyEnd: cmd=%v view=%#v", cmd, s.inspector)
+	}
+	if cmd := s.handleInspectorKey("r"); cmd != commandRefreshInspector {
+		t.Fatalf("r: cmd=%v", cmd)
+	}
+	if cmd := s.handleInspectorKey("q"); cmd != commandBack {
+		t.Fatalf("q: cmd=%v", cmd)
+	}
+	if cmd := s.handleInspectorKey(KeyEsc); cmd != commandBack {
+		t.Fatalf("esc: cmd=%v", cmd)
+	}
+	if cmd := s.handleInspectorKey("z"); cmd != commandNone {
+		t.Fatalf("unmapped key: cmd=%v", cmd)
+	}
+}
+
+func TestInspectorMouseHandlers(t *testing.T) {
+	s := newTUIState()
+	s.inspector = newInspectorViewState("42")
+	s.inspector.resize(3)
+	s.inspector.applySnapshot(InspectorSnapshot{
+		TargetID: "42",
+		Lines:    []string{"1", "2", "3", "4", "5", "6"},
+	})
+	// top parked at 3 by follow mode.
+
+	if cmd := s.handleInspectorMouse(mouseEvent{button: mouseWheelUp}); cmd != commandRender || s.inspector.top != 0 {
+		t.Fatalf("wheel up: cmd=%v top=%d", cmd, s.inspector.top)
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{button: mouseWheelDown}); cmd != commandRender || s.inspector.top != 3 {
+		t.Fatalf("wheel down: cmd=%v top=%d", cmd, s.inspector.top)
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{button: mouseLeft, release: true}); cmd != commandNone {
+		t.Fatalf("release ignored: cmd=%v", cmd)
+	}
+
+	s.hits = []hitRegion{
+		{x0: 0, y0: 0, x1: 4, y1: 0, action: hitInspectorBack},
+		{x0: 6, y0: 0, x1: 12, y1: 0, action: hitInspectorRefresh},
+		{x0: 14, y0: 0, x1: 20, y1: 0, action: hitInspectorFollow},
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{x: 2, y: 0, button: mouseLeft}); cmd != commandBack {
+		t.Fatalf("back button: cmd=%v", cmd)
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{x: 8, y: 0, button: mouseLeft}); cmd != commandRefreshInspector {
+		t.Fatalf("refresh button: cmd=%v", cmd)
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{x: 16, y: 0, button: mouseLeft}); cmd != commandFollowInspector {
+		t.Fatalf("follow button: cmd=%v", cmd)
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{x: 40, y: 0, button: mouseLeft}); cmd != commandNone {
+		t.Fatalf("click outside hit: cmd=%v", cmd)
+	}
+}
+
 func TestEnsureLineVisible(t *testing.T) {
 	cases := []struct {
 		name                          string
