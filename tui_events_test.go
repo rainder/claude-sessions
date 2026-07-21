@@ -198,3 +198,60 @@ func TestResizeWakeSignals(t *testing.T) {
 		t.Fatalf("woke = %b, want resize", woke)
 	}
 }
+
+// withIdleStdin points stdinFD at the read end of a fresh, unwritten pipe for
+// the duration of the test and restores the original value on cleanup. A
+// pipe with no data and an open writer blocks in select exactly like a real
+// idle terminal — unlike /dev/null (the usual stdin under `go test`), which
+// is always select-ready and would otherwise make pollEvents return before
+// its timeout/PendingTimeout logic ever gets exercised.
+func withIdleStdin(t *testing.T) {
+	t.Helper()
+	r, _ := testPipe(t)
+	orig := stdinFD
+	stdinFD = r
+	t.Cleanup(func() { stdinFD = orig })
+}
+
+func TestPollEventsCapsTimeoutToPendingEscape(t *testing.T) {
+	withIdleStdin(t)
+
+	d := newInputDecoder()
+	d.Feed([]byte{0x1b}, time.Now())
+
+	start := time.Now()
+	events, woke := pollEvents(d, 500*time.Millisecond, nil)
+	elapsed := time.Since(start)
+
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("pollEvents took %v, want well under the 500ms timeout (capped by PendingTimeout)", elapsed)
+	}
+	if woke != wakeNone {
+		t.Fatalf("woke = %b, want none", woke)
+	}
+	if len(events) != 1 || events[0].kind != eventKey || events[0].key != KeyEsc {
+		t.Fatalf("events = %#v, want [KeyEsc]", events)
+	}
+}
+
+func TestPollEventsFlushesAlreadyElapsedDeadlineImmediately(t *testing.T) {
+	withIdleStdin(t)
+
+	d := newInputDecoder()
+	d.Feed([]byte{0x1b}, time.Now())
+	time.Sleep(escapeSequenceDelay + 5*time.Millisecond)
+
+	start := time.Now()
+	events, woke := pollEvents(d, 0, nil)
+	elapsed := time.Since(start)
+
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("pollEvents took %v, want a near-immediate return for an already-elapsed deadline (regression: timeout=0 must not block forever)", elapsed)
+	}
+	if woke != wakeNone {
+		t.Fatalf("woke = %b, want none", woke)
+	}
+	if len(events) != 1 || events[0].kind != eventKey || events[0].key != KeyEsc {
+		t.Fatalf("events = %#v, want [KeyEsc]", events)
+	}
+}

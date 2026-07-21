@@ -341,6 +341,15 @@ type wakeFD struct {
 	kind wakeKind
 }
 
+// stdinFD is the descriptor pollEvents treats as stdin. It's a var rather
+// than a hardcoded os.Stdin.Fd() call so tests can point it at an idle
+// pipe's read end instead: a regular file or /dev/null (the usual stdin
+// under `go test`) is always select-ready, which would otherwise race every
+// test past pollEvents' timeout/flush path before it has a chance to fire. A
+// pipe read end with no data and an open writer blocks in select exactly
+// like a real idle terminal does.
+var stdinFD = int(os.Stdin.Fd())
+
 // pollEvents waits up to timeout for stdin or any of wakes to become
 // readable, decodes any stdin bytes through dec, and reports which wake
 // sources fired as a bitmask. It generalizes readEvents (tui.go) from a
@@ -352,14 +361,21 @@ type wakeFD struct {
 // escape sequence (a lone ESC that might still be the start of a longer
 // sequence) — in that case the wait is capped at dec.PendingTimeout so Flush
 // gets a chance to resolve it without waiting for the next real keystroke.
+// That cap can itself be zero (the pending deadline already elapsed, e.g. the
+// caller was busy handling something else): a zero-duration select still
+// needs an explicit non-nil Timeval to poll-and-return-immediately rather
+// than block forever, so tvp is built whenever the decoder has *any* pending
+// deadline, not just when timeout > 0.
 //
-// Every ready wake descriptor is drained in a loop until EAGAIN (matching
-// signalWake's best-effort single-byte write) and its kind OR'd into the
-// returned mask. Stdin is read at most once per call, up to 256 bytes; a
-// zero-byte or EAGAIN read (e.g. stdin redirected from /dev/null, as happens
-// under `go test`) is treated as no input rather than fed to the decoder.
+// Every ready wake descriptor is drained in a loop until a read returns no
+// data — either an error (EAGAIN on an empty non-blocking pipe) or a clean
+// zero-byte read (EOF, e.g. the write end closed while the read end is still
+// open) — and its kind OR'd into the returned mask. Stdin is read at most
+// once per call, up to 256 bytes; a zero-byte or errored read (e.g. stdin
+// redirected from /dev/null, as happens under `go test`) is treated as no
+// input rather than fed to the decoder.
 func pollEvents(dec *inputDecoder, timeout time.Duration, wakes []wakeFD) ([]inputEvent, wakeKind) {
-	fd := int(os.Stdin.Fd())
+	fd := stdinFD
 	maxFd := fd
 	var fdSet unix.FdSet
 	fdSet.Set(fd)
@@ -373,14 +389,13 @@ func pollEvents(dec *inputDecoder, timeout time.Duration, wakes []wakeFD) ([]inp
 		}
 	}
 
-	if pending, ok := dec.PendingTimeout(time.Now()); ok {
-		if timeout == 0 || pending < timeout {
-			timeout = pending
-		}
+	pending, hasPending := dec.PendingTimeout(time.Now())
+	if hasPending && (timeout == 0 || pending < timeout) {
+		timeout = pending
 	}
 
 	var tvp *unix.Timeval
-	if timeout > 0 {
+	if timeout > 0 || hasPending {
 		tv := unix.NsecToTimeval(timeout.Nanoseconds())
 		tvp = &tv
 	}
@@ -400,7 +415,8 @@ func pollEvents(dec *inputDecoder, timeout time.Duration, wakes []wakeFD) ([]inp
 		}
 		var drain [64]byte
 		for {
-			if _, err := unix.Read(w.fd, drain[:]); err != nil {
+			nr, err := unix.Read(w.fd, drain[:])
+			if err != nil || nr == 0 {
 				break
 			}
 		}
