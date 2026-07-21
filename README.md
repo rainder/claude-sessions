@@ -90,17 +90,36 @@ claude-sessions tmux-info PID              # tmux session name for a pid
 
 ### Live-view keys
 
-| Key  | Action                                         |
-| ---- | ---------------------------------------------- |
-| ↑/↓  | navigate                                       |
-| n    | new tmux session (↑/↓ cwd · ←/→ command)       |
-| k    | kill (tmux-aware)                              |
-| a    | attach (or migrate to tmux first)              |
-| p    | preview (tmux pane snapshot or transcript)     |
-| m    | toggle view mode (full ↔ minimal, persisted)   |
-| r    | refresh now                                    |
-| ?    | help modal                                     |
-| q    | quit (Ctrl-C / Ctrl-D also work)               |
+| Key     | Action                                          |
+| ------- | ----------------------------------------------- |
+| ↑/↓     | navigate                                        |
+| n       | new tmux session (↑/↓ cwd · ←/→ command)        |
+| k       | kill (tmux-aware)                               |
+| a       | attach (or migrate to tmux first)               |
+| Enter/p | open fullscreen inspector                       |
+| m       | toggle view mode (full ↔ minimal, persisted)    |
+| r       | refresh now                                     |
+| ?       | help modal                                      |
+| q       | quit (Ctrl-C / Ctrl-D also work)                |
+| click   | select a row (double-click opens the inspector) |
+| wheel   | scroll the list                                 |
+
+### Fullscreen inspector
+
+`Enter`/`p` opens a fullscreen inspector for the selected row: a live tmux
+pane snapshot, falling back to the transcript tail when the session has no
+pane.
+
+| Key       | Action                               |
+| --------- | ------------------------------------- |
+| ↑/↓, j/k  | scroll one line                      |
+| PgUp/PgDn | scroll one page                      |
+| Home/End  | jump to oldest / resume live follow  |
+| r         | refresh now                          |
+| Esc/q/p   | back to the list                     |
+
+Mouse works throughout: wheel scrolls, and the footer's Back/Refresh/Follow
+controls are clickable.
 
 ### Command presets
 

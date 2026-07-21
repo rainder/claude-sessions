@@ -79,11 +79,17 @@ func renderInspectorTooSmall(w io.Writer, cols, rows int) []hitRegion {
 	return []hitRegion{{x0: 0, y0: 1, x1: x1, y1: 1, action: hitInspectorBack}}
 }
 
-// inspectorTitle formats the header line: bold display name, PID, and the host
-// when the session came from a remote server.
+// inspectorTitle formats the header line: display name (bold when user-set,
+// dimmed when auto-derived — matching how render.go's list rows treat the
+// same DisplayName flag), PID, and the host when the session came from a
+// remote server.
 func inspectorTitle(snap InspectorSnapshot) string {
-	name, _ := snap.Session.DisplayName()
-	title := bold(name) + "  PID " + strconv.Itoa(snap.Session.PID)
+	name, dimmed := snap.Session.DisplayName()
+	label := bold(name)
+	if dimmed {
+		label = dim(name)
+	}
+	title := label + "  PID " + strconv.Itoa(snap.Session.PID)
 	if snap.Session.Host != "" {
 		title += "  " + dim(snap.Session.Host)
 	}

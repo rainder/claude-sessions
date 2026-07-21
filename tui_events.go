@@ -352,10 +352,9 @@ var stdinFD = int(os.Stdin.Fd())
 
 // pollEvents waits up to timeout for stdin or any of wakes to become
 // readable, decodes any stdin bytes through dec, and reports which wake
-// sources fired as a bitmask. It generalizes readEvents (tui.go) from a
-// single optional wake descriptor to an arbitrary list, so the render loop
-// can multiplex the remote hub, the fullscreen inspector, and SIGWINCH-driven
-// resize wakes over one select call instead of one.
+// sources fired as a bitmask. It takes an arbitrary list of wake descriptors
+// so the render loop can multiplex the remote hub, the fullscreen inspector,
+// and SIGWINCH-driven resize wakes over one select call.
 //
 // timeout == 0 blocks indefinitely, except when dec has a pending incomplete
 // escape sequence (a lone ESC that might still be the start of a longer

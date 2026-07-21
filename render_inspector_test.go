@@ -204,6 +204,22 @@ func TestRenderInspectorFollowClickableWhileFollowing(t *testing.T) {
 	}
 }
 
+// TestInspectorTitleDimsAutoDerivedName mirrors render.go's TestDerivedNameDimmed:
+// an auto-derived name renders dim, a user-set one renders bold and undimmed.
+func TestInspectorTitleDimsAutoDerivedName(t *testing.T) {
+	derived := InspectorSnapshot{Session: Session{PID: 42, Name: "der-name", NameSource: "derived"}}
+	if title := inspectorTitle(derived); !strings.Contains(title, ansiDim+"der-name") {
+		t.Errorf("derived name not dimmed: %q", title)
+	}
+
+	userSet := InspectorSnapshot{Session: Session{PID: 42, Name: "usr-name", NameSource: "user"}}
+	if title := inspectorTitle(userSet); !strings.Contains(title, ansiBold+"usr-name") {
+		t.Errorf("user-set name not bold: %q", title)
+	} else if strings.Contains(title, ansiDim+"usr-name") {
+		t.Errorf("user-set name unexpectedly dimmed: %q", title)
+	}
+}
+
 func TestRenderInspectorTerminalTooSmall(t *testing.T) {
 	v := populatedInspectorView()
 	var b strings.Builder
