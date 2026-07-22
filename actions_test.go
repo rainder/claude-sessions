@@ -2,9 +2,107 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestActToggleDisabledRoutesLocalAndRemoteAndUsesServerResponse(t *testing.T) {
+	cases := []struct {
+		name           string
+		session        Session
+		wantHost       string
+		wantRequest    bool
+		serverDisabled bool
+	}{
+		{"local enable to disabled", Session{PID: 10, SessionID: "local"}, "", true, true},
+		{"local disabled to enabled", Session{PID: 11, SessionID: "local-off", Disabled: true}, "", false, false},
+		{"remote enable to disabled", Session{PID: 20, SessionID: "remote", Host: "orca"}, "orca", true, true},
+		{"server response is authoritative", Session{PID: 30, SessionID: "authoritative"}, "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target := sessionSelectionTarget(tc.session)
+			c := &actCtx{targets: []selectionTarget{target}, sel: target.id}
+			c.updateDisabled = func(
+				host string,
+				pid int,
+				sessionID string,
+				disabled bool,
+			) (disabledState, error) {
+				if host != tc.wantHost || pid != tc.session.PID ||
+					sessionID != tc.session.SessionID || disabled != tc.wantRequest {
+					t.Fatalf(
+						"request = (%q, %d, %q, %v)",
+						host,
+						pid,
+						sessionID,
+						disabled,
+					)
+				}
+				return disabledState{
+					SessionID: tc.session.SessionID,
+					Disabled:  tc.serverDisabled,
+				}, nil
+			}
+			update, err := actToggleDisabled(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if update == nil || update.Host != tc.wantHost ||
+				update.SessionID != tc.session.SessionID ||
+				update.Disabled != tc.serverDisabled {
+				t.Fatalf("update = %#v", update)
+			}
+		})
+	}
+}
+
+func TestActToggleDisabledIgnoresEmptyHostAndReturnsFailure(t *testing.T) {
+	empty := emptyHostSelectionTarget("orca")
+	called := false
+	c := &actCtx{
+		targets: []selectionTarget{empty},
+		sel:     empty.id,
+		updateDisabled: func(string, int, string, bool) (disabledState, error) {
+			called = true
+			return disabledState{}, nil
+		},
+	}
+	update, err := actToggleDisabled(c)
+	if err != nil || update != nil || called {
+		t.Fatalf("empty target = (%#v, %v), called=%v", update, err, called)
+	}
+
+	target := sessionSelectionTarget(Session{PID: 1, SessionID: "one"})
+	c = &actCtx{
+		targets: []selectionTarget{target},
+		sel:     target.id,
+		updateDisabled: func(string, int, string, bool) (disabledState, error) {
+			return disabledState{}, errors.New("server unavailable")
+		},
+	}
+	update, err = actToggleDisabled(c)
+	if update != nil || err == nil || err.Error() != "server unavailable" {
+		t.Fatalf("failed update = (%#v, %v)", update, err)
+	}
+
+	missingID := sessionSelectionTarget(Session{PID: 2})
+	called = false
+	c = &actCtx{
+		targets: []selectionTarget{missingID},
+		sel:     missingID.id,
+		updateDisabled: func(string, int, string, bool) (disabledState, error) {
+			called = true
+			return disabledState{}, nil
+		},
+	}
+	update, err = actToggleDisabled(c)
+	if update != nil || err == nil ||
+		err.Error() != "PID 2 has no stable session ID" || called {
+		t.Fatalf("missing-ID update = (%#v, %v), called=%v", update, err, called)
+	}
+}
 
 func TestActCtxEmptyHostSelectionIsNotSession(t *testing.T) {
 	target := emptyHostSelectionTarget("beluga")

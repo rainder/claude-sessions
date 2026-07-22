@@ -231,6 +231,10 @@ func newTUIState() *tuiState {
 // the current selection. Otherwise (or once settled) it falls back to
 // validateTargetSel so a vanished selected row drops to a valid target,
 // anchoring whenever the effective selection changes.
+func (s *tuiState) requestSelectionAnchor() {
+	s.anchorSelection = true
+}
+
 func (s *tuiState) settleSelection(targets []selectionTarget) {
 	if s.pending != nil {
 		if id := selectionForTmux(targets, s.pending.host, s.pending.tmux); id != "" {

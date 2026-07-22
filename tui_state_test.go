@@ -396,6 +396,32 @@ func TestEnsureLineVisible(t *testing.T) {
 	}
 }
 
+func TestRequestSelectionAnchorRevealsToggledRowAfterSortMove(t *testing.T) {
+	state := newTUIState()
+	state.sel = "2"
+	state.listOffset = 0
+
+	frame := tableFrame{
+		lines: []string{"header", "one", "three", "two", ""},
+		rows: []tableRow{
+			{line: 1, targetID: "1"},
+			{line: 2, targetID: "3"},
+			{line: 3, targetID: "2"},
+		},
+	}
+	state.requestSelectionAnchor()
+	state.resolveListOffset(frame, 2)
+
+	line := frame.targetLine(state.sel)
+	if line < state.listOffset || line >= state.listOffset+2 {
+		t.Fatalf(
+			"selected line %d not visible in offset %d viewport",
+			line,
+			state.listOffset,
+		)
+	}
+}
+
 func TestWithBottomRowPadsAndPlacesBottomLine(t *testing.T) {
 	got := withBottomRow("one\ntwo", 5, "toast")
 	want := "one\ntwo\n\n\ntoast"

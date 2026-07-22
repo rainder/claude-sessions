@@ -52,6 +52,39 @@ func TestSortDescStatus(t *testing.T) {
 	}
 }
 
+func TestSessionDisableFooterAndHelp(t *testing.T) {
+	footer := sessionFooter()
+	if !strings.Contains(footer, "d disable/enable") {
+		t.Fatalf("footer = %q", footer)
+	}
+	if bottom := sessionBottomRow("sort: status", false); bottom != footer {
+		t.Fatalf("normal bottom row = %q, want footer %q", bottom, footer)
+	}
+	toast := sessionBottomRow("sort: status", true)
+	if !strings.Contains(toast, "sort: status") ||
+		strings.Contains(toast, "d disable/enable") {
+		t.Fatalf("toast bottom row = %q", toast)
+	}
+
+	help := renderHelp("dir")
+	for _, want := range []string{
+		"d            disable / enable session",
+		"claude-sessions preview PID",
+		"claude-sessions tmux-info PID",
+		"claude-sessions attach PID",
+		"press any key to return",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help missing %q:\n%s", want, help)
+		}
+	}
+	if strings.Contains(help, "\x1b[H") ||
+		strings.Contains(help, "\x1b[J") ||
+		strings.Contains(help, "\x1b[2J") {
+		t.Fatalf("help contains terminal positioning or clear: %q", help)
+	}
+}
+
 func TestRenderHelpIsPureContent(t *testing.T) {
 	out := renderHelp("status")
 	for _, want := range []string{"claude-sessions", "NAVIGATION", "current sort: status", "press any key to return"} {

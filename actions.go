@@ -14,6 +14,12 @@ import (
 // can capture the write; restore it with t.Cleanup.
 var terminalOutput io.Writer = os.Stdout
 
+type disabledUpdate struct {
+	Host      string
+	SessionID string
+	Disabled  bool
+}
+
 // actCtx is the runtime state passed to action handlers.
 type actCtx struct {
 	fd       int
@@ -37,6 +43,13 @@ type actCtx struct {
 	// no new session was spawned (cancelled, or spawn failed).
 	spawnedHost string
 	spawnedTmux string
+
+	updateDisabled func(
+		host string,
+		pid int,
+		sessionID string,
+		disabled bool,
+	) (disabledState, error)
 }
 
 // runInteractive hands the terminal to prog with the pollers suspended,
@@ -116,6 +129,41 @@ func (c *actCtx) selectedRemoteNewTarget() (host, defaultCWD string, ok bool) {
 		defaultCWD = target.session.CWD
 	}
 	return target.host, defaultCWD, true
+}
+
+func actToggleDisabled(c *actCtx) (*disabledUpdate, error) {
+	session := c.selected()
+	if session == nil {
+		return nil, nil
+	}
+	if session.SessionID == "" {
+		return nil, fmt.Errorf("PID %d has no stable session ID", session.PID)
+	}
+	update := c.updateDisabled
+	if update == nil {
+		update = setSessionDisabled
+	}
+	state, err := update(
+		session.Host,
+		session.PID,
+		session.SessionID,
+		!session.Disabled,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &disabledUpdate{
+		Host:      session.Host,
+		SessionID: state.SessionID,
+		Disabled:  state.Disabled,
+	}, nil
+}
+
+func showActionError(c *actCtx, label string, err error) {
+	c.prepareLineOutput()
+	fmt.Printf("\n%s: %v\n", label, err)
+	pauseForKey(c.fd, c.oldState)
+	c.enterRaw()
 }
 
 // actKill confirms then kills the selected session. Tmux-aware: kills the

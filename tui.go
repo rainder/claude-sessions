@@ -165,27 +165,32 @@ func RunTUI(interval time.Duration) error {
 	var toast string
 	var toastUntil time.Time
 
-	// refresh re-reads local sessions and the latest remote snapshot. When
-	// kickRemote is true, the hub is also asked to refetch ASAP (used after
-	// actions and the 'r' key). Wall-clock ticks pass false because the hub
-	// has its own ticker — kicking on every tick would just double-fetch.
-	refresh := func(kickRemote bool) {
-		if s, err := CollectLocal(); err == nil {
-			local = s
-		}
+	// settleRows sorts the latest local and remote snapshots, then reconciles
+	// selection. It chases a pending post-spawn landing until its tmux pane
+	// appears, otherwise falling back if a vanished selected row needs replacing.
+	settleRows := func() {
 		SortSessions(local, sortMode)
-		if kickRemote {
-			hub.Refresh()
-		}
 		// Snapshot() returns the hub's shared slices; sort remotes on copies so
 		// we never race the hub goroutine that owns them.
 		remotes = sortRemotes(hub.Snapshot(), sortMode)
 		targets = buildSelectionTargets(local, remotes)
-		// Reconcile the selection against the new targets: chase a pending
-		// post-spawn landing if one is set (retrying until its tmux pane shows
-		// up in a snapshot), otherwise fall back so a vanished selected row
-		// drops to a valid target. Either move re-anchors the viewport.
 		state.settleSelection(targets)
+	}
+
+	// refresh re-reads local sessions through the authoritative loopback server
+	// when available (falling back to direct collection), then settles the latest
+	// remote snapshot. When kickRemote is true, the hub is also asked to refetch
+	// ASAP (used after actions and the 'r' key). Wall-clock ticks pass false
+	// because the hub has its own ticker — kicking on every tick would just
+	// double-fetch.
+	refresh := func(kickRemote bool) {
+		if sessions, err := collectClientLocal(); err == nil {
+			local = sessions
+		}
+		if kickRemote {
+			hub.Refresh()
+		}
+		settleRows()
 	}
 
 	// markInspectorEndedIfGone flags the inspector as ended when the session it
@@ -202,8 +207,8 @@ func RunTUI(interval time.Duration) error {
 	}
 
 	// render paints the active screen. On the session list it builds the table
-	// frame, keeps the selected row visible, reserves the bottom row for an
-	// active toast, and crops to the terminal viewport (recording hit regions
+	// frame, keeps the selected row visible, reserves the bottom row for a footer
+	// or active toast, and crops to the terminal viewport (recording hit regions
 	// for mouse routing). On the inspector it applies the latest hub snapshot,
 	// sizes the viewport, and lets RenderInspector draw + report its controls.
 	//
@@ -241,7 +246,7 @@ func RunTUI(interval time.Duration) error {
 		}, remotes, state.sel, usageHub.Snapshot(), cols, 0, sortMode)
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
-		if toastActive {
+		if rows > 0 {
 			viewRows--
 		}
 		if viewRows < 0 {
@@ -264,8 +269,12 @@ func RunTUI(interval time.Duration) error {
 			state.hits = visible.hits
 			out = visible.text
 		}
-		if toastActive {
-			out = withBottomRow(out, rows, bold(toast))
+		if rows > 0 {
+			out = withBottomRow(
+				out,
+				rows,
+				sessionBottomRow(toast, toastActive),
+			)
 		}
 		_ = screen.Draw(out, cols, rows)
 	}
@@ -443,6 +452,27 @@ func RunTUI(interval time.Duration) error {
 				actAttach(makeCtx())
 				refresh(true)
 				render()
+			case "d", "D":
+				ctx := makeCtx()
+				update, err := actToggleDisabled(ctx)
+				if err != nil {
+					screen.Invalidate()
+					showActionError(ctx, "disable toggle failed", err)
+					render()
+					continue
+				}
+				if update == nil {
+					continue
+				}
+				if update.Host == "" {
+					patchDisabledBySessionID(local, update.SessionID, update.Disabled)
+				} else {
+					hub.PatchDisabled(update.Host, update.SessionID, update.Disabled)
+					hub.Refresh()
+				}
+				settleRows()
+				state.requestSelectionAnchor()
+				render()
 			case "n", "N":
 				screen.Invalidate()
 				ctx := makeCtx()
@@ -602,6 +632,17 @@ func sortRemotes(remotes []RemoteResult, mode string) []RemoteResult {
 	return out
 }
 
+func sessionFooter() string {
+	return dim("d disable/enable  ·  ? help")
+}
+
+func sessionBottomRow(toast string, toastActive bool) string {
+	if toastActive {
+		return bold(toast)
+	}
+	return sessionFooter()
+}
+
 // renderHelp builds help-screen content. RunTUI owns terminal positioning and
 // sends this content through screenRenderer.
 func renderHelp(sortMode string) string {
@@ -615,6 +656,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("ACTIONS")+"  (on selected row)")
 	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command)")
+	fmt.Fprintln(&b, "    d            disable / enable session")
 	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
