@@ -5,7 +5,6 @@ import (
 	"io"
 	"math"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -54,14 +53,10 @@ func tmuxViewerSymbol(s Session) (symbol, sgr string) {
 		return "·", "2"
 	}
 	attached := *s.TmuxAttached
-	switch {
-	case attached == 0:
+	if attached == 0 {
 		return " ", ""
-	case attached < 10:
-		return strconv.Itoa(attached), "1;32"
-	default:
-		return "+", "1;32"
 	}
+	return "▶", "1;32"
 }
 
 func tmuxViewerPrefix(s Session, plain bool) string {
@@ -290,15 +285,6 @@ func formatTokens(n int) string {
 	default:
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 	}
-}
-
-// formatAgents renders a running-subagent count: blank at zero so idle rows
-// stay quiet, plain digits otherwise.
-func formatAgents(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d", n)
 }
 
 // contextWindow is the assumed model context limit used to color the CTX
@@ -781,7 +767,6 @@ type drowFull struct {
 	modelStr  string
 	ctxStr    string
 	costStr   string
-	agentsStr string // running-subagent count, "" when zero
 	ageStr    string
 	sidShort  string
 }
@@ -802,7 +787,6 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		modelStr:  shortModel(s.Model),
 		ctxStr:    formatTokens(s.ContextTokens),
 		costStr:   formatCost(s.CostUSD, s.CostSubagentsUSD),
-		agentsStr: formatAgents(s.AgentsRunning),
 		ageStr:    formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
 		sidShort:  sid,
 	}
@@ -838,13 +822,12 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	}
 
 	dirLabel, statusLabel, ageLabel := sortLabels(sortMode)
-	nameW, dirW, modelW, costW, agentsW, statusW, tmuxW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), len("AGENTS"), utf8.RuneCountInString(statusLabel), len("TMUX")
+	nameW, dirW, modelW, costW, statusW, tmuxW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), utf8.RuneCountInString(statusLabel), len("TMUX")
 	for _, r := range all {
 		nameW = max(nameW, len(r.nameStr))
 		dirW = max(dirW, len(r.cwdStr))
 		modelW = max(modelW, len(r.modelStr))
 		costW = max(costW, len(r.costStr))
-		agentsW = max(agentsW, len(r.agentsStr))
 		statusW = max(statusW, len(r.statusStr))
 		t := r.s.Tmux
 		if t == "" {
@@ -857,9 +840,9 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			"    %7s  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
+			"    %7s  %-*s  %-*s  %-*s  %-*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
 			"PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL",
-			statusW, statusLabel, costW, "COST", agentsW, "AGENTS",
+			statusW, statusLabel, costW, "COST",
 			"CTX", tmuxW, "TMUX", "CPU%", ageLabel, "VER", "SID",
 		)
 	}
@@ -902,14 +885,13 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 					sidCell = dim(sidCell)
 				}
 			}
-			body := fmt.Sprintf("%7d  %s  %s  %s  %s  %s  %*s  %s  %s  %5s  %5s  %-8s  %s ",
+			body := fmt.Sprintf("%7d  %s  %s  %s  %s  %s  %s  %s  %5s  %5s  %-8s  %s ",
 				r.s.PID,
 				nameCell,
 				marqueeCell(r.cwdStr, dirW, step),
 				modelCell(r.modelStr, modelW, plainCells),
 				statusCell,
 				costCell(r.costStr, costW),
-				agentsW, r.agentsStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
 				tmuxCell,
 				r.s.CPU, r.ageStr, r.s.Version, sidCell,
@@ -965,13 +947,12 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 	}
 
 	dirLabel, statusLabel, ageLabel := sortLabels(sortMode)
-	nameW, dirW, modelW, costW, agentsW, statusW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), len("AGENTS"), utf8.RuneCountInString(statusLabel)
+	nameW, dirW, modelW, costW, statusW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), utf8.RuneCountInString(statusLabel)
 	for _, r := range all {
 		nameW = max(nameW, len(r.nameStr))
 		dirW = max(dirW, len(r.cwdStr))
 		modelW = max(modelW, len(r.modelStr))
 		costW = max(costW, len(r.costStr))
-		agentsW = max(agentsW, len(r.agentsStr))
 		statusW = max(statusW, len(r.statusStr))
 	}
 
@@ -979,9 +960,9 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			"    %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s ",
+			"    %-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s ",
 			nameW, "NAME", dirW, dirLabel, statusW, statusLabel,
-			modelW, "MODEL", costW, "COST", agentsW, "AGENTS",
+			modelW, "MODEL", costW, "COST",
 			"CTX", ageLabel,
 		)
 	}
@@ -1009,13 +990,12 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %s  %s  %*s  %s  %5s ",
+			body := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %5s ",
 				nameCell,
 				marqueeCell(r.cwdStr, dirW, step),
 				statusCell,
 				modelCell(r.modelStr, modelW, plainCells),
 				costCell(r.costStr, costW),
-				agentsW, r.agentsStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
 				r.ageStr,
 			)

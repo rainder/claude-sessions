@@ -67,13 +67,13 @@ func TestTmuxViewerPrefix(t *testing.T) {
 		{"no tmux", Session{}, false, "  "},
 		{"unknown", Session{Tmux: "dev:0.0"}, false, dim("· ")},
 		{"detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, false, "  "},
-		{"one", Session{Tmux: "dev:0.0", TmuxAttached: &one}, false, colorize("1;32", "1 ")},
-		{"nine", Session{Tmux: "dev:0.0", TmuxAttached: &nine}, false, colorize("1;32", "9 ")},
-		{"ten", Session{Tmux: "dev:0.0", TmuxAttached: &ten}, false, colorize("1;32", "+ ")},
+		{"one", Session{Tmux: "dev:0.0", TmuxAttached: &one}, false, colorize("1;32", "▶ ")},
+		{"nine", Session{Tmux: "dev:0.0", TmuxAttached: &nine}, false, colorize("1;32", "▶ ")},
+		{"ten", Session{Tmux: "dev:0.0", TmuxAttached: &ten}, false, colorize("1;32", "▶ ")},
 		{"negative unknown", Session{Tmux: "dev:0.0", TmuxAttached: &negative}, false, dim("· ")},
 		{"plain unknown", Session{Tmux: "dev:0.0"}, true, "· "},
 		{"plain detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, true, "  "},
-		{"plain positive", Session{Tmux: "dev:0.0", TmuxAttached: &one}, true, "1 "},
+		{"plain positive", Session{Tmux: "dev:0.0", TmuxAttached: &one}, true, "▶ "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,9 +155,6 @@ func assertWholeRowSelected(t *testing.T, row, prefix string) {
 	}
 	if strings.Contains(row, ansiInvert) {
 		t.Fatalf("selected row still uses reverse video: %q", row)
-	}
-	if strings.Contains(row, "▶") {
-		t.Fatalf("selected row still contains arrow: %q", row)
 	}
 }
 
@@ -263,9 +260,9 @@ func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
 		{"plain", "", nil, "  "},
 		{"unknown", "unknown:0.0", nil, dim("· ")},
 		{"detached", "detached:0.0", &zero, "  "},
-		{"one", "one:0.0", &one, colorize("1;32", "1 ")},
-		{"nine", "nine:0.0", &nine, colorize("1;32", "9 ")},
-		{"ten", "ten:0.0", &ten, colorize("1;32", "+ ")},
+		{"one", "one:0.0", &one, colorize("1;32", "▶ ")},
+		{"nine", "nine:0.0", &nine, colorize("1;32", "▶ ")},
+		{"ten", "ten:0.0", &ten, colorize("1;32", "▶ ")},
 	}
 	for _, mode := range []string{"1", "2", "3"} {
 		for i, tc := range cases {
@@ -300,7 +297,7 @@ func TestSelectedSessionRowsHighlightWholeRow(t *testing.T) {
 			Tmux: "selected:0.0", TmuxAttached: &attached,
 		}
 		selectedRow := renderSessionRowForTest(t, mode, s, true)
-		assertWholeRowSelected(t, selectedRow, "2 ")
+		assertWholeRowSelected(t, selectedRow, "▶ ")
 
 		unselectedRow := renderSessionRowForTest(t, mode, s, false)
 		if visualLen(selectedRow) != visualLen(unselectedRow) {
@@ -333,7 +330,7 @@ func TestSelectedHeadlessRowsSuppressDim(t *testing.T) {
 			Tmux: "headless:0.0", TmuxAttached: &attached,
 		}
 		row := renderSessionRowForTest(t, mode, s, true)
-		assertWholeRowSelected(t, row, "1 ")
+		assertWholeRowSelected(t, row, "▶ ")
 		inner := strings.TrimSuffix(strings.TrimPrefix(row, ansiSelectedBG), ansiReset)
 		if strings.Contains(inner, ansiDim) {
 			t.Errorf("mode %s selected headless row contains dim wrapper: %q", mode, row)
@@ -388,7 +385,7 @@ func TestHeadlessRowsDimmed(t *testing.T) {
 		out := b.String()
 
 		ghostRow := findRow(t, out, "ghostdir")
-		if !strings.HasPrefix(ghostRow, ansiDim+"1 ") {
+		if !strings.HasPrefix(ghostRow, ansiDim+"▶ ") {
 			t.Errorf("mode %s: headless row and viewer prefix not dimmed: %q", mode, ghostRow)
 		}
 		// A reset before the end would cancel the dim mid-row.
@@ -840,19 +837,7 @@ func TestSortIndicator(t *testing.T) {
 	}
 }
 
-func TestFormatAgents(t *testing.T) {
-	if got := formatAgents(0); got != "" {
-		t.Errorf("formatAgents(0) = %q, want empty", got)
-	}
-	if got := formatAgents(-1); got != "" {
-		t.Errorf("formatAgents(-1) = %q, want empty", got)
-	}
-	if got := formatAgents(3); got != "3" {
-		t.Errorf("formatAgents(3) = %q, want 3", got)
-	}
-}
-
-func TestRenderAgentsColumnAndHeaderTotal(t *testing.T) {
+func TestRenderHeaderTotal(t *testing.T) {
 	local := []Session{
 		{PID: 100, SessionID: "aaaa", CWD: "/w1", Status: "busy", StartedAt: 1, AgentsRunning: 3},
 		{PID: 200, SessionID: "bbbb", CWD: "/w2", Status: "idle", StartedAt: 2},
@@ -861,9 +846,6 @@ func TestRenderAgentsColumnAndHeaderTotal(t *testing.T) {
 	RenderAll(&buf, "1", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	out := buf.String()
 
-	if !strings.Contains(out, "AGENTS") {
-		t.Errorf("full view missing AGENTS column header:\n%s", out)
-	}
 	// 2 sessions + 3 running subagents = 5 concurrent agent loops; one main
 	// loop occupied (busy). The busy count is colorized, so match it apart
 	// from the plain-text prefix.
@@ -871,20 +853,10 @@ func TestRenderAgentsColumnAndHeaderTotal(t *testing.T) {
 		t.Errorf("header missing grand total:\n%s", out)
 	}
 
-	// Intermediate view carries the column too.
-	buf.Reset()
-	RenderAll(&buf, "3", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
-	if !strings.Contains(buf.String(), "AGENTS") {
-		t.Errorf("intermediate view missing AGENTS column header")
-	}
-
-	// Minimal view: no column, but header total still present.
+	// Minimal view: header total still present.
 	buf.Reset()
 	RenderAll(&buf, "2", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	out = buf.String()
-	if strings.Contains(out, "AGENTS") {
-		t.Errorf("minimal view must not have AGENTS column:\n%s", out)
-	}
 	if !strings.Contains(out, "5 agents, 2 sessions,") {
 		t.Errorf("minimal header missing grand total:\n%s", out)
 	}
@@ -1204,7 +1176,7 @@ func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 			enabledRow := renderSessionRowForTest(t, mode, enabled, false)
 			disabledRow := renderSessionRowForTest(t, mode, disabled, false)
 
-			if !strings.HasPrefix(stripANSI(disabledRow), "2 │ ") {
+			if !strings.HasPrefix(stripANSI(disabledRow), "▶ │ ") {
 				t.Fatalf("mode %s disabled visible prefix = %q", mode, stripANSI(disabledRow))
 			}
 			if !strings.Contains(
@@ -1213,7 +1185,7 @@ func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 			) {
 				t.Fatalf("mode %s rail is not outside muted body: %q", mode, disabledRow)
 			}
-			if !strings.HasPrefix(disabledRow, ansiDim+"2 "+ansiReset) {
+			if !strings.HasPrefix(disabledRow, ansiDim+"▶ "+ansiReset) {
 				t.Fatalf("mode %s viewer prefix is not muted: %q", mode, disabledRow)
 			}
 			if strings.Contains(enabledRow, "│") {
@@ -1306,7 +1278,7 @@ func TestSelectedDisabledRowsKeepBackgroundColorsAndAmberRail(t *testing.T) {
 			Disabled: true,
 		}
 		row := renderSessionRowForTest(t, mode, session, true)
-		assertWholeRowSelected(t, row, "2 │ ")
+		assertWholeRowSelected(t, row, "▶ │ ")
 		if !strings.Contains(row, "\033[33m│\033[39m ") {
 			t.Fatalf(
 				"mode %s selected disabled row lacks amber rail: %q",
