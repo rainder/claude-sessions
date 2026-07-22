@@ -184,13 +184,11 @@ func RunTUI(interval time.Duration) error {
 		// we never race the hub goroutine that owns them.
 		remotes = sortRemotes(hub.Snapshot(), sortMode)
 		targets = buildSelectionTargets(local, remotes)
-		// A fallback that moves the selection (its row vanished) re-anchors the
-		// viewport to the new selection on the next render.
-		prevSel := state.sel
-		state.sel = validateTargetSel(targets, state.sel)
-		if state.sel != prevSel {
-			state.anchorSelection = true
-		}
+		// Reconcile the selection against the new targets: chase a pending
+		// post-spawn landing if one is set (retrying until its tmux pane shows
+		// up in a snapshot), otherwise fall back so a vanished selected row
+		// drops to a valid target. Either move re-anchors the viewport.
+		state.settleSelection(targets)
 	}
 
 	// markInspectorEndedIfGone flags the inspector as ended when the session it
@@ -415,12 +413,10 @@ func RunTUI(interval time.Duration) error {
 			case "q", "Q", "\x03", "\x04":
 				return nil
 			case KeyUp:
-				state.sel = navTargets(targets, state.sel, -1)
-				state.anchorSelection = true
+				state.navigate(targets, -1)
 				render()
 			case KeyDown:
-				state.sel = navTargets(targets, state.sel, 1)
-				state.anchorSelection = true
+				state.navigate(targets, 1)
 				render()
 			case "k", "K":
 				actKill(makeCtx())
@@ -433,11 +429,15 @@ func RunTUI(interval time.Duration) error {
 			case "n", "N":
 				ctx := makeCtx()
 				actNew(ctx)
-				refresh(true)
-				if id := selectionForTmux(targets, ctx.spawnedHost, ctx.spawnedTmux); id != "" {
-					state.sel = id
-					state.anchorSelection = true
+				// Record the spawned session's landing target before refreshing so
+				// settleSelection can chase it across refreshes: new local metadata
+				// lags and the first remote snapshot is stale, so a one-shot lookup
+				// here would miss. Only a real spawn (non-empty tmux) sets pending;
+				// a cancelled or failed new-session leaves any prior intent intact.
+				if ctx.spawnedTmux != "" {
+					state.pending = &pendingSpawn{host: ctx.spawnedHost, tmux: ctx.spawnedTmux}
 				}
+				refresh(true)
 				render()
 			case "m", "M":
 				switch viewMode {

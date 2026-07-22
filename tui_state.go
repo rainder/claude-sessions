@@ -161,6 +161,17 @@ func inspectorKeyCommand(key string) tuiCommand {
 	}
 }
 
+// pendingSpawn is a just-spawned session's landing target, held across refreshes
+// until a snapshot surfaces its tmux pane so settleSelection can move onto it.
+// New local metadata can lag and the first remote snapshot after a spawn is
+// necessarily stale, so a one-shot post-spawn lookup would miss; retaining the
+// intent lets every later refresh retry until the row appears. host is the
+// session's host label ("" for local); tmux is the spawned tmux session name.
+type pendingSpawn struct {
+	host string
+	tmux string
+}
+
 // tuiState is the mutable screen state owned by the render loop: which screen
 // is showing, the current selection, the session-list scroll offset, the hit
 // regions for the frame last drawn, the double-click tracking pair, and the
@@ -169,6 +180,10 @@ type tuiState struct {
 	mode       screenMode
 	sel        string
 	listOffset int
+	// pending holds a just-spawned session's landing target until a refresh
+	// finds its tmux pane (settleSelection); nil when there is no spawn to chase.
+	// Explicit navigation (keyboard nav, click-select) clears it.
+	pending *pendingSpawn
 	// anchorSelection requests that the next session-list render scroll the
 	// selected row into view. It is set when the selection changes (keyboard
 	// nav, click-select, or a validateTargetSel fallback) and cleared once
@@ -188,6 +203,42 @@ type tuiState struct {
 // newTUIState starts on the session list with no selection.
 func newTUIState() *tuiState {
 	return &tuiState{mode: screenSessions}
+}
+
+// settleSelection reconciles the selection against a freshly-built set of
+// targets, called on every refresh after buildSelectionTargets. When a spawn is
+// pending it first tries to land the selection on that session's tmux pane: on a
+// hit it selects the row (anchoring if the selection moved) and clears the
+// intent; while the pane is still absent it keeps both the pending intent and
+// the current selection. Otherwise (or once settled) it falls back to
+// validateTargetSel so a vanished selected row drops to a valid target,
+// anchoring whenever the effective selection changes.
+func (s *tuiState) settleSelection(targets []selectionTarget) {
+	if s.pending != nil {
+		if id := selectionForTmux(targets, s.pending.host, s.pending.tmux); id != "" {
+			if s.sel != id {
+				s.sel = id
+				s.anchorSelection = true
+			}
+			s.pending = nil
+			return
+		}
+	}
+	prevSel := s.sel
+	s.sel = validateTargetSel(targets, s.sel)
+	if s.sel != prevSel {
+		s.anchorSelection = true
+	}
+}
+
+// navigate moves the selection by delta over targets and requests a re-anchor.
+// It is explicit user navigation, so it cancels any pending post-spawn intent:
+// once the user has moved the cursor themselves, a later spawn snapshot must not
+// yank the selection away.
+func (s *tuiState) navigate(targets []selectionTarget, delta int) {
+	s.pending = nil
+	s.sel = navTargets(targets, s.sel, delta)
+	s.anchorSelection = true
 }
 
 // hitAt returns the first hit region containing the cell (x, y), or nil.
@@ -230,6 +281,9 @@ func (s *tuiState) handleListMouse(m mouseEvent, now time.Time) tuiCommand {
 			s.lastClickID == hit.targetID &&
 			!s.lastClickAt.IsZero() &&
 			now.Sub(s.lastClickAt) <= doubleClickWindow
+		// Clicking a row is explicit navigation: drop any pending post-spawn
+		// intent so a later spawn snapshot can't override the user's choice.
+		s.pending = nil
 		s.sel = hit.targetID
 		if doubleClick {
 			// Reset so a third quick click starts a fresh single-click.
