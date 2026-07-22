@@ -115,6 +115,14 @@ func (s Session) Updated() time.Time {
 	return time.UnixMilli(s.UpdatedAt)
 }
 
+// isScratchCWD reports whether cwd is /tmp or a subdirectory of it. Sessions
+// launched there are short-lived scratch/automation runs (hooks, headless
+// forks, one-shot scripts), not real project work, so they're hidden from
+// every view.
+func isScratchCWD(cwd string) bool {
+	return cwd == "/tmp" || strings.HasPrefix(cwd, "/tmp/")
+}
+
 // CollectLocal reads every *.json under ~/.claude/sessions, filters out dead
 // pids, and enriches each session with CPU% and tmux pane info.
 func CollectLocal() ([]Session, error) {
@@ -141,6 +149,9 @@ func CollectLocal() ([]Session, error) {
 			continue
 		}
 		if !pidAlive(s.PID) {
+			continue
+		}
+		if isScratchCWD(s.CWD) {
 			continue
 		}
 		if c, ok := cpu[s.PID]; ok {

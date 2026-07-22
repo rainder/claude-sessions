@@ -147,7 +147,7 @@ func TestCollectLocalSetsHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := os.Getpid()
-	data, err := json.Marshal(Session{PID: pid, SessionID: "home-test", CWD: filepath.Join(home, "project"), StartedAt: time.Now().UnixMilli()})
+	data, err := json.Marshal(Session{PID: pid, SessionID: "home-test", CWD: "/home/testuser/project", StartedAt: time.Now().UnixMilli()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,6 +169,50 @@ func TestCollectLocalSetsHome(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("pid %d not found in CollectLocal() rows", pid)
+	}
+}
+
+func TestCollectLocalHidesTmpCWD(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	data, err := json.Marshal(Session{PID: pid, SessionID: "tmp-test", CWD: "/tmp/scratch-123", StartedAt: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(pid)+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := CollectLocal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.PID == pid {
+			t.Fatalf("pid %d with cwd /tmp/scratch-123 should be hidden, got row %+v", pid, r)
+		}
+	}
+}
+
+func TestIsScratchCWD(t *testing.T) {
+	cases := []struct {
+		cwd  string
+		want bool
+	}{
+		{"/tmp", true},
+		{"/tmp/foo", true},
+		{"/tmpfoo", false},
+		{"/home/andy/project", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isScratchCWD(c.cwd); got != c.want {
+			t.Errorf("isScratchCWD(%q) = %v, want %v", c.cwd, got, c.want)
+		}
 	}
 }
 
