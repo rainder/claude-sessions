@@ -177,7 +177,7 @@ func CollectLocal() ([]Session, error) {
 }
 
 // sessionStatusRank buckets a session for "status" mode ordering: sessions
-// waiting on the user first, then idle, then busy, then everything else
+// waiting on the user first, then idle, shell, busy, and everything else
 // (unknown/blank status).
 func sessionStatusRank(s Session) int {
 	if s.WaitingFor != "" {
@@ -186,17 +186,19 @@ func sessionStatusRank(s Session) int {
 	switch strings.ToLower(s.Status) {
 	case "idle":
 		return 1
-	case "busy":
+	case "shell":
 		return 2
-	default:
+	case "busy":
 		return 3
+	default:
+		return 4
 	}
 }
 
 // SortSessions orders rows in place, stably, per the given mode:
 //
 //	dir         cwd asc (case-insensitive), StartedAt desc tiebreak
-//	status      waiting > idle > busy > other, Updated() desc tiebreak
+//	status      waiting > idle > shell > busy > other, Updated() desc tiebreak
 //	created     StartedAt desc; created-asc: StartedAt asc
 //	updated     Updated() desc; updated-asc: Updated() asc
 //

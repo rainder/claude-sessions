@@ -130,6 +130,7 @@ func TestSortSessionsStatus(t *testing.T) {
 		{SessionID: "waiting", Status: "busy", WaitingFor: "permission prompt", UpdatedAt: 50},
 		{SessionID: "idle-new", Status: "IDLE", UpdatedAt: 300},
 		{SessionID: "busy-new", Status: "busy", UpdatedAt: 700},
+		{SessionID: "shell", Status: "shell", UpdatedAt: 200},
 		{SessionID: "blank", UpdatedAt: 1000},
 	}
 
@@ -138,7 +139,7 @@ func TestSortSessionsStatus(t *testing.T) {
 	for i, s := range rows {
 		got[i] = s.SessionID
 	}
-	want := []string{"waiting", "idle-new", "idle-old", "busy-new", "busy-old", "blank", "unknown"}
+	want := []string{"waiting", "idle-new", "idle-old", "shell", "busy-new", "busy-old", "blank", "unknown"}
 	if !equalStrings(got, want) {
 		t.Fatalf("status order = %v, want %v", got, want)
 	}
