@@ -102,13 +102,13 @@ Session-list selection changes from a leading `▶` to continuous reverse-video 
 Selected rows must not contain nested ANSI resets that cancel reverse video midway through the row. Each renderer should:
 
 1. Determine whether the row is selected.
-2. Use a plain cell-rendering path for selected rows, suppressing status, model, context, name, and viewer-prefix color wrappers.
+2. Use a plain cell-rendering path for selected rows, suppressing every cell-level ANSI wrapper: status, model, context, name, tmux placeholder, viewer prefix, and headless dimming.
 3. Build the complete plain row.
 4. Wrap the complete row once with reverse video and one trailing reset.
 
 For unselected rows, existing cell colors remain. Unselected headless rows remain dimmed. Selection overrides headless dimming while selected; dimming returns after selection moves away.
 
-Selectable empty-host rows use the same whole-row reverse-video selection. Other screens retain their current arrow markers.
+Selectable empty-host rows use the same whole-row reverse-video selection and omit their normal dim wrapper while selected. Other screens retain their current arrow markers. Row identity, mouse hit regions, keyboard movement, and viewport behavior do not change.
 
 ## Rendering structure
 
