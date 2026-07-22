@@ -122,6 +122,41 @@ func TestSortSessions(t *testing.T) {
 	}
 }
 
+func TestSortSessionsStatus(t *testing.T) {
+	rows := []Session{
+		{SessionID: "unknown", Status: "paused", UpdatedAt: 900},
+		{SessionID: "busy-old", Status: "BUSY", UpdatedAt: 500},
+		{SessionID: "idle-old", Status: "idle", UpdatedAt: 100},
+		{SessionID: "waiting", Status: "busy", WaitingFor: "permission prompt", UpdatedAt: 50},
+		{SessionID: "idle-new", Status: "IDLE", UpdatedAt: 300},
+		{SessionID: "busy-new", Status: "busy", UpdatedAt: 700},
+		{SessionID: "blank", UpdatedAt: 1000},
+	}
+
+	SortSessions(rows, "status")
+	got := make([]string, len(rows))
+	for i, s := range rows {
+		got[i] = s.SessionID
+	}
+	want := []string{"waiting", "idle-new", "idle-old", "busy-new", "busy-old", "blank", "unknown"}
+	if !equalStrings(got, want) {
+		t.Fatalf("status order = %v, want %v", got, want)
+	}
+}
+
+func TestSortSessionsStatusStable(t *testing.T) {
+	rows := []Session{
+		{SessionID: "a", Status: "idle", UpdatedAt: 100},
+		{SessionID: "b", Status: "IDLE", UpdatedAt: 100},
+		{SessionID: "c", Status: "idle", UpdatedAt: 100},
+	}
+	SortSessions(rows, "status")
+	got := []string{rows[0].SessionID, rows[1].SessionID, rows[2].SessionID}
+	if want := []string{"a", "b", "c"}; !equalStrings(got, want) {
+		t.Fatalf("stable status order = %v, want %v", got, want)
+	}
+}
+
 func TestSortSessionsStable(t *testing.T) {
 	// Rows tied on the sort key must keep their input order.
 	rows := []Session{
