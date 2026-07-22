@@ -15,14 +15,10 @@ import (
 // configured server. Mirror the local actions, but talk to the server's HTTP
 // API and SSH for the interactive attach.
 
-// remoteRequestWithTimeout performs an HTTP request to the named server with an
+// serverRequestWithTimeout performs an HTTP request to a resolved server with an
 // explicit client timeout. body is JSON if non-empty. Returns the response body
 // or an error.
-func remoteRequestWithTimeout(name, path, method string, body []byte, timeout time.Duration) ([]byte, error) {
-	srv, ok := LookupServer(name)
-	if !ok {
-		return nil, fmt.Errorf("unknown server: %s", name)
-	}
+func serverRequestWithTimeout(srv ServerConfig, path, method string, body []byte, timeout time.Duration) ([]byte, error) {
 	url := fmt.Sprintf("http://%s:%d%s", srv.Host, srv.Port, path)
 	var bodyReader io.Reader
 	if len(body) > 0 {
@@ -47,6 +43,17 @@ func remoteRequestWithTimeout(name, path, method string, body []byte, timeout ti
 		return data, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return data, nil
+}
+
+// remoteRequestWithTimeout performs an HTTP request to the named server with an
+// explicit client timeout. body is JSON if non-empty. Returns the response body
+// or an error.
+func remoteRequestWithTimeout(name, path, method string, body []byte, timeout time.Duration) ([]byte, error) {
+	srv, ok := LookupServer(name)
+	if !ok {
+		return nil, fmt.Errorf("unknown server: %s", name)
+	}
+	return serverRequestWithTimeout(srv, path, method, body, timeout)
 }
 
 // remoteRequest performs an HTTP request to the named server with the default

@@ -13,11 +13,11 @@ import (
 func TestFetchRemoteDecodesHostUsageAndTagsSessions(t *testing.T) {
 	result := fetchRemoteFixture(t, `{
 		"hostUsage":{"cpuPercent":25.5,"memoryPercent":75},
-		"sessions":[{"pid":42,"cwd":"/srv/app"}]
+		"sessions":[{"pid":42,"sessionId":"remote-42","cwd":"/srv/app","disabled":true}]
 	}`)
 	assertFloatPtr(t, result.HostUsage.CPUPercent, floatPtr(25.5))
 	assertFloatPtr(t, result.HostUsage.MemoryPercent, floatPtr(75))
-	if len(result.Sessions) != 1 || result.Sessions[0].Host != "alias" {
+	if len(result.Sessions) != 1 || result.Sessions[0].Host != "alias" || !result.Sessions[0].Disabled {
 		t.Fatalf("sessions = %#v", result.Sessions)
 	}
 }
