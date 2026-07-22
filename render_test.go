@@ -91,9 +91,19 @@ func TestHighlightSelectedRow(t *testing.T) {
 	if got := highlightSelectedRow("2 row", false); got != "2 row" {
 		t.Errorf("unselected row = %q, want unchanged", got)
 	}
-	want := ansiInvert + "2 row" + ansiReset
+	want := ansiSelectedBG + "2 row" + ansiReset
 	if got := highlightSelectedRow("2 row", true); got != want {
 		t.Errorf("selected row = %q, want %q", got, want)
+	}
+}
+
+func TestHighlightSelectedRowReappliesBackgroundAfterNestedReset(t *testing.T) {
+	row := "plain " + colorize("1;31", "busy") + " tail"
+	want := ansiSelectedBG + "plain " +
+		"\033[1;31mbusy" + ansiReset + ansiSelectedBG +
+		" tail" + ansiReset
+	if got := highlightSelectedRow(row, true); got != want {
+		t.Fatalf("selected styled row = %q, want %q", got, want)
 	}
 }
 
@@ -113,17 +123,38 @@ func testLocalHost(rows ...Session) LocalHost {
 	return LocalHost{Name: "local", Sessions: rows}
 }
 
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) && (s[i] < '@' || s[i] > '~') {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 func assertWholeRowSelected(t *testing.T, row, prefix string) {
 	t.Helper()
-	if !strings.HasPrefix(row, ansiInvert+prefix) {
-		t.Fatalf("selected row lacks continuous invert prefix %q: %q", prefix, row)
+	if !strings.HasPrefix(row, ansiSelectedBG) {
+		t.Fatalf("selected row lacks background prefix: %q", row)
+	}
+	if !strings.HasPrefix(stripANSI(row), prefix) {
+		t.Fatalf("selected row lacks visible prefix %q: %q", prefix, row)
 	}
 	if !strings.HasSuffix(row, ansiReset) {
 		t.Fatalf("selected row lacks final reset: %q", row)
 	}
-	inner := strings.TrimSuffix(strings.TrimPrefix(row, ansiInvert), ansiReset)
-	if strings.Contains(inner, ansiReset) {
-		t.Fatalf("selected row contains nested reset: %q", row)
+	if strings.Contains(row, ansiInvert) {
+		t.Fatalf("selected row still uses reverse video: %q", row)
 	}
 	if strings.Contains(row, "▶") {
 		t.Fatalf("selected row still contains arrow: %q", row)
@@ -139,6 +170,82 @@ func renderSessionRowForTest(t *testing.T, mode string, s Session, selected bool
 	var b strings.Builder
 	RenderAll(&b, mode, testLocalHost(s), nil, sel, nil, 0, 0, "dir")
 	return findRow(t, b.String(), s.Name)
+}
+
+func stripTrailingReset(s string) string {
+	return strings.TrimSuffix(s, ansiReset)
+}
+
+func TestSessionRowsHaveOneRightPaddingSpace(t *testing.T) {
+	s := Session{
+		PID: 42, Name: "padding", NameSource: "user", CWD: "/work/padding",
+		Model: "claude-opus-4-8", Status: "busy", Entrypoint: "cli",
+		UpdatedAt: time.Now().UnixMilli(), Version: "1.2.3", SessionID: "abcdef123456",
+	}
+	for _, mode := range []string{"1", "2", "3"} {
+		for _, selected := range []bool{false, true} {
+			row := stripTrailingReset(renderSessionRowForTest(t, mode, s, selected))
+			if !strings.HasSuffix(row, " ") || strings.HasSuffix(row, "  ") {
+				t.Errorf("mode %s selected=%v row lacks exactly one trailing space: %q", mode, selected, row)
+			}
+		}
+	}
+}
+
+func TestFullRowWithEmptySessionIDHasPlaceholderAndOneRightPaddingSpace(t *testing.T) {
+	s := Session{
+		PID: 42, Name: "empty-sid", NameSource: "user", CWD: "/work/empty-sid",
+		Model: "claude-opus-4-8", Status: "busy", Entrypoint: "cli",
+		UpdatedAt: time.Now().UnixMilli(), Version: "1.2.3",
+	}
+	row := stripTrailingReset(renderSessionRowForTest(t, "1", s, false))
+	if !strings.Contains(stripANSI(row), "1.2.3     - ") {
+		t.Fatalf("full row with empty SessionID lacks aligned version and placeholder: %q", row)
+	}
+	if !strings.HasSuffix(row, " ") || strings.HasSuffix(row, "  ") {
+		t.Fatalf("full row with empty SessionID lacks exactly one trailing space: %q", row)
+	}
+}
+
+func findHeaderRow(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "NAME") && strings.Contains(line, "AGE") {
+			return line
+		}
+	}
+	t.Fatalf("no table header in output:\n%s", out)
+	return ""
+}
+
+func TestTableHeadersHaveOneRightPaddingSpace(t *testing.T) {
+	for _, mode := range []string{"1", "2", "3"} {
+		var b strings.Builder
+		RenderAll(&b, mode, testLocalHost(Session{PID: 1, Name: "row", CWD: "/work/row"}), nil, "", nil, 0, 0, "dir")
+		hdr := findHeaderRow(t, b.String())
+		if !strings.HasSuffix(hdr, " ") || strings.HasSuffix(hdr, "  ") {
+			t.Errorf("mode %s header lacks exactly one trailing space: %q", mode, hdr)
+		}
+	}
+}
+
+func TestIntermediateStatusPrecedesModel(t *testing.T) {
+	s := Session{
+		PID: 42, Name: "ordered", NameSource: "user", CWD: "/work/ordered",
+		Model: "claude-opus-4-8", Status: "busy", Entrypoint: "cli",
+		UpdatedAt: time.Now().UnixMilli(),
+	}
+	var b strings.Builder
+	RenderAll(&b, "3", testLocalHost(s), nil, "", nil, 0, 0, "dir")
+	out := b.String()
+	hdr := findHeaderRow(t, out)
+	if strings.Index(hdr, "STATUS") >= strings.Index(hdr, "MODEL") {
+		t.Fatalf("intermediate header order = %q", hdr)
+	}
+	row := findRow(t, out, "ordered")
+	if strings.Index(row, s.StatusDisplay()) >= strings.Index(row, shortModel(s.Model)) {
+		t.Fatalf("intermediate row order = %q", row)
+	}
 }
 
 func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
@@ -183,7 +290,7 @@ func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
 	}
 }
 
-func TestSelectedSessionRowsInvertWholeRow(t *testing.T) {
+func TestSelectedSessionRowsHighlightWholeRow(t *testing.T) {
 	now := time.Now().UnixMilli()
 	attached := 2
 	for _, mode := range []string{"1", "2", "3"} {
@@ -202,6 +309,20 @@ func TestSelectedSessionRowsInvertWholeRow(t *testing.T) {
 	}
 }
 
+func TestSelectedSessionRowPreservesStatusColor(t *testing.T) {
+	s := Session{
+		PID: 42, Name: "selected", NameSource: "user", CWD: "/work/selected",
+		Status: "busy", Entrypoint: "cli", UpdatedAt: time.Now().UnixMilli(),
+	}
+	row := renderSessionRowForTest(t, "3", s, true)
+	if !strings.Contains(row, "\033[1;31m") {
+		t.Fatalf("selected row lost busy foreground color: %q", row)
+	}
+	if !strings.Contains(row, ansiReset+ansiSelectedBG) {
+		t.Fatalf("selected row does not restore background after status reset: %q", row)
+	}
+}
+
 func TestSelectedHeadlessRowsSuppressDim(t *testing.T) {
 	now := time.Now().UnixMilli()
 	attached := 1
@@ -213,7 +334,7 @@ func TestSelectedHeadlessRowsSuppressDim(t *testing.T) {
 		}
 		row := renderSessionRowForTest(t, mode, s, true)
 		assertWholeRowSelected(t, row, "1 ")
-		inner := strings.TrimSuffix(strings.TrimPrefix(row, ansiInvert), ansiReset)
+		inner := strings.TrimSuffix(strings.TrimPrefix(row, ansiSelectedBG), ansiReset)
 		if strings.Contains(inner, ansiDim) {
 			t.Errorf("mode %s selected headless row contains dim wrapper: %q", mode, row)
 		}

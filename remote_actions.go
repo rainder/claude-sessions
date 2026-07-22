@@ -123,7 +123,7 @@ func actKillRemote(c *actCtx) {
 		return
 	}
 	host, pid := s.Host, s.PID
-	enterCooked(c.fd, c.oldState)
+	c.prepareLineOutput()
 	defer c.enterRaw()
 
 	if !confirm(fmt.Sprintf("\nkill PID %d on %s? [y/N] ", pid, host)) {
@@ -154,7 +154,7 @@ func actAttachRemote(c *actCtx) {
 	host, pid := s.Host, s.PID
 	srv, ok := LookupServer(host)
 	if !ok {
-		enterCooked(c.fd, c.oldState)
+		c.prepareLineOutput()
 		fmt.Printf("\nunknown server: %s\n", host)
 		pauseForKey(c.fd, c.oldState)
 		c.enterRaw()
@@ -165,7 +165,7 @@ func actAttachRemote(c *actCtx) {
 	// Fetch tmux info.
 	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/tmux-info", pid), "GET", nil)
 	if err != nil {
-		enterCooked(c.fd, c.oldState)
+		c.prepareLineOutput()
 		fmt.Printf("\ntmux-info failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		c.enterRaw()
@@ -179,7 +179,7 @@ func actAttachRemote(c *actCtx) {
 	tname := info.Tmux
 	if tname == "" {
 		// Not in tmux — offer migration.
-		enterCooked(c.fd, c.oldState)
+		c.prepareLineOutput()
 		if !confirm(fmt.Sprintf("\nPID %d on %s is not in tmux. Migrate first? [y/N] ", pid, host)) {
 			c.enterRaw()
 			return
@@ -236,7 +236,7 @@ func remoteNewRows(defaultCWD string, suggestions []cwdSuggestion) (lines []stri
 func actNewRemote(c *actCtx, host, defaultCWD string) {
 	presets, err := LoadCommandPresets()
 	if err != nil {
-		enterCooked(c.fd, c.oldState)
+		c.prepareLineOutput()
 		fmt.Printf("\nload commands: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		c.enterRaw()
@@ -255,14 +255,14 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 	}
 	lines, start, entries := remoteNewRows(defaultCWD, suggestions)
 
-	row, presetIndex, ok := pickNewSession("New session on "+host, lines, start, presets, presetStart, note)
+	row, presetIndex, ok := pickNewSession("New session on "+host, lines, start, presets, presetStart, note, c.modalWakes)
 	if !ok {
 		return
 	}
 	preset := presets[presetIndex]
 	SaveCommandPresetName(preset.Name)
 
-	enterCooked(c.fd, c.oldState)
+	c.prepareLineOutput()
 	defer c.enterRaw()
 
 	var cwd string

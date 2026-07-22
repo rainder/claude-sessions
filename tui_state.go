@@ -112,6 +112,24 @@ func cropTableFrame(frame tableFrame, offset, rows, cols int) visibleFrame {
 	return visibleFrame{text: strings.Join(clipped, "\n"), hits: hits}
 }
 
+// withBottomRow pads or truncates content so bottom occupies the final terminal
+// row. The screen renderer performs width clipping and final frame padding.
+func withBottomRow(content string, rows int, bottom string) string {
+	if rows <= 0 {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	bodyRows := rows - 1
+	if len(lines) > bodyRows {
+		lines = lines[:bodyRows]
+	}
+	for len(lines) < bodyRows {
+		lines = append(lines, "")
+	}
+	lines = append(lines, bottom)
+	return strings.Join(lines, "\n")
+}
+
 // doubleClickWindow is the maximum gap between two clicks on the same row that
 // still counts as a double-click (which opens the inspector).
 const doubleClickWindow = 350 * time.Millisecond

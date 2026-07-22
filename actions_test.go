@@ -97,6 +97,89 @@ func TestActCtxEnterRawEnablesMouse(t *testing.T) {
 	}
 }
 
+func TestWriteActionOutputPosition(t *testing.T) {
+	tests := []struct {
+		name string
+		rows int
+		want string
+	}{
+		{"full terminal", 24, "\x1b[24;1H\x1b[K\x1b[23;1H"},
+		{"two rows", 2, "\x1b[2;1H\x1b[K\x1b[1;1H"},
+		{"one row", 1, "\x1b[1;1H\x1b[K"},
+		{"unknown size", 0, "\x1b[9999;1H\x1b[K\x1b[1A\r"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out strings.Builder
+			writeActionOutputPosition(&out, tt.rows)
+			if got := out.String(); got != tt.want {
+				t.Fatalf("position output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestActionOutputPositionFollowsIncrementalScreenPatch(t *testing.T) {
+	w := &recordingScreenWriter{}
+	r := newScreenRenderer(w)
+	if err := r.Draw("header\nold session", 80, 2); err != nil {
+		t.Fatal(err)
+	}
+	w.writes = nil
+
+	if err := r.Draw("header\nchanged session", 80, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.last(); !strings.Contains(got, "\x1b[2;1Hchanged session") || strings.Contains(got, "\x1b[1;1H") {
+		t.Fatalf("incremental patch = %q, want only changed row", got)
+	}
+	writeActionOutputPosition(w, 2)
+	_, _ = w.Write([]byte("\nprompt > "))
+
+	if len(w.writes) != 3 {
+		t.Fatalf("writes = %d, want patch, position, and prompt", len(w.writes))
+	}
+	if got, want := string(w.writes[1]), "\x1b[2;1H\x1b[K\x1b[1;1H"; got != want {
+		t.Fatalf("action output position = %q, want %q", got, want)
+	}
+	if got, want := string(w.writes[2]), "\nprompt > "; got != want {
+		t.Fatalf("prompt output = %q, want %q", got, want)
+	}
+}
+
+func TestActionOutputPositionFollowsPickerRedraw(t *testing.T) {
+	w := &recordingScreenWriter{}
+	r := newScreenRenderer(w)
+	lines := []string{"/first", "enter path manually…"}
+	presets := []CommandPreset{{Name: "Claude", Command: "claude"}}
+	state := newPickerState{Row: 0, Preset: 0, RowCount: len(lines), PresetCount: len(presets)}
+	if err := r.Draw(renderNewPickerViewport("New session", lines, presets, state, "", 8), 80, 8); err != nil {
+		t.Fatal(err)
+	}
+	w.writes = nil
+
+	state.Row = 1
+	if err := r.Draw(renderNewPickerViewport("New session", lines, presets, state, "", 8), 80, 8); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.writes) != 1 || !strings.Contains(w.last(), "enter path manually…") {
+		t.Fatalf("picker redraw = %q, want a patch for the manual path row", w.last())
+	}
+	writeActionOutputPosition(w, 8)
+	_, _ = w.Write([]byte("\ncwd path (q=cancel) > "))
+
+	if len(w.writes) != 3 {
+		t.Fatalf("writes = %d, want patch, position, and prompt", len(w.writes))
+	}
+	if got, want := string(w.writes[1]), "\x1b[8;1H\x1b[K\x1b[7;1H"; got != want {
+		t.Fatalf("picker action output position = %q, want %q", got, want)
+	}
+	if got, want := string(w.writes[2]), "\ncwd path (q=cancel) > "; got != want {
+		t.Fatalf("picker prompt output = %q, want %q", got, want)
+	}
+}
+
 func TestRemoteNewRowsSuggestionsAndFallback(t *testing.T) {
 	lines, start, entries := remoteNewRows("/selected", []cwdSuggestion{{CWD: "/history", Count: 4}, {CWD: "/selected", Count: 2}})
 	if start != 0 || len(lines) != 3 || !strings.Contains(lines[0], "/history") || !strings.Contains(lines[1], "/selected") {
