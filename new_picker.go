@@ -86,7 +86,11 @@ func pickerRow(i int, line string, selected int) string {
 // then centers a window of rows around the selected cwd where possible.
 func renderNewPickerViewport(title string, lines []string, presets []CommandPreset, state newPickerState, note string, rows int) string {
 	full := renderNewPicker(title, lines, presets, state, note)
-	if rows <= 0 || len(strings.Split(full, "\n")) <= rows {
+	fullRows := strings.Split(full, "\n")
+	if fullRows[len(fullRows)-1] == "" {
+		fullRows = fullRows[:len(fullRows)-1]
+	}
+	if rows <= 0 || len(fullRows) <= rows {
 		return full
 	}
 
@@ -102,6 +106,9 @@ func renderNewPickerViewport(title string, lines []string, presets []CommandPres
 	}
 
 	capacity := rows - len(prefix) - len(suffix)
+	if capacity > len(lines) {
+		capacity = len(lines)
+	}
 	start := state.Row - capacity/2
 	if start < 0 {
 		start = 0

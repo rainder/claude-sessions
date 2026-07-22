@@ -61,6 +61,18 @@ func TestRenderNewPickerViewportKeepsFullOutputWhenItFits(t *testing.T) {
 	}
 }
 
+func TestRenderNewPickerViewportNearFitKeepsFullOutput(t *testing.T) {
+	presets := []CommandPreset{{Name: "Claude", Command: "claude"}}
+	lines := []string{"/repo", "enter path manually…"}
+	state := newPickerState{Row: 1, RowCount: len(lines), PresetCount: len(presets)}
+	full := renderNewPicker("New session", lines, presets, state, "")
+	rows := len(strings.Split(full, "\n")) - 1 // trailing newline is not a visible content row
+
+	if got := renderNewPickerViewport("New session", lines, presets, state, "", rows); got != full {
+		t.Fatalf("viewport changed near-fitting output:\n got: %q\nwant: %q", got, full)
+	}
+}
+
 func TestRenderNewPickerViewportKeepsSelectionVisible(t *testing.T) {
 	presets := []CommandPreset{{Name: "Claude", Command: "claude"}}
 	lines := make([]string, 12)
