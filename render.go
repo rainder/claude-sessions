@@ -521,19 +521,32 @@ func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteRe
 	return frame.overflowing
 }
 
-// sortLabels returns the DIR and AGE header labels, suffixing ▲/▼ on the
-// column that carries the active sort: DIR for the dir mode (ascending), AGE
-// for the time modes. In created modes the AGE column shows age since start
-// (see ageBasis), so the arrow always sits on the column being sorted.
-func sortLabels(sortMode string) (dirLabel, ageLabel string) {
+// sortLabels returns the DIR, STATUS and AGE header labels, suffixing ▲/▼ on
+// the column that carries the active sort: DIR for the dir mode (ascending),
+// STATUS for the status mode, AGE for the time modes. In created modes the AGE
+// column shows age since start (see ageBasis), so the arrow always sits on the
+// column being sorted.
+func sortLabels(sortMode string) (dirLabel, statusLabel, ageLabel string) {
 	switch sortMode {
+	case "status":
+		return "DIR", "STATUS▲", "AGE"
 	case "created", "updated":
-		return "DIR", "AGE▼"
+		return "DIR", "STATUS", "AGE▼"
 	case "created-asc", "updated-asc":
-		return "DIR", "AGE▲"
+		return "DIR", "STATUS", "AGE▲"
 	default: // dir
-		return "DIR▲", "AGE"
+		return "DIR▲", "STATUS", "AGE"
 	}
+}
+
+// minimalStatusLabel returns the minimal view's one-cell status header, adding
+// the ▲ arrow when status is the active sort. The minimal view has no room for
+// the word "STATUS", so it marks the single-glyph column with "S▲".
+func minimalStatusLabel(sortMode string) string {
+	if sortMode == "status" {
+		return "S▲"
+	}
+	return "S"
 }
 
 // ageBasis is the timestamp the AGE column counts from: session start in the
@@ -624,8 +637,8 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 		}
 	}
 
-	dirLabel, ageLabel := sortLabels(sortMode)
-	nameW, dirW, modelW, costW, agentsW, statusW, tmuxW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), len("AGENTS"), len("STATUS"), len("TMUX")
+	dirLabel, statusLabel, ageLabel := sortLabels(sortMode)
+	nameW, dirW, modelW, costW, agentsW, statusW, tmuxW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), len("AGENTS"), utf8.RuneCountInString(statusLabel), len("TMUX")
 	for _, r := range all {
 		nameW = max(nameW, len(r.nameStr))
 		dirW = max(dirW, len(r.cwdStr))
@@ -644,7 +657,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 
 	buildHdr := func() string {
 		return fmt.Sprintf("  %7s  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s",
-			"PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, "STATUS", costW, "COST", agentsW, "AGENTS", "CTX", tmuxW, "TMUX",
+			"PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, statusLabel, costW, "COST", agentsW, "AGENTS", "CTX", tmuxW, "TMUX",
 			"CPU%", ageLabel, "VER", "SID")
 	}
 	hdr := buildHdr()
@@ -742,8 +755,8 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 		}
 	}
 
-	dirLabel, ageLabel := sortLabels(sortMode)
-	nameW, dirW, modelW, costW, agentsW, statusW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), len("AGENTS"), len("STATUS")
+	dirLabel, statusLabel, ageLabel := sortLabels(sortMode)
+	nameW, dirW, modelW, costW, agentsW, statusW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), len("AGENTS"), utf8.RuneCountInString(statusLabel)
 	for _, r := range all {
 		nameW = max(nameW, len(r.nameStr))
 		dirW = max(dirW, len(r.cwdStr))
@@ -757,7 +770,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 
 	buildHdr := func() string {
 		return fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s  %5s",
-			nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, "STATUS", costW, "COST", agentsW, "AGENTS", "CTX", "CPU%", ageLabel)
+			nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, statusLabel, costW, "COST", agentsW, "AGENTS", "CTX", "CPU%", ageLabel)
 	}
 	hdr := buildHdr()
 	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
@@ -869,7 +882,9 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 		}
 	}
 
-	dirLabel, ageLabel := sortLabels(sortMode)
+	dirLabel, _, ageLabel := sortLabels(sortMode)
+	statusLabel := minimalStatusLabel(sortMode)
+	statusW := utf8.RuneCountInString(statusLabel)
 	dirW, nameW := utf8.RuneCountInString(dirLabel), len("NAME")
 	for _, r := range all {
 		dirW = max(dirW, len(r.dir))
@@ -879,7 +894,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 	renderHeader(w, sections, "minimal", usage, cols)
 
 	buildHdr := func() string {
-		return fmt.Sprintf("  %-*s  %-*s  S  %5s", dirW, dirLabel, nameW, "NAME", ageLabel)
+		return fmt.Sprintf("  %-*s  %-*s  %-*s  %5s", dirW, dirLabel, nameW, "NAME", statusW, statusLabel, ageLabel)
 	}
 	hdr := buildHdr()
 	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
@@ -903,9 +918,9 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 			if glyph == "" {
 				glyph = "?"
 			}
-			statusCell := glyph
+			statusCell := glyph + strings.Repeat(" ", statusW-1)
 			if !ghost {
-				statusCell = colorize(statusColor[r.s.Status], glyph)
+				statusCell = colorize(statusColor[r.s.Status], statusCell)
 			}
 			nameCell := fmt.Sprintf("%-*s", nameW, r.display)
 			if r.nameDim && !ghost {
