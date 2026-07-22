@@ -239,7 +239,10 @@ func RunTUI(interval time.Duration) error {
 			return
 		}
 
-		frame := BuildTableFrame(viewMode, local, remotes, state.sel, usageHub.Snapshot(), cols, 0, sortMode)
+		frame := BuildTableFrame(viewMode, LocalHost{
+			Name:     shortHostname(),
+			Sessions: local,
+		}, remotes, state.sel, usageHub.Snapshot(), cols, 0, sortMode)
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if toastActive {

@@ -87,6 +87,9 @@ func cmdList() error {
 	sortMode := LoadSortMode()
 	SortSessions(local, sortMode)
 	remotes = sortRemotes(remotes, sortMode)
-	RenderAll(os.Stdout, LoadViewMode(), local, remotes, "", nil, 0, 0, sortMode)
+	RenderAll(os.Stdout, LoadViewMode(), LocalHost{
+		Name:     shortHostname(),
+		Sessions: local,
+	}, remotes, "", nil, 0, 0, sortMode)
 	return nil
 }
