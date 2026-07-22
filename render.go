@@ -759,7 +759,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	renderHeader(w, sections, "full", usage, cols)
 
 	buildHdr := func() string {
-		return fmt.Sprintf("  %7s  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s",
+		return fmt.Sprintf("  %7s  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
 			"PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, statusLabel, costW, "COST", agentsW, "AGENTS", "CTX", tmuxW, "TMUX",
 			"CPU%", ageLabel, "VER", "SID")
 	}
@@ -796,7 +796,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%7d  %s  %s  %s  %s  %s  %*s  %s  %s  %5s  %5s  %-8s  %s",
+			body := fmt.Sprintf("%7d  %s  %s  %s  %s  %s  %*s  %s  %s  %5s  %5s  %-8s  %s ",
 				r.s.PID,
 				nameCell,
 				marqueeCell(r.cwdStr, dirW, step),
@@ -874,8 +874,8 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 	renderHeader(w, sections, "intermediate", usage, cols)
 
 	buildHdr := func() string {
-		return fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s  %5s",
-			nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, statusLabel, costW, "COST", agentsW, "AGENTS", "CTX", "CPU%", ageLabel)
+		return fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s  %5s ",
+			nameW, "NAME", dirW, dirLabel, statusW, statusLabel, modelW, "MODEL", costW, "COST", agentsW, "AGENTS", "CTX", "CPU%", ageLabel)
 	}
 	hdr := buildHdr()
 	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
@@ -902,11 +902,11 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %s  %s  %*s  %s  %5s  %5s",
+			body := fmt.Sprintf("%s  %s  %s  %s  %s  %*s  %s  %5s  %5s ",
 				nameCell,
 				marqueeCell(r.cwdStr, dirW, step),
-				modelCell(r.modelStr, modelW, plainCells),
 				statusCell,
+				modelCell(r.modelStr, modelW, plainCells),
 				costCell(r.costStr, costW),
 				agentsW, r.agentsStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
@@ -998,7 +998,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 	renderHeader(w, sections, "minimal", usage, cols)
 
 	buildHdr := func() string {
-		return fmt.Sprintf("  %-*s  %-*s  %-*s  %5s", dirW, dirLabel, nameW, "NAME", statusW, statusLabel, ageLabel)
+		return fmt.Sprintf("  %-*s  %-*s  %-*s  %5s ", dirW, dirLabel, nameW, "NAME", statusW, statusLabel, ageLabel)
 	}
 	hdr := buildHdr()
 	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
@@ -1029,7 +1029,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 			if utf8.RuneCountInString(r.dir) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %5s",
+			body := fmt.Sprintf("%s  %s  %s  %5s ",
 				marqueeCell(r.dir, dirW, step), nameCell, statusCell, r.ageStr)
 			row := tmuxViewerPrefix(r.s, plainCells) + body
 			if ghost && !selected {

@@ -172,6 +172,67 @@ func renderSessionRowForTest(t *testing.T, mode string, s Session, selected bool
 	return findRow(t, b.String(), s.Name)
 }
 
+func stripTrailingReset(s string) string {
+	return strings.TrimSuffix(s, ansiReset)
+}
+
+func TestSessionRowsHaveOneRightPaddingSpace(t *testing.T) {
+	s := Session{
+		PID: 42, Name: "padding", NameSource: "user", CWD: "/work/padding",
+		Model: "claude-opus-4-8", Status: "busy", Entrypoint: "cli",
+		UpdatedAt: time.Now().UnixMilli(), Version: "1.2.3", SessionID: "abcdef123456",
+	}
+	for _, mode := range []string{"1", "2", "3"} {
+		for _, selected := range []bool{false, true} {
+			row := stripTrailingReset(renderSessionRowForTest(t, mode, s, selected))
+			if !strings.HasSuffix(row, " ") || strings.HasSuffix(row, "  ") {
+				t.Errorf("mode %s selected=%v row lacks exactly one trailing space: %q", mode, selected, row)
+			}
+		}
+	}
+}
+
+func findHeaderRow(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "NAME") && strings.Contains(line, "AGE") {
+			return line
+		}
+	}
+	t.Fatalf("no table header in output:\n%s", out)
+	return ""
+}
+
+func TestTableHeadersHaveOneRightPaddingSpace(t *testing.T) {
+	for _, mode := range []string{"1", "2", "3"} {
+		var b strings.Builder
+		RenderAll(&b, mode, testLocalHost(Session{PID: 1, Name: "row", CWD: "/work/row"}), nil, "", nil, 0, 0, "dir")
+		hdr := findHeaderRow(t, b.String())
+		if !strings.HasSuffix(hdr, " ") || strings.HasSuffix(hdr, "  ") {
+			t.Errorf("mode %s header lacks exactly one trailing space: %q", mode, hdr)
+		}
+	}
+}
+
+func TestIntermediateStatusPrecedesModel(t *testing.T) {
+	s := Session{
+		PID: 42, Name: "ordered", NameSource: "user", CWD: "/work/ordered",
+		Model: "claude-opus-4-8", Status: "busy", Entrypoint: "cli",
+		UpdatedAt: time.Now().UnixMilli(),
+	}
+	var b strings.Builder
+	RenderAll(&b, "3", testLocalHost(s), nil, "", nil, 0, 0, "dir")
+	out := b.String()
+	hdr := findHeaderRow(t, out)
+	if strings.Index(hdr, "STATUS") >= strings.Index(hdr, "MODEL") {
+		t.Fatalf("intermediate header order = %q", hdr)
+	}
+	row := findRow(t, out, "ordered")
+	if strings.Index(row, s.StatusDisplay()) >= strings.Index(row, shortModel(s.Model)) {
+		t.Fatalf("intermediate row order = %q", row)
+	}
+}
+
 func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
 	now := time.Now().UnixMilli()
 	zero := 0
