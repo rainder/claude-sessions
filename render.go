@@ -56,7 +56,7 @@ func tmuxViewerSymbol(s Session) (symbol, sgr string) {
 	attached := *s.TmuxAttached
 	switch {
 	case attached == 0:
-		return "0", "2"
+		return " ", ""
 	case attached < 10:
 		return strconv.Itoa(attached), "1;32"
 	default:

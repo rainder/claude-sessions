@@ -66,13 +66,13 @@ func TestTmuxViewerPrefix(t *testing.T) {
 	}{
 		{"no tmux", Session{}, false, "  "},
 		{"unknown", Session{Tmux: "dev:0.0"}, false, dim("· ")},
-		{"detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, false, dim("0 ")},
+		{"detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, false, "  "},
 		{"one", Session{Tmux: "dev:0.0", TmuxAttached: &one}, false, colorize("1;32", "1 ")},
 		{"nine", Session{Tmux: "dev:0.0", TmuxAttached: &nine}, false, colorize("1;32", "9 ")},
 		{"ten", Session{Tmux: "dev:0.0", TmuxAttached: &ten}, false, colorize("1;32", "+ ")},
 		{"negative unknown", Session{Tmux: "dev:0.0", TmuxAttached: &negative}, false, dim("· ")},
 		{"plain unknown", Session{Tmux: "dev:0.0"}, true, "· "},
-		{"plain detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, true, "0 "},
+		{"plain detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, true, "  "},
 		{"plain positive", Session{Tmux: "dev:0.0", TmuxAttached: &one}, true, "1 "},
 	}
 	for _, tc := range cases {
@@ -262,7 +262,7 @@ func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
 	}{
 		{"plain", "", nil, "  "},
 		{"unknown", "unknown:0.0", nil, dim("· ")},
-		{"detached", "detached:0.0", &zero, dim("0 ")},
+		{"detached", "detached:0.0", &zero, "  "},
 		{"one", "one:0.0", &one, colorize("1;32", "1 ")},
 		{"nine", "nine:0.0", &nine, colorize("1;32", "9 ")},
 		{"ten", "ten:0.0", &ten, colorize("1;32", "+ ")},
