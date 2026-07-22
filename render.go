@@ -13,10 +13,11 @@ import (
 
 // ANSI escape sequences.
 const (
-	ansiReset  = "\033[0m"
-	ansiBold   = "\033[1m"
-	ansiDim    = "\033[2m"
-	ansiInvert = "\033[7m"
+	ansiReset      = "\033[0m"
+	ansiBold       = "\033[1m"
+	ansiDim        = "\033[2m"
+	ansiInvert     = "\033[7m"
+	ansiSelectedBG = "\033[48;5;236m"
 )
 
 // statusColor maps the raw `status` field to an ANSI SGR code.
@@ -76,7 +77,8 @@ func highlightSelectedRow(row string, selected bool) string {
 	if !selected {
 		return row
 	}
-	return ansiInvert + row + ansiReset
+	row = strings.ReplaceAll(row, ansiReset, ansiReset+ansiSelectedBG)
+	return ansiSelectedBG + row + ansiReset
 }
 
 // usageColor maps a rate-limit utilization percentage to an SGR code:
@@ -773,7 +775,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 		for _, r := range rows {
 			selected := r.s.ID() == sel
 			ghost := r.s.Headless()
-			plainCells := selected || ghost
+			plainCells := ghost
 
 			tmuxStr := r.s.Tmux
 			if tmuxStr == "" {
@@ -887,7 +889,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 		for _, r := range rows {
 			selected := r.s.ID() == sel
 			ghost := r.s.Headless()
-			plainCells := selected || ghost
+			plainCells := ghost
 
 			statusCell := fmt.Sprintf("%-*s", statusW, r.statusStr)
 			if !plainCells {
@@ -1010,7 +1012,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 		for _, r := range rows {
 			selected := r.s.ID() == sel
 			ghost := r.s.Headless()
-			plainCells := selected || ghost
+			plainCells := ghost
 
 			glyph := statusGlyph[r.s.Status]
 			if glyph == "" {
