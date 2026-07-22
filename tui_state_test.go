@@ -395,3 +395,22 @@ func TestEnsureLineVisible(t *testing.T) {
 		}
 	}
 }
+
+func TestWithBottomRowPadsAndPlacesBottomLine(t *testing.T) {
+	got := withBottomRow("one\ntwo", 5, "toast")
+	want := "one\ntwo\n\n\ntoast"
+	if got != want {
+		t.Fatalf("withBottomRow = %q, want %q", got, want)
+	}
+}
+
+func TestWithBottomRowTruncatesContent(t *testing.T) {
+	got := withBottomRow("one\ntwo\nthree", 2, "toast")
+	want := "one\ntoast"
+	if got != want {
+		t.Fatalf("withBottomRow = %q, want %q", got, want)
+	}
+	if got := withBottomRow("one", 1, "toast"); got != "toast" {
+		t.Fatalf("one-row screen = %q, want toast", got)
+	}
+}
