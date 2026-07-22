@@ -255,7 +255,7 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 	}
 	lines, start, entries := remoteNewRows(defaultCWD, suggestions)
 
-	row, presetIndex, ok := pickNewSession("New session on "+host, lines, start, presets, presetStart, note)
+	row, presetIndex, ok := pickNewSession("New session on "+host, lines, start, presets, presetStart, note, c.modalWakes)
 	if !ok {
 		return
 	}

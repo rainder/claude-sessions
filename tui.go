@@ -39,29 +39,21 @@ const (
 	KeyEsc   = "\x00esc"
 )
 
-// readEventBlocking waits indefinitely for the next key event(s) from stdin and
-// returns them as key strings. Used inside modal handlers (the help screen, the
-// new-session picker) that pause for input. Mouse events are decoded but
-// filtered out — modal menus ignore the mouse — and background wakes are not
-// watched, so a modal isn't dismissed by remote-data updates underneath.
-//
-// A persistent decoder is kept across the internal poll loop so a multi-byte
-// escape sequence split across reads still decodes, and a lone Esc resolves via
-// pollEvents' pending-flush path rather than being dropped: pollEvents caps its
-// wait at the decoder's pending-escape deadline, so we simply loop until at
-// least one key surfaces.
-func readEventBlocking() []string {
-	dec := newInputDecoder()
+// readModalEvents waits for key input or one of the modal's allowed wake
+// sources. The caller owns the persistent decoder so split escape sequences and
+// lone Esc flushes survive successive modal redraws. Mouse-only input remains
+// ignored; it cannot dismiss or redraw a modal without a wake source.
+func readModalEvents(dec *inputDecoder, wakes []wakeFD) ([]string, wakeKind) {
 	for {
-		events, _ := pollEvents(dec, 0, nil)
+		events, woke := pollEvents(dec, 0, wakes)
 		var keys []string
 		for _, ev := range events {
 			if ev.kind == eventKey {
 				keys = append(keys, ev.key)
 			}
 		}
-		if len(keys) > 0 {
-			return keys
+		if len(keys) > 0 || woke != wakeNone {
+			return keys, woke
 		}
 	}
 }
@@ -278,12 +270,16 @@ func RunTUI(interval time.Duration) error {
 		_ = screen.Draw(out, cols, rows)
 	}
 
+	// Modal screens only listen for resize wakes. Remote and inspector wakes
+	// remain owned by the main loop so background data never changes a modal.
+	modalWakes := []wakeFD{{fd: rw.FD(), kind: wakeResize}}
 	makeCtx := func() *actCtx {
 		return &actCtx{
-			fd:       fd,
-			oldState: oldState,
-			targets:  targets,
-			sel:      state.sel,
+			fd:         fd,
+			oldState:   oldState,
+			targets:    targets,
+			sel:        state.sel,
+			modalWakes: modalWakes,
 			pause: func() {
 				hub.Pause()
 				usageHub.Pause()
@@ -490,12 +486,18 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "?":
 				screen.Invalidate()
-				cols, rows, err := term.GetSize(fd)
-				if err != nil {
-					cols, rows = 0, 0
+				helpDecoder := newInputDecoder()
+				for {
+					cols, rows, err := term.GetSize(fd)
+					if err != nil {
+						cols, rows = 0, 0
+					}
+					_ = screen.Draw(renderHelp(sortMode), cols, rows)
+					keys, _ := readModalEvents(helpDecoder, modalWakes)
+					if len(keys) > 0 {
+						break
+					}
 				}
-				_ = screen.Draw(renderHelp(sortMode), cols, rows)
-				readEventBlocking()
 				screen.Invalidate()
 				render()
 			}

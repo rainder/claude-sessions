@@ -27,6 +27,10 @@ type actCtx struct {
 	pause  func()
 	resume func()
 
+	// modalWakes are the foreground-only wake sources used while an action owns
+	// a fullscreen modal. RunTUI supplies its resize pipe but excludes data hubs.
+	modalWakes []wakeFD
+
 	// spawnedHost/spawnedTmux record a tmux session just created by this
 	// action (actNew / actNewRemote), so the caller can re-target the
 	// selection onto it once a post-action refresh picks it up. Empty when
@@ -200,7 +204,7 @@ func actNew(c *actCtx) {
 		lines = append(lines, fmt.Sprintf("%-50s%s", picker.shortName(p.cwd), freq))
 	}
 	lines = append(lines, "enter path manually…")
-	row, presetIndex, ok := pickNewSession("New tmux session", lines, start, presets, presetStart, "")
+	row, presetIndex, ok := pickNewSession("New tmux session", lines, start, presets, presetStart, "", c.modalWakes)
 	if !ok {
 		return
 	}
