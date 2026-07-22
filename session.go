@@ -204,7 +204,7 @@ func sessionStatusRank(s Session) int {
 // SortSessions orders rows in place, stably, per the given mode:
 //
 //	dir         cwd asc (case-insensitive), StartedAt desc tiebreak
-//	status      waiting > idle > shell > busy > other, Updated() desc tiebreak
+//	status      waiting > idle > shell > busy > other, Updated() asc tiebreak (oldest first)
 //	created     StartedAt desc; created-asc: StartedAt asc
 //	updated     Updated() desc; updated-asc: Updated() asc
 //
@@ -219,7 +219,7 @@ func sessionLess(a, b Session, mode string) bool {
 		if ra != rb {
 			return ra < rb
 		}
-		return a.Updated().After(b.Updated())
+		return a.Updated().Before(b.Updated())
 	case "created":
 		return a.StartedAt > b.StartedAt
 	case "created-asc":
