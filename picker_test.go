@@ -62,6 +62,26 @@ func TestCollectCwdSuggestionsFiltersAndRanks(t *testing.T) {
 	}
 }
 
+func TestCollapseHome(t *testing.T) {
+	cases := []struct {
+		path string
+		home string
+		want string
+	}{
+		{"/home/bob/repo", "/home/bob", "~/repo"},
+		{"/home/bob", "/home/bob", "~"},
+		{"/srv/data", "/home/bob", "/srv/data"},
+		{"/home/bob/repo", "", "/home/bob/repo"},
+		{"", "/home/bob", ""},
+		{"/home/bobby/repo", "/home/bob", "~by/repo"},
+	}
+	for _, c := range cases {
+		if got := collapseHome(c.path, c.home); got != c.want {
+			t.Errorf("collapseHome(%q, %q) = %q, want %q", c.path, c.home, got, c.want)
+		}
+	}
+}
+
 func TestMergeRemoteCwdEntries(t *testing.T) {
 	suggestions := []cwdSuggestion{{CWD: "/a", Count: 3}, {CWD: "/b", Count: 2}}
 	got := mergeRemoteCwdEntries("/b", suggestions)

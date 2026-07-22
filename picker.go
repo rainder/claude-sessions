@@ -31,10 +31,18 @@ type cwdPicker struct {
 }
 
 func (p *cwdPicker) shortName(cwd string) string {
-	if p.home != "" && strings.HasPrefix(cwd, p.home) {
-		return "~" + strings.TrimPrefix(cwd, p.home)
+	return collapseHome(cwd, p.home)
+}
+
+// collapseHome shortens path by replacing a leading home prefix with "~". A
+// blank home (unknown, e.g. a remote host that didn't report one) leaves path
+// untouched — never collapse everything onto a zero-value prefix. Shared by the
+// local picker's shortName and the remote picker's display.
+func collapseHome(path, home string) string {
+	if home != "" && strings.HasPrefix(path, home) {
+		return "~" + strings.TrimPrefix(path, home)
 	}
-	return cwd
+	return path
 }
 
 // collectCwdSuggestions gathers ranked cwd candidates from this host's session

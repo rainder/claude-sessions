@@ -10,46 +10,135 @@ import (
 
 // newPickerState holds the cursor position for the two-axis new-session
 // picker: Row selects the cwd/path line, Preset selects the command preset.
+// Filter, when non-empty, narrows the visible rows to a case-insensitive
+// substring match; RowCount always reflects the currently-filtered row count,
+// which the caller recomputes each iteration.
 type newPickerState struct {
 	Row, Preset           int
 	RowCount, PresetCount int
+	Filter                string
 }
 
 // handle applies one key event to the state, returning whether the picker
 // should confirm (return the current selection) or cancel.
+//
+// While a filter is active (Filter != ""), 'q'/'Q' and the 1-9 digits are
+// treated as literal filter text rather than cancel / quick-select, so Esc is
+// the only way to cancel and digits extend the filter. With no filter the
+// original shortcuts stand: 'q' cancels, 1-9 jump-select. Any printable ASCII
+// byte extends the filter; Backspace (DEL 0x7f or BS 0x08) trims its last
+// character. Filter edits reset Row to 0 so the top match is selected.
 func (s *newPickerState) handle(key string) (confirm, cancel bool) {
 	switch key {
 	case KeyUp:
-		s.Row = (s.Row + s.RowCount - 1) % s.RowCount
+		if s.RowCount > 0 {
+			s.Row = (s.Row + s.RowCount - 1) % s.RowCount
+		}
 	case KeyDown:
-		s.Row = (s.Row + 1) % s.RowCount
+		if s.RowCount > 0 {
+			s.Row = (s.Row + 1) % s.RowCount
+		}
 	case KeyLeft:
 		s.Preset = (s.Preset + s.PresetCount - 1) % s.PresetCount
 	case KeyRight:
 		s.Preset = (s.Preset + 1) % s.PresetCount
 	case "\r", "\n", KeyEnter:
 		return true, false
-	case "q", "Q", KeyEsc, "\x03":
+	case KeyEsc, "\x03":
 		return false, true
+	case "\x7f", "\x08":
+		if s.Filter != "" {
+			s.Filter = s.Filter[:len(s.Filter)-1]
+			s.Row = 0
+		}
 	default:
-		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+		// 'q' cancels only when not filtering (it's a valid path character).
+		if s.Filter == "" && (key == "q" || key == "Q") {
+			return false, true
+		}
+		// Digit quick-select only when not filtering; otherwise digits are
+		// ordinary filter text.
+		if s.Filter == "" && len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
 			row := int(key[0] - '1')
 			if row < s.RowCount {
 				s.Row = row
 				return true, false
 			}
+			return false, false
+		}
+		// Any other printable ASCII byte extends the filter. This excludes the
+		// multi-byte "\x00…" key sentinels (arrows, Enter, …) and control bytes.
+		if len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e {
+			s.Filter += key
+			s.Row = 0
 		}
 	}
 	return false, false
 }
 
+// filterNewPickerLines narrows lines to those whose visible text contains
+// filter (case-insensitive substring). It returns the matching lines plus a
+// parallel slice mapping each visible row back to its index in the original
+// lines — so the caller can translate a confirmed filtered row into the
+// original entry index. An empty filter is the identity: all lines, indices
+// 0..n-1. ANSI color codes embedded in a row are stripped before matching so
+// the filter tests what the user sees, not escape sequences.
+func filterNewPickerLines(lines []string, filter string) (filtered []string, indices []int) {
+	if filter == "" {
+		indices = make([]int, len(lines))
+		for i := range lines {
+			indices[i] = i
+		}
+		return lines, indices
+	}
+	needle := strings.ToLower(filter)
+	for i, line := range lines {
+		if strings.Contains(strings.ToLower(stripSGR(line)), needle) {
+			filtered = append(filtered, line)
+			indices = append(indices, i)
+		}
+	}
+	return filtered, indices
+}
+
+// stripSGR removes ANSI SGR ("\033[…m") escape sequences from s, leaving the
+// visible text. Mirrors visualLen's scan (render.go) but returns the stripped
+// string rather than its width.
+func stripSGR(s string) string {
+	if !strings.Contains(s, "\033[") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {
+			if j := strings.IndexByte(s[i:], 'm'); j >= 0 {
+				i += j + 1
+				continue
+			}
+			b.WriteString(s[i:])
+			break
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 // renderNewPicker draws the two-axis new-session modal: a preset selector
-// on top and a scrollable list of cwd/path lines below.
+// on top and a scrollable list of cwd/path lines below. When a filter is
+// active it shows the filter string under the title and, if nothing matches, a
+// "(no matches)" placeholder in place of the rows.
 func renderNewPicker(title string, lines []string, presets []CommandPreset, state newPickerState, note string) string {
 	preset := presets[state.Preset]
 	var b strings.Builder
 	b.WriteString("\n " + bold(title) + "\n\n")
+	if state.Filter != "" {
+		fmt.Fprintf(&b, " %s %s\n\n", dim("Filter:"), state.Filter)
+	}
 	fmt.Fprintf(&b, " Command:  ◀ %s ▶\n           %s\n\n", bold(preset.Name), dim(preset.Command))
+	if len(lines) == 0 {
+		b.WriteString("   " + dim("(no matches)") + "\n")
+	}
 	for i, line := range lines {
 		marker := "   "
 		if i == state.Row {
@@ -60,11 +149,22 @@ func renderNewPicker(title string, lines []string, presets []CommandPreset, stat
 	if note != "" {
 		b.WriteString("\n " + dim(note) + "\n")
 	}
-	b.WriteString("\n " + dim("↑/↓ cwd · ←/→ command · Enter select · q cancel") + "\n")
+	b.WriteString("\n " + dim(pickerFooter(state.Filter)) + "\n")
 	return b.String()
 }
 
-const pickerHelp = "↑/↓ cwd · ←/→ command · Enter select · q cancel"
+// pickerFooter returns the footer hint, which differs while filtering (Esc
+// cancels and Backspace edits, since 'q' is filter text). The no-filter hint
+// keeps "Enter select · q cancel" contiguous so callers/tests that match that
+// substring stay valid.
+func pickerFooter(filter string) string {
+	if filter != "" {
+		return "↑/↓ cwd · ←/→ command · Enter select · ⌫ edit · Esc cancel"
+	}
+	return pickerHelp
+}
+
+const pickerHelp = "↑/↓ cwd · ←/→ command · type to filter · Enter select · q cancel"
 
 func pickerCommandRows(preset CommandPreset) []string {
 	return []string{
@@ -85,6 +185,12 @@ func pickerRow(i int, line string, selected int) string {
 // it fits. On a short known terminal it reserves the command and footer chrome,
 // then centers a window of rows around the selected cwd where possible.
 func renderNewPickerViewport(title string, lines []string, presets []CommandPreset, state newPickerState, note string, rows int) string {
+	// No rows to window (e.g. a filter with no matches): renderNewPicker draws
+	// the placeholder without indexing into lines, so skip the compaction path
+	// that would index lines[state.Row].
+	if len(lines) == 0 {
+		return renderNewPicker(title, lines, presets, state, note)
+	}
 	full := renderNewPicker(title, lines, presets, state, note)
 	fullRows := strings.Split(full, "\n")
 	if fullRows[len(fullRows)-1] == "" {
@@ -96,10 +202,15 @@ func renderNewPickerViewport(title string, lines []string, presets []CommandPres
 
 	preset := presets[state.Preset]
 	command := pickerCommandRows(preset)
-	prefix := []string{" " + bold(title), "", command[0], command[1], ""}
-	suffix := []string{"", " " + dim(pickerHelp)}
+	prefix := []string{" " + bold(title), ""}
+	if state.Filter != "" {
+		prefix = append(prefix, " "+dim("Filter:")+" "+state.Filter, "")
+	}
+	prefix = append(prefix, command[0], command[1], "")
+	footer := " " + dim(pickerFooter(state.Filter))
+	suffix := []string{"", footer}
 	if note != "" {
-		suffix = []string{"", " " + dim(note), "", " " + dim(pickerHelp)}
+		suffix = []string{"", " " + dim(note), "", footer}
 	}
 	if rows < len(prefix)+len(suffix)+1 {
 		return renderNewPickerCompact(title, lines, preset, state, rows)
@@ -135,7 +246,12 @@ func renderNewPickerCompact(title string, lines []string, preset CommandPreset, 
 	}
 	command := pickerCommandRows(preset)
 	titleRow := " " + bold(title)
-	helpRow := " " + dim(pickerHelp)
+	if state.Filter != "" {
+		// Fold the filter into the title row so the compact layout keeps its
+		// fixed per-height row budgets.
+		titleRow += "  " + dim("/"+state.Filter)
+	}
+	helpRow := " " + dim(pickerFooter(state.Filter))
 	switch rows {
 	case 2:
 		return strings.Join([]string{titleRow, selected}, "\n")
@@ -154,8 +270,8 @@ func pickNewSession(title string, lines []string, rowStart int, presets []Comman
 	if len(lines) == 0 || len(presets) == 0 {
 		return 0, 0, false
 	}
-	state := newPickerState{Row: rowStart, Preset: presetStart, RowCount: len(lines), PresetCount: len(presets)}
-	if state.Row < 0 || state.Row >= state.RowCount {
+	state := newPickerState{Row: rowStart, Preset: presetStart, PresetCount: len(presets)}
+	if state.Row < 0 || state.Row >= len(lines) {
 		state.Row = 0
 	}
 	if state.Preset < 0 || state.Preset >= state.PresetCount {
@@ -164,20 +280,42 @@ func pickNewSession(title string, lines []string, rowStart int, presets []Comman
 	renderer := newScreenRenderer(os.Stdout)
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
+
+	// sync recomputes the filtered view from the full lines + current Filter and
+	// keeps RowCount / Row consistent with it. It returns the index map so a
+	// confirmed filtered row can be translated back to the original lines index.
+	sync := func() (filtered []string, indices []int) {
+		filtered, indices = filterNewPickerLines(lines, state.Filter)
+		state.RowCount = len(filtered)
+		if state.Row >= state.RowCount {
+			state.Row = 0
+		}
+		return filtered, indices
+	}
+
 	for {
+		filtered, indices := sync()
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
 			cols, rows = 0, 0
 		}
-		_ = renderer.Draw(renderNewPickerViewport(title, lines, presets, state, note, rows), cols, rows)
+		_ = renderer.Draw(renderNewPickerViewport(title, filtered, presets, state, note, rows), cols, rows)
 		keys, _ := readModalEvents(decoder, wakes)
 		for _, key := range keys {
+			// Recompute before each key so RowCount and the index map reflect
+			// any filter edit earlier in the same batch (e.g. a pasted
+			// "foo\r": Enter must map through the post-"foo" indices).
+			_, indices = sync()
 			confirm, cancel := state.handle(key)
 			if cancel {
 				return 0, 0, false
 			}
 			if confirm {
-				return state.Row, state.Preset, true
+				if state.RowCount == 0 {
+					// Nothing matches the current filter; ignore the confirm.
+					continue
+				}
+				return indices[state.Row], state.Preset, true
 			}
 		}
 	}

@@ -70,6 +70,7 @@ func TestCwdSuggestionsReturnsRankedHistory(t *testing.T) {
 	(&server{token: "secret"}).cwdSuggestions(rec, req)
 
 	var got struct {
+		Home        string          `json:"home"`
 		Suggestions []cwdSuggestion `json:"suggestions"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
@@ -77,6 +78,9 @@ func TestCwdSuggestionsReturnsRankedHistory(t *testing.T) {
 	}
 	if len(got.Suggestions) != 1 || got.Suggestions[0].CWD != cwd {
 		t.Fatalf("suggestions = %#v", got.Suggestions)
+	}
+	if got.Home != home {
+		t.Fatalf("home = %q, want %q", got.Home, home)
 	}
 }
 
