@@ -39,29 +39,21 @@ const (
 	KeyEsc   = "\x00esc"
 )
 
-// readEventBlocking waits indefinitely for the next key event(s) from stdin and
-// returns them as key strings. Used inside modal handlers (the help screen, the
-// new-session picker) that pause for input. Mouse events are decoded but
-// filtered out — modal menus ignore the mouse — and background wakes are not
-// watched, so a modal isn't dismissed by remote-data updates underneath.
-//
-// A persistent decoder is kept across the internal poll loop so a multi-byte
-// escape sequence split across reads still decodes, and a lone Esc resolves via
-// pollEvents' pending-flush path rather than being dropped: pollEvents caps its
-// wait at the decoder's pending-escape deadline, so we simply loop until at
-// least one key surfaces.
-func readEventBlocking() []string {
-	dec := newInputDecoder()
+// readModalEvents waits for key input or one of the modal's allowed wake
+// sources. The caller owns the persistent decoder so split escape sequences and
+// lone Esc flushes survive successive modal redraws. Mouse-only input remains
+// ignored; it cannot dismiss or redraw a modal without a wake source.
+func readModalEvents(dec *inputDecoder, wakes []wakeFD) ([]string, wakeKind) {
 	for {
-		events, _ := pollEvents(dec, 0, nil)
+		events, woke := pollEvents(dec, 0, wakes)
 		var keys []string
 		for _, ev := range events {
 			if ev.kind == eventKey {
 				keys = append(keys, ev.key)
 			}
 		}
-		if len(keys) > 0 {
-			return keys
+		if len(keys) > 0 || woke != wakeNone {
+			return keys, woke
 		}
 	}
 }
@@ -156,6 +148,7 @@ func RunTUI(interval time.Duration) error {
 
 	decoder := newInputDecoder()
 	state := newTUIState()
+	screen := newScreenRenderer(os.Stdout)
 
 	// inspectorHub polls the previewed session while the inspector screen is
 	// open; nil on the session list. Shut down on exit if still open.
@@ -237,7 +230,7 @@ func RunTUI(interval time.Duration) error {
 			state.inspector.resize(rows - inspectorChromeRows)
 			var buf strings.Builder
 			state.hits = RenderInspector(&buf, state.inspector, cols, rows)
-			fmt.Print("\033[H\033[J" + buf.String())
+			_ = screen.Draw(buf.String(), cols, rows)
 			return
 		}
 
@@ -272,17 +265,21 @@ func RunTUI(interval time.Duration) error {
 			out = visible.text
 		}
 		if toastActive {
-			out += fmt.Sprintf("\033[%d;1H%s", rows, clipLine(bold(toast), cols))
+			out = withBottomRow(out, rows, bold(toast))
 		}
-		fmt.Print("\033[H\033[J" + out)
+		_ = screen.Draw(out, cols, rows)
 	}
 
+	// Modal screens only listen for resize wakes. Remote and inspector wakes
+	// remain owned by the main loop so background data never changes a modal.
+	modalWakes := []wakeFD{{fd: rw.FD(), kind: wakeResize}}
 	makeCtx := func() *actCtx {
 		return &actCtx{
-			fd:       fd,
-			oldState: oldState,
-			targets:  targets,
-			sel:      state.sel,
+			fd:         fd,
+			oldState:   oldState,
+			targets:    targets,
+			sel:        state.sel,
+			modalWakes: modalWakes,
 			pause: func() {
 				hub.Pause()
 				usageHub.Pause()
@@ -315,6 +312,7 @@ func RunTUI(interval time.Duration) error {
 		state.mode = screenInspector
 		state.inspector = newInspectorViewState(target.id)
 		state.inspectorTargetGone = false
+		screen.Invalidate()
 		render()
 	}
 
@@ -330,6 +328,7 @@ func RunTUI(interval time.Duration) error {
 		state.inspector = inspectorViewState{}
 		state.inspectorTargetGone = false
 		refresh(false)
+		screen.Invalidate()
 		render()
 	}
 
@@ -435,14 +434,17 @@ func RunTUI(interval time.Duration) error {
 				state.navigate(targets, 1)
 				render()
 			case "k", "K":
+				screen.Invalidate()
 				actKill(makeCtx())
 				refresh(true)
 				render()
 			case "a", "A":
+				screen.Invalidate()
 				actAttach(makeCtx())
 				refresh(true)
 				render()
 			case "n", "N":
+				screen.Invalidate()
 				ctx := makeCtx()
 				actNew(ctx)
 				// Record the spawned session's landing target before refreshing so
@@ -483,8 +485,20 @@ func RunTUI(interval time.Duration) error {
 				refresh(true)
 				render()
 			case "?":
-				renderHelp(sortMode)
-				readEventBlocking()
+				screen.Invalidate()
+				helpDecoder := newInputDecoder()
+				for {
+					cols, rows, err := term.GetSize(fd)
+					if err != nil {
+						cols, rows = 0, 0
+					}
+					_ = screen.Draw(renderHelp(sortMode), cols, rows)
+					keys, _ := readModalEvents(helpDecoder, modalWakes)
+					if len(keys) > 0 {
+						break
+					}
+				}
+				screen.Invalidate()
 				render()
 			}
 		}
@@ -588,43 +602,45 @@ func sortRemotes(remotes []RemoteResult, mode string) []RemoteResult {
 	return out
 }
 
-// renderHelp paints the help modal. Caller waits for a keypress to dismiss.
-func renderHelp(sortMode string) {
-	fmt.Print("\033[H\033[J")
-	fmt.Println(bold("claude-sessions  ·  help"))
-	fmt.Println()
-	fmt.Println("  " + bold("NAVIGATION"))
-	fmt.Println("    ↑ / ↓        move selection")
-	fmt.Println("    mouse click  select row · double-click opens")
-	fmt.Println("    mouse wheel  scroll list or inspector")
-	fmt.Println()
-	fmt.Println("  " + bold("ACTIONS") + "  (on selected row)")
-	fmt.Println("    n            new tmux session (↑/↓ cwd · ←/→ command)")
-	fmt.Println("    k            kill the session (tmux-aware)")
-	fmt.Println("    a            attach (or migrate to tmux first)")
-	fmt.Println("    Enter / p    open full-screen inspector")
-	fmt.Println()
-	fmt.Println("  " + bold("INSPECTOR"))
-	fmt.Println("    Home / End   oldest output / resume live follow")
-	fmt.Println("    PgUp / PgDn  scroll inspector by page")
-	fmt.Println("    r            refresh now")
-	fmt.Println("    Esc / q / p  return from inspector")
-	fmt.Println()
-	fmt.Println("  " + bold("VIEW"))
-	fmt.Println("    m            cycle mode (full → intermediate → minimal)  ·  persisted")
-	fmt.Println("    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
-	fmt.Println("                 current sort: " + sortMode)
-	fmt.Println("    r            refresh now")
-	fmt.Println("    q / Ctrl-C   quit")
-	fmt.Println("    ?            this help")
-	fmt.Println()
-	fmt.Println("  " + bold("SUBCOMMANDS") + "  (from the shell)")
-	fmt.Println("    claude-sessions kill PID [-y]")
-	fmt.Println("    claude-sessions migrate PID [-y]")
-	fmt.Println("    claude-sessions new --cwd PATH [--name NAME]")
-	fmt.Println("    claude-sessions preview PID")
-	fmt.Println("    claude-sessions tmux-info PID")
-	fmt.Println("    claude-sessions attach PID")
-	fmt.Println()
-	fmt.Println(dim("press any key to return"))
+// renderHelp builds help-screen content. RunTUI owns terminal positioning and
+// sends this content through screenRenderer.
+func renderHelp(sortMode string) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, bold("claude-sessions  ·  help"))
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "  "+bold("NAVIGATION"))
+	fmt.Fprintln(&b, "    ↑ / ↓        move selection")
+	fmt.Fprintln(&b, "    mouse click  select row · double-click opens")
+	fmt.Fprintln(&b, "    mouse wheel  scroll list or inspector")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "  "+bold("ACTIONS")+"  (on selected row)")
+	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command)")
+	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
+	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
+	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "  "+bold("INSPECTOR"))
+	fmt.Fprintln(&b, "    Home / End   oldest output / resume live follow")
+	fmt.Fprintln(&b, "    PgUp / PgDn  scroll inspector by page")
+	fmt.Fprintln(&b, "    r            refresh now")
+	fmt.Fprintln(&b, "    Esc / q / p  return from inspector")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "  "+bold("VIEW"))
+	fmt.Fprintln(&b, "    m            cycle mode (full → intermediate → minimal)  ·  persisted")
+	fmt.Fprintln(&b, "    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
+	fmt.Fprintln(&b, "                 current sort: "+sortMode)
+	fmt.Fprintln(&b, "    r            refresh now")
+	fmt.Fprintln(&b, "    q / Ctrl-C   quit")
+	fmt.Fprintln(&b, "    ?            this help")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "  "+bold("SUBCOMMANDS")+"  (from the shell)")
+	fmt.Fprintln(&b, "    claude-sessions kill PID [-y]")
+	fmt.Fprintln(&b, "    claude-sessions migrate PID [-y]")
+	fmt.Fprintln(&b, "    claude-sessions new --cwd PATH [--name NAME]")
+	fmt.Fprintln(&b, "    claude-sessions preview PID")
+	fmt.Fprintln(&b, "    claude-sessions tmux-info PID")
+	fmt.Fprintln(&b, "    claude-sessions attach PID")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, dim("press any key to return"))
+	return b.String()
 }

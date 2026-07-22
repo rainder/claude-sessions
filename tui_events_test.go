@@ -199,6 +199,24 @@ func TestResizeWakeSignals(t *testing.T) {
 	}
 }
 
+func TestReadModalEventsReturnsResizeWakeWithoutKey(t *testing.T) {
+	withIdleStdin(t)
+	r, err := newResizeWake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	r.Signal()
+
+	keys, woke := readModalEvents(newInputDecoder(), []wakeFD{{fd: r.FD(), kind: wakeResize}})
+	if len(keys) != 0 {
+		t.Fatalf("keys = %#v, want none", keys)
+	}
+	if woke != wakeResize {
+		t.Fatalf("woke = %b, want resize", woke)
+	}
+}
+
 // withIdleStdin points stdinFD at the read end of a fresh, unwritten pipe for
 // the duration of the test and restores the original value on cleanup. A
 // pipe with no data and an open writer blocks in select exactly like a real

@@ -27,6 +27,10 @@ type actCtx struct {
 	pause  func()
 	resume func()
 
+	// modalWakes are the foreground-only wake sources used while an action owns
+	// a fullscreen modal. RunTUI supplies its resize pipe but excludes data hubs.
+	modalWakes []wakeFD
+
 	// spawnedHost/spawnedTmux record a tmux session just created by this
 	// action (actNew / actNewRemote), so the caller can re-target the
 	// selection onto it once a post-action refresh picks it up. Empty when
@@ -54,6 +58,33 @@ func (c *actCtx) runInteractive(prog string, args ...string) error {
 func (c *actCtx) enterRaw() {
 	enterRaw(c.fd)
 	writeMouseMode(terminalOutput, true)
+}
+
+// prepareLineOutput parks the cursor in a cleared bottom row before restoring
+// cooked mode for an action prompt or status message. screenRenderer leaves the
+// cursor on its last patch, which may be inside the session list or a picker.
+func (c *actCtx) prepareLineOutput() {
+	_, rows, err := term.GetSize(c.fd)
+	if err != nil {
+		rows = 0
+	}
+	writeActionOutputPosition(terminalOutput, rows)
+	enterCooked(c.fd, c.oldState)
+}
+
+// writeActionOutputPosition clears the row where a leading newline from an
+// action prompt will land, then parks the cursor immediately above it. A
+// one-row terminal cannot avoid scrolling; unknown size uses a bottom-clamped
+// fallback instead of moving to the home position.
+func writeActionOutputPosition(w io.Writer, rows int) {
+	switch {
+	case rows > 1:
+		_, _ = fmt.Fprintf(w, "\x1b[%d;1H\x1b[K\x1b[%d;1H", rows, rows-1)
+	case rows == 1:
+		_, _ = io.WriteString(w, "\x1b[1;1H\x1b[K")
+	default:
+		_, _ = io.WriteString(w, "\x1b[9999;1H\x1b[K\x1b[1A\r")
+	}
 }
 
 // selectedTarget returns the currently-selected target, or nil if sel doesn't
@@ -98,7 +129,7 @@ func actKill(c *actCtx) {
 		actKillRemote(c)
 		return
 	}
-	enterCooked(c.fd, c.oldState)
+	c.prepareLineOutput()
 	defer c.enterRaw()
 
 	var prompt string
@@ -139,7 +170,7 @@ func actAttach(c *actCtx) {
 		return
 	}
 	// Not in tmux — offer migration.
-	enterCooked(c.fd, c.oldState)
+	c.prepareLineOutput()
 	prompt := fmt.Sprintf("\nPID %d is not in tmux. Migrate (kill + resume in tmux) first? [y/N] ", s.PID)
 	if !confirm(prompt) {
 		c.enterRaw()
@@ -178,7 +209,7 @@ func actNew(c *actCtx) {
 	}
 	presets, err := LoadCommandPresets()
 	if err != nil {
-		enterCooked(c.fd, c.oldState)
+		c.prepareLineOutput()
 		fmt.Printf("\nload commands: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		c.enterRaw()
@@ -200,14 +231,14 @@ func actNew(c *actCtx) {
 		lines = append(lines, fmt.Sprintf("%-50s%s", picker.shortName(p.cwd), freq))
 	}
 	lines = append(lines, "enter path manually…")
-	row, presetIndex, ok := pickNewSession("New tmux session", lines, start, presets, presetStart, "")
+	row, presetIndex, ok := pickNewSession("New tmux session", lines, start, presets, presetStart, "", c.modalWakes)
 	if !ok {
 		return
 	}
 	preset := presets[presetIndex]
 	SaveCommandPresetName(preset.Name)
 
-	enterCooked(c.fd, c.oldState)
+	c.prepareLineOutput()
 	defer c.enterRaw()
 
 	var cwd string

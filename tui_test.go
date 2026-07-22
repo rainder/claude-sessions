@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSessionScreenOpenKeys(t *testing.T) {
 	for _, key := range []string{KeyEnter, "p", "P"} {
@@ -46,5 +49,17 @@ func TestCycleSortMode(t *testing.T) {
 func TestSortDescStatus(t *testing.T) {
 	if got := sortDesc("status"); got != "status (waiting → idle → busy)" {
 		t.Fatalf("sortDesc(status) = %q", got)
+	}
+}
+
+func TestRenderHelpIsPureContent(t *testing.T) {
+	out := renderHelp("status")
+	for _, want := range []string{"claude-sessions", "NAVIGATION", "current sort: status", "press any key to return"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("help missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b[H") || strings.Contains(out, "\x1b[J") || strings.Contains(out, "\x1b[2J") {
+		t.Fatalf("help contains terminal positioning or clear: %q", out)
 	}
 }
