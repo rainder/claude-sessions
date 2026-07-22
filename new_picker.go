@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // newPickerState holds the cursor position for the two-axis new-session
@@ -45,7 +48,7 @@ func (s *newPickerState) handle(key string) (confirm, cancel bool) {
 func renderNewPicker(title string, lines []string, presets []CommandPreset, state newPickerState, note string) string {
 	preset := presets[state.Preset]
 	var b strings.Builder
-	b.WriteString("\033[H\033[J\n " + bold(title) + "\n\n")
+	b.WriteString("\n " + bold(title) + "\n\n")
 	fmt.Fprintf(&b, " Command:  ◀ %s ▶\n           %s\n\n", bold(preset.Name), dim(preset.Command))
 	for i, line := range lines {
 		marker := "   "
@@ -74,8 +77,14 @@ func pickNewSession(title string, lines []string, rowStart int, presets []Comman
 	if state.Preset < 0 || state.Preset >= state.PresetCount {
 		state.Preset = 0
 	}
+	renderer := newScreenRenderer(os.Stdout)
+	fd := int(os.Stdin.Fd())
 	for {
-		fmt.Print(renderNewPicker(title, lines, presets, state, note))
+		cols, rows, err := term.GetSize(fd)
+		if err != nil {
+			cols, rows = 0, 0
+		}
+		_ = renderer.Draw(renderNewPicker(title, lines, presets, state, note), cols, rows)
 		for _, key := range readEventBlocking() {
 			confirm, cancel := state.handle(key)
 			if cancel {

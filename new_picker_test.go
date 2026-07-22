@@ -44,4 +44,7 @@ func TestRenderNewPicker(t *testing.T) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "\x1b[H") || strings.Contains(out, "\x1b[J") || strings.Contains(out, "\x1b[2J") {
+		t.Fatalf("picker contains terminal positioning or clear: %q", out)
+	}
 }
