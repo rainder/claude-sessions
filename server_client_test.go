@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -77,6 +79,9 @@ func TestSessionServerConfigUsesLocalAndRemoteEndpoints(t *testing.T) {
 	}
 	if localServerTimeout != 750*time.Millisecond {
 		t.Fatalf("local timeout = %s, want 750ms", localServerTimeout)
+	}
+	if disabledWriteTimeout != 5*time.Second {
+		t.Fatalf("disabled write timeout = %s, want 5s", disabledWriteTimeout)
 	}
 
 	writeServerYAML(t, home, "orca", "10.0.0.8", "9876", "remote-secret")
@@ -235,5 +240,229 @@ func TestPatchDisabledBySessionID(t *testing.T) {
 	rows = append(rows, Session{})
 	if patchDisabledBySessionID(rows, "", true) || rows[2].Disabled {
 		t.Fatal("empty session ID must never be patched")
+	}
+}
+
+func stubLocalServerFallback(
+	t *testing.T,
+	request func(context.Context, ServerConfig, string, string, []byte) ([]byte, bool, error),
+	resolve func(context.Context) string,
+) {
+	t.Helper()
+	previousRequest := localServerRequestAttempt
+	previousResolve := localTailscaleIPv4
+	localServerRequestAttempt = request
+	localTailscaleIPv4 = resolve
+	t.Cleanup(func() {
+		localServerRequestAttempt = previousRequest
+		localTailscaleIPv4 = previousResolve
+	})
+}
+
+func TestLocalServerRequestLoopbackSuccessSkipsTailscale(t *testing.T) {
+	var attempts []ServerConfig
+	stubLocalServerFallback(t,
+		func(_ context.Context, srv ServerConfig, path, method string, body []byte) ([]byte, bool, error) {
+			attempts = append(attempts, srv)
+			if path != "/sessions" || method != http.MethodGet || body != nil {
+				t.Fatalf("request = (%q, %q, %q)", path, method, body)
+			}
+			return []byte(`{"sessions":[]}`), true, nil
+		},
+		func(context.Context) string {
+			t.Fatal("Tailscale resolved after loopback success")
+			return ""
+		},
+	)
+
+	srv := ServerConfig{Host: localServerHost, Port: localServerPort, Token: "secret"}
+	got, err := localServerRequestWithTimeout(srv, "/sessions", http.MethodGet, nil, localServerTimeout)
+	if err != nil || string(got) != `{"sessions":[]}` {
+		t.Fatalf("request = (%q, %v)", got, err)
+	}
+	if len(attempts) != 1 || attempts[0] != srv {
+		t.Fatalf("attempts = %#v, want only loopback %#v", attempts, srv)
+	}
+}
+
+func TestLocalServerRequestRetriesTailscaleAfterResponseLessFailure(t *testing.T) {
+	loopbackErr := errors.New("connection refused")
+	srv := ServerConfig{Host: localServerHost, Port: localServerPort, Token: "secret"}
+	var deadlines []time.Time
+	var resolvedDeadline time.Time
+	var attempts []ServerConfig
+	stubLocalServerFallback(t,
+		func(ctx context.Context, attempt ServerConfig, path, method string, body []byte) ([]byte, bool, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("request context has no deadline")
+			}
+			deadlines = append(deadlines, deadline)
+			attempts = append(attempts, attempt)
+			if attempt.Host == localServerHost {
+				return nil, false, loopbackErr
+			}
+			if attempt.Host != "100.64.0.5" || attempt.Port != localServerPort || attempt.Token != srv.Token ||
+				path != "/sessions/42/disabled" || method != http.MethodPut || string(body) != `{"disabled":true}` {
+				t.Fatalf("fallback request = (%#v, %q, %q, %q)", attempt, path, method, body)
+			}
+			return []byte(`{"disabled":true}`), true, nil
+		},
+		func(ctx context.Context) string {
+			var ok bool
+			resolvedDeadline, ok = ctx.Deadline()
+			if !ok {
+				t.Fatal("resolver context has no deadline")
+			}
+			return "100.64.0.5"
+		},
+	)
+
+	got, err := localServerRequestWithTimeout(srv, "/sessions/42/disabled", http.MethodPut, []byte(`{"disabled":true}`), disabledWriteTimeout)
+	if err != nil || string(got) != `{"disabled":true}` {
+		t.Fatalf("request = (%q, %v)", got, err)
+	}
+	if len(attempts) != 2 || attempts[0].Host != localServerHost || attempts[1].Host != "100.64.0.5" {
+		t.Fatalf("attempts = %#v", attempts)
+	}
+	if len(deadlines) != 2 || !deadlines[0].Equal(resolvedDeadline) || !deadlines[0].Equal(deadlines[1]) {
+		t.Fatalf("deadlines = %#v resolver=%s; want one shared operation deadline", deadlines, resolvedDeadline)
+	}
+}
+
+func TestLocalServerRequestDoesNotRetryAfterResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "HTTP status error", err: errors.New("HTTP 404: session ended")},
+		{name: "body read error", err: io.ErrUnexpectedEOF},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubLocalServerFallback(t,
+				func(context.Context, ServerConfig, string, string, []byte) ([]byte, bool, error) {
+					return nil, true, tc.err
+				},
+				func(context.Context) string {
+					t.Fatal("Tailscale resolved after HTTP response")
+					return ""
+				},
+			)
+
+			_, err := localServerRequestWithTimeout(
+				ServerConfig{Host: localServerHost, Port: localServerPort},
+				"/sessions",
+				http.MethodGet,
+				nil,
+				localServerTimeout,
+			)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("error = %v, want %v", err, tc.err)
+			}
+		})
+	}
+}
+
+func TestFetchLocalServerSessionsFallsBackToDirectCollectionAfterBothEndpointsFail(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	attempts := 0
+	stubLocalServerFallback(t,
+		func(context.Context, ServerConfig, string, string, []byte) ([]byte, bool, error) {
+			attempts++
+			return nil, false, errors.New("unreachable")
+		},
+		func(context.Context) string { return "100.64.0.5" },
+	)
+
+	directRows := []Session{{PID: 1, SessionID: "direct"}}
+	got, err := collectClientLocalWith(fetchLocalServerSessions, func() ([]Session, error) {
+		return directRows, nil
+	})
+	if err != nil || len(got) != 1 || got[0].SessionID != "direct" {
+		t.Fatalf("result = (%#v, %v)", got, err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want loopback and Tailscale", attempts)
+	}
+}
+
+func TestSetSessionDisabledRemoteHostBypassesLocalFallback(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"disabled":true,"sessionId":"session-42"}`)
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "orca", u.Hostname(), u.Port(), "secret")
+	stubLocalServerFallback(t,
+		func(context.Context, ServerConfig, string, string, []byte) ([]byte, bool, error) {
+			t.Fatal("local fallback request used for named remote host")
+			return nil, false, nil
+		},
+		func(context.Context) string {
+			t.Fatal("Tailscale resolved for named remote host")
+			return ""
+		},
+	)
+
+	state, err := setSessionDisabled("orca", 42, "session-42", true)
+	if err != nil || !state.Disabled || state.SessionID != "session-42" {
+		t.Fatalf("state = (%#v, %v)", state, err)
+	}
+}
+
+func TestPutLocalSessionDisabledReturnsErrorAfterBothEndpointsFail(t *testing.T) {
+	attempts := 0
+	stubLocalServerFallback(t,
+		func(context.Context, ServerConfig, string, string, []byte) ([]byte, bool, error) {
+			attempts++
+			return nil, false, errors.New("unreachable")
+		},
+		func(context.Context) string { return "100.64.0.5" },
+	)
+
+	state, err := putLocalSessionDisabled(
+		ServerConfig{Host: localServerHost, Port: localServerPort, Token: "secret"},
+		42,
+		"session-42",
+		true,
+	)
+	if err == nil || state != (disabledState{}) {
+		t.Fatalf("state = (%#v, %v), want zero state and error", state, err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want loopback and Tailscale", attempts)
+	}
+}
+
+func TestServerRequestAttemptReportsBodyReadAsResponseReceived(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		fmt.Fprint(rw, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nx")
+		if err := rw.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer backend.Close()
+
+	_, responseReceived, err := serverRequestAttempt(
+		context.Background(),
+		serverConfigForURL(t, backend.URL, "secret"),
+		"/sessions",
+		http.MethodGet,
+		nil,
+	)
+	if !responseReceived {
+		t.Fatal("responseReceived = false after HTTP headers")
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("error = %v, want unexpected EOF", err)
 	}
 }

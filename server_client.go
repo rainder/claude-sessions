@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,13 @@ const (
 	localServerPort      = 8765
 	localServerTimeout   = 750 * time.Millisecond
 	disabledWriteTimeout = 5 * time.Second
+)
+
+var (
+	// Test seams let local fallback behavior be exercised without a running
+	// Tailscale daemon or any network listener.
+	localServerRequestAttempt = serverRequestAttempt
+	localTailscaleIPv4        = tailscaleIPv4Context
 )
 
 type disabledState struct {
@@ -39,6 +47,38 @@ func sessionServerConfig(host string) (ServerConfig, error) {
 	}, nil
 }
 
+// localServerRequestWithTimeout tries loopback first. It falls back to this
+// host's Tailscale IPv4 only when the loopback transport did not receive an HTTP
+// response, and both attempts share one operation deadline.
+func localServerRequestWithTimeout(srv ServerConfig, path, method string, body []byte, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	data, responseReceived, err := localServerRequestAttempt(ctx, srv, path, method, body)
+	if err == nil || responseReceived {
+		return data, err
+	}
+
+	tailscaleHost := localTailscaleIPv4(ctx)
+	if tailscaleHost == "" {
+		return data, err
+	}
+	fallback := srv
+	fallback.Host = tailscaleHost
+	data, _, err = localServerRequestAttempt(ctx, fallback, path, method, body)
+	return data, err
+}
+
+func parseServerSessions(data []byte) ([]Session, error) {
+	var response struct {
+		Sessions []Session `json:"sessions"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("bad response: %w", err)
+	}
+	return response.Sessions, nil
+}
+
 func fetchSessionsFromServer(
 	srv ServerConfig,
 	timeout time.Duration,
@@ -53,13 +93,7 @@ func fetchSessionsFromServer(
 	if err != nil {
 		return nil, err
 	}
-	var response struct {
-		Sessions []Session `json:"sessions"`
-	}
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("bad response: %w", err)
-	}
-	return response.Sessions, nil
+	return parseServerSessions(data)
 }
 
 func fetchLocalServerSessions() ([]Session, error) {
@@ -67,7 +101,17 @@ func fetchLocalServerSessions() ([]Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return fetchSessionsFromServer(srv, localServerTimeout)
+	data, err := localServerRequestWithTimeout(
+		srv,
+		"/sessions",
+		http.MethodGet,
+		nil,
+		localServerTimeout,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return parseServerSessions(data)
 }
 
 func collectClientLocalWith(
@@ -83,11 +127,14 @@ func collectClientLocal() ([]Session, error) {
 	return collectClientLocalWith(fetchLocalServerSessions, CollectLocal)
 }
 
-func putSessionDisabled(
+type serverRequestWithTimeoutFunc func(ServerConfig, string, string, []byte, time.Duration) ([]byte, error)
+
+func putSessionDisabledWithRequest(
 	srv ServerConfig,
 	pid int,
 	sessionID string,
 	disabled bool,
+	request serverRequestWithTimeoutFunc,
 ) (disabledState, error) {
 	if sessionID == "" {
 		return disabledState{}, errors.New("session ID required")
@@ -102,7 +149,7 @@ func putSessionDisabled(
 	if err != nil {
 		return disabledState{}, err
 	}
-	data, err := serverRequestWithTimeout(
+	data, err := request(
 		srv,
 		fmt.Sprintf("/sessions/%d/disabled", pid),
 		http.MethodPut,
@@ -138,6 +185,36 @@ func putSessionDisabled(
 	}, nil
 }
 
+func putSessionDisabled(
+	srv ServerConfig,
+	pid int,
+	sessionID string,
+	disabled bool,
+) (disabledState, error) {
+	return putSessionDisabledWithRequest(
+		srv,
+		pid,
+		sessionID,
+		disabled,
+		serverRequestWithTimeout,
+	)
+}
+
+func putLocalSessionDisabled(
+	srv ServerConfig,
+	pid int,
+	sessionID string,
+	disabled bool,
+) (disabledState, error) {
+	return putSessionDisabledWithRequest(
+		srv,
+		pid,
+		sessionID,
+		disabled,
+		localServerRequestWithTimeout,
+	)
+}
+
 func setSessionDisabled(
 	host string,
 	pid int,
@@ -147,6 +224,9 @@ func setSessionDisabled(
 	srv, err := sessionServerConfig(host)
 	if err != nil {
 		return disabledState{}, err
+	}
+	if host == "" {
+		return putLocalSessionDisabled(srv, pid, sessionID, disabled)
 	}
 	return putSessionDisabled(srv, pid, sessionID, disabled)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,34 +16,60 @@ import (
 // configured server. Mirror the local actions, but talk to the server's HTTP
 // API and SSH for the interactive attach.
 
-// serverRequestWithTimeout performs an HTTP request to a resolved server with an
-// explicit client timeout. body is JSON if non-empty. Returns the response body
-// or an error.
-func serverRequestWithTimeout(srv ServerConfig, path, method string, body []byte, timeout time.Duration) ([]byte, error) {
+// serverRequestAttempt performs one HTTP request to a resolved server. Its
+// responseReceived result is true as soon as http.Client.Do returns a response,
+// including the unusual case where it also returns an error. Callers use that
+// signal to decide whether a different endpoint may be attempted.
+func serverRequestAttempt(
+	ctx context.Context,
+	srv ServerConfig,
+	path, method string,
+	body []byte,
+) (data []byte, responseReceived bool, err error) {
 	url := fmt.Sprintf("http://%s:%d%s", srv.Host, srv.Port, path)
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+srv.Token)
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
+
+	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return nil, err
+		if resp != nil {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			return nil, true, err
+		}
+		return nil, false, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return data, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+
+	data, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return data, true, err
 	}
-	return data, nil
+	if resp.StatusCode != http.StatusOK {
+		return data, true, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return data, true, nil
+}
+
+// serverRequestWithTimeout performs an HTTP request to a resolved server with a
+// single operation timeout. body is JSON if non-empty. Returns the response body
+// or an error.
+func serverRequestWithTimeout(srv ServerConfig, path, method string, body []byte, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	data, _, err := serverRequestAttempt(ctx, srv, path, method, body)
+	return data, err
 }
 
 // remoteRequestWithTimeout performs an HTTP request to the named server with an

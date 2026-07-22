@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -542,7 +543,13 @@ func loadOrCreateToken() (string, error) {
 // tailscaleIPv4 returns the host's Tailscale IPv4 address (or "" if Tailscale
 // isn't installed/connected). Defense-in-depth alongside the bearer token.
 func tailscaleIPv4() string {
-	out, err := exec.Command("tailscale", "ip", "-4").Output()
+	return tailscaleIPv4Context(context.Background())
+}
+
+// tailscaleIPv4Context is the context-bounded variant used by local client
+// fallback, so address resolution cannot outlive its total operation deadline.
+func tailscaleIPv4Context(ctx context.Context) string {
+	out, err := exec.CommandContext(ctx, "tailscale", "ip", "-4").Output()
 	if err != nil {
 		return ""
 	}
