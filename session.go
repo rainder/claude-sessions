@@ -42,8 +42,9 @@ type Session struct {
 	// time so remote rows render from the JSON as-is.
 	AgentsRunning int `json:"agentsRunning,omitempty"`
 
-	CPU  string `json:"cpu"`
-	Tmux string `json:"tmux"` // "session:win.pane" or "" if not in tmux
+	CPU          string `json:"cpu"`
+	Tmux         string `json:"tmux"` // "session:win.pane" or "" if not in tmux
+	TmuxAttached *int   `json:"tmuxAttached,omitempty"`
 
 	Home string `json:"home,omitempty"` // collector's home, used for local/remote ~ collapse
 	Host string `json:"-"`              // client-only remote host label
@@ -161,6 +162,7 @@ func CollectLocal() ([]Session, error) {
 		}
 		if pane, found := walkTmuxPane(s.PID, panes, ppid); found {
 			s.Tmux = pane.Location
+			s.TmuxAttached = pane.Attached
 		}
 		s.Home = home
 		if p := findTranscript(home, s.SessionID); p != "" {
