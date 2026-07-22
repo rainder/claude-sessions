@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,23 @@ type actionResult struct {
 	OK    bool   `json:"ok"`
 	Tmux  string `json:"tmux,omitempty"`  // tmux session name for migrate/new
 	Error string `json:"error,omitempty"` // human-readable failure reason
+}
+
+type sessionFlight struct {
+	done       chan struct{}
+	err        error
+	generation uint64
+}
+
+type sessionCache struct {
+	mu               sync.Mutex
+	sessions         []Session
+	completedAt      time.Time
+	valid            bool
+	cachedGeneration uint64
+	generation       uint64
+	flight           *sessionFlight
+	now              func() time.Time
 }
 
 type server struct {
@@ -40,6 +58,8 @@ type server struct {
 	// where they fall back to CollectLocal / KillSession.
 	collect   func() ([]Session, error)
 	terminate func(Session) error
+
+	sessionCache sessionCache
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -51,6 +71,80 @@ func (s *server) collectLocal() ([]Session, error) {
 		return s.collect()
 	}
 	return CollectLocal()
+}
+
+func (c *sessionCache) timeNow() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (s *server) cachedSessions() ([]Session, error) {
+	cache := &s.sessionCache
+	for {
+		cache.mu.Lock()
+		if cache.valid && cache.cachedGeneration == cache.generation && cache.timeNow().Before(cache.completedAt.Add(time.Second)) {
+			sessions := cache.sessions
+			cache.mu.Unlock()
+			return sessions, nil
+		}
+		if flight := cache.flight; flight != nil {
+			cache.mu.Unlock()
+			<-flight.done
+
+			cache.mu.Lock()
+			err := flight.err
+			currentGeneration := cache.generation
+			flightGeneration := flight.generation
+			cache.mu.Unlock()
+			if err != nil && currentGeneration == flightGeneration {
+				return nil, err
+			}
+			continue
+		}
+
+		flight := &sessionFlight{done: make(chan struct{})}
+		cache.flight = flight
+		cache.mu.Unlock()
+
+		for {
+			cache.mu.Lock()
+			generation := cache.generation
+			cache.mu.Unlock()
+
+			sessions, err := s.collectLocal()
+			completedAt := cache.timeNow()
+
+			cache.mu.Lock()
+			if cache.generation != generation {
+				cache.mu.Unlock()
+				continue
+			}
+			flight.err = err
+			flight.generation = generation
+			if err == nil {
+				cache.sessions = sessions
+				cache.completedAt = completedAt
+				cache.cachedGeneration = generation
+				cache.valid = true
+			}
+			cache.flight = nil
+			close(flight.done)
+			cache.mu.Unlock()
+			return sessions, err
+		}
+	}
+}
+
+func (s *server) invalidateSessions() {
+	cache := &s.sessionCache
+	cache.mu.Lock()
+	cache.generation++
+	cache.sessions = nil
+	cache.completedAt = time.Time{}
+	cache.valid = false
+	cache.mu.Unlock()
 }
 
 func (s *server) terminateSession(target Session) error {
@@ -71,7 +165,7 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	sessions, err := s.collectLocal()
+	sessions, err := s.cachedSessions()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -205,6 +299,7 @@ func (s *server) kill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return
 	}
+	s.invalidateSessions()
 	writeJSON(w, http.StatusOK, actionResult{OK: true})
 }
 
@@ -223,6 +318,7 @@ func (s *server) migrate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return
 	}
+	s.invalidateSessions()
 	writeJSON(w, http.StatusOK, actionResult{OK: true, Tmux: tname})
 }
 
@@ -272,6 +368,7 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return
 	}
+	s.invalidateSessions()
 	writeJSON(w, http.StatusOK, actionResult{OK: true, Tmux: tname})
 }
 

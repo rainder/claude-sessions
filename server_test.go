@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewSessionExpandsTildeBeforeValidation(t *testing.T) {
@@ -513,5 +515,371 @@ func TestSessionsIncludesEmptyHostUsageWhenUnavailable(t *testing.T) {
 	s.sessions(rec, req)
 	if !strings.Contains(rec.Body.String(), `"hostUsage":{}`) {
 		t.Fatalf("response missing empty hostUsage object: %s", rec.Body.String())
+	}
+}
+
+func getServerSessions(s *server) (int, []Session, error) {
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		return rec.Code, nil, nil
+	}
+	var response struct {
+		Sessions []Session `json:"sessions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		return rec.Code, nil, err
+	}
+	return rec.Code, response.Sessions, nil
+}
+
+func TestSessionsCachesSuccessfulCollectionForOneSecond(t *testing.T) {
+	now := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	collectCalls := 0
+	hostSnapshots := 0
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			collectCalls++
+			if collectCalls == 1 {
+				now = now.Add(200 * time.Millisecond)
+			}
+			return []Session{{PID: collectCalls}}, nil
+		},
+		hostSnapshot: func() HostUsage {
+			hostSnapshots++
+			return HostUsage{}
+		},
+	}
+	s.sessionCache.now = func() time.Time { return now }
+
+	code, sessions, err := getServerSessions(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != http.StatusOK || len(sessions) != 1 || sessions[0].PID != 1 {
+		t.Fatalf("first response = (%d, %#v), want PID 1", code, sessions)
+	}
+
+	now = now.Add(999 * time.Millisecond)
+	code, sessions, err = getServerSessions(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != http.StatusOK || len(sessions) != 1 || sessions[0].PID != 1 {
+		t.Fatalf("response before TTL = (%d, %#v), want PID 1", code, sessions)
+	}
+	if collectCalls != 1 {
+		t.Fatalf("collect calls before TTL = %d, want 1", collectCalls)
+	}
+
+	now = now.Add(time.Millisecond)
+	code, sessions, err = getServerSessions(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != http.StatusOK || len(sessions) != 1 || sessions[0].PID != 2 {
+		t.Fatalf("response at TTL = (%d, %#v), want refreshed PID 2", code, sessions)
+	}
+	if collectCalls != 2 {
+		t.Fatalf("collect calls at TTL = %d, want 2", collectCalls)
+	}
+	if hostSnapshots != 3 {
+		t.Fatalf("host snapshots = %d, want one per request", hostSnapshots)
+	}
+}
+
+func TestSessionsDoesNotCacheCollectionErrors(t *testing.T) {
+	collectCalls := 0
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			collectCalls++
+			if collectCalls == 1 {
+				return nil, errors.New("collect failed")
+			}
+			return []Session{{PID: 2}}, nil
+		},
+	}
+
+	code, _, err := getServerSessions(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != http.StatusInternalServerError {
+		t.Fatalf("first status = %d, want %d", code, http.StatusInternalServerError)
+	}
+
+	code, sessions, err := getServerSessions(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != http.StatusOK || len(sessions) != 1 || sessions[0].PID != 2 {
+		t.Fatalf("second response = (%d, %#v), want successful retry", code, sessions)
+	}
+	if collectCalls != 2 {
+		t.Fatalf("collect calls = %d, want 2", collectCalls)
+	}
+}
+
+func TestSessionsSharesConcurrentCollectionError(t *testing.T) {
+	flightStarted := make(chan struct{})
+	releaseFlight := make(chan struct{})
+	secondRequestStarted := make(chan struct{})
+	flightErr := errors.New("collect failed")
+	var collectMu sync.Mutex
+	collectCalls := 0
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			collectMu.Lock()
+			collectCalls++
+			call := collectCalls
+			collectMu.Unlock()
+			if call == 1 {
+				close(flightStarted)
+				<-releaseFlight
+				return nil, flightErr
+			}
+			return []Session{{PID: 2}}, nil
+		},
+	}
+
+	type result struct {
+		code     int
+		sessions []Session
+		err      error
+	}
+	firstResult := make(chan result, 1)
+	secondResult := make(chan result, 1)
+	go func() {
+		code, sessions, err := getServerSessions(s)
+		firstResult <- result{code: code, sessions: sessions, err: err}
+	}()
+	<-flightStarted
+	go func() {
+		close(secondRequestStarted)
+		code, sessions, err := getServerSessions(s)
+		secondResult <- result{code: code, sessions: sessions, err: err}
+	}()
+	<-secondRequestStarted
+	time.Sleep(100 * time.Millisecond)
+	close(releaseFlight)
+
+	for _, result := range []result{<-firstResult, <-secondResult} {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.code != http.StatusInternalServerError {
+			t.Fatalf("concurrent status = %d, want %d", result.code, http.StatusInternalServerError)
+		}
+	}
+	collectMu.Lock()
+	if collectCalls != 1 {
+		collectMu.Unlock()
+		t.Fatalf("collect calls for shared failed flight = %d, want 1", collectCalls)
+	}
+	collectMu.Unlock()
+
+	code, sessions, err := getServerSessions(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != http.StatusOK || len(sessions) != 1 || sessions[0].PID != 2 {
+		t.Fatalf("later response = (%d, %#v), want retry success", code, sessions)
+	}
+	collectMu.Lock()
+	defer collectMu.Unlock()
+	if collectCalls != 2 {
+		t.Fatalf("collect calls after later retry = %d, want 2", collectCalls)
+	}
+}
+
+func TestSessionsSharesConcurrentColdCollection(t *testing.T) {
+	const requests = 16
+
+	collectionStarted := make(chan struct{})
+	secondCollectionStarted := make(chan struct{})
+	releaseCollection := make(chan struct{})
+	var mu sync.Mutex
+	collectCalls := 0
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			mu.Lock()
+			collectCalls++
+			call := collectCalls
+			mu.Unlock()
+			if call == 1 {
+				close(collectionStarted)
+			} else if call == 2 {
+				close(secondCollectionStarted)
+			}
+			<-releaseCollection
+			return []Session{{PID: 42}}, nil
+		},
+	}
+
+	type result struct {
+		code     int
+		sessions []Session
+		err      error
+	}
+	results := make(chan result, requests)
+	start := make(chan struct{})
+	var ready, workers sync.WaitGroup
+	ready.Add(requests)
+	workers.Add(requests)
+	for range requests {
+		go func() {
+			defer workers.Done()
+			ready.Done()
+			<-start
+			code, sessions, err := getServerSessions(s)
+			results <- result{code: code, sessions: sessions, err: err}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-collectionStarted
+
+	select {
+	case <-secondCollectionStarted:
+		close(releaseCollection)
+		t.Fatal("second cold request started its own collection")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseCollection)
+	workers.Wait()
+	close(results)
+
+	for result := range results {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.code != http.StatusOK || len(result.sessions) != 1 || result.sessions[0].PID != 42 {
+			t.Fatalf("response = (%d, %#v), want cached session", result.code, result.sessions)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if collectCalls != 1 {
+		t.Fatalf("collect calls = %d, want 1", collectCalls)
+	}
+}
+
+func TestKillInvalidatesCachedSessionsOnlyAfterSuccess(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		terminateErr  error
+		wantCalls     int
+		wantListingID int
+	}{
+		{name: "success", wantCalls: 3, wantListingID: 2},
+		{name: "failure", terminateErr: errors.New("kill failed"), wantCalls: 2, wantListingID: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			collectCalls := 0
+			s := &server{
+				token: "secret",
+				collect: func() ([]Session, error) {
+					collectCalls++
+					switch collectCalls {
+					case 1, 2:
+						return []Session{{PID: 1}}, nil
+					default:
+						return []Session{{PID: 2}}, nil
+					}
+				},
+				terminate: func(Session) error { return test.terminateErr },
+			}
+
+			code, _, err := getServerSessions(s)
+			if err != nil || code != http.StatusOK {
+				t.Fatalf("initial listing = (%d, %v)", code, err)
+			}
+			killRequest := httptest.NewRequest(http.MethodPost, "/sessions/1/kill", nil)
+			killRequest.SetPathValue("pid", "1")
+			killRequest.Header.Set("Authorization", "Bearer secret")
+			killRecorder := httptest.NewRecorder()
+			s.kill(killRecorder, killRequest)
+
+			code, sessions, err := getServerSessions(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code != http.StatusOK || len(sessions) != 1 || sessions[0].PID != test.wantListingID {
+				t.Fatalf("listing after kill = (%d, %#v), want PID %d", code, sessions, test.wantListingID)
+			}
+			if collectCalls != test.wantCalls {
+				t.Fatalf("collect calls = %d, want %d", collectCalls, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestSessionsRetriesAfterInvalidationDuringCollection(t *testing.T) {
+	firstCollectionStarted := make(chan struct{})
+	releaseFirstCollection := make(chan struct{})
+	var mu sync.Mutex
+	collectCalls := 0
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			mu.Lock()
+			collectCalls++
+			call := collectCalls
+			mu.Unlock()
+			switch call {
+			case 1:
+				close(firstCollectionStarted)
+				<-releaseFirstCollection
+				return []Session{{PID: 1}}, nil
+			case 2:
+				return []Session{{PID: 1}}, nil // fresh row used by kill
+			case 3:
+				return []Session{{PID: 2}}, nil // fresh listing after invalidation
+			default:
+				return nil, fmt.Errorf("unexpected collect call %d", call)
+			}
+		},
+		terminate: func(Session) error { return nil },
+	}
+
+	type result struct {
+		code     int
+		sessions []Session
+		err      error
+	}
+	listing := make(chan result, 1)
+	go func() {
+		code, sessions, err := getServerSessions(s)
+		listing <- result{code: code, sessions: sessions, err: err}
+	}()
+	<-firstCollectionStarted
+
+	killRequest := httptest.NewRequest(http.MethodPost, "/sessions/1/kill", nil)
+	killRequest.SetPathValue("pid", "1")
+	killRequest.Header.Set("Authorization", "Bearer secret")
+	killRecorder := httptest.NewRecorder()
+	s.kill(killRecorder, killRequest)
+	if killRecorder.Code != http.StatusOK {
+		t.Fatalf("kill status = %d", killRecorder.Code)
+	}
+
+	close(releaseFirstCollection)
+	got := <-listing
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.code != http.StatusOK || len(got.sessions) != 1 || got.sessions[0].PID != 2 {
+		t.Fatalf("listing = (%d, %#v), want fresh PID 2", got.code, got.sessions)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if collectCalls != 3 {
+		t.Fatalf("collect calls = %d, want 3", collectCalls)
 	}
 }
