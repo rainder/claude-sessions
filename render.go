@@ -807,6 +807,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
 				tmuxCell,
 				r.s.CPU, r.ageStr, r.s.Version, r.sidShort)
+			body = strings.TrimRight(body, " ") + " "
 			row := tmuxViewerPrefix(r.s, plainCells) + body
 			if ghost && !selected {
 				row = dim(row)
