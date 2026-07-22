@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -921,4 +922,365 @@ func TestSessionsRetriesAfterInvalidationDuringCollection(t *testing.T) {
 	if collectCalls != 3 {
 		t.Fatalf("collect calls = %d, want 3", collectCalls)
 	}
+}
+
+func putDisabled(s *server, pid int, body string, authed bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/sessions/%d/disabled", pid), strings.NewReader(body))
+	req.SetPathValue("pid", strconv.Itoa(pid))
+	if authed {
+		req.Header.Set("Authorization", "Bearer secret")
+	}
+	rec := httptest.NewRecorder()
+	s.setDisabled(rec, req)
+	return rec
+}
+
+func TestSetDisabledSetsClearsAndAnnotatesSessions(t *testing.T) {
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 42, SessionID: "session-42"}}, nil
+		},
+	}
+
+	rec := putDisabled(s, 42, `{"disabled":true,"sessionId":"session-42"}`, true)
+	if rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"disabled":true`) ||
+		!strings.Contains(rec.Body.String(), `"sessionId":"session-42"`) {
+		t.Fatalf("set response = %d %s", rec.Code, rec.Body.String())
+	}
+	code, rows, err := getServerSessions(s)
+	if err != nil || code != http.StatusOK || len(rows) != 1 || !rows[0].Disabled {
+		t.Fatalf("annotated rows = (%d, %#v, %v)", code, rows, err)
+	}
+
+	rec = putDisabled(s, 42, `{"disabled":false,"sessionId":"session-42"}`, true)
+	if rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"disabled":false`) ||
+		!strings.Contains(rec.Body.String(), `"sessionId":"session-42"`) {
+		t.Fatalf("clear response = %d %s", rec.Code, rec.Body.String())
+	}
+	_, rows, err = getServerSessions(s)
+	if err != nil || len(rows) != 1 || rows[0].Disabled {
+		t.Fatalf("cleared rows = (%#v, %v)", rows, err)
+	}
+}
+
+func TestSetDisabledValidatesRequest(t *testing.T) {
+	live := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 42, SessionID: "session-42"}}, nil
+		},
+	}
+	cases := []struct {
+		name string
+		pid  int
+		body string
+		want int
+	}{
+		{"malformed", 42, `{`, http.StatusBadRequest},
+		{"trailing JSON", 42, `{"disabled":true,"sessionId":"session-42"} {}`, http.StatusBadRequest},
+		{"missing state", 42, `{"sessionId":"session-42"}`, http.StatusBadRequest},
+		{"missing identity", 42, `{"disabled":true}`, http.StatusBadRequest},
+		{"empty identity", 42, `{"disabled":true,"sessionId":""}`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := putDisabled(live, tc.pid, tc.body, true)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%q", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/sessions/not-a-pid/disabled",
+		strings.NewReader(`{"disabled":true,"sessionId":"session-42"}`),
+	)
+	req.SetPathValue("pid", "not-a-pid")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	live.setDisabled(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed PID status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func validationStateServer(collect func() ([]Session, error)) *server {
+	return &server{
+		token:   "secret",
+		collect: collect,
+		disabledSessionIDs: map[string]struct{}{
+			"retained-session": {},
+		},
+		disabledGeneration: 7,
+		sessionCache: sessionCache{
+			sessions: []Session{{
+				PID:       10,
+				SessionID: "cached-session",
+			}},
+			completedAt:      time.Now(),
+			valid:            true,
+			cachedGeneration: 11,
+			generation:       11,
+		},
+	}
+}
+
+func assertValidationStateUnchanged(t *testing.T, s *server) {
+	t.Helper()
+
+	s.disabledMu.RLock()
+	_, retained := s.disabledSessionIDs["retained-session"]
+	registryLen := len(s.disabledSessionIDs)
+	disabledGeneration := s.disabledGeneration
+	s.disabledMu.RUnlock()
+	if !retained || registryLen != 1 || disabledGeneration != 7 {
+		t.Fatalf(
+			"validation mutated registry: registry=%#v generation=%d",
+			s.disabledSessionIDs,
+			disabledGeneration,
+		)
+	}
+
+	s.sessionCache.mu.Lock()
+	cacheValid := s.sessionCache.valid
+	cacheGeneration := s.sessionCache.generation
+	cachedGeneration := s.sessionCache.cachedGeneration
+	cachedRows := len(s.sessionCache.sessions)
+	completedAt := s.sessionCache.completedAt
+	s.sessionCache.mu.Unlock()
+	if !cacheValid ||
+		cacheGeneration != 11 ||
+		cachedGeneration != 11 ||
+		cachedRows != 1 ||
+		completedAt.IsZero() {
+		t.Fatalf(
+			"validation invalidated cache: valid=%v generation=%d cachedGeneration=%d rows=%d completedAt=%v",
+			cacheValid,
+			cacheGeneration,
+			cachedGeneration,
+			cachedRows,
+			completedAt,
+		)
+	}
+}
+
+func TestSetDisabledUnknownPIDPreservesRegistryAndCache(t *testing.T) {
+	s := validationStateServer(func() ([]Session, error) {
+		return []Session{{PID: 42, SessionID: "session-42"}}, nil
+	})
+
+	rec := putDisabled(
+		s,
+		99,
+		`{"disabled":true,"sessionId":"session-99"}`,
+		true,
+	)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf(
+			"status = %d, want %d; body=%q",
+			rec.Code,
+			http.StatusNotFound,
+			rec.Body.String(),
+		)
+	}
+	assertValidationStateUnchanged(t, s)
+}
+
+func TestSetDisabledRejectsSessionWithoutStableID(t *testing.T) {
+	s := validationStateServer(func() ([]Session, error) {
+		return []Session{{PID: 42}}, nil
+	})
+	rec := putDisabled(
+		s,
+		42,
+		`{"disabled":true,"sessionId":"selected-session"}`,
+		true,
+	)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%q", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	assertValidationStateUnchanged(t, s)
+}
+
+func TestSetDisabledRejectsReusedPIDWhenExpectedSessionChanged(t *testing.T) {
+	s := validationStateServer(func() ([]Session, error) {
+		return []Session{{PID: 42, SessionID: "new-session"}}, nil
+	})
+
+	rec := putDisabled(
+		s,
+		42,
+		`{"disabled":true,"sessionId":"old-session"}`,
+		true,
+	)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf(
+			"status = %d, want %d; body=%q",
+			rec.Code,
+			http.StatusConflict,
+			rec.Body.String(),
+		)
+	}
+	assertValidationStateUnchanged(t, s)
+}
+
+func TestSetDisabledUnauthorizedDoesNotCollectOrMutate(t *testing.T) {
+	collectCalls := 0
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			collectCalls++
+			return []Session{{PID: 42, SessionID: "session-42"}}, nil
+		},
+		disabledSessionIDs: map[string]struct{}{"keep": {}},
+	}
+	rec := putDisabled(
+		s,
+		42,
+		`{"disabled":true,"sessionId":"session-42"}`,
+		false,
+	)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if collectCalls != 0 {
+		t.Fatalf("unauthorized request collected sessions %d times", collectCalls)
+	}
+	s.disabledMu.RLock()
+	defer s.disabledMu.RUnlock()
+	if len(s.disabledSessionIDs) != 1 {
+		t.Fatalf("disabled state mutated: %#v", s.disabledSessionIDs)
+	}
+	if _, ok := s.disabledSessionIDs["keep"]; !ok {
+		t.Fatalf("existing disabled state was removed: %#v", s.disabledSessionIDs)
+	}
+}
+
+func TestDisabledStateFollowsSessionIDNotReusedPID(t *testing.T) {
+	current := Session{PID: 42, SessionID: "old-session"}
+	s := &server{
+		token:   "secret",
+		collect: func() ([]Session, error) { return []Session{current}, nil },
+	}
+	if rec := putDisabled(
+		s,
+		42,
+		`{"disabled":true,"sessionId":"old-session"}`,
+		true,
+	); rec.Code != http.StatusOK {
+		t.Fatalf("set status = %d", rec.Code)
+	}
+
+	current = Session{PID: 42, SessionID: "new-session"}
+	_, rows, err := getServerSessions(s)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %#v, err=%v", rows, err)
+	}
+	if rows[0].Disabled {
+		t.Fatal("reused PID inherited old session disabled state")
+	}
+	s.disabledMu.RLock()
+	_, stale := s.disabledSessionIDs["old-session"]
+	s.disabledMu.RUnlock()
+	if stale {
+		t.Fatal("ended session ID was not pruned")
+	}
+}
+
+func TestCollectionErrorDoesNotPruneDisabledState(t *testing.T) {
+	s := &server{
+		token:              "secret",
+		collect:            func() ([]Session, error) { return nil, errors.New("collect failed") },
+		disabledSessionIDs: map[string]struct{}{"keep-me": {}},
+	}
+	code, _, err := getServerSessions(s)
+	if err != nil || code != http.StatusInternalServerError {
+		t.Fatalf("response = (%d, %v)", code, err)
+	}
+	s.disabledMu.RLock()
+	_, kept := s.disabledSessionIDs["keep-me"]
+	s.disabledMu.RUnlock()
+	if !kept {
+		t.Fatal("collection error pruned disabled state")
+	}
+}
+
+func TestCollectionStartedBeforeWriteDoesNotPruneNewerState(t *testing.T) {
+	s := &server{}
+	s.collect = func() ([]Session, error) {
+		s.writeDisabled("newer-session", true)
+		return nil, nil
+	}
+	if _, err := s.collectLocal(); err != nil {
+		t.Fatal(err)
+	}
+	s.disabledMu.RLock()
+	_, kept := s.disabledSessionIDs["newer-session"]
+	s.disabledMu.RUnlock()
+	if !kept {
+		t.Fatal("collection pruned state written after collection started")
+	}
+}
+
+func TestSetDisabledInvalidatesSessionCache(t *testing.T) {
+	collectCalls := 0
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			collectCalls++
+			return []Session{{PID: 42, SessionID: "session-42"}}, nil
+		},
+	}
+	if code, _, err := getServerSessions(s); err != nil || code != http.StatusOK {
+		t.Fatalf("initial listing = (%d, %v)", code, err)
+	}
+	if rec := putDisabled(
+		s,
+		42,
+		`{"disabled":true,"sessionId":"session-42"}`,
+		true,
+	); rec.Code != http.StatusOK {
+		t.Fatalf("put status = %d", rec.Code)
+	}
+	_, rows, err := getServerSessions(s)
+	if err != nil || len(rows) != 1 || !rows[0].Disabled {
+		t.Fatalf("listing after put = (%#v, %v)", rows, err)
+	}
+	if collectCalls != 3 {
+		t.Fatalf("collect calls = %d, want 3 (initial, PUT resolve, invalidated GET)", collectCalls)
+	}
+}
+
+func TestDisabledStateConcurrentReadsAndWrites(t *testing.T) {
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 42, SessionID: "session-42"}}, nil
+		},
+	}
+	var workers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		workers.Add(2)
+		go func(disabled bool) {
+			defer workers.Done()
+			putDisabled(
+				s,
+				42,
+				fmt.Sprintf(
+					`{"disabled":%t,"sessionId":"session-42"}`,
+					disabled,
+				),
+				true,
+			)
+		}(i%2 == 0)
+		go func() {
+			defer workers.Done()
+			_, _, _ = getServerSessions(s)
+		}()
+	}
+	workers.Wait()
 }

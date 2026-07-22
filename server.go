@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -60,17 +61,77 @@ type server struct {
 	terminate func(Session) error
 
 	sessionCache sessionCache
+
+	disabledMu         sync.RWMutex
+	disabledSessionIDs map[string]struct{}
+	disabledGeneration uint64
 }
 
 func (s *server) authed(r *http.Request) bool {
 	return r.Header.Get("Authorization") == "Bearer "+s.token
 }
 
-func (s *server) collectLocal() ([]Session, error) {
+func (s *server) collectLocalRaw() ([]Session, error) {
 	if s.collect != nil {
 		return s.collect()
 	}
 	return CollectLocal()
+}
+
+func (s *server) collectLocal() ([]Session, error) {
+	s.disabledMu.RLock()
+	disabledGeneration := s.disabledGeneration
+	s.disabledMu.RUnlock()
+
+	sessions, err := s.collectLocalRaw()
+	if err != nil {
+		return nil, err
+	}
+	s.annotateDisabled(sessions, disabledGeneration)
+	return sessions, nil
+}
+
+func (s *server) annotateDisabled(sessions []Session, collectedGeneration uint64) {
+	live := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		if session.SessionID != "" {
+			live[session.SessionID] = struct{}{}
+		}
+	}
+
+	s.disabledMu.Lock()
+	defer s.disabledMu.Unlock()
+	if s.disabledGeneration == collectedGeneration {
+		for sessionID := range s.disabledSessionIDs {
+			if _, ok := live[sessionID]; !ok {
+				delete(s.disabledSessionIDs, sessionID)
+			}
+		}
+	}
+	for i := range sessions {
+		if sessions[i].SessionID == "" {
+			sessions[i].Disabled = false
+			continue
+		}
+		_, sessions[i].Disabled = s.disabledSessionIDs[sessions[i].SessionID]
+	}
+}
+
+func (s *server) writeDisabled(sessionID string, disabled bool) {
+	if sessionID == "" {
+		return
+	}
+	s.disabledMu.Lock()
+	defer s.disabledMu.Unlock()
+	if s.disabledSessionIDs == nil {
+		s.disabledSessionIDs = make(map[string]struct{})
+	}
+	if disabled {
+		s.disabledSessionIDs[sessionID] = struct{}{}
+	} else {
+		delete(s.disabledSessionIDs, sessionID)
+	}
+	s.disabledGeneration++
 }
 
 func (c *sessionCache) timeNow() time.Time {
@@ -179,6 +240,84 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 		"ts":        time.Now().Unix(),
 		"hostUsage": hostUsage,
 		"sessions":  sessions,
+	})
+}
+
+func (s *server) setDisabled(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	pid, err := strconv.Atoi(r.PathValue("pid"))
+	if err != nil {
+		http.Error(w, "bad pid", http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Disabled  *bool   `json:"disabled"`
+		SessionID *string `json:"sessionId"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if body.Disabled == nil {
+		http.Error(w, "disabled boolean required", http.StatusBadRequest)
+		return
+	}
+	if body.SessionID == nil || *body.SessionID == "" {
+		http.Error(w, "non-empty sessionId required", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, "request body must contain one JSON object", http.StatusBadRequest)
+		return
+	}
+
+	sessions, err := s.collectLocalRaw()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var target *Session
+	for i := range sessions {
+		if sessions[i].PID == pid {
+			target = &sessions[i]
+			break
+		}
+	}
+	if target == nil {
+		http.Error(w, fmt.Sprintf("PID %d is not a live Claude session", pid), http.StatusNotFound)
+		return
+	}
+	if target.SessionID == "" {
+		http.Error(w, fmt.Sprintf("PID %d has no stable session ID", pid), http.StatusConflict)
+		return
+	}
+	if target.SessionID != *body.SessionID {
+		http.Error(
+			w,
+			fmt.Sprintf(
+				"PID %d now belongs to session %q, not %q",
+				pid,
+				target.SessionID,
+				*body.SessionID,
+			),
+			http.StatusConflict,
+		)
+		return
+	}
+
+	s.writeDisabled(target.SessionID, *body.Disabled)
+	s.invalidateSessions()
+	writeJSON(w, http.StatusOK, struct {
+		Disabled  bool   `json:"disabled"`
+		SessionID string `json:"sessionId"`
+	}{
+		Disabled:  *body.Disabled,
+		SessionID: target.SessionID,
 	})
 }
 
@@ -510,6 +649,7 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
+	mux.HandleFunc("PUT /sessions/{pid}/disabled", s.setDisabled)
 	mux.HandleFunc("GET /cwd-suggestions", s.cwdSuggestions)
 	mux.HandleFunc("GET /sessions/{pid}/preview", s.preview)
 	mux.HandleFunc("GET /sessions/{pid}/tmux-info", s.tmuxInfo)
