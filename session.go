@@ -40,7 +40,8 @@ type Session struct {
 	// AgentsRunning is the number of currently running Task/Agent-tool
 	// subagents (incl. nested), per scanSessionAgents. Computed at collection
 	// time so remote rows render from the JSON as-is.
-	AgentsRunning int `json:"agentsRunning,omitempty"`
+	AgentsRunning int  `json:"agentsRunning,omitempty"`
+	Disabled      bool `json:"disabled,omitempty"`
 
 	CPU          string `json:"cpu"`
 	Tmux         string `json:"tmux"` // "session:win.pane" or "" if not in tmux
@@ -208,41 +209,38 @@ func sessionStatusRank(s Session) int {
 //	updated     Updated() desc; updated-asc: Updated() asc
 //
 // An unknown mode is treated as "dir".
-func SortSessions(rows []Session, mode string) {
+func sessionLess(a, b Session, mode string) bool {
+	if a.Disabled != b.Disabled {
+		return !a.Disabled
+	}
 	switch mode {
 	case "status":
-		sort.SliceStable(rows, func(i, j int) bool {
-			ri, rj := sessionStatusRank(rows[i]), sessionStatusRank(rows[j])
-			if ri != rj {
-				return ri < rj
-			}
-			return rows[i].Updated().After(rows[j].Updated())
-		})
+		ra, rb := sessionStatusRank(a), sessionStatusRank(b)
+		if ra != rb {
+			return ra < rb
+		}
+		return a.Updated().After(b.Updated())
 	case "created":
-		sort.SliceStable(rows, func(i, j int) bool {
-			return rows[i].StartedAt > rows[j].StartedAt
-		})
+		return a.StartedAt > b.StartedAt
 	case "created-asc":
-		sort.SliceStable(rows, func(i, j int) bool {
-			return rows[i].StartedAt < rows[j].StartedAt
-		})
+		return a.StartedAt < b.StartedAt
 	case "updated":
-		sort.SliceStable(rows, func(i, j int) bool {
-			return rows[i].Updated().After(rows[j].Updated())
-		})
+		return a.Updated().After(b.Updated())
 	case "updated-asc":
-		sort.SliceStable(rows, func(i, j int) bool {
-			return rows[i].Updated().Before(rows[j].Updated())
-		})
-	default: // "dir"
-		sort.SliceStable(rows, func(i, j int) bool {
-			ci, cj := strings.ToLower(rows[i].CWD), strings.ToLower(rows[j].CWD)
-			if ci != cj {
-				return ci < cj
-			}
-			return rows[i].StartedAt > rows[j].StartedAt
-		})
+		return a.Updated().Before(b.Updated())
+	default:
+		ca, cb := strings.ToLower(a.CWD), strings.ToLower(b.CWD)
+		if ca != cb {
+			return ca < cb
+		}
+		return a.StartedAt > b.StartedAt
 	}
+}
+
+func SortSessions(rows []Session, mode string) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return sessionLess(rows[i], rows[j], mode)
+	})
 }
 
 func readSessionFile(path string) (Session, bool) {
@@ -254,6 +252,7 @@ func readSessionFile(path string) (Session, bool) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return Session{}, false
 	}
+	s.Disabled = false
 	if s.PID == 0 {
 		return Session{}, false
 	}

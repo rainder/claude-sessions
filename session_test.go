@@ -342,3 +342,85 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+func TestSessionDisabledJSONCompatibility(t *testing.T) {
+	data, err := json.Marshal(Session{PID: 1, Disabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"disabled":true`) {
+		t.Fatalf("marshaled JSON missing disabled field: %s", data)
+	}
+
+	data, err = json.Marshal(Session{PID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"disabled"`) {
+		t.Fatalf("false disabled field must be omitted: %s", data)
+	}
+
+	var old Session
+	if err := json.Unmarshal([]byte(`{"pid":1}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Disabled {
+		t.Fatal("missing disabled field decoded as true")
+	}
+}
+
+func TestReadSessionFileIgnoresPersistedDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	data, err := json.Marshal(Session{
+		PID:       1,
+		SessionID: "persisted-disabled",
+		Disabled:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, ok := readSessionFile(path)
+	if !ok {
+		t.Fatal("session file was not decoded")
+	}
+	if session.Disabled {
+		t.Fatal("persisted disabled state became authoritative")
+	}
+}
+
+func TestSortSessionsKeepsDisabledRowsLastInEveryMode(t *testing.T) {
+	fixture := []Session{
+		{SessionID: "disabled-busy", CWD: "/beta", Status: "busy", StartedAt: 200, UpdatedAt: 300, Disabled: true},
+		{SessionID: "enabled-busy", CWD: "/beta", Status: "busy", StartedAt: 100, UpdatedAt: 400},
+		{SessionID: "disabled-idle", CWD: "/alpha", Status: "idle", StartedAt: 400, UpdatedAt: 200, Disabled: true},
+		{SessionID: "enabled-idle", CWD: "/alpha", Status: "idle", StartedAt: 300, UpdatedAt: 100},
+	}
+	cases := []struct {
+		mode string
+		want []string
+	}{
+		{"dir", []string{"enabled-idle", "enabled-busy", "disabled-idle", "disabled-busy"}},
+		{"status", []string{"enabled-idle", "enabled-busy", "disabled-idle", "disabled-busy"}},
+		{"created", []string{"enabled-idle", "enabled-busy", "disabled-idle", "disabled-busy"}},
+		{"created-asc", []string{"enabled-busy", "enabled-idle", "disabled-busy", "disabled-idle"}},
+		{"updated", []string{"enabled-busy", "enabled-idle", "disabled-busy", "disabled-idle"}},
+		{"updated-asc", []string{"enabled-idle", "enabled-busy", "disabled-idle", "disabled-busy"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			rows := append([]Session(nil), fixture...)
+			SortSessions(rows, tc.mode)
+			got := make([]string, len(rows))
+			for i := range rows {
+				got[i] = rows[i].SessionID
+			}
+			if !equalStrings(got, tc.want) {
+				t.Fatalf("SortSessions(%q) = %v, want %v", tc.mode, got, tc.want)
+			}
+		})
+	}
+}

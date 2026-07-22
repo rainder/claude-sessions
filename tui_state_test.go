@@ -414,3 +414,26 @@ func TestWithBottomRowTruncatesContent(t *testing.T) {
 		t.Fatalf("one-row screen = %q, want toast", got)
 	}
 }
+
+func TestSettleSelectionKeepsToggledSessionAfterDisabledSortMove(t *testing.T) {
+	rows := []Session{
+		{PID: 1, SessionID: "one", CWD: "/alpha"},
+		{PID: 2, SessionID: "two", CWD: "/beta"},
+		{PID: 3, SessionID: "three", CWD: "/gamma"},
+	}
+	SortSessions(rows, "dir")
+
+	state := newTUIState()
+	state.sel = "2"
+	state.settleSelection(buildSelectionTargets(rows, nil))
+
+	rows[1].Disabled = true
+	SortSessions(rows, "dir")
+	if rows[2].SessionID != "two" {
+		t.Fatalf("disabled row index = %v, want session two last", rows)
+	}
+	state.settleSelection(buildSelectionTargets(rows, nil))
+	if state.sel != "2" {
+		t.Fatalf("selection = %q, want toggled session 2", state.sel)
+	}
+}
