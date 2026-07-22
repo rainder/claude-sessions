@@ -85,13 +85,25 @@ func pauseForKey(fd int, oldState *term.State) {
 	enterCooked(fd, oldState)
 }
 
+// writeInteractiveHandoff writes the terminal-mode transition that hands the
+// terminal off to an interactive subprocess: disable mouse reporting, restore
+// wrap, exit the alternate screen, clear the revealed primary screen, home the
+// cursor, show the cursor — in that exact order. Clearing (2J+H) after leaving
+// the alt-screen suppresses the flicker of stale primary-buffer shell contents
+// before the subprocess (tmux attach / ssh -t) paints.
+func writeInteractiveHandoff(w io.Writer) {
+	_, _ = io.WriteString(w, mouseDisableSequence+"\033[?7h\033[?1049l\033[2J\033[H\033[?25h")
+}
+
 // runInteractive leaves the alt-screen + raw mode so the named program owns
 // the terminal (e.g. tmux attach, ssh -t), runs it, then re-enters our UI.
 func runInteractive(fd int, oldState *term.State, prog string, args ...string) error {
-	// Disable mouse reporting, exit alt-screen, restore wrap, show cursor,
-	// cooked mode. Mouse reporting must go first: the subprocess doesn't
-	// expect SGR mouse sequences on its stdin.
-	fmt.Print(mouseDisableSequence + "\033[?7h\033[?1049l\033[?25h")
+	// Disable mouse reporting, exit alt-screen, restore wrap, clear the
+	// revealed primary screen, show cursor, cooked mode. Mouse reporting must
+	// go first: the subprocess doesn't expect SGR mouse sequences on its
+	// stdin. Clearing the primary screen avoids flashing stale shell output
+	// before the subprocess paints.
+	writeInteractiveHandoff(os.Stdout)
 	_ = term.Restore(fd, oldState)
 	cmd := exec.Command(prog, args...)
 	cmd.Stdin = os.Stdin
