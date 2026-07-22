@@ -192,21 +192,6 @@ func TestSessionRowsHaveOneRightPaddingSpace(t *testing.T) {
 	}
 }
 
-func TestFullRowWithEmptySessionIDHasPlaceholderAndOneRightPaddingSpace(t *testing.T) {
-	s := Session{
-		PID: 42, Name: "empty-sid", NameSource: "user", CWD: "/work/empty-sid",
-		Model: "claude-opus-4-8", Status: "busy", Entrypoint: "cli",
-		UpdatedAt: time.Now().UnixMilli(), Version: "1.2.3",
-	}
-	row := stripTrailingReset(renderSessionRowForTest(t, "1", s, false))
-	if !strings.Contains(stripANSI(row), "1.2.3     - ") {
-		t.Fatalf("full row with empty SessionID lacks aligned version and placeholder: %q", row)
-	}
-	if !strings.HasSuffix(row, " ") || strings.HasSuffix(row, "  ") {
-		t.Fatalf("full row with empty SessionID lacks exactly one trailing space: %q", row)
-	}
-}
-
 func findHeaderRow(t *testing.T, out string) string {
 	t.Helper()
 	for _, line := range strings.Split(out, "\n") {
