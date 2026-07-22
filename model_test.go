@@ -156,7 +156,7 @@ func TestRenderModelColumn(t *testing.T) {
 		Model: "claude-fable-5", ContextTokens: 124362, UpdatedAt: time.Now().UnixMilli()}
 	for _, view := range []string{"1", "3"} {
 		var b strings.Builder
-		RenderAll(&b, view, []Session{s}, nil, "", nil, 0, 0, "dir")
+		RenderAll(&b, view, LocalHost{Name: "local", Sessions: []Session{s}}, nil, "", nil, 0, 0, "dir")
 		out := b.String()
 		if !strings.Contains(out, "MODEL") {
 			t.Errorf("view %s: missing MODEL header:\n%s", view, out)

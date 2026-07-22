@@ -29,6 +29,9 @@ type actionResult struct {
 type server struct {
 	token string
 	host  string
+	// hostSnapshot returns this host's latest resource usage; nil yields an
+	// empty HostUsage so old clients and tests without a hub still get 200.
+	hostSnapshot func() HostUsage
 	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
 	// a stub to assert bounds and header wiring without touching tmux.
 	previewLoader func(int, PreviewLimits) (PreviewResult, error)
@@ -73,10 +76,15 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	hostUsage := HostUsage{}
+	if s.hostSnapshot != nil {
+		hostUsage = s.hostSnapshot()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"hostname": s.host,
-		"ts":       time.Now().Unix(),
-		"sessions": sessions,
+		"hostname":  s.host,
+		"ts":        time.Now().Unix(),
+		"hostUsage": hostUsage,
+		"sessions":  sessions,
 	})
 }
 
@@ -395,7 +403,14 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 
 `, bind, port, bindHint, host, tok, host, bind, port, tok)
 
-	s := &server{token: tok, host: host}
+	hostUsageHub := NewHostUsageHub(hostUsageInterval)
+	defer hostUsageHub.Shutdown()
+
+	s := &server{
+		token:        tok,
+		host:         host,
+		hostSnapshot: hostUsageHub.Snapshot,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("GET /cwd-suggestions", s.cwdSuggestions)

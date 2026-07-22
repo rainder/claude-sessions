@@ -21,9 +21,9 @@ type actCtx struct {
 	targets  []selectionTarget // current snapshot
 	sel      string            // selected target ID
 
-	// pause/resume suspend the background pollers (remote + usage hubs)
-	// while an external program owns the terminal — nothing renders, so
-	// fetching would be wasted traffic. Either may be nil.
+	// pause/resume suspend the background pollers (remote, account-usage,
+	// and host-usage hubs) while an external program owns the terminal —
+	// nothing renders, so fetching would be wasted traffic. Either may be nil.
 	pause  func()
 	resume func()
 

@@ -63,6 +63,10 @@ func findRow(t *testing.T, out, needle string) string {
 	return ""
 }
 
+func testLocalHost(rows ...Session) LocalHost {
+	return LocalHost{Name: "local", Sessions: rows}
+}
+
 func TestHeadlessRowsDimmed(t *testing.T) {
 	now := time.Now().UnixMilli()
 	normal := Session{PID: 11111, Name: "my-task", CWD: "/tmp/normaldir",
@@ -72,7 +76,7 @@ func TestHeadlessRowsDimmed(t *testing.T) {
 
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
-		RenderAll(&b, mode, []Session{normal, ghost}, nil, "", nil, 0, 0, "dir")
+		RenderAll(&b, mode, testLocalHost(normal, ghost), nil, "", nil, 0, 0, "dir")
 		out := b.String()
 
 		ghostRow := findRow(t, out, "ghostdir")
@@ -103,7 +107,7 @@ func TestDerivedNameDimmed(t *testing.T) {
 
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
-		RenderAll(&b, mode, []Session{derived, userSet, fallback}, nil, "", nil, 0, 0, "dir")
+		RenderAll(&b, mode, testLocalHost(derived, userSet, fallback), nil, "", nil, 0, 0, "dir")
 		out := b.String()
 
 		if row := findRow(t, out, "derdir"); !strings.Contains(row, ansiDim+"der-name") {
@@ -323,7 +327,7 @@ func TestRenderCostColumn(t *testing.T) {
 	// Full and intermediate views carry the column; minimal does not.
 	for _, view := range []string{"1", "3"} {
 		var b strings.Builder
-		RenderAll(&b, view, []Session{priced, free}, nil, "", nil, 0, 0, "dir")
+		RenderAll(&b, view, testLocalHost(priced, free), nil, "", nil, 0, 0, "dir")
 		out := b.String()
 		if !strings.Contains(out, "COST") {
 			t.Errorf("view %s: missing COST header:\n%s", view, out)
@@ -337,7 +341,7 @@ func TestRenderCostColumn(t *testing.T) {
 	}
 
 	var b strings.Builder
-	RenderAll(&b, "2", []Session{priced}, nil, "", nil, 0, 0, "dir")
+	RenderAll(&b, "2", testLocalHost(priced), nil, "", nil, 0, 0, "dir")
 	if strings.Contains(b.String(), "COST") {
 		t.Errorf("minimal view unexpectedly has COST column:\n%s", b.String())
 	}
@@ -443,7 +447,7 @@ func TestRenderMarqueeOverflow(t *testing.T) {
 
 	// Wide terminal: no shrink, DIR fits, nothing overflows.
 	var wide strings.Builder
-	if RenderAll(&wide, "2", []Session{s}, nil, "", nil, 200, 0, "dir") {
+	if RenderAll(&wide, "2", testLocalHost(s), nil, "", nil, 200, 0, "dir") {
 		t.Errorf("wide terminal reported overflow: %s", wide.String())
 	}
 	if !strings.Contains(wide.String(), longDir) {
@@ -454,7 +458,7 @@ func TestRenderMarqueeOverflow(t *testing.T) {
 	// overflow and successive steps render different windows.
 	frame := func(step int) string {
 		var b strings.Builder
-		if !RenderAll(&b, "2", []Session{s}, nil, "", nil, 30, step, "dir") {
+		if !RenderAll(&b, "2", testLocalHost(s), nil, "", nil, 30, step, "dir") {
 			t.Fatalf("narrow terminal did not report overflow at step %d", step)
 		}
 		return findRow(t, b.String(), "marq")
@@ -493,7 +497,7 @@ func TestSortIndicator(t *testing.T) {
 
 	renderWith := func(view, mode string) string {
 		var b strings.Builder
-		RenderAll(&b, view, []Session{s}, nil, "", nil, 0, 0, mode)
+		RenderAll(&b, view, testLocalHost(s), nil, "", nil, 0, 0, mode)
 		return b.String()
 	}
 
@@ -547,7 +551,7 @@ func TestRenderAgentsColumnAndHeaderTotal(t *testing.T) {
 		{PID: 200, SessionID: "bbbb", CWD: "/w2", Status: "idle", StartedAt: 2},
 	}
 	var buf bytes.Buffer
-	RenderAll(&buf, "1", local, nil, "", nil, 0, 0, "dir")
+	RenderAll(&buf, "1", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	out := buf.String()
 
 	if !strings.Contains(out, "AGENTS") {
@@ -562,14 +566,14 @@ func TestRenderAgentsColumnAndHeaderTotal(t *testing.T) {
 
 	// Intermediate view carries the column too.
 	buf.Reset()
-	RenderAll(&buf, "3", local, nil, "", nil, 0, 0, "dir")
+	RenderAll(&buf, "3", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	if !strings.Contains(buf.String(), "AGENTS") {
 		t.Errorf("intermediate view missing AGENTS column header")
 	}
 
 	// Minimal view: no column, but header total still present.
 	buf.Reset()
-	RenderAll(&buf, "2", local, nil, "", nil, 0, 0, "dir")
+	RenderAll(&buf, "2", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	out = buf.String()
 	if strings.Contains(out, "AGENTS") {
 		t.Errorf("minimal view must not have AGENTS column:\n%s", out)
@@ -584,7 +588,7 @@ func TestRenderHeaderTotalNoSubagents(t *testing.T) {
 		{PID: 100, SessionID: "aaaa", CWD: "/w1", Status: "idle", StartedAt: 1},
 	}
 	var buf bytes.Buffer
-	RenderAll(&buf, "1", local, nil, "", nil, 0, 0, "dir")
+	RenderAll(&buf, "1", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	out := buf.String()
 	if !strings.Contains(out, "1 agent, 1 session,") {
 		t.Errorf("singular zero-subagent form missing:\n%s", out)
@@ -628,7 +632,7 @@ func TestEmptyRemoteHostSelectionMarker(t *testing.T) {
 	for _, mode := range []string{"1", "3", "2"} {
 		t.Run(mode, func(t *testing.T) {
 			var b strings.Builder
-			RenderAll(&b, mode, local, remotes, selected, nil, 0, 0, "dir")
+			RenderAll(&b, mode, testLocalHost(local...), remotes, selected, nil, 0, 0, "dir")
 			row := findRow(t, b.String(), "(no sessions)")
 			if !strings.HasPrefix(row, "▶ ") {
 				t.Fatalf("mode %s empty-host row lacks selection marker: %q", mode, row)
@@ -647,7 +651,7 @@ func TestEmptyLocalHostSelectionMarker(t *testing.T) {
 	for _, mode := range []string{"1", "3", "2"} {
 		t.Run(mode, func(t *testing.T) {
 			var b strings.Builder
-			RenderAll(&b, mode, nil, nil, selected, nil, 0, 0, "dir")
+			RenderAll(&b, mode, testLocalHost(), nil, selected, nil, 0, 0, "dir")
 			row := findRow(t, b.String(), "(no sessions)")
 			if !strings.HasPrefix(row, "▶ ") {
 				t.Fatalf("mode %s empty-local row lacks selection marker: %q", mode, row)
@@ -661,7 +665,7 @@ func TestEmptyLocalHostSelectionMarker(t *testing.T) {
 
 func TestEmptyLocalHostUnselectedMarker(t *testing.T) {
 	var b strings.Builder
-	RenderAll(&b, "1", nil, nil, "", nil, 0, 0, "dir")
+	RenderAll(&b, "1", testLocalHost(), nil, "", nil, 0, 0, "dir")
 	row := findRow(t, b.String(), "(no sessions)")
 	if !strings.HasPrefix(row, "  ") || strings.HasPrefix(row, "▶ ") {
 		t.Fatalf("unselected empty-local row has wrong marker: %q", row)
@@ -673,7 +677,7 @@ func TestEmptyRemoteHostUnselectedMarker(t *testing.T) {
 	// on beluga's row — the one this test is about.
 	local := []Session{{PID: 1, CWD: "/local"}}
 	var b strings.Builder
-	RenderAll(&b, "1", local, []RemoteResult{{Name: "beluga"}}, "", nil, 0, 0, "dir")
+	RenderAll(&b, "1", testLocalHost(local...), []RemoteResult{{Name: "beluga"}}, "", nil, 0, 0, "dir")
 	row := findRow(t, b.String(), "(no sessions)")
 	if !strings.HasPrefix(row, "  ") || strings.HasPrefix(row, "▶ ") {
 		t.Fatalf("unselected empty-host row has wrong marker: %q", row)
@@ -684,7 +688,7 @@ func TestEmptyLocalAndRemoteCoexist(t *testing.T) {
 	// Empty local + empty remote both render "(no sessions)". Selecting the
 	// local row marks only it, and two empty hosts must not inflate the counts.
 	var b strings.Builder
-	RenderAll(&b, "1", nil, []RemoteResult{{Name: "beluga"}}, emptyHostSelectionID(""), nil, 0, 0, "dir")
+	RenderAll(&b, "1", testLocalHost(), []RemoteResult{{Name: "beluga"}}, emptyHostSelectionID(""), nil, 0, 0, "dir")
 	out := b.String()
 
 	var rows []string
@@ -708,6 +712,86 @@ func TestEmptyLocalAndRemoteCoexist(t *testing.T) {
 	}
 }
 
+func TestFormatHostPercent(t *testing.T) {
+	cases := []struct {
+		name string
+		in   *float64
+		want string
+	}{
+		{"unavailable", nil, "--"},
+		{"zero", floatPtr(0), "0%"},
+		{"round down", floatPtr(42.4), "42%"},
+		{"round half up", floatPtr(42.5), "43%"},
+		{"hundred", floatPtr(100), "100%"},
+		{"clamp above hundred", floatPtr(250), "100%"},
+		{"clamp below zero", floatPtr(-0.2), "0%"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatHostPercent(tc.in); got != tc.want {
+				t.Fatalf("formatHostPercent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHostUsageHeadingsAllViews(t *testing.T) {
+	local := LocalHost{
+		Name:      "workstation",
+		Sessions:  []Session{{PID: 1, CWD: "/local-dir"}},
+		HostUsage: HostUsage{CPUPercent: floatPtr(12.5), MemoryPercent: floatPtr(50)},
+	}
+	remotes := []RemoteResult{{
+		Name:      "beluga",
+		Sessions:  []Session{{PID: 2, Host: "beluga", CWD: "/remote-dir"}},
+		HostUsage: HostUsage{CPUPercent: floatPtr(0)},
+	}}
+	for _, mode := range []string{"1", "2", "3"} {
+		t.Run(mode, func(t *testing.T) {
+			var b strings.Builder
+			RenderAll(&b, mode, local, remotes, "", nil, 0, 0, "dir")
+			out := b.String()
+			localHeading := findRow(t, out, "workstation")
+			if !strings.Contains(localHeading, "CPU 13%  MEM 50%") {
+				t.Fatalf("local heading = %q", localHeading)
+			}
+			remoteHeading := findRow(t, out, "beluga")
+			if !strings.Contains(remoteHeading, "CPU 0%  MEM --") {
+				t.Fatalf("remote heading = %q", remoteHeading)
+			}
+			if strings.Index(out, "workstation") > strings.Index(out, "local-dir") {
+				t.Fatal("local heading rendered after local row")
+			}
+			if strings.Index(out, "beluga") > strings.Index(out, "remote-dir") {
+				t.Fatal("remote heading rendered after remote row")
+			}
+		})
+	}
+}
+
+func TestHostHeadingPrecedesRemoteStates(t *testing.T) {
+	// Keep local populated so the only "(no sessions)" body belongs to the
+	// empty remote section under test.
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/local-session"}}}
+	remotes := []RemoteResult{
+		{Name: "loading", Loading: true},
+		{Name: "down", Error: "timeout"},
+		{Name: "empty"},
+	}
+	var b strings.Builder
+	RenderAll(&b, "1", local, remotes, "", nil, 0, 0, "dir")
+	out := b.String()
+	for _, tc := range []struct{ host, body string }{
+		{"loading", "(loading...)"},
+		{"down", "[unreachable: timeout]"},
+		{"empty", "(no sessions)"},
+	} {
+		if strings.Index(out, tc.host) < 0 || strings.Index(out, tc.body) < 0 || strings.Index(out, tc.host) > strings.Index(out, tc.body) {
+			t.Fatalf("%s heading/body order wrong:\n%s", tc.host, out)
+		}
+	}
+}
+
 // TestRenderAllMatchesBuildTableFrame locks the compatibility invariant: the
 // text RenderAll writes must be byte-identical to the joined frame lines, and
 // its overflow return must match the frame's, across all three views and a mix
@@ -721,8 +805,8 @@ func TestRenderAllMatchesBuildTableFrame(t *testing.T) {
 	remotes := []RemoteResult{{Name: "dev"}}
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
-		overflow := RenderAll(&b, mode, local, remotes, "1", nil, 120, 0, "dir")
-		frame := BuildTableFrame(mode, local, remotes, "1", nil, 120, 0, "dir")
+		overflow := RenderAll(&b, mode, testLocalHost(local...), remotes, "1", nil, 120, 0, "dir")
+		frame := BuildTableFrame(mode, testLocalHost(local...), remotes, "1", nil, 120, 0, "dir")
 		if got := strings.Join(frame.lines, "\n"); got != b.String() {
 			t.Errorf("mode %s: RenderAll text diverged from frame:\nRenderAll: %q\nframe:     %q", mode, b.String(), got)
 		}

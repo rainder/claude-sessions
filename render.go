@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"strings"
 	"time"
@@ -387,20 +388,34 @@ func displayCWD(cwd, home string) string {
 	return cwd
 }
 
-// section is one rendering block: the local sessions (label "") or one
-// remote host's sessions (label = hostname).
+// section is one rendering block. host is the stable selection/action key
+// ("" for local, configured alias for remote); name is the visible heading.
 type section struct {
-	label   string
-	rows    []Session
-	error   string
-	loading bool
+	name      string
+	host      string
+	hostUsage HostUsage
+	rows      []Session
+	error     string
+	loading   bool
 }
 
-func buildSections(local []Session, remotes []RemoteResult) []section {
+func buildSections(local LocalHost, remotes []RemoteResult) []section {
 	out := make([]section, 0, 1+len(remotes))
-	out = append(out, section{rows: local})
+	out = append(out, section{
+		name:      local.Name,
+		host:      "",
+		hostUsage: local.HostUsage,
+		rows:      local.Sessions,
+	})
 	for _, r := range remotes {
-		out = append(out, section{label: r.Name, rows: r.Sessions, error: r.Error, loading: r.Loading})
+		out = append(out, section{
+			name:      r.Name,
+			host:      r.Name,
+			hostUsage: r.HostUsage,
+			rows:      r.Sessions,
+			error:     r.Error,
+			loading:   r.Loading,
+		})
 	}
 	return out
 }
@@ -415,6 +430,30 @@ func renderEmptyHostRow(w *frameWriter, host, sel string) {
 	}
 	w.record(emptyHostSelectionID(host), false)
 	fmt.Fprintln(w, marker+dim("(no sessions)"))
+}
+
+// formatHostPercent renders a whole-host usage percentage. A nil pointer means
+// the metric was unavailable and renders as "--"; otherwise the value is
+// clamped to [0,100] and rounded half away from zero (math.Round, not Go's
+// banker's %.0f) so 42.5 shows as "43%". Local values are already clamped by
+// hostPercent, but remotely supplied values bypass it, so clamping here keeps a
+// buggy server from rendering "250%" or "-0%".
+func formatHostPercent(value *float64) string {
+	if value == nil {
+		return "--"
+	}
+	clamped := max(0, min(100, *value))
+	return fmt.Sprintf("%.0f%%", math.Round(clamped))
+}
+
+// renderHostHeading prints a section's host heading: the bold host name
+// followed by its whole-host CPU and memory usage. Used for the local section
+// and every remote section across all three views so the layout stays uniform.
+func renderHostHeading(w io.Writer, sec section) {
+	fmt.Fprintf(w, "  %s  CPU %s  MEM %s\n",
+		bold(sec.name),
+		formatHostPercent(sec.hostUsage.CPUPercent),
+		formatHostPercent(sec.hostUsage.MemoryPercent))
 }
 
 // plural renders a count with its word, pluralizing the word for counts other
@@ -485,7 +524,7 @@ func (w *frameWriter) record(targetID string, openable bool) {
 // loop uses the frame to crop a viewport and resolve mouse clicks, while
 // RenderAll wraps it for callers that only want the text. Arguments mirror
 // RenderAll (see its doc for cols/step/sortMode semantics).
-func BuildTableFrame(viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) tableFrame {
+func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) tableFrame {
 	sections := buildSections(local, remotes)
 	w := &frameWriter{}
 	var overflowing bool
@@ -515,7 +554,7 @@ func BuildTableFrame(viewMode string, local []Session, remotes []RemoteResult, s
 // It is a thin compatibility wrapper over BuildTableFrame: joining the frame
 // lines with newlines reproduces the exact bytes the row writers emitted, so
 // the `--once` path and existing callers/tests keep the same output and return.
-func RenderAll(w io.Writer, viewMode string, local []Session, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
+func RenderAll(w io.Writer, viewMode string, local LocalHost, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	frame := BuildTableFrame(viewMode, local, remotes, sel, usage, cols, step, sortMode)
 	io.WriteString(w, strings.Join(frame.lines, "\n"))
 	return frame.overflowing
@@ -561,12 +600,12 @@ func ageBasis(s Session, sortMode string) time.Time {
 // RenderFull renders local sessions only (used by `--once` when there are no
 // remote servers configured, and by callers that want the local view alone).
 func RenderFull(w io.Writer, sessions []Session, sel string) {
-	RenderAll(w, "1", sessions, nil, sel, nil, 0, 0, "dir")
+	RenderAll(w, "1", LocalHost{Name: shortHostname(), Sessions: sessions}, nil, sel, nil, 0, 0, "dir")
 }
 
 // RenderMinimal — same as RenderFull but for the compact view.
 func RenderMinimal(w io.Writer, sessions []Session, sel string) {
-	RenderAll(w, "2", sessions, nil, sel, nil, 0, 0, "dir")
+	RenderAll(w, "2", LocalHost{Name: shortHostname(), Sessions: sessions}, nil, sel, nil, 0, 0, "dir")
 }
 
 // ============================================================================
@@ -714,22 +753,23 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	}
 
 	// Local first.
+	renderHostHeading(w, sections[0])
 	if len(sectionRows[0]) == 0 {
-		renderEmptyHostRow(w, "", sel)
+		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
 		rowFn(sectionRows[0])
 	}
 	// Remote sections.
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))
+		renderHostHeading(w, sections[i])
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
-			renderEmptyHostRow(w, sections[i].label, sel)
+			renderEmptyHostRow(w, sections[i].host, sel)
 		default:
 			rowFn(sectionRows[i])
 		}
@@ -818,21 +858,22 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 		}
 	}
 
+	renderHostHeading(w, sections[0])
 	if len(sectionRows[0]) == 0 {
-		renderEmptyHostRow(w, "", sel)
+		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
 		rowFn(sectionRows[0])
 	}
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))
+		renderHostHeading(w, sections[i])
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
-			renderEmptyHostRow(w, sections[i].label, sel)
+			renderEmptyHostRow(w, sections[i].host, sel)
 		default:
 			rowFn(sectionRows[i])
 		}
@@ -939,21 +980,22 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 		}
 	}
 
+	renderHostHeading(w, sections[0])
 	if len(sectionRows[0]) == 0 {
-		renderEmptyHostRow(w, "", sel)
+		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
 		rowFn(sectionRows[0])
 	}
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  %s\n", bold(sections[i].label))
+		renderHostHeading(w, sections[i])
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
-			renderEmptyHostRow(w, sections[i].label, sel)
+			renderEmptyHostRow(w, sections[i].host, sel)
 		default:
 			rowFn(sectionRows[i])
 		}
