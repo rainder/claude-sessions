@@ -30,11 +30,14 @@ func TestLoadSortModeGarbage(t *testing.T) {
 }
 
 func TestLoadSortModeValid(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	SaveSortMode("updated")
-	if got := LoadSortMode(); got != "updated" {
-		t.Errorf("LoadSortMode() after SaveSortMode = %q, want %q", got, "updated")
+	for _, mode := range []string{"updated", "status"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			SaveSortMode(mode)
+			if got := LoadSortMode(); got != mode {
+				t.Errorf("LoadSortMode() after SaveSortMode = %q, want %q", got, mode)
+			}
+		})
 	}
 }
 

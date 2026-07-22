@@ -40,15 +40,16 @@ func SaveViewMode(mode string) {
 	_ = os.WriteFile(filepath.Join(dir, "view-mode"), []byte(mode+"\n"), 0o644)
 }
 
-// LoadSortMode reads the persisted sort mode ("dir", "created", "created-asc",
-// "updated", "updated-asc"). Defaults to "dir" on any error or unrecognized value.
+// LoadSortMode reads the persisted sort mode ("dir", "status", "created",
+// "created-asc", "updated", "updated-asc"). Defaults to "dir" on any error or
+// unrecognized value.
 func LoadSortMode() string {
 	data, err := os.ReadFile(filepath.Join(ConfigDir(), "sort-mode"))
 	if err != nil {
 		return "dir"
 	}
 	switch v := strings.TrimSpace(string(data)); v {
-	case "dir", "created", "created-asc", "updated", "updated-asc":
+	case "dir", "status", "created", "created-asc", "updated", "updated-asc":
 		return v
 	}
 	return "dir"

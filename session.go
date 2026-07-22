@@ -176,15 +176,41 @@ func CollectLocal() ([]Session, error) {
 	return out, nil
 }
 
+// sessionStatusRank buckets a session for "status" mode ordering: sessions
+// waiting on the user first, then idle, then busy, then everything else
+// (unknown/blank status).
+func sessionStatusRank(s Session) int {
+	if s.WaitingFor != "" {
+		return 0
+	}
+	switch strings.ToLower(s.Status) {
+	case "idle":
+		return 1
+	case "busy":
+		return 2
+	default:
+		return 3
+	}
+}
+
 // SortSessions orders rows in place, stably, per the given mode:
 //
 //	dir         cwd asc (case-insensitive), StartedAt desc tiebreak
+//	status      waiting > idle > busy > other, Updated() desc tiebreak
 //	created     StartedAt desc; created-asc: StartedAt asc
 //	updated     Updated() desc; updated-asc: Updated() asc
 //
 // An unknown mode is treated as "dir".
 func SortSessions(rows []Session, mode string) {
 	switch mode {
+	case "status":
+		sort.SliceStable(rows, func(i, j int) bool {
+			ri, rj := sessionStatusRank(rows[i]), sessionStatusRank(rows[j])
+			if ri != rj {
+				return ri < rj
+			}
+			return rows[i].Updated().After(rows[j].Updated())
+		})
 	case "created":
 		sort.SliceStable(rows, func(i, j int) bool {
 			return rows[i].StartedAt > rows[j].StartedAt

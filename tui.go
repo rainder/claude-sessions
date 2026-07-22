@@ -184,13 +184,11 @@ func RunTUI(interval time.Duration) error {
 		// we never race the hub goroutine that owns them.
 		remotes = sortRemotes(hub.Snapshot(), sortMode)
 		targets = buildSelectionTargets(local, remotes)
-		// A fallback that moves the selection (its row vanished) re-anchors the
-		// viewport to the new selection on the next render.
-		prevSel := state.sel
-		state.sel = validateTargetSel(targets, state.sel)
-		if state.sel != prevSel {
-			state.anchorSelection = true
-		}
+		// Reconcile the selection against the new targets: chase a pending
+		// post-spawn landing if one is set (retrying until its tmux pane shows
+		// up in a snapshot), otherwise fall back so a vanished selected row
+		// drops to a valid target. Either move re-anchors the viewport.
+		state.settleSelection(targets)
 	}
 
 	// markInspectorEndedIfGone flags the inspector as ended when the session it
@@ -415,12 +413,10 @@ func RunTUI(interval time.Duration) error {
 			case "q", "Q", "\x03", "\x04":
 				return nil
 			case KeyUp:
-				state.sel = navTargets(targets, state.sel, -1)
-				state.anchorSelection = true
+				state.navigate(targets, -1)
 				render()
 			case KeyDown:
-				state.sel = navTargets(targets, state.sel, 1)
-				state.anchorSelection = true
+				state.navigate(targets, 1)
 				render()
 			case "k", "K":
 				actKill(makeCtx())
@@ -433,11 +429,15 @@ func RunTUI(interval time.Duration) error {
 			case "n", "N":
 				ctx := makeCtx()
 				actNew(ctx)
-				refresh(true)
-				if id := selectionForTmux(targets, ctx.spawnedHost, ctx.spawnedTmux); id != "" {
-					state.sel = id
-					state.anchorSelection = true
+				// Record the spawned session's landing target before refreshing so
+				// settleSelection can chase it across refreshes: new local metadata
+				// lags and the first remote snapshot is stale, so a one-shot lookup
+				// here would miss. Only a real spawn (non-empty tmux) sets pending;
+				// a cancelled or failed new-session leaves any prior intent intact.
+				if ctx.spawnedTmux != "" {
+					state.pending = &pendingSpawn{host: ctx.spawnedHost, tmux: ctx.spawnedTmux}
 				}
+				refresh(true)
 				render()
 			case "m", "M":
 				switch viewMode {
@@ -525,7 +525,7 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 // sorted per mode. The snapshot's Session slices are shared with the hub
 // goroutine, so the sort runs on fresh copies to avoid a data race.
 // sortModeOrder is the 's'-key cycle; shift-s walks it backward.
-var sortModeOrder = []string{"dir", "created", "created-asc", "updated", "updated-asc"}
+var sortModeOrder = []string{"dir", "status", "created", "created-asc", "updated", "updated-asc"}
 
 // cycleSortMode returns the mode delta steps away in sortModeOrder, wrapping
 // at both ends. An unknown mode is treated as "dir" (index 0).
@@ -545,6 +545,8 @@ func cycleSortMode(mode string, delta int) string {
 // sort mode with 's'.
 func sortDesc(mode string) string {
 	switch mode {
+	case "status":
+		return "status (waiting → idle → busy)"
 	case "created":
 		return "created ▼ (newest first)"
 	case "created-asc":
@@ -593,7 +595,7 @@ func renderHelp(sortMode string) {
 	fmt.Println()
 	fmt.Println("  " + bold("VIEW"))
 	fmt.Println("    m            cycle mode (full → intermediate → minimal)  ·  persisted")
-	fmt.Println("    s / S        cycle sort forward / back (dir → created → updated, +asc)")
+	fmt.Println("    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
 	fmt.Println("                 current sort: " + sortMode)
 	fmt.Println("    r            refresh now")
 	fmt.Println("    q / Ctrl-C   quit")

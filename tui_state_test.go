@@ -240,6 +240,141 @@ func TestListMouseWheelNoAnchorClickAnchors(t *testing.T) {
 	}
 }
 
+func TestSettleSelectionPendingSpawnSettlesWhenTargetAppears(t *testing.T) {
+	s := newTUIState()
+	s.sel = "11"
+	s.pending = &pendingSpawn{host: "", tmux: "spawn-abc"}
+
+	// Phase 1: the spawned tmux session has not surfaced yet and the old row is
+	// still present, so the selection and the pending intent are both retained
+	// and nothing is anchored.
+	absent := buildSelectionTargets([]Session{{PID: 11, CWD: "/tmp/a"}}, nil)
+	s.settleSelection(absent)
+	if s.sel != "11" {
+		t.Fatalf("phase1 sel = %q, want 11 (retained)", s.sel)
+	}
+	if s.pending == nil {
+		t.Fatal("phase1 cleared pending while target absent")
+	}
+	if s.anchorSelection {
+		t.Fatal("phase1 anchored without a selection change")
+	}
+
+	// Phase 2: the new session shows up with a matching tmux pane; selection
+	// jumps to it, anchors once, and the pending intent clears.
+	present := buildSelectionTargets([]Session{
+		{PID: 11, CWD: "/tmp/a"},
+		{PID: 22, CWD: "/tmp/b", Tmux: "spawn-abc:0.0"},
+	}, nil)
+	s.settleSelection(present)
+	if s.sel != "22" {
+		t.Fatalf("phase2 sel = %q, want 22", s.sel)
+	}
+	if s.pending != nil {
+		t.Fatal("phase2 did not clear pending after settling")
+	}
+	if !s.anchorSelection {
+		t.Fatal("phase2 did not anchor the new selection")
+	}
+}
+
+func TestSettleSelectionRemoteHostMatch(t *testing.T) {
+	s := newTUIState()
+	s.sel = "11"
+	s.pending = &pendingSpawn{host: "dev", tmux: "spawn-xyz"}
+
+	// A local session shares the tmux name but not the host, so it must NOT
+	// match; only the remote session on host "dev" is a valid landing spot.
+	targets := buildSelectionTargets(
+		[]Session{{PID: 11, CWD: "/tmp/a", Tmux: "spawn-xyz:0.0"}},
+		[]RemoteResult{{Name: "dev", Sessions: []Session{
+			{PID: 5, CWD: "/tmp/r", Tmux: "spawn-xyz:0.0", Host: "dev"},
+		}}},
+	)
+	s.settleSelection(targets)
+	if s.sel != "dev:5" {
+		t.Fatalf("sel = %q, want dev:5 (remote host match, not the local tmux twin)", s.sel)
+	}
+	if s.pending != nil {
+		t.Fatal("did not clear pending after remote match")
+	}
+	if !s.anchorSelection {
+		t.Fatal("did not anchor the remote selection")
+	}
+}
+
+func TestSettleSelectionRetainsPendingWithFallbackWhenOldRowVanishes(t *testing.T) {
+	s := newTUIState()
+	s.sel = "99" // a row that is about to vanish
+	s.pending = &pendingSpawn{host: "", tmux: "spawn-def"}
+
+	// The pending tmux session has not surfaced and the previously-selected row
+	// is gone: validateTargetSel falls back to the first row (anchoring the
+	// change) while the pending intent survives for a later refresh.
+	targets := buildSelectionTargets([]Session{{PID: 11, CWD: "/tmp/a"}}, nil)
+	s.settleSelection(targets)
+	if s.sel != "11" {
+		t.Fatalf("sel = %q, want 11 (validateTargetSel fallback)", s.sel)
+	}
+	if s.pending == nil {
+		t.Fatal("cleared pending while the spawn target was still absent")
+	}
+	if !s.anchorSelection {
+		t.Fatal("fallback did not anchor the changed selection")
+	}
+}
+
+func TestNavigateCancelsPending(t *testing.T) {
+	targets := buildSelectionTargets([]Session{
+		{PID: 11, CWD: "/tmp/a"},
+		{PID: 22, CWD: "/tmp/b"},
+	}, nil)
+	s := newTUIState()
+	s.sel = "11"
+	s.pending = &pendingSpawn{host: "", tmux: "spawn-abc"}
+
+	s.navigate(targets, 1)
+	if s.sel != "22" {
+		t.Fatalf("navigate sel = %q, want 22", s.sel)
+	}
+	if s.pending != nil {
+		t.Fatal("navigate did not cancel pending intent")
+	}
+	if !s.anchorSelection {
+		t.Fatal("navigate did not anchor the new selection")
+	}
+}
+
+func TestListMouseRowSelectCancelsPendingButWheelDoesNot(t *testing.T) {
+	now := time.Unix(100, 0)
+	s := newTUIState()
+	s.hits = []hitRegion{{x0: 0, y0: 3, x1: 79, y1: 3,
+		action: hitSelectSession, targetID: "r7", openable: true}}
+
+	// Wheel scroll is free scrolling, not a selection change: pending survives.
+	s.pending = &pendingSpawn{host: "", tmux: "spawn-abc"}
+	s.handleListMouse(mouseEvent{button: mouseWheelDown}, now)
+	if s.pending == nil {
+		t.Fatal("wheel scroll cancelled pending")
+	}
+
+	// A left click that selects a row is explicit navigation: pending clears.
+	s.handleListMouse(mouseEvent{x: 5, y: 3, button: mouseLeft}, now)
+	if s.sel != "r7" {
+		t.Fatalf("click sel = %q, want r7", s.sel)
+	}
+	if s.pending != nil {
+		t.Fatal("row click did not cancel pending")
+	}
+
+	// A click on empty space hits nothing and must not cancel pending.
+	s.pending = &pendingSpawn{host: "", tmux: "spawn-abc"}
+	s.handleListMouse(mouseEvent{x: 5, y: 40, button: mouseLeft}, now)
+	if s.pending == nil {
+		t.Fatal("click on empty space cancelled pending")
+	}
+}
+
 func TestEnsureLineVisible(t *testing.T) {
 	cases := []struct {
 		name                          string

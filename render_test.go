@@ -515,6 +515,17 @@ func TestSortIndicator(t *testing.T) {
 		if strings.Contains(row, "2h") {
 			t.Errorf("view %s updated: AGE should count from update, not start: %q", view, row)
 		}
+		out := renderWith(view, "status")
+		if view == "2" {
+			if !strings.Contains(out, "S▲") {
+				t.Errorf("view %s status: want S▲:\n%s", view, out)
+			}
+		} else if !strings.Contains(out, "STATUS▲") {
+			t.Errorf("view %s status: want STATUS▲:\n%s", view, out)
+		}
+		if strings.Contains(out, "DIR▲") || strings.Contains(out, "AGE▲") || strings.Contains(out, "AGE▼") {
+			t.Errorf("view %s status: only status column should carry arrow:\n%s", view, out)
+		}
 	}
 }
 
