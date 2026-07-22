@@ -81,6 +81,39 @@ func highlightSelectedRow(row string, selected bool) string {
 	return ansiSelectedBG + row + ansiReset
 }
 
+func disabledRail(session Session, selected bool) string {
+	if !session.Disabled {
+		return "  "
+	}
+	if selected {
+		return "\033[33m│\033[39m "
+	}
+	return colorize("33", "│") + " "
+}
+
+func sessionRowPlain(session Session, selected bool) bool {
+	return session.Headless() || (session.Disabled && !selected)
+}
+
+func decorateSessionRow(session Session, selected bool, body string) string {
+	plain := sessionRowPlain(session, selected)
+	viewer := tmuxViewerPrefix(session, plain)
+	rail := disabledRail(session, selected)
+
+	var row string
+	switch {
+	case selected:
+		row = viewer + rail + body
+	case session.Disabled:
+		row = dim(viewer) + rail + dim(body)
+	case session.Headless():
+		row = dim(viewer + rail + body)
+	default:
+		row = viewer + rail + body
+	}
+	return highlightSelectedRow(row, selected)
+}
+
 // usageColor maps a rate-limit utilization percentage to an SGR code:
 // default below 70%, yellow 70–89%, red at 90%+.
 func usageColor(pct float64) string {
@@ -823,9 +856,12 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	renderHeader(w, sections, "full", usage, cols)
 
 	buildHdr := func() string {
-		return fmt.Sprintf("  %7s  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
-			"PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL", statusW, statusLabel, costW, "COST", agentsW, "AGENTS", "CTX", tmuxW, "TMUX",
-			"CPU%", ageLabel, "VER", "SID")
+		return fmt.Sprintf(
+			"    %7s  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
+			"PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL",
+			statusW, statusLabel, costW, "COST", agentsW, "AGENTS",
+			"CTX", tmuxW, "TMUX", "CPU%", ageLabel, "VER", "SID",
+		)
 	}
 	hdr := buildHdr()
 	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
@@ -838,8 +874,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	rowFn := func(rows []drowFull) {
 		for _, r := range rows {
 			selected := r.s.ID() == sel
-			ghost := r.s.Headless()
-			plainCells := ghost
+			plainCells := sessionRowPlain(r.s, selected)
 
 			tmuxStr := r.s.Tmux
 			if tmuxStr == "" {
@@ -877,12 +912,9 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 				agentsW, r.agentsStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
 				tmuxCell,
-				r.s.CPU, r.ageStr, r.s.Version, sidCell)
-			row := tmuxViewerPrefix(r.s, plainCells) + body
-			if ghost && !selected {
-				row = dim(row)
-			}
-			row = highlightSelectedRow(row, selected)
+				r.s.CPU, r.ageStr, r.s.Version, sidCell,
+			)
+			row := decorateSessionRow(r.s, selected, body)
 			w.record(r.s.ID(), true)
 			fmt.Fprintln(w, row)
 		}
@@ -946,8 +978,12 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 	renderHeader(w, sections, "intermediate", usage, cols)
 
 	buildHdr := func() string {
-		return fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s  %5s ",
-			nameW, "NAME", dirW, dirLabel, statusW, statusLabel, modelW, "MODEL", costW, "COST", agentsW, "AGENTS", "CTX", "CPU%", ageLabel)
+		return fmt.Sprintf(
+			"    %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s  %5s ",
+			nameW, "NAME", dirW, dirLabel, statusW, statusLabel,
+			modelW, "MODEL", costW, "COST", agentsW, "AGENTS",
+			"CTX", "CPU%", ageLabel,
+		)
 	}
 	hdr := buildHdr()
 	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
@@ -960,8 +996,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 	rowFn := func(rows []drowFull) {
 		for _, r := range rows {
 			selected := r.s.ID() == sel
-			ghost := r.s.Headless()
-			plainCells := ghost
+			plainCells := sessionRowPlain(r.s, selected)
 
 			statusCell := fmt.Sprintf("%-*s", statusW, r.statusStr)
 			if !plainCells {
@@ -982,12 +1017,9 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 				costCell(r.costStr, costW),
 				agentsW, r.agentsStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
-				r.s.CPU, r.ageStr)
-			row := tmuxViewerPrefix(r.s, plainCells) + body
-			if ghost && !selected {
-				row = dim(row)
-			}
-			row = highlightSelectedRow(row, selected)
+				r.s.CPU, r.ageStr,
+			)
+			row := decorateSessionRow(r.s, selected, body)
 			w.record(r.s.ID(), true)
 			fmt.Fprintln(w, row)
 		}
@@ -1071,7 +1103,10 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 	renderHeader(w, sections, "minimal", usage, cols)
 
 	buildHdr := func() string {
-		return fmt.Sprintf("  %-*s  %-*s  %-*s  %5s ", dirW, dirLabel, nameW, "NAME", statusW, statusLabel, ageLabel)
+		return fmt.Sprintf(
+			"    %-*s  %-*s  %-*s  %5s ",
+			dirW, dirLabel, nameW, "NAME", statusW, statusLabel, ageLabel,
+		)
 	}
 	hdr := buildHdr()
 	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
@@ -1084,8 +1119,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 	rowFn := func(rows []drowMinimal) {
 		for _, r := range rows {
 			selected := r.s.ID() == sel
-			ghost := r.s.Headless()
-			plainCells := ghost
+			plainCells := sessionRowPlain(r.s, selected)
 
 			glyph := statusGlyph[r.s.Status]
 			if glyph == "" {
@@ -1102,13 +1136,14 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 			if utf8.RuneCountInString(r.dir) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %5s ",
-				marqueeCell(r.dir, dirW, step), nameCell, statusCell, r.ageStr)
-			row := tmuxViewerPrefix(r.s, plainCells) + body
-			if ghost && !selected {
-				row = dim(row)
-			}
-			row = highlightSelectedRow(row, selected)
+			body := fmt.Sprintf(
+				"%s  %s  %s  %5s ",
+				marqueeCell(r.dir, dirW, step),
+				nameCell,
+				statusCell,
+				r.ageStr,
+			)
+			row := decorateSessionRow(r.s, selected, body)
 			w.record(r.s.ID(), true)
 			fmt.Fprintln(w, row)
 		}

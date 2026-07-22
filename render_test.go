@@ -1183,3 +1183,163 @@ func TestRenderAllMatchesBuildTableFrame(t *testing.T) {
 		}
 	}
 }
+
+func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
+	now := time.Now().UnixMilli()
+	attached := 2
+	enabled := Session{
+		PID: 41, SessionID: "enabled", Name: "enabled", NameSource: "user",
+		CWD: "/work/enabled", Status: "busy", Entrypoint: "cli", UpdatedAt: now,
+		Tmux: "enabled:0.0", TmuxAttached: &attached,
+	}
+	disabled := enabled
+	disabled.PID = 42
+	disabled.SessionID = "disable"
+	disabled.Name = "disable"
+	disabled.CWD = "/work/disable"
+	disabled.Disabled = true
+
+	for _, mode := range []string{"1", "2", "3"} {
+		t.Run(mode, func(t *testing.T) {
+			enabledRow := renderSessionRowForTest(t, mode, enabled, false)
+			disabledRow := renderSessionRowForTest(t, mode, disabled, false)
+
+			if !strings.HasPrefix(stripANSI(disabledRow), "2 │ ") {
+				t.Fatalf("mode %s disabled visible prefix = %q", mode, stripANSI(disabledRow))
+			}
+			if !strings.Contains(
+				disabledRow,
+				colorize("33", "│")+" "+ansiDim,
+			) {
+				t.Fatalf("mode %s rail is not outside muted body: %q", mode, disabledRow)
+			}
+			if !strings.HasPrefix(disabledRow, ansiDim+"2 "+ansiReset) {
+				t.Fatalf("mode %s viewer prefix is not muted: %q", mode, disabledRow)
+			}
+			if strings.Contains(enabledRow, "│") {
+				t.Fatalf("mode %s enabled row contains rail: %q", mode, enabledRow)
+			}
+			if visualLen(enabledRow) != visualLen(disabledRow) {
+				t.Fatalf(
+					"mode %s widths differ: enabled=%d disabled=%d",
+					mode,
+					visualLen(enabledRow),
+					visualLen(disabledRow),
+				)
+			}
+		})
+	}
+}
+
+func TestDisabledRailAddsFixedHeaderColumnAcrossModes(t *testing.T) {
+	session := Session{
+		PID: 42, SessionID: "one", Name: "one", NameSource: "user",
+		CWD: "/work/one", Status: "idle",
+	}
+	cases := []struct {
+		mode       string
+		marker     string
+		wantPrefix string
+	}{
+		{"1", "PID", "        PID"},
+		{"2", "DIR▲", "    DIR▲  NAME"},
+		{"3", "NAME", "    NAME"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			var output strings.Builder
+			RenderAll(
+				&output,
+				tc.mode,
+				testLocalHost(session),
+				nil,
+				"",
+				nil,
+				0,
+				0,
+				"dir",
+			)
+			header := findRow(t, output.String(), tc.marker)
+			if !strings.HasPrefix(header, tc.wantPrefix) {
+				t.Fatalf(
+					"mode %s header = %q, want prefix %q",
+					tc.mode,
+					header,
+					tc.wantPrefix,
+				)
+			}
+		})
+	}
+}
+
+func TestHeadlessDisabledRowKeepsAmberRail(t *testing.T) {
+	attached := 1
+	session := Session{
+		PID: 42, SessionID: "headless-disabled", Name: "headless",
+		NameSource: "user", CWD: "/work/headless", Status: "busy",
+		Entrypoint: "sdk-cli", Tmux: "headless:0.0",
+		TmuxAttached: &attached, Disabled: true,
+	}
+	for _, mode := range []string{"1", "2", "3"} {
+		row := renderSessionRowForTest(t, mode, session, false)
+		if !strings.Contains(row, colorize("33", "│")+" ") ||
+			!strings.Contains(row, ansiDim) {
+			t.Fatalf(
+				"mode %s headless disabled row lost rail or dim: %q",
+				mode,
+				row,
+			)
+		}
+	}
+}
+
+func TestSelectedDisabledRowsKeepBackgroundColorsAndAmberRail(t *testing.T) {
+	now := time.Now().UnixMilli()
+	attached := 2
+	for _, mode := range []string{"1", "2", "3"} {
+		session := Session{
+			PID: 42, SessionID: "disabled", Name: "disabled",
+			NameSource: "user", CWD: "/work/disabled",
+			Model: "claude-opus-4-8", Status: "busy", Entrypoint: "cli",
+			UpdatedAt: now, Tmux: "disabled:0.0", TmuxAttached: &attached,
+			Version: "1.2.3", CostUSD: 0.25, ContextTokens: 1000,
+			Disabled: true,
+		}
+		row := renderSessionRowForTest(t, mode, session, true)
+		assertWholeRowSelected(t, row, "2 │ ")
+		if !strings.Contains(row, "\033[33m│\033[39m ") {
+			t.Fatalf(
+				"mode %s selected disabled row lacks amber rail: %q",
+				mode,
+				row,
+			)
+		}
+		if !strings.Contains(row, "\033[1;31m") {
+			t.Fatalf(
+				"mode %s selected disabled row lost status color: %q",
+				mode,
+				row,
+			)
+		}
+		if !strings.Contains(row, ansiReset+ansiSelectedBG) {
+			t.Fatalf(
+				"mode %s selected background is not restored after reset: %q",
+				mode,
+				row,
+			)
+		}
+	}
+}
+
+func TestDisabledRailPreservesViewerPrefixWidth(t *testing.T) {
+	attached := 3
+	session := Session{
+		Tmux: "dev:0.0", TmuxAttached: &attached, Disabled: true,
+	}
+	got := visualLen(
+		tmuxViewerPrefix(session, true) + disabledRail(session, false),
+	)
+	if got != 4 {
+		t.Fatalf("viewer + disabled rail width = %d, want 4", got)
+	}
+}
