@@ -159,7 +159,9 @@ func CollectLocal() ([]Session, error) {
 		} else {
 			s.CPU = "-"
 		}
-		s.Tmux = walkTmuxPane(s.PID, panes, ppid)
+		if pane, found := walkTmuxPane(s.PID, panes, ppid); found {
+			s.Tmux = pane.Location
+		}
 		s.Home = home
 		if p := findTranscript(home, s.SessionID); p != "" {
 			m := cachedMeta(p)

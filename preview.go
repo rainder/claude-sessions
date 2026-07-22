@@ -100,16 +100,16 @@ func LoadPreview(pid int, limits PreviewLimits) (PreviewResult, error) {
 func captureTmuxPreview(pid int, limits PreviewLimits) (label, content string, err error) {
 	panes, _ := tmuxPaneMap()
 	ppid, _ := ppidMap()
-	loc := walkTmuxPane(pid, panes, ppid)
-	if loc == "" {
+	pane, found := walkTmuxPane(pid, panes, ppid)
+	if !found {
 		return "", "", errNoTmuxPane
 	}
 	out, err := exec.Command("tmux", "capture-pane", "-p", "-e",
-		"-S", "-"+strconv.Itoa(limits.MaxLines), "-t", loc).Output()
+		"-S", "-"+strconv.Itoa(limits.MaxLines), "-t", pane.Location).Output()
 	if err != nil {
 		return "", "", fmt.Errorf("tmux capture-pane: %w", err)
 	}
-	return "tmux pane " + loc, string(out), nil
+	return "tmux pane " + pane.Location, string(out), nil
 }
 
 // sanitizeTerminalText strips control sequences that could hijack the viewer's
@@ -405,7 +405,11 @@ func trunc(s string, n int) string {
 func tmuxLocForPID(pid int) string {
 	panes, _ := tmuxPaneMap()
 	ppid, _ := ppidMap()
-	return walkTmuxPane(pid, panes, ppid)
+	pane, found := walkTmuxPane(pid, panes, ppid)
+	if !found {
+		return ""
+	}
+	return pane.Location
 }
 
 // tmuxSessionForPID returns the tmux session name (without :win.pane suffix)
