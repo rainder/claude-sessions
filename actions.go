@@ -60,6 +60,33 @@ func (c *actCtx) enterRaw() {
 	writeMouseMode(terminalOutput, true)
 }
 
+// prepareLineOutput parks the cursor in a cleared bottom row before restoring
+// cooked mode for an action prompt or status message. screenRenderer leaves the
+// cursor on its last patch, which may be inside the session list or a picker.
+func (c *actCtx) prepareLineOutput() {
+	_, rows, err := term.GetSize(c.fd)
+	if err != nil {
+		rows = 0
+	}
+	writeActionOutputPosition(terminalOutput, rows)
+	enterCooked(c.fd, c.oldState)
+}
+
+// writeActionOutputPosition clears the row where a leading newline from an
+// action prompt will land, then parks the cursor immediately above it. A
+// one-row terminal cannot avoid scrolling; unknown size uses a bottom-clamped
+// fallback instead of moving to the home position.
+func writeActionOutputPosition(w io.Writer, rows int) {
+	switch {
+	case rows > 1:
+		_, _ = fmt.Fprintf(w, "\x1b[%d;1H\x1b[K\x1b[%d;1H", rows, rows-1)
+	case rows == 1:
+		_, _ = io.WriteString(w, "\x1b[1;1H\x1b[K")
+	default:
+		_, _ = io.WriteString(w, "\x1b[9999;1H\x1b[K\x1b[1A\r")
+	}
+}
+
 // selectedTarget returns the currently-selected target, or nil if sel doesn't
 // resolve to anything in the current snapshot.
 func (c *actCtx) selectedTarget() *selectionTarget {
@@ -102,7 +129,7 @@ func actKill(c *actCtx) {
 		actKillRemote(c)
 		return
 	}
-	enterCooked(c.fd, c.oldState)
+	c.prepareLineOutput()
 	defer c.enterRaw()
 
 	var prompt string
@@ -143,7 +170,7 @@ func actAttach(c *actCtx) {
 		return
 	}
 	// Not in tmux — offer migration.
-	enterCooked(c.fd, c.oldState)
+	c.prepareLineOutput()
 	prompt := fmt.Sprintf("\nPID %d is not in tmux. Migrate (kill + resume in tmux) first? [y/N] ", s.PID)
 	if !confirm(prompt) {
 		c.enterRaw()
@@ -182,7 +209,7 @@ func actNew(c *actCtx) {
 	}
 	presets, err := LoadCommandPresets()
 	if err != nil {
-		enterCooked(c.fd, c.oldState)
+		c.prepareLineOutput()
 		fmt.Printf("\nload commands: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		c.enterRaw()
@@ -211,7 +238,7 @@ func actNew(c *actCtx) {
 	preset := presets[presetIndex]
 	SaveCommandPresetName(preset.Name)
 
-	enterCooked(c.fd, c.oldState)
+	c.prepareLineOutput()
 	defer c.enterRaw()
 
 	var cwd string

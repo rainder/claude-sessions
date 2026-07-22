@@ -156,6 +156,33 @@ func TestScreenRendererClipsStyledRowsAndResetsStyle(t *testing.T) {
 	}
 }
 
+func TestScreenRendererRepaintsStyleOnlyChange(t *testing.T) {
+	w := &recordingScreenWriter{}
+	r := newScreenRenderer(w)
+	if err := r.Draw("\x1b[31mvisible", 20, 1); err != nil {
+		t.Fatal(err)
+	}
+	w.writes = nil
+
+	if err := r.Draw("\x1b[32mvisible", 20, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.writes) != 1 {
+		t.Fatalf("style-only change writes = %d, want 1", len(w.writes))
+	}
+	out := w.last()
+	if strings.Count(out, "\x1b[1;1H") != 1 || !strings.Contains(out, "\x1b[1;1H\x1b[32mvisible") {
+		t.Fatalf("style-only patch = %q", out)
+	}
+
+	if err := r.Draw("\x1b[32mvisible", 20, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.writes) != 1 {
+		t.Fatalf("identical styled draw wrote again: %d writes", len(w.writes))
+	}
+}
+
 func TestScreenRendererUnknownSizeFallback(t *testing.T) {
 	w := &recordingScreenWriter{}
 	r := newScreenRenderer(w)
