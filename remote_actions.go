@@ -108,19 +108,22 @@ func fetchRemotePreview(host string, pid int, limits PreviewLimits) (PreviewResu
 
 // fetchRemoteCwdSuggestions retrieves the ranked cwd history from the named
 // server's /cwd-suggestions endpoint, using a short 5s timeout so a slow or
-// unreachable host doesn't stall the picker.
-func fetchRemoteCwdSuggestions(host string) ([]cwdSuggestion, error) {
+// unreachable host doesn't stall the picker. It also returns the remote host's
+// home directory (when reported) so the picker can collapse it to "~"; an older
+// server that omits the field yields an empty home and raw paths.
+func fetchRemoteCwdSuggestions(host string) (suggestions []cwdSuggestion, home string, err error) {
 	data, err := remoteRequestWithTimeout(host, "/cwd-suggestions", http.MethodGet, nil, 5*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var response struct {
+		Home        string          `json:"home"`
 		Suggestions []cwdSuggestion `json:"suggestions"`
 	}
 	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return response.Suggestions, nil
+	return response.Suggestions, response.Home, nil
 }
 
 // actKillRemote handles `k` on a remote-selected row.
@@ -220,8 +223,11 @@ func actAttachRemote(c *actCtx) {
 // merges defaultCWD and the fetched suggestions into ordered entries, formats
 // each as a fixed-width path plus dim frequency, and appends the manual-entry
 // row. start is the index of the default row. Unlike the local picker it does
-// no isDir/hiddenCwd filtering — the paths live on the remote host.
-func remoteNewRows(defaultCWD string, suggestions []cwdSuggestion) (lines []string, start int, entries []cwdEntry) {
+// no isDir/hiddenCwd filtering — the paths live on the remote host. home is the
+// remote host's home directory (empty if unknown): it collapses only the
+// DISPLAYED path to "~"; entries[i].cwd keeps the real absolute remote path for
+// the POST body.
+func remoteNewRows(defaultCWD string, suggestions []cwdSuggestion, home string) (lines []string, start int, entries []cwdEntry) {
 	entries = mergeRemoteCwdEntries(defaultCWD, suggestions)
 	lines = make([]string, 0, len(entries)+1)
 	for i, entry := range entries {
@@ -232,7 +238,7 @@ func remoteNewRows(defaultCWD string, suggestions []cwdSuggestion) (lines []stri
 		if entry.count > 0 {
 			freq = "  " + dim(fmt.Sprintf("(%d)", entry.count))
 		}
-		lines = append(lines, fmt.Sprintf("%-50s%s", entry.cwd, freq))
+		lines = append(lines, fmt.Sprintf("%-50s%s", collapseHome(entry.cwd, home), freq))
 	}
 	lines = append(lines, "enter path manually…")
 	return lines, start, entries
@@ -254,13 +260,14 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 	// Fetch the remote host's cwd history for the picker. A slow or unreachable
 	// host must not block manual entry, so on error we fall back to no
 	// suggestions and surface a note in the modal.
-	suggestions, err := fetchRemoteCwdSuggestions(host)
+	suggestions, home, err := fetchRemoteCwdSuggestions(host)
 	note := ""
 	if err != nil {
 		suggestions = nil
+		home = ""
 		note = "remote suggestions unavailable"
 	}
-	lines, start, entries := remoteNewRows(defaultCWD, suggestions)
+	lines, start, entries := remoteNewRows(defaultCWD, suggestions, home)
 
 	row, presetIndex, ok := pickNewSession("New session on "+host, lines, start, presets, presetStart, note, c.modalWakes)
 	if !ok {

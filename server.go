@@ -326,9 +326,11 @@ func (s *server) cwdSuggestions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	home, _ := os.UserHomeDir()
 	writeJSON(w, http.StatusOK, struct {
+		Home        string          `json:"home"`
 		Suggestions []cwdSuggestion `json:"suggestions"`
-	}{Suggestions: collectCwdSuggestions()})
+	}{Home: home, Suggestions: collectCwdSuggestions()})
 }
 
 func (s *server) preview(w http.ResponseWriter, r *http.Request) {

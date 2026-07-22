@@ -279,18 +279,46 @@ func TestActionOutputPositionFollowsPickerRedraw(t *testing.T) {
 }
 
 func TestRemoteNewRowsSuggestionsAndFallback(t *testing.T) {
-	lines, start, entries := remoteNewRows("/selected", []cwdSuggestion{{CWD: "/history", Count: 4}, {CWD: "/selected", Count: 2}})
+	lines, start, entries := remoteNewRows("/selected", []cwdSuggestion{{CWD: "/history", Count: 4}, {CWD: "/selected", Count: 2}}, "")
 	if start != 0 || len(lines) != 3 || !strings.Contains(lines[0], "/history") || !strings.Contains(lines[1], "/selected") {
 		t.Fatalf("rows = %#v start=%d", lines, start)
 	}
 	if len(entries) != 2 {
 		t.Fatalf("entries = %#v", entries)
 	}
-	fallback, _, fallbackEntries := remoteNewRows("", nil)
+	fallback, _, fallbackEntries := remoteNewRows("", nil, "")
 	if len(fallback) != 1 || fallback[0] != "enter path manually…" {
 		t.Fatalf("fallback rows = %#v", fallback)
 	}
 	if len(fallbackEntries) != 0 {
 		t.Fatalf("fallback entries = %#v", fallbackEntries)
+	}
+}
+
+// TestRemoteNewRowsCollapsesHome proves the remote picker collapses the remote
+// host's $HOME to "~" in the DISPLAYED row while keeping the real absolute
+// remote path in entries[i].cwd for the POST body. A blank home leaves the
+// display untouched.
+func TestRemoteNewRowsCollapsesHome(t *testing.T) {
+	home := "/home/bob"
+	inside := home + "/Developer/repo"
+	outside := "/srv/data"
+	suggestions := []cwdSuggestion{{CWD: inside, Count: 3}, {CWD: outside, Count: 1}}
+
+	lines, _, entries := remoteNewRows("", suggestions, home)
+	if !strings.Contains(lines[0], "~/Developer/repo") || strings.Contains(lines[0], home) {
+		t.Fatalf("home not collapsed in display: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], outside) {
+		t.Fatalf("non-home path should stay raw: %q", lines[1])
+	}
+	if entries[0].cwd != inside {
+		t.Fatalf("stored cwd = %q, want raw remote path %q", entries[0].cwd, inside)
+	}
+
+	// Unknown home: display stays raw, no zero-value collapsing.
+	rawLines, _, _ := remoteNewRows("", suggestions, "")
+	if !strings.Contains(rawLines[0], inside) {
+		t.Fatalf("blank home should leave path raw: %q", rawLines[0])
 	}
 }

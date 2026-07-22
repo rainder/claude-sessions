@@ -56,7 +56,7 @@ func tmuxViewerSymbol(s Session) (symbol, sgr string) {
 	attached := *s.TmuxAttached
 	switch {
 	case attached == 0:
-		return "0", "2"
+		return " ", ""
 	case attached < 10:
 		return strconv.Itoa(attached), "1;32"
 	default:
@@ -979,10 +979,10 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			"    %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s  %5s ",
+			"    %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s ",
 			nameW, "NAME", dirW, dirLabel, statusW, statusLabel,
 			modelW, "MODEL", costW, "COST", agentsW, "AGENTS",
-			"CTX", "CPU%", ageLabel,
+			"CTX", ageLabel,
 		)
 	}
 	hdr := buildHdr()
@@ -1009,7 +1009,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %s  %s  %*s  %s  %5s  %5s ",
+			body := fmt.Sprintf("%s  %s  %s  %s  %s  %*s  %s  %5s ",
 				nameCell,
 				marqueeCell(r.cwdStr, dirW, step),
 				statusCell,
@@ -1017,7 +1017,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 				costCell(r.costStr, costW),
 				agentsW, r.agentsStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
-				r.s.CPU, r.ageStr,
+				r.ageStr,
 			)
 			row := decorateSessionRow(r.s, selected, body)
 			w.record(r.s.ID(), true)
