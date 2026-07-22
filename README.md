@@ -185,6 +185,10 @@ Start the server on each remote host with `claude-sessions -s`. The bind IP and 
 
 Remote rows appear in their own section under the local one. Selection works across all rows; actions on a remote row use the HTTP API + `ssh -t <ssh_host>` for attach.
 
+Each local or remote host section starts with aggregate host resource usage,
+for example `CPU 23%  MEM 61%`. CPU uses a 0–100 whole-machine scale across
+all cores; unavailable metrics render as `--` without hiding session rows.
+
 ## Files
 
 - `~/.claude/sessions/<pid>.json` — session metadata (written by Claude Code)

@@ -122,6 +122,10 @@ func RunTUI(interval time.Duration) error {
 	usageHub := NewUsageHub()
 	defer usageHub.Shutdown()
 
+	hostUsageHub := NewHostUsageHub(interval)
+	defer hostUsageHub.Shutdown()
+	localName := shortHostname()
+
 	// Resize handling: a SIGWINCH-driven wake pipe lets a blocked pollEvents
 	// return so we redraw at the new size. One goroutine translates the signal
 	// to a pipe write and never touches stdin (single-consumer invariant).
@@ -240,8 +244,9 @@ func RunTUI(interval time.Duration) error {
 		}
 
 		frame := BuildTableFrame(viewMode, LocalHost{
-			Name:     shortHostname(),
-			Sessions: local,
+			Name:      localName,
+			Sessions:  local,
+			HostUsage: hostUsageHub.Snapshot(),
 		}, remotes, state.sel, usageHub.Snapshot(), cols, 0, sortMode)
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
@@ -280,8 +285,16 @@ func RunTUI(interval time.Duration) error {
 			oldState: oldState,
 			targets:  targets,
 			sel:      state.sel,
-			pause:    func() { hub.Pause(); usageHub.Pause() },
-			resume:   func() { hub.Resume(); usageHub.Resume() },
+			pause: func() {
+				hub.Pause()
+				usageHub.Pause()
+				hostUsageHub.Pause()
+			},
+			resume: func() {
+				hub.Resume()
+				usageHub.Resume()
+				hostUsageHub.Resume()
+			},
 		}
 	}
 
@@ -461,6 +474,7 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "r", "R":
 				usageHub.Kick()
+				hostUsageHub.Kick()
 				refresh(true)
 				render()
 			case "?":

@@ -179,13 +179,13 @@ Read `/proc/meminfo` and compute:
 Run a bounded, non-interactive snapshot with a deterministic locale:
 
 ```text
-LC_ALL=C top -l 1 -n 0
+LC_ALL=C top -l 2 -n 0 -s 0
 ```
 
-Parse:
+macOS `top` needs two samples to calculate interval CPU usage; the first sample has no prior baseline. Parse the last sample block:
 
-- Aggregate CPU idle percentage from the `CPU usage:` line; utilization is `100 - idle`.
-- Physical used and unused memory from the `PhysMem:` line; utilization is `used / (used + unused) * 100`.
+- Aggregate CPU idle percentage from the final `CPU usage:` line; utilization is `100 - idle`.
+- Physical used and unused memory from the final `PhysMem:` line; utilization is `used / (used + unused) * 100`.
 
 The parser supports the size suffixes emitted by supported macOS versions and rejects malformed or incomplete lines without panicking. CPU and memory parsing are independent, so one valid value can still be published when the other is unavailable.
 
@@ -244,7 +244,7 @@ Linux cases:
 
 macOS cases:
 
-- Normal `CPU usage:` and `PhysMem:` lines.
+- Two sample blocks use the final `CPU usage:` and `PhysMem:` lines.
 - `0%` and `100%` boundaries.
 - Supported binary size suffixes and decimals.
 - Missing one metric while the other remains valid.
