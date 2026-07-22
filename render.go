@@ -796,6 +796,13 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
+			sidCell := r.sidShort
+			if sidCell == "" {
+				sidCell = "-"
+				if !plainCells {
+					sidCell = dim(sidCell)
+				}
+			}
 			body := fmt.Sprintf("%7d  %s  %s  %s  %s  %s  %*s  %s  %s  %5s  %5s  %-8s  %s ",
 				r.s.PID,
 				nameCell,
@@ -806,8 +813,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 				agentsW, r.agentsStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
 				tmuxCell,
-				r.s.CPU, r.ageStr, r.s.Version, r.sidShort)
-			body = strings.TrimRight(body, " ") + " "
+				r.s.CPU, r.ageStr, r.s.Version, sidCell)
 			row := tmuxViewerPrefix(r.s, plainCells) + body
 			if ghost && !selected {
 				row = dim(row)
