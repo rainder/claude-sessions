@@ -6,7 +6,7 @@ import (
 )
 
 func TestSessionScreenOpenKeys(t *testing.T) {
-	for _, key := range []string{KeyEnter, "p", "P"} {
+	for _, key := range []string{KeyRight, "p", "P"} {
 		if got := sessionKeyCommand(key); got != commandOpenInspector {
 			t.Errorf("key %q command = %v", key, got)
 		}

@@ -405,7 +405,11 @@ func RunTUI(interval time.Duration) error {
 		}
 		for _, ev := range events {
 			if state.mode == screenInspector {
-				if handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render) {
+				if handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render, func() {
+					screen.Invalidate()
+					actAttach(makeCtx())
+					refresh(true)
+				}) {
 					return nil
 				}
 				continue
@@ -427,6 +431,11 @@ func RunTUI(interval time.Duration) error {
 			switch k {
 			case "q", "Q", "\x03", "\x04":
 				return nil
+			case KeyEnter:
+				screen.Invalidate()
+				actAttach(makeCtx())
+				refresh(true)
+				render()
 			case KeyUp:
 				state.navigate(targets, -1)
 				render()
@@ -509,8 +518,9 @@ func RunTUI(interval time.Duration) error {
 // is active. It returns true when the app should quit (Ctrl-C/Ctrl-D). Back
 // commands close the inspector; refresh/follow touch the hub or viewport;
 // scrolling keys and the wheel mutate the view and repaint. hubPtr is the loop's
-// inspectorHub variable so a Refresh reaches the live hub.
-func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render func()) (quit bool) {
+// inspectorHub variable so a Refresh reaches the live hub. Enter attaches to the
+// session (mirroring the session-list Enter binding) and closes the inspector.
+func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach func()) (quit bool) {
 	if ev.kind == eventMouse {
 		switch state.handleInspectorMouse(ev.mouse) {
 		case commandBack:
@@ -525,6 +535,12 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 		case commandRender:
 			render()
 		}
+		return false
+	}
+
+	if ev.key == KeyEnter {
+		attach()
+		closeInspector()
 		return false
 	}
 

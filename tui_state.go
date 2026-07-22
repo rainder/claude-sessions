@@ -152,11 +152,12 @@ const (
 // sessionKeyCommand maps a keystroke on the session-list screen to the
 // screen-transition command it triggers, or commandNone when the key is not a
 // screen transition (navigation, actions, sort, etc. are handled inline by the
-// render loop because they need runtime dependencies). Enter and p/P open the
-// fullscreen inspector for the selected row.
+// render loop because they need runtime dependencies). Right/p/P open the
+// fullscreen inspector (preview) for the selected row; Enter attaches (handled
+// inline by the render loop, not here).
 func sessionKeyCommand(key string) tuiCommand {
 	switch key {
-	case KeyEnter, "p", "P":
+	case KeyRight, "p", "P":
 		return commandOpenInspector
 	default:
 		return commandNone
