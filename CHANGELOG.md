@@ -9,6 +9,9 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Local and remote host headings now show the raw 1-, 5-, and 15-minute load
+  averages (`LOAD 1.24 0.96 0.72`) alongside the aggregate CPU/MEM figures.
+  Unavailable load renders atomically as dashes (`LOAD -- -- --`).
 - Account rate-limit usage bars (5-hour + weekly, like `/usage`) in the TUI
   header, refreshed every 2 minutes in the background. Hidden when
   credentials or the endpoint are unavailable.

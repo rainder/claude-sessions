@@ -16,11 +16,21 @@ const (
 	hostUsageInterval = 2 * time.Second
 )
 
+// LoadAverage holds the raw 1/5/15-minute load averages htop-style. Nil fields
+// mean unavailable; pointers preserve a valid zero through JSON omitempty. The
+// three fields move together — hostLoadAverage populates all or none.
+type LoadAverage struct {
+	OneMinute      *float64 `json:"oneMinute,omitempty"`
+	FiveMinutes    *float64 `json:"fiveMinutes,omitempty"`
+	FifteenMinutes *float64 `json:"fifteenMinutes,omitempty"`
+}
+
 // HostUsage is one whole-host resource snapshot. Nil fields mean unavailable;
-// pointers preserve a valid zero percentage through JSON omitempty.
+// pointers preserve a valid zero value through JSON omitempty.
 type HostUsage struct {
-	CPUPercent    *float64 `json:"cpuPercent,omitempty"`
-	MemoryPercent *float64 `json:"memoryPercent,omitempty"`
+	CPUPercent    *float64     `json:"cpuPercent,omitempty"`
+	MemoryPercent *float64     `json:"memoryPercent,omitempty"`
+	Load          *LoadAverage `json:"loadAverage,omitempty"`
 }
 
 // LocalHost groups the current machine's identity, sessions, and resource
@@ -37,6 +47,24 @@ func hostPercent(v float64) *float64 {
 	}
 	v = max(0, min(100, v))
 	return &v
+}
+
+// hostLoadAverage builds a LoadAverage from raw 1/5/15-minute samples. Load
+// averages are reported htop-style: never clamped or core-normalized, so a valid
+// zero is preserved and values above 100 pass through unchanged. Any negative,
+// NaN, or infinite input makes the whole triple untrustworthy, so the function
+// returns nil atomically rather than a partially valid LoadAverage.
+func hostLoadAverage(one, five, fifteen float64) *LoadAverage {
+	for _, v := range [...]float64{one, five, fifteen} {
+		if v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil
+		}
+	}
+	return &LoadAverage{
+		OneMinute:      &one,
+		FiveMinutes:    &five,
+		FifteenMinutes: &fifteen,
+	}
 }
 
 type hostUsageCollector interface {

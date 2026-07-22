@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -914,11 +915,42 @@ func TestFormatHostPercent(t *testing.T) {
 	}
 }
 
+func TestFormatHostLoad(t *testing.T) {
+	const unavailable = "-- -- --"
+	cases := []struct {
+		name string
+		in   *LoadAverage
+		want string
+	}{
+		{"nil object", nil, unavailable},
+		{"nil one minute", &LoadAverage{OneMinute: nil, FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, unavailable},
+		{"nil five minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: nil, FifteenMinutes: floatPtr(1)}, unavailable},
+		{"nil fifteen minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: nil}, unavailable},
+		{"normal", hostLoadAverage(1.24, 0.96, 0.72), "1.24 0.96 0.72"},
+		{"all zero", hostLoadAverage(0, 0, 0), "0.00 0.00 0.00"},
+		{"negative zero normalized", &LoadAverage{OneMinute: floatPtr(math.Copysign(0, -1)), FiveMinutes: floatPtr(0), FifteenMinutes: floatPtr(0)}, "0.00 0.00 0.00"},
+		{"above hundred unclamped", hostLoadAverage(128.5, 100, 250.75), "128.50 100.00 250.75"},
+		{"negative one minute", &LoadAverage{OneMinute: floatPtr(-0.01), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, unavailable},
+		{"negative five minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(-1), FifteenMinutes: floatPtr(1)}, unavailable},
+		{"negative fifteen minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(-1)}, unavailable},
+		{"nan", &LoadAverage{OneMinute: floatPtr(math.NaN()), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, unavailable},
+		{"positive inf", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(math.Inf(1)), FifteenMinutes: floatPtr(1)}, unavailable},
+		{"negative inf", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(math.Inf(-1))}, unavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatHostLoad(tc.in); got != tc.want {
+				t.Fatalf("formatHostLoad() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHostUsageHeadingsAllViews(t *testing.T) {
 	local := LocalHost{
 		Name:      "workstation",
 		Sessions:  []Session{{PID: 1, CWD: "/local-dir"}},
-		HostUsage: HostUsage{CPUPercent: floatPtr(12.5), MemoryPercent: floatPtr(50)},
+		HostUsage: HostUsage{CPUPercent: floatPtr(12.5), MemoryPercent: floatPtr(50), Load: hostLoadAverage(1.24, 0.96, 0.72)},
 	}
 	remotes := []RemoteResult{{
 		Name:      "beluga",
@@ -931,11 +963,11 @@ func TestHostUsageHeadingsAllViews(t *testing.T) {
 			RenderAll(&b, mode, local, remotes, "", nil, 0, 0, "dir")
 			out := b.String()
 			localHeading := findRow(t, out, "workstation")
-			if !strings.Contains(localHeading, "CPU 13%  MEM 50%") {
+			if !strings.Contains(localHeading, "CPU 13%  MEM 50%  LOAD 1.24 0.96 0.72") {
 				t.Fatalf("local heading = %q", localHeading)
 			}
 			remoteHeading := findRow(t, out, "beluga")
-			if !strings.Contains(remoteHeading, "CPU 0%  MEM --") {
+			if !strings.Contains(remoteHeading, "CPU 0%  MEM --  LOAD -- -- --") {
 				t.Fatalf("remote heading = %q", remoteHeading)
 			}
 			if strings.Index(out, "workstation") > strings.Index(out, "local-dir") {

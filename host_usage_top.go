@@ -9,7 +9,7 @@ import (
 )
 
 func parseDarwinTop(out string) HostUsage {
-	var cpuLine, memoryLine string
+	var cpuLine, memoryLine, loadLine string
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "CPU usage:") {
@@ -18,11 +18,43 @@ func parseDarwinTop(out string) HostUsage {
 		if strings.HasPrefix(line, "PhysMem:") {
 			memoryLine = line
 		}
+		if strings.HasPrefix(line, "Load Avg:") {
+			loadLine = line
+		}
 	}
 	return HostUsage{
 		CPUPercent:    parseDarwinCPU(cpuLine),
 		MemoryPercent: parseDarwinMemory(memoryLine),
+		Load:          parseDarwinLoadAverage(loadLine),
 	}
+}
+
+// parseDarwinLoadAverage parses a macOS `top` "Load Avg: 1.24, 0.96, 0.72"
+// line into a LoadAverage via hostLoadAverage. Returns nil for a missing or
+// wrong prefix, a value count other than three, or any unparsable/invalid
+// member (empty, non-numeric, negative, NaN, or infinite).
+func parseDarwinLoadAverage(line string) *LoadAverage {
+	const prefix = "Load Avg:"
+	if !strings.HasPrefix(line, prefix) {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(line, prefix), ",")
+	if len(parts) != 3 {
+		return nil
+	}
+	values := make([]float64, 3)
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil
+		}
+		v, err := strconv.ParseFloat(part, 64)
+		if err != nil {
+			return nil
+		}
+		values[i] = v
+	}
+	return hostLoadAverage(values[0], values[1], values[2])
 }
 
 func parseDarwinCPU(line string) *float64 {

@@ -80,6 +80,26 @@ func parseLinuxMemory(data string) *float64 {
 	return hostPercent(float64(total-available) / float64(total) * 100)
 }
 
+// parseLinuxLoadAverage parses the first three whitespace-separated fields of
+// /proc/loadavg (1/5/15-minute load averages) and passes them through
+// hostLoadAverage. All trailing fields (running/total processes, last PID)
+// are ignored. Returns nil for empty, truncated, or non-numeric data.
+func parseLinuxLoadAverage(data string) *LoadAverage {
+	fields := strings.Fields(data)
+	if len(fields) < 3 {
+		return nil
+	}
+	values := make([]float64, 3)
+	for i := range values {
+		v, err := strconv.ParseFloat(fields[i], 64)
+		if err != nil {
+			return nil
+		}
+		values[i] = v
+	}
+	return hostLoadAverage(values[0], values[1], values[2])
+}
+
 const linuxCPUPrimingDelay = 100 * time.Millisecond
 
 type linuxHostUsageCollector struct {
@@ -102,6 +122,9 @@ func (c *linuxHostUsageCollector) Sample(ctx context.Context) HostUsage {
 		usage.MemoryPercent = parseLinuxMemory(string(data))
 	}
 	usage.CPUPercent = c.sampleCPU(ctx)
+	if data, err := c.readFile("/proc/loadavg"); err == nil {
+		usage.Load = parseLinuxLoadAverage(string(data))
+	}
 	return usage
 }
 

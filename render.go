@@ -482,14 +482,40 @@ func formatHostPercent(value *float64) string {
 	return fmt.Sprintf("%.0f%%", math.Round(clamped))
 }
 
+// formatHostLoad renders the 1/5/15-minute host load averages htop-style. The
+// triple is atomic: a nil LoadAverage, any nil member, or any negative/NaN/Inf
+// value (which remote JSON can carry past hostLoadAverage) renders the whole
+// thing as "-- -- --". Otherwise the three values print as "%.2f %.2f %.2f" —
+// never clamped, never core-normalized, and never sharing formatHostPercent's
+// percentage formatting.
+func formatHostLoad(load *LoadAverage) string {
+	const unavailable = "-- -- --"
+	if load == nil {
+		return unavailable
+	}
+	values := [3]float64{}
+	for i, v := range [...]*float64{load.OneMinute, load.FiveMinutes, load.FifteenMinutes} {
+		if v == nil || *v < 0 || math.IsNaN(*v) || math.IsInf(*v, 0) {
+			return unavailable
+		}
+		values[i] = *v
+		if values[i] == 0 {
+			values[i] = 0 // normalize IEEE negative zero to visible 0.00
+		}
+	}
+	return fmt.Sprintf("%.2f %.2f %.2f", values[0], values[1], values[2])
+}
+
 // renderHostHeading prints a section's host heading: the bold host name
-// followed by its whole-host CPU and memory usage. Used for the local section
-// and every remote section across all three views so the layout stays uniform.
+// followed by its whole-host CPU, memory, and load-average usage. Used for the
+// local section and every remote section across all three views so the layout
+// stays uniform.
 func renderHostHeading(w io.Writer, sec section) {
-	fmt.Fprintf(w, "  %s  CPU %s  MEM %s\n",
+	fmt.Fprintf(w, "  %s  CPU %s  MEM %s  LOAD %s\n",
 		bold(sec.name),
 		formatHostPercent(sec.hostUsage.CPUPercent),
-		formatHostPercent(sec.hostUsage.MemoryPercent))
+		formatHostPercent(sec.hostUsage.MemoryPercent),
+		formatHostLoad(sec.hostUsage.Load))
 }
 
 // plural renders a count with its word, pluralizing the word for counts other

@@ -186,8 +186,19 @@ Start the server on each remote host with `claude-sessions -s`. The bind IP and 
 Remote rows appear in their own section under the local one. Selection works across all rows; actions on a remote row use the HTTP API + `ssh -t <ssh_host>` for attach.
 
 Each local or remote host section starts with aggregate host resource usage,
-for example `CPU 23%  MEM 61%`. CPU uses a 0–100 whole-machine scale across
-all cores; unavailable metrics render as `--` without hiding session rows.
+following the bold host name:
+
+```text
+CPU 23%  MEM 61%  LOAD 1.24 0.96 0.72
+```
+
+CPU uses a 0–100 whole-machine scale across all cores. `LOAD` shows the raw
+1-, 5-, and 15-minute load averages in that order, each to two decimal places.
+These are load averages, not percentages: they are neither normalized by
+CPU/core count nor clamped, so on a busy multi-core box they can read well
+above `1.00`. Unavailable metrics render as dashes without hiding any session
+rows — CPU and MEM each fall back to `--`, and load renders atomically as
+`LOAD -- -- --` (all three or none, never a partial triple).
 
 ## Files
 

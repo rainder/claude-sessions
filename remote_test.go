@@ -22,16 +22,55 @@ func TestFetchRemoteDecodesHostUsageAndTagsSessions(t *testing.T) {
 	}
 }
 
+func TestFetchRemoteDecodesNestedLoadAverage(t *testing.T) {
+	// A valid zero member must survive omitempty, so five-minute stays 0 rather
+	// than decoding to nil.
+	result := fetchRemoteFixture(t, `{
+		"hostUsage":{"cpuPercent":25.5,"memoryPercent":75,"loadAverage":{"oneMinute":1.24,"fiveMinutes":0,"fifteenMinutes":0.72}},
+		"sessions":[]
+	}`)
+	assertLoadAveragePtr(t, result.HostUsage.Load, &LoadAverage{
+		OneMinute:      floatPtr(1.24),
+		FiveMinutes:    floatPtr(0),
+		FifteenMinutes: floatPtr(0.72),
+	})
+	if got := formatHostLoad(result.HostUsage.Load); got != "1.24 0.00 0.72" {
+		t.Fatalf("formatHostLoad = %q, want %q", got, "1.24 0.00 0.72")
+	}
+}
+
 func TestFetchRemoteCompatibilityWithMissingAndPartialHostUsage(t *testing.T) {
 	missing := fetchRemoteFixture(t, `{"sessions":[]}`)
 	if missing.HostUsage.CPUPercent != nil || missing.HostUsage.MemoryPercent != nil {
 		t.Fatalf("missing hostUsage decoded as %#v", missing.HostUsage)
+	}
+	if missing.HostUsage.Load != nil {
+		t.Fatalf("missing loadAverage decoded as %#v", missing.HostUsage.Load)
 	}
 
 	partial := fetchRemoteFixture(t, `{"hostUsage":{"cpuPercent":0},"sessions":[]}`)
 	assertFloatPtr(t, partial.HostUsage.CPUPercent, floatPtr(0))
 	if partial.HostUsage.MemoryPercent != nil {
 		t.Fatalf("partial memory = %v, want nil", partial.HostUsage.MemoryPercent)
+	}
+	// An old server without loadAverage leaves Load nil.
+	if partial.HostUsage.Load != nil {
+		t.Fatalf("partial loadAverage = %#v, want nil", partial.HostUsage.Load)
+	}
+
+	// A partial nested load decodes as partial data (one member present), but the
+	// triple is atomic: rendering must show unavailable, never a half-populated
+	// load line.
+	partialLoad := fetchRemoteFixture(t, `{"hostUsage":{"loadAverage":{"oneMinute":1.24}},"sessions":[]}`)
+	if partialLoad.HostUsage.Load == nil {
+		t.Fatal("partial loadAverage decoded as nil, want partial object")
+	}
+	assertFloatPtr(t, partialLoad.HostUsage.Load.OneMinute, floatPtr(1.24))
+	if partialLoad.HostUsage.Load.FiveMinutes != nil || partialLoad.HostUsage.Load.FifteenMinutes != nil {
+		t.Fatalf("partial load unexpectedly populated: %#v", partialLoad.HostUsage.Load)
+	}
+	if got := formatHostLoad(partialLoad.HostUsage.Load); got != "-- -- --" {
+		t.Fatalf("formatHostLoad = %q, want %q", got, "-- -- --")
 	}
 }
 

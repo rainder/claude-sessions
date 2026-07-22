@@ -506,6 +506,45 @@ func TestSessionsIncludesHostUsage(t *testing.T) {
 	assertFloatPtr(t, got.HostUsage.MemoryPercent, &memory)
 }
 
+func TestSessionsEmitsNestedLoadAverage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cpu, memory := 12.5, 67.25
+	s := &server{
+		token: "secret",
+		host:  "devbox",
+		hostSnapshot: func() HostUsage {
+			return HostUsage{CPUPercent: &cpu, MemoryPercent: &memory, Load: hostLoadAverage(1.24, 0.96, 0.72)}
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	// Navigate the raw JSON so the exact wire key names are asserted, not just
+	// that HostUsage's struct tags happen to round-trip.
+	var raw map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	hostUsage, ok := raw["hostUsage"].(map[string]any)
+	if !ok {
+		t.Fatalf("hostUsage not an object: %#v", raw["hostUsage"])
+	}
+	if hostUsage["cpuPercent"] != 12.5 || hostUsage["memoryPercent"] != 67.25 {
+		t.Fatalf("CPU/MEM not preserved alongside load: %#v", hostUsage)
+	}
+	load, ok := hostUsage["loadAverage"].(map[string]any)
+	if !ok {
+		t.Fatalf("loadAverage not an object: %#v", hostUsage["loadAverage"])
+	}
+	if load["oneMinute"] != 1.24 || load["fiveMinutes"] != 0.96 || load["fifteenMinutes"] != 0.72 {
+		t.Fatalf("loadAverage keys/values wrong: %#v", load)
+	}
+}
+
 func TestSessionsIncludesEmptyHostUsageWhenUnavailable(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := &server{token: "secret", host: "devbox"}

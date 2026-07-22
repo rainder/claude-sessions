@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -79,11 +80,18 @@ func TestLinuxCollectorBootstrapRespectsCancellation(t *testing.T) {
 	reads := 0
 	collector := &linuxHostUsageCollector{
 		readFile: func(path string) ([]byte, error) {
-			if path == "/proc/meminfo" {
+			switch path {
+			case "/proc/meminfo":
 				return []byte("MemTotal: 1000 kB\nMemAvailable: 500 kB\n"), nil
+			case "/proc/loadavg":
+				return []byte("1.24 0.96 0.72 2/1234 5678\n"), nil
+			case "/proc/stat":
+				reads++
+				return []byte("cpu 1 1 1 1 1 1 1 1\n"), nil
+			default:
+				t.Fatalf("unexpected readFile path %q", path)
+				return nil, nil
 			}
-			reads++
-			return []byte("cpu 1 1 1 1 1 1 1 1\n"), nil
 		},
 		primingDelay: time.Hour,
 	}
@@ -97,6 +105,102 @@ func TestLinuxCollectorBootstrapRespectsCancellation(t *testing.T) {
 		t.Fatal("CPU should be unavailable after canceled bootstrap")
 	}
 	assertFloatPtr(t, got.MemoryPercent, floatPtr(50))
+}
+
+func TestParseLinuxLoadAverage(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  *LoadAverage
+	}{
+		{"normal", "1.24 0.96 0.72 2/1234 5678\n", hostLoadAverage(1.24, 0.96, 0.72)},
+		{"trailing fields ignored", "1.24 0.96 0.72 99/99999 999999 extra fields\n", hostLoadAverage(1.24, 0.96, 0.72)},
+		{"all zero valid", "0 0 0 1/1 1\n", hostLoadAverage(0, 0, 0)},
+		{"values above 100 valid", "150.5 200 999.99 1/1 1\n", hostLoadAverage(150.5, 200, 999.99)},
+		{"empty", "", nil},
+		{"fewer than three fields", "1.24 0.96\n", nil},
+		{"malformed numeric", "1.24 bad 0.72 2/1234 5678\n", nil},
+		{"negative", "-1.24 0.96 0.72 2/1234 5678\n", nil},
+		{"NaN", "NaN 0.96 0.72 2/1234 5678\n", nil},
+		{"+Inf", "+Inf 0.96 0.72 2/1234 5678\n", nil},
+		{"-Inf", "-Inf 0.96 0.72 2/1234 5678\n", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseLinuxLoadAverage(tc.input)
+			assertLoadAveragePtr(t, got, tc.want)
+		})
+	}
+}
+
+func TestLinuxCollectorSampleLoadSuccess(t *testing.T) {
+	statReads := 0
+	collector := &linuxHostUsageCollector{
+		readFile: func(path string) ([]byte, error) {
+			switch path {
+			case "/proc/meminfo":
+				return []byte("MemTotal: 1000 kB\nMemAvailable: 500 kB\n"), nil
+			case "/proc/loadavg":
+				return []byte("1.24 0.96 0.72 2/1234 5678\n"), nil
+			case "/proc/stat":
+				statReads++
+				if statReads == 1 {
+					return []byte("cpu 100 0 0 100 0 0 0 0\n"), nil
+				}
+				return []byte("cpu 175 0 0 125 0 0 0 0\n"), nil
+			default:
+				t.Fatalf("unexpected readFile path %q", path)
+				return nil, nil
+			}
+		},
+		primingDelay: 0,
+	}
+	got := collector.Sample(context.Background())
+	if statReads != 2 {
+		t.Fatalf("stat reads = %d, want 2 after bootstrap", statReads)
+	}
+	assertFloatPtr(t, got.CPUPercent, floatPtr(75))
+	assertFloatPtr(t, got.MemoryPercent, floatPtr(50))
+	assertLoadAveragePtr(t, got.Load, hostLoadAverage(1.24, 0.96, 0.72))
+}
+
+func TestLinuxCollectorSampleLoadReadFailureLeavesLoadNil(t *testing.T) {
+	collector := &linuxHostUsageCollector{
+		readFile: func(path string) ([]byte, error) {
+			switch path {
+			case "/proc/meminfo":
+				return []byte("MemTotal: 1000 kB\nMemAvailable: 500 kB\n"), nil
+			case "/proc/loadavg":
+				return nil, errTestReadFailure
+			case "/proc/stat":
+				return []byte("cpu 1 1 1 1 1 1 1 1\n"), nil
+			default:
+				t.Fatalf("unexpected readFile path %q", path)
+				return nil, nil
+			}
+		},
+		primingDelay: 0,
+	}
+	got := collector.Sample(context.Background())
+	if got.Load != nil {
+		t.Fatalf("Load = %+v, want nil after read failure", got.Load)
+	}
+	assertFloatPtr(t, got.MemoryPercent, floatPtr(50))
+}
+
+var errTestReadFailure = errors.New("test read failure")
+
+func assertLoadAveragePtr(t *testing.T, got, want *LoadAverage) {
+	t.Helper()
+	if got == nil || want == nil {
+		if got != nil || want != nil {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+		return
+	}
+	assertFloatPtr(t, got.OneMinute, want.OneMinute)
+	assertFloatPtr(t, got.FiveMinutes, want.FiveMinutes)
+	assertFloatPtr(t, got.FifteenMinutes, want.FifteenMinutes)
 }
 
 func floatPtr(v float64) *float64 { return &v }
