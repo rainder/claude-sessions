@@ -676,6 +676,8 @@ func TestFormatHostPercent(t *testing.T) {
 		{"round down", floatPtr(42.4), "42%"},
 		{"round half up", floatPtr(42.5), "43%"},
 		{"hundred", floatPtr(100), "100%"},
+		{"clamp above hundred", floatPtr(250), "100%"},
+		{"clamp below zero", floatPtr(-0.2), "0%"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

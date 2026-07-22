@@ -369,7 +369,7 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 
 `, bind, port, bindHint, host, tok, host, bind, port, tok)
 
-	hostUsageHub := NewHostUsageHub(2 * time.Second)
+	hostUsageHub := NewHostUsageHub(hostUsageInterval)
 	defer hostUsageHub.Shutdown()
 
 	s := &server{

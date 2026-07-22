@@ -9,7 +9,12 @@ import (
 	"time"
 )
 
-const hostUsageSampleTimeout = 2 * time.Second
+const (
+	// hostUsageSampleTimeout bounds one collector sample.
+	hostUsageSampleTimeout = 2 * time.Second
+	// hostUsageInterval is the default refresh cadence for long-running hubs.
+	hostUsageInterval = 2 * time.Second
+)
 
 // HostUsage is one whole-host resource snapshot. Nil fields mean unavailable;
 // pointers preserve a valid zero percentage through JSON omitempty.
@@ -79,7 +84,7 @@ func NewHostUsageHub(interval time.Duration) *HostUsageHub {
 
 func newHostUsageHubWithCollector(collector hostUsageCollector, interval time.Duration) *HostUsageHub {
 	if interval <= 0 {
-		interval = 2 * time.Second
+		interval = hostUsageInterval
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &HostUsageHub{
@@ -97,8 +102,8 @@ func newHostUsageHubWithCollector(collector hostUsageCollector, interval time.Du
 
 func (h *HostUsageHub) sample() {
 	ctx, cancel := context.WithTimeout(h.ctx, hostUsageSampleTimeout)
+	defer cancel()
 	usage := h.collector.Sample(ctx)
-	cancel()
 	h.mu.Lock()
 	h.current = usage
 	h.mu.Unlock()

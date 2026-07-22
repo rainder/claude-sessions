@@ -425,13 +425,16 @@ func renderEmptyHostRow(w *frameWriter, host, sel string) {
 
 // formatHostPercent renders a whole-host usage percentage. A nil pointer means
 // the metric was unavailable and renders as "--"; otherwise the value is
-// rounded half away from zero (math.Round, not Go's banker's %.0f) so 42.5
-// shows as "43%".
+// clamped to [0,100] and rounded half away from zero (math.Round, not Go's
+// banker's %.0f) so 42.5 shows as "43%". Local values are already clamped by
+// hostPercent, but remotely supplied values bypass it, so clamping here keeps a
+// buggy server from rendering "250%" or "-0%".
 func formatHostPercent(value *float64) string {
 	if value == nil {
 		return "--"
 	}
-	return fmt.Sprintf("%.0f%%", math.Round(*value))
+	clamped := max(0, min(100, *value))
+	return fmt.Sprintf("%.0f%%", math.Round(clamped))
 }
 
 // renderHostHeading prints a section's host heading: the bold host name
