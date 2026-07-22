@@ -525,7 +525,7 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 // sorted per mode. The snapshot's Session slices are shared with the hub
 // goroutine, so the sort runs on fresh copies to avoid a data race.
 // sortModeOrder is the 's'-key cycle; shift-s walks it backward.
-var sortModeOrder = []string{"dir", "created", "created-asc", "updated", "updated-asc"}
+var sortModeOrder = []string{"dir", "status", "created", "created-asc", "updated", "updated-asc"}
 
 // cycleSortMode returns the mode delta steps away in sortModeOrder, wrapping
 // at both ends. An unknown mode is treated as "dir" (index 0).
@@ -545,6 +545,8 @@ func cycleSortMode(mode string, delta int) string {
 // sort mode with 's'.
 func sortDesc(mode string) string {
 	switch mode {
+	case "status":
+		return "status (waiting → idle → busy)"
 	case "created":
 		return "created ▼ (newest first)"
 	case "created-asc":
@@ -593,7 +595,7 @@ func renderHelp(sortMode string) {
 	fmt.Println()
 	fmt.Println("  " + bold("VIEW"))
 	fmt.Println("    m            cycle mode (full → intermediate → minimal)  ·  persisted")
-	fmt.Println("    s / S        cycle sort forward / back (dir → created → updated, +asc)")
+	fmt.Println("    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
 	fmt.Println("                 current sort: " + sortMode)
 	fmt.Println("    r            refresh now")
 	fmt.Println("    q / Ctrl-C   quit")
