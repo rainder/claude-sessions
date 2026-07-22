@@ -54,7 +54,7 @@ func TestSortDescStatus(t *testing.T) {
 
 func TestSessionDisableFooterAndHelp(t *testing.T) {
 	footer := sessionFooter()
-	if !strings.Contains(footer, "d disable/enable") {
+	if !strings.Contains(footer, "-/+ disable/enable") {
 		t.Fatalf("footer = %q", footer)
 	}
 	if bottom := sessionBottomRow("sort: status", false); bottom != footer {
@@ -62,13 +62,13 @@ func TestSessionDisableFooterAndHelp(t *testing.T) {
 	}
 	toast := sessionBottomRow("sort: status", true)
 	if !strings.Contains(toast, "sort: status") ||
-		strings.Contains(toast, "d disable/enable") {
+		strings.Contains(toast, "-/+ disable/enable") {
 		t.Fatalf("toast bottom row = %q", toast)
 	}
 
 	help := renderHelp("dir")
 	for _, want := range []string{
-		"d            disable / enable session",
+		"- / +        disable / enable session",
 		"claude-sessions preview PID",
 		"claude-sessions tmux-info PID",
 		"claude-sessions attach PID",

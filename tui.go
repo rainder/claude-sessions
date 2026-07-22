@@ -461,7 +461,7 @@ func RunTUI(interval time.Duration) error {
 				actAttach(makeCtx())
 				refresh(true)
 				render()
-			case "d", "D":
+			case "-", "+":
 				ctx := makeCtx()
 				update, err := actToggleDisabled(ctx)
 				if err != nil {
@@ -649,7 +649,7 @@ func sortRemotes(remotes []RemoteResult, mode string) []RemoteResult {
 }
 
 func sessionFooter() string {
-	return dim("d disable/enable  ·  ? help")
+	return dim("-/+ disable/enable  ·  ? help")
 }
 
 func sessionBottomRow(toast string, toastActive bool) string {
@@ -672,7 +672,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("ACTIONS")+"  (on selected row)")
 	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command)")
-	fmt.Fprintln(&b, "    d            disable / enable session")
+	fmt.Fprintln(&b, "    - / +        disable / enable session")
 	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
