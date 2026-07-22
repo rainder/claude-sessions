@@ -51,6 +51,51 @@ func TestWriteUsageNil(t *testing.T) {
 	}
 }
 
+func TestTmuxViewerPrefix(t *testing.T) {
+	zero := 0
+	one := 1
+	nine := 9
+	ten := 10
+	negative := -1
+	cases := []struct {
+		name  string
+		s     Session
+		plain bool
+		want  string
+	}{
+		{"no tmux", Session{}, false, "  "},
+		{"unknown", Session{Tmux: "dev:0.0"}, false, dim("· ")},
+		{"detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, false, dim("0 ")},
+		{"one", Session{Tmux: "dev:0.0", TmuxAttached: &one}, false, colorize("1;32", "1 ")},
+		{"nine", Session{Tmux: "dev:0.0", TmuxAttached: &nine}, false, colorize("1;32", "9 ")},
+		{"ten", Session{Tmux: "dev:0.0", TmuxAttached: &ten}, false, colorize("1;32", "+ ")},
+		{"negative unknown", Session{Tmux: "dev:0.0", TmuxAttached: &negative}, false, dim("· ")},
+		{"plain unknown", Session{Tmux: "dev:0.0"}, true, "· "},
+		{"plain detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, true, "0 "},
+		{"plain positive", Session{Tmux: "dev:0.0", TmuxAttached: &one}, true, "1 "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tmuxViewerPrefix(tc.s, tc.plain); got != tc.want {
+				t.Errorf("tmuxViewerPrefix() = %q, want %q", got, tc.want)
+			}
+			if got := visualLen(tmuxViewerPrefix(tc.s, tc.plain)); got != 2 {
+				t.Errorf("tmuxViewerPrefix() visual width = %d, want 2", got)
+			}
+		})
+	}
+}
+
+func TestHighlightSelectedRow(t *testing.T) {
+	if got := highlightSelectedRow("2 row", false); got != "2 row" {
+		t.Errorf("unselected row = %q, want unchanged", got)
+	}
+	want := ansiInvert + "2 row" + ansiReset
+	if got := highlightSelectedRow("2 row", true); got != want {
+		t.Errorf("selected row = %q, want %q", got, want)
+	}
+}
+
 // findRow returns the rendered line containing needle, failing if absent.
 func findRow(t *testing.T, out, needle string) string {
 	t.Helper()

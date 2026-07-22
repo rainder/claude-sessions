@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,6 +43,40 @@ func colorize(code, s string) string {
 
 func bold(s string) string { return ansiBold + s + ansiReset }
 func dim(s string) string  { return ansiDim + s + ansiReset }
+
+func tmuxViewerSymbol(s Session) (symbol, sgr string) {
+	if s.Tmux == "" {
+		return " ", ""
+	}
+	if s.TmuxAttached == nil || *s.TmuxAttached < 0 {
+		return "·", "2"
+	}
+	attached := *s.TmuxAttached
+	switch {
+	case attached == 0:
+		return "0", "2"
+	case attached < 10:
+		return strconv.Itoa(attached), "1;32"
+	default:
+		return "+", "1;32"
+	}
+}
+
+func tmuxViewerPrefix(s Session, plain bool) string {
+	symbol, sgr := tmuxViewerSymbol(s)
+	prefix := symbol + " "
+	if plain || sgr == "" {
+		return prefix
+	}
+	return colorize(sgr, prefix)
+}
+
+func highlightSelectedRow(row string, selected bool) string {
+	if !selected {
+		return row
+	}
+	return ansiInvert + row + ansiReset
+}
 
 // usageColor maps a rate-limit utilization percentage to an SGR code:
 // default below 70%, yellow 70–89%, red at 90%+.
@@ -952,11 +987,11 @@ func visualLen(s string) int {
 	for {
 		i := strings.Index(out, "\033[")
 		if i < 0 {
-			return len(out)
+			return utf8.RuneCountInString(out)
 		}
 		j := strings.IndexByte(out[i:], 'm')
 		if j < 0 {
-			return len(out)
+			return utf8.RuneCountInString(out)
 		}
 		out = out[:i] + out[i+j+1:]
 	}
