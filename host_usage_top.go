@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -154,5 +155,7 @@ func (c *darwinHostUsageCollector) Sample(ctx context.Context) HostUsage {
 	if err != nil {
 		return HostUsage{}
 	}
-	return parseDarwinTop(string(out))
+	usage := parseDarwinTop(string(out))
+	usage.NumCPU = runtime.NumCPU()
+	return usage
 }

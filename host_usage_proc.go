@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -125,6 +126,7 @@ func (c *linuxHostUsageCollector) Sample(ctx context.Context) HostUsage {
 	if data, err := c.readFile("/proc/loadavg"); err == nil {
 		usage.Load = parseLinuxLoadAverage(string(data))
 	}
+	usage.NumCPU = runtime.NumCPU()
 	return usage
 }
 

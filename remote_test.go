@@ -34,8 +34,9 @@ func TestFetchRemoteDecodesNestedLoadAverage(t *testing.T) {
 		FiveMinutes:    floatPtr(0),
 		FifteenMinutes: floatPtr(0.72),
 	})
-	if got := formatHostLoad(result.HostUsage.Load); got != "1.24 0.00 0.72" {
-		t.Fatalf("formatHostLoad = %q, want %q", got, "1.24 0.00 0.72")
+	want := bold("  1.2") + " " + dim("  0.0") + " " + dim("  0.7")
+	if got := formatHostLoad(result.HostUsage.Load, result.HostUsage.NumCPU); got != want {
+		t.Fatalf("formatHostLoad = %q, want %q", got, want)
 	}
 }
 
@@ -69,8 +70,9 @@ func TestFetchRemoteCompatibilityWithMissingAndPartialHostUsage(t *testing.T) {
 	if partialLoad.HostUsage.Load.FiveMinutes != nil || partialLoad.HostUsage.Load.FifteenMinutes != nil {
 		t.Fatalf("partial load unexpectedly populated: %#v", partialLoad.HostUsage.Load)
 	}
-	if got := formatHostLoad(partialLoad.HostUsage.Load); got != "-- -- --" {
-		t.Fatalf("formatHostLoad = %q, want %q", got, "-- -- --")
+	unavailable := colorize("", "   --") + " " + colorize("", "   --") + " " + colorize("", "   --")
+	if got := formatHostLoad(partialLoad.HostUsage.Load, partialLoad.HostUsage.NumCPU); got != unavailable {
+		t.Fatalf("formatHostLoad = %q, want %q", got, unavailable)
 	}
 }
 

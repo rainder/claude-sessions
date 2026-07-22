@@ -92,6 +92,25 @@ func usageColor(pct float64) string {
 	}
 }
 
+// loadSeverity maps a load average to an SGR code the same way usageColor
+// maps a rate-limit percentage: default below 0.7 of cores, yellow 0.7–0.99,
+// red at 1.0+ (saturated). cores <= 0 means the host didn't report a core
+// count (older remote server, unsupported OS), so severity is unknowable —
+// the caller renders uncolored rather than guessing.
+func loadSeverity(load float64, cores int) string {
+	if cores <= 0 {
+		return ""
+	}
+	switch ratio := load / float64(cores); {
+	case ratio >= 1.0:
+		return "1;31"
+	case ratio >= 0.7:
+		return "33"
+	default:
+		return ""
+	}
+}
+
 // usageBar renders a width-cell block bar for pct (clamped to 0–100). The
 // unfilled track is dimmed so it doesn't visually compete with the fill.
 func usageBar(pct float64, width int) string {
@@ -455,6 +474,21 @@ func buildSections(local LocalHost, remotes []RemoteResult) []section {
 	return out
 }
 
+// sectionNameWidth returns the display width of the longest section name, so
+// renderHostHeading can pad every host's name to the same column and keep
+// CPU/MEM/LOAD aligned whether the host is called "pi" or
+// "agent-workstation". Counted in runes, not bytes, so multi-byte names don't
+// over-pad.
+func sectionNameWidth(sections []section) int {
+	width := 0
+	for _, sec := range sections {
+		if n := utf8.RuneCountInString(sec.name); n > width {
+			width = n
+		}
+	}
+	return width
+}
+
 // renderEmptyHostRow prints the selectable "(no sessions)" placeholder for a
 // reachable local or remote host.
 func renderEmptyHostRow(w *frameWriter, host, sel string) {
@@ -482,14 +516,40 @@ func formatHostPercent(value *float64) string {
 	return fmt.Sprintf("%.0f%%", math.Round(clamped))
 }
 
+// loadToken formats one load-average value right-justified to a fixed width
+// (so LOAD columns line up across hosts once combined with formatHostLoad's
+// siblings) and wraps it in exactly one SGR code: the 1-minute figure
+// (emphasize=true) bolds when otherwise uncolored, or bolds-in-place when
+// loadSeverity already colored it (yellow -> bold yellow, red is already
+// bold); the 5/15-minute figures dim when uncolored, or keep loadSeverity's
+// plain-weight color untouched, so the eye lands on the actionable number
+// first and reads the trend after. Padding happens on the plain numeral
+// before the SGR wrap — wrapping first would let fmt's width count escape
+// bytes and silently break the alignment this exists to fix.
+func loadToken(v float64, cores int, emphasize bool) string {
+	numeral := fmt.Sprintf("%5.1f", v)
+	code := loadSeverity(v, cores)
+	switch {
+	case code == "33" && emphasize:
+		code = "1;33"
+	case code == "" && emphasize:
+		code = "1"
+	case code == "" && !emphasize:
+		code = "2"
+	}
+	return colorize(code, numeral)
+}
+
 // formatHostLoad renders the 1/5/15-minute host load averages htop-style. The
 // triple is atomic: a nil LoadAverage, any nil member, or any negative/NaN/Inf
 // value (which remote JSON can carry past hostLoadAverage) renders the whole
-// thing as "-- -- --". Otherwise the three values print as "%.2f %.2f %.2f" —
-// never clamped, never core-normalized, and never sharing formatHostPercent's
-// percentage formatting.
-func formatHostLoad(load *LoadAverage) string {
-	const unavailable = "-- -- --"
+// thing as uncolored "--" tokens at the same width as the colored path.
+// Otherwise each value prints via loadToken — one decimal, never clamped,
+// never sharing formatHostPercent's percentage formatting. cores is the
+// host's reported CPU count (0 if unknown), used only for loadSeverity.
+func formatHostLoad(load *LoadAverage, cores int) string {
+	unavailableToken := fmt.Sprintf("%5s", "--")
+	unavailable := strings.Join([]string{unavailableToken, unavailableToken, unavailableToken}, " ")
 	if load == nil {
 		return unavailable
 	}
@@ -500,22 +560,25 @@ func formatHostLoad(load *LoadAverage) string {
 		}
 		values[i] = *v
 		if values[i] == 0 {
-			values[i] = 0 // normalize IEEE negative zero to visible 0.00
+			values[i] = 0 // normalize IEEE negative zero to visible 0.0
 		}
 	}
-	return fmt.Sprintf("%.2f %.2f %.2f", values[0], values[1], values[2])
+	return loadToken(values[0], cores, true) + " " + loadToken(values[1], cores, false) + " " + loadToken(values[2], cores, false)
 }
 
-// renderHostHeading prints a section's host heading: the bold host name
-// followed by its whole-host CPU, memory, and load-average usage. Used for the
-// local section and every remote section across all three views so the layout
-// stays uniform.
-func renderHostHeading(w io.Writer, sec section) {
-	fmt.Fprintf(w, "  %s  CPU %s  MEM %s  LOAD %s\n",
-		bold(sec.name),
+// renderHostHeading prints a section's host heading: the bold host name,
+// padded to nameWidth (see sectionNameWidth), followed by its whole-host CPU,
+// memory, and load-average usage. Used for the local section and every remote
+// section across all three views so the layout stays uniform. Padding is
+// applied to the plain name before bolding — bolding first would let fmt's
+// width count escape bytes and break the alignment.
+func renderHostHeading(w io.Writer, sec section, nameWidth int) {
+	paddedName := fmt.Sprintf("%-*s", nameWidth, sec.name)
+	fmt.Fprintf(w, "  %s  CPU %4s  MEM %4s  LOAD %s\n",
+		bold(paddedName),
 		formatHostPercent(sec.hostUsage.CPUPercent),
 		formatHostPercent(sec.hostUsage.MemoryPercent),
-		formatHostLoad(sec.hostUsage.Load))
+		formatHostLoad(sec.hostUsage.Load, sec.hostUsage.NumCPU))
 }
 
 // plural renders a count with its word, pluralizing the word for counts other
@@ -726,6 +789,7 @@ func modelCell(model string, width int, plain bool) string {
 
 func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
+	nameWidth := sectionNameWidth(sections)
 
 	sectionRows := make([][]drowFull, len(sections))
 	var all []drowFull
@@ -816,7 +880,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	}
 
 	// Local first.
-	renderHostHeading(w, sections[0])
+	renderHostHeading(w, sections[0], nameWidth)
 	if len(sectionRows[0]) == 0 {
 		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
@@ -825,7 +889,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	// Remote sections.
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		renderHostHeading(w, sections[i])
+		renderHostHeading(w, sections[i], nameWidth)
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
@@ -846,6 +910,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 
 func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
+	nameWidth := sectionNameWidth(sections)
 
 	sectionRows := make([][]drowFull, len(sections))
 	var all []drowFull
@@ -919,7 +984,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 		}
 	}
 
-	renderHostHeading(w, sections[0])
+	renderHostHeading(w, sections[0], nameWidth)
 	if len(sectionRows[0]) == 0 {
 		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
@@ -927,7 +992,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 	}
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		renderHostHeading(w, sections[i])
+		renderHostHeading(w, sections[i], nameWidth)
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
@@ -972,6 +1037,7 @@ func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
 
 func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
+	nameWidth := sectionNameWidth(sections)
 
 	sectionRows := make([][]drowMinimal, len(sections))
 	var all []drowMinimal
@@ -1039,7 +1105,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 		}
 	}
 
-	renderHostHeading(w, sections[0])
+	renderHostHeading(w, sections[0], nameWidth)
 	if len(sectionRows[0]) == 0 {
 		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
@@ -1047,7 +1113,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 	}
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		renderHostHeading(w, sections[i])
+		renderHostHeading(w, sections[i], nameWidth)
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))

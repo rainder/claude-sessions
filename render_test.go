@@ -915,31 +915,65 @@ func TestFormatHostPercent(t *testing.T) {
 	}
 }
 
-func TestFormatHostLoad(t *testing.T) {
-	const unavailable = "-- -- --"
+func TestLoadSeverity(t *testing.T) {
 	cases := []struct {
-		name string
-		in   *LoadAverage
-		want string
+		name  string
+		load  float64
+		cores int
+		want  string
 	}{
-		{"nil object", nil, unavailable},
-		{"nil one minute", &LoadAverage{OneMinute: nil, FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, unavailable},
-		{"nil five minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: nil, FifteenMinutes: floatPtr(1)}, unavailable},
-		{"nil fifteen minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: nil}, unavailable},
-		{"normal", hostLoadAverage(1.24, 0.96, 0.72), "1.24 0.96 0.72"},
-		{"all zero", hostLoadAverage(0, 0, 0), "0.00 0.00 0.00"},
-		{"negative zero normalized", &LoadAverage{OneMinute: floatPtr(math.Copysign(0, -1)), FiveMinutes: floatPtr(0), FifteenMinutes: floatPtr(0)}, "0.00 0.00 0.00"},
-		{"above hundred unclamped", hostLoadAverage(128.5, 100, 250.75), "128.50 100.00 250.75"},
-		{"negative one minute", &LoadAverage{OneMinute: floatPtr(-0.01), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, unavailable},
-		{"negative five minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(-1), FifteenMinutes: floatPtr(1)}, unavailable},
-		{"negative fifteen minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(-1)}, unavailable},
-		{"nan", &LoadAverage{OneMinute: floatPtr(math.NaN()), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, unavailable},
-		{"positive inf", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(math.Inf(1)), FifteenMinutes: floatPtr(1)}, unavailable},
-		{"negative inf", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(math.Inf(-1))}, unavailable},
+		{"unknown core count", 39.7, 0, ""},
+		{"comfortably under", 2, 4, ""},
+		{"just under elevated", 2.79, 4, ""},
+		{"elevated", 3, 4, "33"},
+		{"just under saturated", 3.99, 4, "33"},
+		{"saturated", 4, 4, "1;31"},
+		{"well over saturated", 39.7, 16, "1;31"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatHostLoad(tc.in); got != tc.want {
+			if got := loadSeverity(tc.load, tc.cores); got != tc.want {
+				t.Fatalf("loadSeverity(%v, %d) = %q, want %q", tc.load, tc.cores, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatHostLoad(t *testing.T) {
+	unavailToken := colorize("", "   --")
+	unavailable := unavailToken + " " + unavailToken + " " + unavailToken
+	cases := []struct {
+		name  string
+		in    *LoadAverage
+		cores int
+		want  string
+	}{
+		{"nil object", nil, 0, unavailable},
+		{"nil one minute", &LoadAverage{OneMinute: nil, FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, 0, unavailable},
+		{"nil five minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: nil, FifteenMinutes: floatPtr(1)}, 0, unavailable},
+		{"nil fifteen minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: nil}, 0, unavailable},
+		{"normal, no core count", hostLoadAverage(1.24, 0.96, 0.72), 0,
+			bold("  1.2") + " " + dim("  1.0") + " " + dim("  0.7")},
+		{"all zero", hostLoadAverage(0, 0, 0), 0,
+			bold("  0.0") + " " + dim("  0.0") + " " + dim("  0.0")},
+		{"negative zero normalized", &LoadAverage{OneMinute: floatPtr(math.Copysign(0, -1)), FiveMinutes: floatPtr(0), FifteenMinutes: floatPtr(0)}, 0,
+			bold("  0.0") + " " + dim("  0.0") + " " + dim("  0.0")},
+		{"above hundred unclamped, five-wide column survives", hostLoadAverage(128.5, 100, 250.75), 0,
+			bold("128.5") + " " + dim("100.0") + " " + dim("250.8")},
+		{"negative one minute", &LoadAverage{OneMinute: floatPtr(-0.01), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, 0, unavailable},
+		{"negative five minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(-1), FifteenMinutes: floatPtr(1)}, 0, unavailable},
+		{"negative fifteen minute", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(-1)}, 0, unavailable},
+		{"nan", &LoadAverage{OneMinute: floatPtr(math.NaN()), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(1)}, 0, unavailable},
+		{"positive inf", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(math.Inf(1)), FifteenMinutes: floatPtr(1)}, 0, unavailable},
+		{"negative inf", &LoadAverage{OneMinute: floatPtr(1), FiveMinutes: floatPtr(1), FifteenMinutes: floatPtr(math.Inf(-1))}, 0, unavailable},
+		{"elevated trend stays unbolded", hostLoadAverage(3.6, 2.9, 2.1), 4,
+			colorize("1;33", "  3.6") + " " + colorize("33", "  2.9") + " " + dim("  2.1")},
+		{"saturated forces bold red even on the trend figures", hostLoadAverage(39.72, 25.17, 19.98), 16,
+			colorize("1;31", " 39.7") + " " + colorize("1;31", " 25.2") + " " + colorize("1;31", " 20.0")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatHostLoad(tc.in, tc.cores); got != tc.want {
 				t.Fatalf("formatHostLoad() = %q, want %q", got, tc.want)
 			}
 		})
@@ -957,17 +991,19 @@ func TestHostUsageHeadingsAllViews(t *testing.T) {
 		Sessions:  []Session{{PID: 2, Host: "beluga", CWD: "/remote-dir"}},
 		HostUsage: HostUsage{CPUPercent: floatPtr(0)},
 	}}
+	wantLocalLoad := bold("  1.2") + " " + dim("  1.0") + " " + dim("  0.7")
+	wantRemoteLoad := colorize("", "   --") + " " + colorize("", "   --") + " " + colorize("", "   --")
 	for _, mode := range []string{"1", "2", "3"} {
 		t.Run(mode, func(t *testing.T) {
 			var b strings.Builder
 			RenderAll(&b, mode, local, remotes, "", nil, 0, 0, "dir")
 			out := b.String()
 			localHeading := findRow(t, out, "workstation")
-			if !strings.Contains(localHeading, "CPU 13%  MEM 50%  LOAD 1.24 0.96 0.72") {
+			if !strings.Contains(localHeading, "CPU  13%  MEM  50%  LOAD "+wantLocalLoad) {
 				t.Fatalf("local heading = %q", localHeading)
 			}
 			remoteHeading := findRow(t, out, "beluga")
-			if !strings.Contains(remoteHeading, "CPU 0%  MEM --  LOAD -- -- --") {
+			if !strings.Contains(remoteHeading, "CPU   0%  MEM   --  LOAD "+wantRemoteLoad) {
 				t.Fatalf("remote heading = %q", remoteHeading)
 			}
 			if strings.Index(out, "workstation") > strings.Index(out, "local-dir") {

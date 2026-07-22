@@ -26,11 +26,14 @@ type LoadAverage struct {
 }
 
 // HostUsage is one whole-host resource snapshot. Nil fields mean unavailable;
-// pointers preserve a valid zero value through JSON omitempty.
+// pointers preserve a valid zero value through JSON omitempty. NumCPU is 0
+// when unknown (unsupported OS, or an older server that predates this field)
+// — loadSeverity treats 0 as "don't color", not as a real zero-core host.
 type HostUsage struct {
 	CPUPercent    *float64     `json:"cpuPercent,omitempty"`
 	MemoryPercent *float64     `json:"memoryPercent,omitempty"`
 	Load          *LoadAverage `json:"loadAverage,omitempty"`
+	NumCPU        int          `json:"numCPU,omitempty"`
 }
 
 // LocalHost groups the current machine's identity, sessions, and resource
