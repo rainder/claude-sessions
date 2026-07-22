@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -422,6 +423,27 @@ func renderEmptyHostRow(w *frameWriter, host, sel string) {
 	fmt.Fprintln(w, marker+dim("(no sessions)"))
 }
 
+// formatHostPercent renders a whole-host usage percentage. A nil pointer means
+// the metric was unavailable and renders as "--"; otherwise the value is
+// rounded half away from zero (math.Round, not Go's banker's %.0f) so 42.5
+// shows as "43%".
+func formatHostPercent(value *float64) string {
+	if value == nil {
+		return "--"
+	}
+	return fmt.Sprintf("%.0f%%", math.Round(*value))
+}
+
+// renderHostHeading prints a section's host heading: the bold host name
+// followed by its whole-host CPU and memory usage. Used for the local section
+// and every remote section across all three views so the layout stays uniform.
+func renderHostHeading(w io.Writer, sec section) {
+	fmt.Fprintf(w, "  %s  CPU %s  MEM %s\n",
+		bold(sec.name),
+		formatHostPercent(sec.hostUsage.CPUPercent),
+		formatHostPercent(sec.hostUsage.MemoryPercent))
+}
+
 // plural renders a count with its word, pluralizing the word for counts other
 // than 1: plural(1, "agent") → "1 agent", plural(2, "agent") → "2 agents".
 func plural(n int, word string) string {
@@ -707,6 +729,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	}
 
 	// Local first.
+	renderHostHeading(w, sections[0])
 	if len(sectionRows[0]) == 0 {
 		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
@@ -715,7 +738,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 	// Remote sections.
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  %s\n", bold(sections[i].name))
+		renderHostHeading(w, sections[i])
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
@@ -812,6 +835,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 		}
 	}
 
+	renderHostHeading(w, sections[0])
 	if len(sectionRows[0]) == 0 {
 		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
@@ -819,7 +843,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 	}
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  %s\n", bold(sections[i].name))
+		renderHostHeading(w, sections[i])
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
@@ -932,6 +956,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 		}
 	}
 
+	renderHostHeading(w, sections[0])
 	if len(sectionRows[0]) == 0 {
 		renderEmptyHostRow(w, sections[0].host, sel)
 	} else {
@@ -939,7 +964,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 	}
 	for i := 1; i < len(sections); i++ {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  %s\n", bold(sections[i].name))
+		renderHostHeading(w, sections[i])
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))

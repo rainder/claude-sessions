@@ -665,6 +665,84 @@ func TestEmptyLocalAndRemoteCoexist(t *testing.T) {
 	}
 }
 
+func TestFormatHostPercent(t *testing.T) {
+	cases := []struct {
+		name string
+		in   *float64
+		want string
+	}{
+		{"unavailable", nil, "--"},
+		{"zero", floatPtr(0), "0%"},
+		{"round down", floatPtr(42.4), "42%"},
+		{"round half up", floatPtr(42.5), "43%"},
+		{"hundred", floatPtr(100), "100%"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatHostPercent(tc.in); got != tc.want {
+				t.Fatalf("formatHostPercent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHostUsageHeadingsAllViews(t *testing.T) {
+	local := LocalHost{
+		Name:      "workstation",
+		Sessions:  []Session{{PID: 1, CWD: "/local-dir"}},
+		HostUsage: HostUsage{CPUPercent: floatPtr(12.5), MemoryPercent: floatPtr(50)},
+	}
+	remotes := []RemoteResult{{
+		Name:      "beluga",
+		Sessions:  []Session{{PID: 2, Host: "beluga", CWD: "/remote-dir"}},
+		HostUsage: HostUsage{CPUPercent: floatPtr(0)},
+	}}
+	for _, mode := range []string{"1", "2", "3"} {
+		t.Run(mode, func(t *testing.T) {
+			var b strings.Builder
+			RenderAll(&b, mode, local, remotes, "", nil, 0, 0, "dir")
+			out := b.String()
+			localHeading := findRow(t, out, "workstation")
+			if !strings.Contains(localHeading, "CPU 13%  MEM 50%") {
+				t.Fatalf("local heading = %q", localHeading)
+			}
+			remoteHeading := findRow(t, out, "beluga")
+			if !strings.Contains(remoteHeading, "CPU 0%  MEM --") {
+				t.Fatalf("remote heading = %q", remoteHeading)
+			}
+			if strings.Index(out, "workstation") > strings.Index(out, "local-dir") {
+				t.Fatal("local heading rendered after local row")
+			}
+			if strings.Index(out, "beluga") > strings.Index(out, "remote-dir") {
+				t.Fatal("remote heading rendered after remote row")
+			}
+		})
+	}
+}
+
+func TestHostHeadingPrecedesRemoteStates(t *testing.T) {
+	// Keep local populated so the only "(no sessions)" body belongs to the
+	// empty remote section under test.
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/local-session"}}}
+	remotes := []RemoteResult{
+		{Name: "loading", Loading: true},
+		{Name: "down", Error: "timeout"},
+		{Name: "empty"},
+	}
+	var b strings.Builder
+	RenderAll(&b, "1", local, remotes, "", nil, 0, 0, "dir")
+	out := b.String()
+	for _, tc := range []struct{ host, body string }{
+		{"loading", "(loading...)"},
+		{"down", "[unreachable: timeout]"},
+		{"empty", "(no sessions)"},
+	} {
+		if strings.Index(out, tc.host) < 0 || strings.Index(out, tc.body) < 0 || strings.Index(out, tc.host) > strings.Index(out, tc.body) {
+			t.Fatalf("%s heading/body order wrong:\n%s", tc.host, out)
+		}
+	}
+}
+
 // TestRenderAllMatchesBuildTableFrame locks the compatibility invariant: the
 // text RenderAll writes must be byte-identical to the joined frame lines, and
 // its overflow return must match the frame's, across all three views and a mix
