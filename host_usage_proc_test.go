@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
 func TestParseLinuxCPUTimesExcludesGuestAndCountsIOWaitIdle(t *testing.T) {
 	got, ok := parseLinuxCPUTimes("cpu  100 10 20 50 5 3 2 10 40 7\ncpu0 1 2 3 4 5 6 7 8\n")
@@ -69,6 +73,30 @@ func TestParseLinuxMemory(t *testing.T) {
 			assertFloatPtr(t, parseLinuxMemory(tc.input), tc.want)
 		})
 	}
+}
+
+func TestLinuxCollectorBootstrapRespectsCancellation(t *testing.T) {
+	reads := 0
+	collector := &linuxHostUsageCollector{
+		readFile: func(path string) ([]byte, error) {
+			if path == "/proc/meminfo" {
+				return []byte("MemTotal: 1000 kB\nMemAvailable: 500 kB\n"), nil
+			}
+			reads++
+			return []byte("cpu 1 1 1 1 1 1 1 1\n"), nil
+		},
+		primingDelay: time.Hour,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := collector.Sample(ctx)
+	if reads != 1 {
+		t.Fatalf("stat reads = %d, want 1 after cancellation", reads)
+	}
+	if got.CPUPercent != nil {
+		t.Fatal("CPU should be unavailable after canceled bootstrap")
+	}
+	assertFloatPtr(t, got.MemoryPercent, floatPtr(50))
 }
 
 func floatPtr(v float64) *float64 { return &v }

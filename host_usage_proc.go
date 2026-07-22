@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type linuxCPUTimes struct {
@@ -75,4 +78,62 @@ func parseLinuxMemory(data string) *float64 {
 		return nil
 	}
 	return hostPercent(float64(total-available) / float64(total) * 100)
+}
+
+const linuxCPUPrimingDelay = 100 * time.Millisecond
+
+type linuxHostUsageCollector struct {
+	readFile     func(string) ([]byte, error)
+	primingDelay time.Duration
+	previous     linuxCPUTimes
+	primed       bool
+}
+
+func newLinuxHostUsageCollector() hostUsageCollector {
+	return &linuxHostUsageCollector{
+		readFile:     os.ReadFile,
+		primingDelay: linuxCPUPrimingDelay,
+	}
+}
+
+func (c *linuxHostUsageCollector) Sample(ctx context.Context) HostUsage {
+	usage := HostUsage{}
+	if data, err := c.readFile("/proc/meminfo"); err == nil {
+		usage.MemoryPercent = parseLinuxMemory(string(data))
+	}
+	usage.CPUPercent = c.sampleCPU(ctx)
+	return usage
+}
+
+func (c *linuxHostUsageCollector) sampleCPU(ctx context.Context) *float64 {
+	data, err := c.readFile("/proc/stat")
+	if err != nil {
+		return nil
+	}
+	current, ok := parseLinuxCPUTimes(string(data))
+	if !ok {
+		return nil
+	}
+	if !c.primed {
+		c.previous = current
+		c.primed = true
+		timer := time.NewTimer(c.primingDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+		}
+		data, err = c.readFile("/proc/stat")
+		if err != nil {
+			return nil
+		}
+		current, ok = parseLinuxCPUTimes(string(data))
+		if !ok {
+			return nil
+		}
+	}
+	pct := linuxCPUPercent(c.previous, current)
+	c.previous = current
+	return pct
 }

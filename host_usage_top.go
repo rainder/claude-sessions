@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -98,4 +101,26 @@ func parseDarwinSize(s string) (float64, bool) {
 		return 0, false
 	}
 	return v * multiplier, true
+}
+
+type darwinHostUsageCollector struct {
+	runTop func(context.Context) ([]byte, error)
+}
+
+func newDarwinHostUsageCollector() hostUsageCollector {
+	return &darwinHostUsageCollector{runTop: runDarwinTop}
+}
+
+func runDarwinTop(ctx context.Context) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "top", "-l", "2", "-n", "0", "-s", "0")
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	return cmd.Output()
+}
+
+func (c *darwinHostUsageCollector) Sample(ctx context.Context) HostUsage {
+	out, err := c.runTop(ctx)
+	if err != nil {
+		return HostUsage{}
+	}
+	return parseDarwinTop(string(out))
 }
