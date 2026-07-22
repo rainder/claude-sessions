@@ -946,8 +946,8 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 	renderHeader(w, sections, "intermediate", usage, cols)
 
 	buildHdr := func() string {
-		return fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s  %5s ",
-			nameW, "NAME", dirW, dirLabel, statusW, statusLabel, modelW, "MODEL", costW, "COST", agentsW, "AGENTS", "CTX", "CPU%", ageLabel)
+		return fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s  %*s  %5s  %5s ",
+			nameW, "NAME", dirW, dirLabel, statusW, statusLabel, modelW, "MODEL", costW, "COST", agentsW, "AGENTS", "CTX", ageLabel)
 	}
 	hdr := buildHdr()
 	if nd := shrinkDirW(dirW, visualLen(hdr), cols); nd != dirW {
@@ -974,7 +974,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %s  %s  %*s  %s  %5s  %5s ",
+			body := fmt.Sprintf("%s  %s  %s  %s  %s  %*s  %s  %5s ",
 				nameCell,
 				marqueeCell(r.cwdStr, dirW, step),
 				statusCell,
@@ -982,7 +982,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 				costCell(r.costStr, costW),
 				agentsW, r.agentsStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
-				r.s.CPU, r.ageStr)
+				r.ageStr)
 			row := tmuxViewerPrefix(r.s, plainCells) + body
 			if ghost && !selected {
 				row = dim(row)
