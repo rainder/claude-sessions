@@ -242,6 +242,9 @@ func TestIsScratchCWD(t *testing.T) {
 		{"/tmp", true},
 		{"/tmp/foo", true},
 		{"/tmpfoo", false},
+		{"/private", true},
+		{"/private/var/folders", true},
+		{"/privateer", false},
 		{"/home/andy/project", false},
 		{"", false},
 	}

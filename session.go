@@ -115,12 +115,13 @@ func (s Session) Updated() time.Time {
 	return time.UnixMilli(s.UpdatedAt)
 }
 
-// isScratchCWD reports whether cwd is /tmp or a subdirectory of it. Sessions
-// launched there are short-lived scratch/automation runs (hooks, headless
-// forks, one-shot scripts), not real project work, so they're hidden from
-// every view.
+// isScratchCWD reports whether cwd is /tmp, /private, or a subdirectory of
+// either. Sessions launched there are short-lived scratch/automation runs
+// (hooks, headless forks, one-shot scripts), not real project work, so they're
+// hidden from every view.
 func isScratchCWD(cwd string) bool {
-	return cwd == "/tmp" || strings.HasPrefix(cwd, "/tmp/")
+	return cwd == "/tmp" || strings.HasPrefix(cwd, "/tmp/") ||
+		cwd == "/private" || strings.HasPrefix(cwd, "/private/")
 }
 
 // CollectLocal reads every *.json under ~/.claude/sessions, filters out dead
