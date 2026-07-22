@@ -344,3 +344,48 @@ func TestNewSessionKnownPresetUsesItsCommand(t *testing.T) {
 		t.Fatalf("tmux argv:\n%s", data)
 	}
 }
+
+func TestSessionsIncludesHostUsage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cpu, memory := 12.5, 67.25
+	s := &server{
+		token: "secret",
+		host:  "devbox",
+		hostSnapshot: func() HostUsage {
+			return HostUsage{CPUPercent: &cpu, MemoryPercent: &memory}
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Hostname  string    `json:"hostname"`
+		HostUsage HostUsage `json:"hostUsage"`
+		Sessions  []Session `json:"sessions"`
+		TS        int64     `json:"ts"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Hostname != "devbox" || got.TS == 0 {
+		t.Fatalf("response metadata = %#v", got)
+	}
+	assertFloatPtr(t, got.HostUsage.CPUPercent, &cpu)
+	assertFloatPtr(t, got.HostUsage.MemoryPercent, &memory)
+}
+
+func TestSessionsIncludesEmptyHostUsageWhenUnavailable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{token: "secret", host: "devbox"}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if !strings.Contains(rec.Body.String(), `"hostUsage":{}`) {
+		t.Fatalf("response missing empty hostUsage object: %s", rec.Body.String())
+	}
+}

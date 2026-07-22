@@ -15,10 +15,11 @@ import (
 
 // RemoteResult is the per-host outcome of a /sessions poll.
 type RemoteResult struct {
-	Name     string    // server name from config
-	Sessions []Session // empty when Error != ""
-	Error    string    // "" on success, short reason otherwise
-	Loading  bool      // true for a placeholder slot whose first fetch hasn't returned yet
+	Name      string    // server name from config
+	Sessions  []Session // empty when Error != ""
+	HostUsage HostUsage
+	Error     string // "" on success, short reason otherwise
+	Loading   bool   // true for a placeholder slot whose first fetch hasn't returned yet
 }
 
 // FetchRemote queries one server's /sessions endpoint. 5s timeout.
@@ -40,16 +41,18 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 		return RemoteResult{Name: srv.Name, Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
 	var body struct {
-		Sessions []Session `json:"sessions"`
+		Sessions  []Session `json:"sessions"`
+		HostUsage HostUsage `json:"hostUsage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return RemoteResult{Name: srv.Name, Error: "bad response: " + shortErr(err)}
 	}
-	// Tag every session with the host name so ID() and rendering know.
+	// Tag every session with the configured host alias so ID(), selection, and
+	// remote action routing remain stable even when the server hostname differs.
 	for i := range body.Sessions {
 		body.Sessions[i].Host = srv.Name
 	}
-	return RemoteResult{Name: srv.Name, Sessions: body.Sessions}
+	return RemoteResult{Name: srv.Name, Sessions: body.Sessions, HostUsage: body.HostUsage}
 }
 
 // FetchAllRemote polls all configured servers in parallel and returns the
