@@ -272,6 +272,65 @@ func TestSessionHomeJSONCompatibility(t *testing.T) {
 	}
 }
 
+func TestSessionTmuxAttachedJSONCompatibility(t *testing.T) {
+	zero := 0
+	positive := 3
+	cases := []struct {
+		name       string
+		attached   *int
+		wantJSON   string
+		absentJSON bool
+	}{
+		{"unknown omitted", nil, "", true},
+		{"detached retained", &zero, `"tmuxAttached":0`, false},
+		{"positive retained", &positive, `"tmuxAttached":3`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(Session{Tmux: "dev:0.0", TmuxAttached: tc.attached})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.absentJSON {
+				if strings.Contains(string(data), "tmuxAttached") {
+					t.Fatalf("marshaled JSON unexpectedly contains tmuxAttached: %s", data)
+				}
+			} else if !strings.Contains(string(data), tc.wantJSON) {
+				t.Fatalf("marshaled JSON = %s, want field %s", data, tc.wantJSON)
+			}
+
+			var roundTrip Session
+			if err := json.Unmarshal(data, &roundTrip); err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case tc.attached == nil && roundTrip.TmuxAttached != nil:
+				t.Fatalf("round-trip count = %v, want nil", roundTrip.TmuxAttached)
+			case tc.attached != nil && roundTrip.TmuxAttached == nil:
+				t.Fatalf("round-trip count = nil, want %d", *tc.attached)
+			case tc.attached != nil && *roundTrip.TmuxAttached != *tc.attached:
+				t.Fatalf("round-trip count = %d, want %d", *roundTrip.TmuxAttached, *tc.attached)
+			}
+		})
+	}
+
+	var legacy Session
+	if err := json.Unmarshal([]byte(`{"pid":1,"tmux":"legacy:0.0"}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.TmuxAttached != nil {
+		t.Fatalf("legacy missing field decoded as %v, want nil", legacy.TmuxAttached)
+	}
+
+	var detached Session
+	if err := json.Unmarshal([]byte(`{"pid":2,"tmux":"dev:0.0","tmuxAttached":0}`), &detached); err != nil {
+		t.Fatal(err)
+	}
+	if detached.TmuxAttached == nil || *detached.TmuxAttached != 0 {
+		t.Fatalf("detached count decoded as %v, want pointer to 0", detached.TmuxAttached)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

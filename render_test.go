@@ -51,6 +51,51 @@ func TestWriteUsageNil(t *testing.T) {
 	}
 }
 
+func TestTmuxViewerPrefix(t *testing.T) {
+	zero := 0
+	one := 1
+	nine := 9
+	ten := 10
+	negative := -1
+	cases := []struct {
+		name  string
+		s     Session
+		plain bool
+		want  string
+	}{
+		{"no tmux", Session{}, false, "  "},
+		{"unknown", Session{Tmux: "dev:0.0"}, false, dim("· ")},
+		{"detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, false, dim("0 ")},
+		{"one", Session{Tmux: "dev:0.0", TmuxAttached: &one}, false, colorize("1;32", "1 ")},
+		{"nine", Session{Tmux: "dev:0.0", TmuxAttached: &nine}, false, colorize("1;32", "9 ")},
+		{"ten", Session{Tmux: "dev:0.0", TmuxAttached: &ten}, false, colorize("1;32", "+ ")},
+		{"negative unknown", Session{Tmux: "dev:0.0", TmuxAttached: &negative}, false, dim("· ")},
+		{"plain unknown", Session{Tmux: "dev:0.0"}, true, "· "},
+		{"plain detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, true, "0 "},
+		{"plain positive", Session{Tmux: "dev:0.0", TmuxAttached: &one}, true, "1 "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tmuxViewerPrefix(tc.s, tc.plain); got != tc.want {
+				t.Errorf("tmuxViewerPrefix() = %q, want %q", got, tc.want)
+			}
+			if got := visualLen(tmuxViewerPrefix(tc.s, tc.plain)); got != 2 {
+				t.Errorf("tmuxViewerPrefix() visual width = %d, want 2", got)
+			}
+		})
+	}
+}
+
+func TestHighlightSelectedRow(t *testing.T) {
+	if got := highlightSelectedRow("2 row", false); got != "2 row" {
+		t.Errorf("unselected row = %q, want unchanged", got)
+	}
+	want := ansiInvert + "2 row" + ansiReset
+	if got := highlightSelectedRow("2 row", true); got != want {
+		t.Errorf("selected row = %q, want %q", got, want)
+	}
+}
+
 // findRow returns the rendered line containing needle, failing if absent.
 func findRow(t *testing.T, out, needle string) string {
 	t.Helper()
@@ -67,12 +112,153 @@ func testLocalHost(rows ...Session) LocalHost {
 	return LocalHost{Name: "local", Sessions: rows}
 }
 
+func assertWholeRowSelected(t *testing.T, row, prefix string) {
+	t.Helper()
+	if !strings.HasPrefix(row, ansiInvert+prefix) {
+		t.Fatalf("selected row lacks continuous invert prefix %q: %q", prefix, row)
+	}
+	if !strings.HasSuffix(row, ansiReset) {
+		t.Fatalf("selected row lacks final reset: %q", row)
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(row, ansiInvert), ansiReset)
+	if strings.Contains(inner, ansiReset) {
+		t.Fatalf("selected row contains nested reset: %q", row)
+	}
+	if strings.Contains(row, "▶") {
+		t.Fatalf("selected row still contains arrow: %q", row)
+	}
+}
+
+func renderSessionRowForTest(t *testing.T, mode string, s Session, selected bool) string {
+	t.Helper()
+	sel := ""
+	if selected {
+		sel = s.ID()
+	}
+	var b strings.Builder
+	RenderAll(&b, mode, testLocalHost(s), nil, sel, nil, 0, 0, "dir")
+	return findRow(t, b.String(), s.Name)
+}
+
+func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
+	now := time.Now().UnixMilli()
+	zero := 0
+	one := 1
+	nine := 9
+	ten := 10
+	cases := []struct {
+		name     string
+		tmux     string
+		attached *int
+		want     string
+	}{
+		{"plain", "", nil, "  "},
+		{"unknown", "unknown:0.0", nil, dim("· ")},
+		{"detached", "detached:0.0", &zero, dim("0 ")},
+		{"one", "one:0.0", &one, colorize("1;32", "1 ")},
+		{"nine", "nine:0.0", &nine, colorize("1;32", "9 ")},
+		{"ten", "ten:0.0", &ten, colorize("1;32", "+ ")},
+	}
+	for _, mode := range []string{"1", "2", "3"} {
+		for i, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				s := Session{
+					PID:          100 + i,
+					Name:         tc.name,
+					NameSource:   "user",
+					CWD:          "/work/" + tc.name,
+					Status:       "idle",
+					Entrypoint:   "cli",
+					UpdatedAt:    now,
+					Tmux:         tc.tmux,
+					TmuxAttached: tc.attached,
+				}
+				row := renderSessionRowForTest(t, mode, s, false)
+				if !strings.HasPrefix(row, tc.want) {
+					t.Errorf("mode %s row prefix = %q, want %q in row %q", mode, row[:len(tc.want)], tc.want, row)
+				}
+			})
+		}
+	}
+}
+
+func TestSelectedSessionRowsInvertWholeRow(t *testing.T) {
+	now := time.Now().UnixMilli()
+	attached := 2
+	for _, mode := range []string{"1", "2", "3"} {
+		s := Session{
+			PID: 42, Name: "selected", NameSource: "user", CWD: "/work/selected",
+			Status: "busy", Entrypoint: "cli", UpdatedAt: now,
+			Tmux: "selected:0.0", TmuxAttached: &attached,
+		}
+		selectedRow := renderSessionRowForTest(t, mode, s, true)
+		assertWholeRowSelected(t, selectedRow, "2 ")
+
+		unselectedRow := renderSessionRowForTest(t, mode, s, false)
+		if visualLen(selectedRow) != visualLen(unselectedRow) {
+			t.Errorf("mode %s selected width = %d, unselected width = %d", mode, visualLen(selectedRow), visualLen(unselectedRow))
+		}
+	}
+}
+
+func TestSelectedHeadlessRowsSuppressDim(t *testing.T) {
+	now := time.Now().UnixMilli()
+	attached := 1
+	for _, mode := range []string{"1", "2", "3"} {
+		s := Session{
+			PID: 77, Name: "headless", NameSource: "user", CWD: "/work/headless",
+			Status: "busy", Entrypoint: "sdk-cli", StartedAt: now,
+			Tmux: "headless:0.0", TmuxAttached: &attached,
+		}
+		row := renderSessionRowForTest(t, mode, s, true)
+		assertWholeRowSelected(t, row, "1 ")
+		inner := strings.TrimSuffix(strings.TrimPrefix(row, ansiInvert), ansiReset)
+		if strings.Contains(inner, ansiDim) {
+			t.Errorf("mode %s selected headless row contains dim wrapper: %q", mode, row)
+		}
+	}
+}
+
+func TestTmuxViewerPrefixPreservesWidth(t *testing.T) {
+	now := time.Now().UnixMilli()
+	attached := 3
+	for _, mode := range []string{"1", "2", "3"} {
+		unknown := Session{
+			PID: 88, Name: "width", NameSource: "user", CWD: "/work/width",
+			Status: "idle", Entrypoint: "cli", UpdatedAt: now, Tmux: "width:0.0",
+		}
+		known := unknown
+		known.TmuxAttached = &attached
+
+		var unknownOut, knownOut strings.Builder
+		RenderAll(&unknownOut, mode, testLocalHost(unknown), nil, "", nil, 0, 0, "dir")
+		RenderAll(&knownOut, mode, testLocalHost(known), nil, "", nil, 0, 0, "dir")
+		unknownRow := findRow(t, unknownOut.String(), unknown.Name)
+		knownRow := findRow(t, knownOut.String(), known.Name)
+		if visualLen(unknownRow) != visualLen(knownRow) {
+			t.Errorf("mode %s unknown width = %d, known width = %d", mode, visualLen(unknownRow), visualLen(knownRow))
+		}
+
+		headerNeedle := "PID"
+		if mode != "1" {
+			headerNeedle = "DIR"
+		}
+		unknownHeader := findRow(t, unknownOut.String(), headerNeedle)
+		knownHeader := findRow(t, knownOut.String(), headerNeedle)
+		if unknownHeader != knownHeader {
+			t.Errorf("mode %s header changed with viewer count:\nunknown: %q\nknown:   %q", mode, unknownHeader, knownHeader)
+		}
+	}
+}
+
 func TestHeadlessRowsDimmed(t *testing.T) {
 	now := time.Now().UnixMilli()
+	attached := 1
 	normal := Session{PID: 11111, Name: "my-task", CWD: "/tmp/normaldir",
 		Status: "busy", Entrypoint: "cli", UpdatedAt: now}
 	ghost := Session{PID: 99901, CWD: "/tmp/ghostdir",
-		Entrypoint: "sdk-cli", StartedAt: now}
+		Entrypoint: "sdk-cli", StartedAt: now,
+		Tmux: "ghost:0.0", TmuxAttached: &attached}
 
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
@@ -80,12 +266,11 @@ func TestHeadlessRowsDimmed(t *testing.T) {
 		out := b.String()
 
 		ghostRow := findRow(t, out, "ghostdir")
-		body := strings.TrimPrefix(ghostRow, "  ")
-		if !strings.HasPrefix(body, ansiDim) {
-			t.Errorf("mode %s: headless row not dimmed: %q", mode, ghostRow)
+		if !strings.HasPrefix(ghostRow, ansiDim+"1 ") {
+			t.Errorf("mode %s: headless row and viewer prefix not dimmed: %q", mode, ghostRow)
 		}
 		// A reset before the end would cancel the dim mid-row.
-		if inner := strings.TrimSuffix(strings.TrimPrefix(body, ansiDim), ansiReset); strings.Contains(inner, ansiReset) {
+		if inner := strings.TrimSuffix(strings.TrimPrefix(ghostRow, ansiDim), ansiReset); strings.Contains(inner, ansiReset) {
 			t.Errorf("mode %s: headless row has mid-row reset: %q", mode, ghostRow)
 		}
 
@@ -622,7 +807,7 @@ func TestCtxCell(t *testing.T) {
 	}
 }
 
-func TestEmptyRemoteHostSelectionMarker(t *testing.T) {
+func TestEmptyRemoteHostSelectionHighlight(t *testing.T) {
 	// A populated local session keeps the local section from rendering its own
 	// "(no sessions)" row, isolating this test to the remote empty-host row.
 	local := []Session{{PID: 1, CWD: "/local"}}
@@ -634,9 +819,7 @@ func TestEmptyRemoteHostSelectionMarker(t *testing.T) {
 			var b strings.Builder
 			RenderAll(&b, mode, testLocalHost(local...), remotes, selected, nil, 0, 0, "dir")
 			row := findRow(t, b.String(), "(no sessions)")
-			if !strings.HasPrefix(row, "▶ ") {
-				t.Fatalf("mode %s empty-host row lacks selection marker: %q", mode, row)
-			}
+			assertWholeRowSelected(t, row, "  ")
 			// The empty remote host must not inflate counts: 1 local session
 			// (1 agent), 0 from beluga.
 			if !strings.Contains(b.String(), "1 agent, 1 session,") {
@@ -646,16 +829,14 @@ func TestEmptyRemoteHostSelectionMarker(t *testing.T) {
 	}
 }
 
-func TestEmptyLocalHostSelectionMarker(t *testing.T) {
+func TestEmptyLocalHostSelectionHighlight(t *testing.T) {
 	selected := emptyHostSelectionID("")
 	for _, mode := range []string{"1", "3", "2"} {
 		t.Run(mode, func(t *testing.T) {
 			var b strings.Builder
 			RenderAll(&b, mode, testLocalHost(), nil, selected, nil, 0, 0, "dir")
 			row := findRow(t, b.String(), "(no sessions)")
-			if !strings.HasPrefix(row, "▶ ") {
-				t.Fatalf("mode %s empty-local row lacks selection marker: %q", mode, row)
-			}
+			assertWholeRowSelected(t, row, "  ")
 			if !strings.Contains(b.String(), "0 agents, 0 sessions,") {
 				t.Fatalf("mode %s empty local changed header counts:\n%s", mode, b.String())
 			}
@@ -701,11 +882,9 @@ func TestEmptyLocalAndRemoteCoexist(t *testing.T) {
 		t.Fatalf("want 2 (no sessions) rows (local + beluga), got %d:\n%s", len(rows), out)
 	}
 	// Local is section 0, so its row renders first and is the selected one.
-	if !strings.HasPrefix(rows[0], "▶ ") {
-		t.Fatalf("selected empty-local row lacks marker: %q", rows[0])
-	}
-	if strings.HasPrefix(rows[1], "▶ ") {
-		t.Fatalf("unselected empty-remote row wrongly marked: %q", rows[1])
+	assertWholeRowSelected(t, rows[0], "  ")
+	if strings.HasPrefix(rows[1], ansiInvert) {
+		t.Fatalf("unselected empty-remote row wrongly highlighted: %q", rows[1])
 	}
 	if !strings.Contains(out, "0 agents, 0 sessions,") {
 		t.Fatalf("two empty hosts inflated header counts:\n%s", out)

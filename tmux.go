@@ -6,30 +6,45 @@ import (
 	"strings"
 )
 
-// tmuxPaneMap returns pane_pid → "session:window.pane" for every tmux pane
-// on the default server. Empty map (no error) if tmux isn't running.
-func tmuxPaneMap() (map[int]string, error) {
+type tmuxPaneInfo struct {
+	Location string
+	Attached *int
+}
+
+// tmuxPaneMap returns pane_pid → pane metadata for every tmux pane on the
+// default server. Empty map (no error) if tmux isn't running.
+func tmuxPaneMap() (map[int]tmuxPaneInfo, error) {
 	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{pane_pid} #{session_name}:#{window_index}.#{pane_index}").Output()
+		"#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_attached}").Output()
 	if err != nil {
-		return map[int]string{}, nil
+		return map[int]tmuxPaneInfo{}, nil
 	}
-	m := make(map[int]string)
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	return parseTmuxPaneOutput(string(out)), nil
+}
+
+func parseTmuxPaneOutput(out string) map[int]tmuxPaneInfo {
+	panes := make(map[int]tmuxPaneInfo)
+	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
-		sp := strings.SplitN(line, " ", 2)
-		if len(sp) != 2 {
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 || fields[1] == "" {
 			continue
 		}
-		pid, err := strconv.Atoi(sp[0])
-		if err != nil {
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
 			continue
 		}
-		m[pid] = sp[1]
+
+		info := tmuxPaneInfo{Location: fields[1]}
+		attached, err := strconv.Atoi(strings.TrimSpace(fields[2]))
+		if err == nil && attached >= 0 {
+			info.Attached = &attached
+		}
+		panes[pid] = info
 	}
-	return m, nil
+	return panes
 }
 
 // ppidMap returns pid → ppid for every process on the system.
@@ -80,19 +95,19 @@ func processInfo() (ppid map[int]int, cpu map[int]string, err error) {
 	return ppid, cpu, nil
 }
 
-// walkTmuxPane returns the tmux pane string (session:win.pane) if pid is a
-// descendant of any tmux pane process, else "". Checks the pid itself first
-// since `tmux new-session "claude ..."` makes claude the pane_pid directly.
-func walkTmuxPane(pid int, panes map[int]string, ppid map[int]int) string {
+// walkTmuxPane returns tmux pane metadata if pid is a descendant of any tmux
+// pane process. It checks pid itself first because `tmux new-session
+// "claude ..."` makes claude the pane_pid directly.
+func walkTmuxPane(pid int, panes map[int]tmuxPaneInfo, ppid map[int]int) (tmuxPaneInfo, bool) {
 	cur := pid
 	for i := 0; i < 32; i++ {
-		if loc, ok := panes[cur]; ok {
-			return loc
+		if info, ok := panes[cur]; ok {
+			return info, true
 		}
 		if cur <= 1 {
-			return ""
+			return tmuxPaneInfo{}, false
 		}
 		cur = ppid[cur]
 	}
-	return ""
+	return tmuxPaneInfo{}, false
 }
