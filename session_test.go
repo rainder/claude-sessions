@@ -351,6 +351,13 @@ func TestSessionDisabledJSONCompatibility(t *testing.T) {
 	if !strings.Contains(string(data), `"disabled":true`) {
 		t.Fatalf("marshaled JSON missing disabled field: %s", data)
 	}
+	var roundTrip Session
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if !roundTrip.Disabled {
+		t.Fatal("disabled field decoded as false")
+	}
 
 	data, err = json.Marshal(Session{PID: 1})
 	if err != nil {
