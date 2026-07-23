@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -69,7 +70,7 @@ type server struct {
 }
 
 func (s *server) authed(r *http.Request) bool {
-	return r.Header.Get("Authorization") == "Bearer "+s.token
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) == 1
 }
 
 func (s *server) collectLocalRaw() ([]Session, error) {
@@ -558,7 +559,11 @@ func loadOrCreateToken() (string, error) {
 	}
 	path := filepath.Join(dir, "server-token")
 	if data, err := os.ReadFile(path); err == nil {
-		return strings.TrimSpace(string(data)), nil
+		tok := strings.TrimSpace(string(data))
+		if tok == "" {
+			return "", fmt.Errorf("%s exists but is empty; delete it to regenerate", path)
+		}
+		return tok, nil
 	}
 	b := make([]byte, 18) // 24 base64url chars
 	if _, err := rand.Read(b); err != nil {
