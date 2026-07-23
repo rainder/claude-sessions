@@ -14,6 +14,23 @@ func targetIDs(targets []selectionTarget) []string {
 	return ids
 }
 
+func TestFirstIdleTarget(t *testing.T) {
+	local := []Session{
+		{PID: 1, CWD: "/a", Status: "busy"},
+		{PID: 2, CWD: "/b", Status: "idle"},
+		{PID: 3, CWD: "/c", Status: "idle"},
+	}
+	targets := buildSelectionTargets(local, nil)
+	if got, want := firstIdleTarget(targets), "2"; got != want {
+		t.Fatalf("firstIdleTarget = %q, want %q", got, want)
+	}
+
+	noneIdle := buildSelectionTargets([]Session{{PID: 1, CWD: "/a", Status: "busy"}}, nil)
+	if got := firstIdleTarget(noneIdle); got != "" {
+		t.Fatalf("firstIdleTarget with no idle sessions = %q, want empty", got)
+	}
+}
+
 func TestBuildSelectionTargets(t *testing.T) {
 	local := []Session{{PID: 10, CWD: "/local"}}
 	remotes := []RemoteResult{

@@ -93,6 +93,17 @@ func selectionForTmux(targets []selectionTarget, host, tmuxSession string) strin
 	return ""
 }
 
+// firstIdleTarget returns the id of the topmost target whose session is idle,
+// or "" if none is idle.
+func firstIdleTarget(targets []selectionTarget) string {
+	for _, target := range targets {
+		if target.session != nil && target.session.Status == "idle" {
+			return target.id
+		}
+	}
+	return ""
+}
+
 func validateTargetSel(targets []selectionTarget, sel string) string {
 	for _, target := range targets {
 		if target.id == sel {

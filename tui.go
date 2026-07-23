@@ -451,6 +451,9 @@ func RunTUI(interval time.Duration) error {
 			case KeyDown:
 				state.navigate(targets, 1)
 				render()
+			case "\t":
+				state.selectID(firstIdleTarget(targets))
+				render()
 			case "k", "K":
 				screen.Invalidate()
 				actKill(makeCtx())
@@ -667,6 +670,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("NAVIGATION"))
 	fmt.Fprintln(&b, "    ↑ / ↓        move selection")
+	fmt.Fprintln(&b, "    Tab          jump to topmost idle session")
 	fmt.Fprintln(&b, "    mouse click  select row · double-click opens")
 	fmt.Fprintln(&b, "    mouse wheel  scroll list or inspector")
 	fmt.Fprintln(&b)

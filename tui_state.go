@@ -264,6 +264,18 @@ func (s *tuiState) navigate(targets []selectionTarget, delta int) {
 	s.anchorSelection = true
 }
 
+// selectID moves the selection directly to id (if non-empty) and requests a
+// re-anchor. Like navigate, it is explicit user navigation, so it cancels any
+// pending post-spawn intent.
+func (s *tuiState) selectID(id string) {
+	if id == "" {
+		return
+	}
+	s.pending = nil
+	s.sel = id
+	s.anchorSelection = true
+}
+
 // hitAt returns the first hit region containing the cell (x, y), or nil.
 func (s *tuiState) hitAt(x, y int) *hitRegion {
 	for i := range s.hits {
