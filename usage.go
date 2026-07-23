@@ -52,6 +52,15 @@ type UsageInfo struct {
 	Credits           creditsInfo
 }
 
+// AccountUsage pairs a rate-limit snapshot with the account it belongs to, so a
+// remote host's limits stay attributable when it runs a different Anthropic
+// account than the client. Account is the login email ("" when the identity
+// couldn't be read); Info is the snapshot (nil before the first fetch lands).
+type AccountUsage struct {
+	Account string     `json:"account"` // email, "" when unknown
+	Info    *UsageInfo `json:"info"`
+}
+
 // parseUsage decodes the /api/oauth/usage response body. The overall
 // five_hour and seven_day buckets are kept; per-model buckets are ignored by
 // design. The model-scoped weekly limit is pulled from the "limits" array's
@@ -118,6 +127,31 @@ func parseUsage(body []byte) (*UsageInfo, error) {
 		}
 	}
 	return u, nil
+}
+
+// loadAccountEmail reads the logged-in Anthropic account's email from
+// oauthAccount.emailAddress in $HOME/.claude.json (Claude Code's top-level
+// config — note this is NOT ~/.claude/.claude.json). Returns "" on any error;
+// the header just renders the bars without an account label. Read-only, like
+// the token — Claude Code owns this file.
+func loadAccountEmail() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return ""
+	}
+	var raw struct {
+		OAuthAccount struct {
+			EmailAddress string `json:"emailAddress"`
+		} `json:"oauthAccount"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return ""
+	}
+	return raw.OAuthAccount.EmailAddress
 }
 
 // usageURL is the endpoint Claude Code's /usage command reads.

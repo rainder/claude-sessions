@@ -678,6 +678,67 @@ func TestSessionsIncludesEmptyHostUsageWhenUnavailable(t *testing.T) {
 	}
 }
 
+func TestSessionsIncludesUsageWhenSnapshotPresent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{
+		token: "secret",
+		host:  "devbox",
+		usageSnapshot: func() *AccountUsage {
+			return &AccountUsage{
+				Account: "andy@work.com",
+				Info:    &UsageInfo{FiveHour: usageBucket{Pct: 42}},
+			}
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	var raw map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	usage, ok := raw["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("usage not an object: %#v", raw["usage"])
+	}
+	if usage["account"] != "andy@work.com" {
+		t.Fatalf("usage.account = %#v, want andy@work.com", usage["account"])
+	}
+	if _, ok := usage["info"].(map[string]any); !ok {
+		t.Fatalf("usage.info not an object: %#v", usage["info"])
+	}
+}
+
+func TestSessionsOmitsUsageWhenSnapshotNilOrHubAbsent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cases := map[string]*server{
+		"no hub":       {token: "secret", host: "devbox"},
+		"nil snapshot": {token: "secret", host: "devbox", usageSnapshot: func() *AccountUsage { return nil }},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+			s.sessions(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+			}
+			var raw map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := raw["usage"]; present {
+				t.Fatalf("usage key present when it should be omitted: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func getServerSessions(s *server) (int, []Session, error) {
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
 	req.Header.Set("Authorization", "Bearer secret")

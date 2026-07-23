@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -74,6 +75,32 @@ func TestFetchRemoteCompatibilityWithMissingAndPartialHostUsage(t *testing.T) {
 	unavailable := colorize("", "   --") + " " + colorize("", "   --") + " " + colorize("", "   --")
 	if got := formatHostLoad(partialLoad.HostUsage.Load, partialLoad.HostUsage.NumCPU); got != unavailable {
 		t.Fatalf("formatHostLoad = %q, want %q", got, unavailable)
+	}
+}
+
+func TestFetchRemoteDecodesOptionalUsage(t *testing.T) {
+	// Build the body exactly as the server does — marshal an AccountUsage — so
+	// the test tracks the real serialization (UsageInfo has no JSON tags, so its
+	// wire keys are the Go field names) instead of a hand-written shape.
+	usage := AccountUsage{Account: "bot@ci.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 42}}}
+	payload, err := json.Marshal(map[string]any{"sessions": []Session{}, "usage": usage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fetchRemoteFixture(t, string(payload))
+	if got.Usage == nil {
+		t.Fatal("usage decoded as nil, want populated")
+	}
+	if got.Usage.Account != "bot@ci.com" {
+		t.Fatalf("account = %q, want bot@ci.com", got.Usage.Account)
+	}
+	if got.Usage.Info == nil || got.Usage.Info.FiveHour.Pct != 42 {
+		t.Fatalf("usage.info wrong: %#v", got.Usage.Info)
+	}
+
+	// An older server that omits "usage" leaves it nil — the client keeps working.
+	if old := fetchRemoteFixture(t, `{"sessions":[]}`); old.Usage != nil {
+		t.Fatalf("missing usage decoded as %#v, want nil", old.Usage)
 	}
 }
 

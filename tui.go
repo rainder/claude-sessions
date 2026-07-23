@@ -110,9 +110,12 @@ func RunTUI(interval time.Duration) error {
 
 	// Account usage bars: same non-blocking pattern as the remote hub. The
 	// first paint happens with no bar; it appears once the initial fetch
-	// lands (no wake pipe — the next tick repaints anyway).
+	// lands (no wake pipe — the next tick repaints anyway). The local login
+	// email is read once (cheap, stable for the session) so its bar can be
+	// deduped/labeled against remotes that run a different account.
 	usageHub := NewUsageHub()
 	defer usageHub.Shutdown()
+	localAccount := loadAccountEmail()
 
 	hostUsageHub := NewHostUsageHub(interval)
 	defer hostUsageHub.Shutdown()
@@ -243,7 +246,7 @@ func RunTUI(interval time.Duration) error {
 			Name:      localName,
 			Sessions:  local,
 			HostUsage: hostUsageHub.Snapshot(),
-		}, remotes, state.sel, usageHub.Snapshot(), cols, 0, sortMode)
+		}, remotes, state.sel, &AccountUsage{Account: localAccount, Info: usageHub.Snapshot()}, cols, 0, sortMode)
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if rows > 0 {
