@@ -169,10 +169,12 @@ func extractCWDFromJSONL(path string) string {
 
 // hiddenCwd reports cwds that are never worth suggesting: everything under
 // /private, which on macOS is where scratchpads and /tmp (a symlink to
-// /private/tmp) live. The selected row's own cwd bypasses this — it's an
-// explicit context, not a suggestion.
+// /private/tmp) live, and worktree checkouts (.claude/worktrees/<name>) —
+// short-lived, per-task dirs that clutter the list and usually don't outlive
+// the session that made them. The selected row's own cwd bypasses this —
+// it's an explicit context, not a suggestion.
 func hiddenCwd(cwd string) bool {
-	return strings.HasPrefix(cwd, "/private/") || cwd == "/private"
+	return strings.HasPrefix(cwd, "/private/") || cwd == "/private" || worktreeName(cwd) != ""
 }
 
 // isDir returns true if path is a directory.

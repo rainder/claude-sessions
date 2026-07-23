@@ -19,6 +19,7 @@ func TestHiddenCwd(t *testing.T) {
 		{"/Users/andy/Developer/claude-sessions", false},
 		{"/privateer/repo", false},
 		{"", false},
+		{"/Users/andy/Developer/claude-sessions/.claude/worktrees/some-feature", true},
 	}
 	for _, c := range cases {
 		if got := hiddenCwd(c.cwd); got != c.want {

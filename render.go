@@ -466,6 +466,21 @@ func displayCWD(cwd, home string) string {
 	return cwd
 }
 
+// collapseWorktreePath rewrites a cwd under .claude/worktrees/<name> to
+// "<squashed-project-root>:<name>", dropping the ".claude/worktrees" nesting
+// so the DIR column reads like a branch suffix instead of two extra path
+// segments. The root goes through squashPath same as any other path (so
+// "Developer" abbreviates to "D" but the project dir itself stays full).
+// Returns cwd unchanged when cwd isn't a worktree path.
+func collapseWorktreePath(cwd string) string {
+	name := worktreeName(cwd)
+	if name == "" {
+		return cwd
+	}
+	i := strings.Index(cwd, "/.claude/worktrees/")
+	return squashPath(cwd[:i]) + ":" + name
+}
+
 // section is one rendering block. host is the stable selection/action key
 // ("" for local, configured alias for remote); name is the visible heading.
 type section struct {
@@ -781,12 +796,16 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		sid = sid[:8]
 	}
 	name, nameDim := s.DisplayName()
+	cwdStr := squashPath(cwd)
+	if wt := collapseWorktreePath(cwd); wt != cwd {
+		cwdStr = wt
+	}
 	return drowFull{
 		s:         s,
 		nameStr:   name,
 		nameDim:   nameDim,
 		statusStr: s.StatusDisplay(),
-		cwdStr:    squashPath(cwd),
+		cwdStr:    cwdStr,
 		modelStr:  shortModel(s.Model),
 		ctxStr:    formatTokens(s.ContextTokens),
 		costStr:   formatCost(s.CostUSD, s.CostSubagentsUSD),

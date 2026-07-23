@@ -721,6 +721,33 @@ func TestDisplayCWD(t *testing.T) {
 	}
 }
 
+func TestCollapseWorktreePath(t *testing.T) {
+	cases := []struct{ cwd, want string }{
+		{"~/Developer/project-name/.claude/worktrees/some-feature", "~/D/project-name:some-feature"},
+		{"/repo/.claude/worktrees/DR-860/sub/dir", "/repo:DR-860"},
+		{"/repo/not-a-worktree", "/repo/not-a-worktree"},
+		{"/repo/.claude/worktrees/", "/repo/.claude/worktrees/"},
+	}
+	for _, tc := range cases {
+		if got := collapseWorktreePath(tc.cwd); got != tc.want {
+			t.Errorf("collapseWorktreePath(%q) = %q, want %q", tc.cwd, got, tc.want)
+		}
+	}
+}
+
+func TestDeriveFullCollapsesWorktreePath(t *testing.T) {
+	now := time.Unix(100, 0)
+	s := Session{
+		CWD:  "/home/andy/Developer/project-name/.claude/worktrees/some-feature",
+		Home: "/home/andy",
+	}
+	row := deriveFull(s, now, "dir")
+	want := "~/D/project-name:some-feature"
+	if row.cwdStr != want {
+		t.Errorf("cwdStr = %q, want %q", row.cwdStr, want)
+	}
+}
+
 func TestDeriveFullUsesSessionHome(t *testing.T) {
 	now := time.Unix(100, 0)
 	cases := []struct {
