@@ -18,8 +18,11 @@ type RemoteResult struct {
 	Name      string    // server name from config
 	Sessions  []Session // empty when Error != ""
 	HostUsage HostUsage
-	Error     string // "" on success, short reason otherwise
-	Loading   bool   // true for a placeholder slot whose first fetch hasn't returned yet
+	// Usage is the host's account rate-limit snapshot; nil from older servers
+	// that don't report it, or before that host's first poll lands.
+	Usage   *AccountUsage
+	Error   string // "" on success, short reason otherwise
+	Loading bool   // true for a placeholder slot whose first fetch hasn't returned yet
 }
 
 // FetchRemote queries one server's /sessions endpoint. 5s timeout.
@@ -41,8 +44,9 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 		return RemoteResult{Name: srv.Name, Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
 	var body struct {
-		Sessions  []Session `json:"sessions"`
-		HostUsage HostUsage `json:"hostUsage"`
+		Sessions  []Session     `json:"sessions"`
+		HostUsage HostUsage     `json:"hostUsage"`
+		Usage     *AccountUsage `json:"usage"` // nil from older servers
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return RemoteResult{Name: srv.Name, Error: "bad response: " + shortErr(err)}
@@ -52,7 +56,7 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 	for i := range body.Sessions {
 		body.Sessions[i].Host = srv.Name
 	}
-	return RemoteResult{Name: srv.Name, Sessions: body.Sessions, HostUsage: body.HostUsage}
+	return RemoteResult{Name: srv.Name, Sessions: body.Sessions, HostUsage: body.HostUsage, Usage: body.Usage}
 }
 
 // FetchAllRemote polls all configured servers in parallel and returns the

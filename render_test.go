@@ -46,7 +46,7 @@ func TestUsageColor(t *testing.T) {
 
 func TestWriteUsageNil(t *testing.T) {
 	var b strings.Builder
-	writeUsage(&b, nil, 0)
+	writeUsage(&b, "", nil, 0)
 	if b.Len() != 0 {
 		t.Errorf("writeUsage(nil) wrote %q, want nothing", b.String())
 	}
@@ -456,7 +456,7 @@ func TestClipLine(t *testing.T) {
 
 func TestWriteUsage(t *testing.T) {
 	var b strings.Builder
-	writeUsage(&b, &UsageInfo{
+	writeUsage(&b, "", &UsageInfo{
 		FiveHour: usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay: usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
 	}, 0)
@@ -486,7 +486,7 @@ func TestWriteUsage(t *testing.T) {
 
 func TestWriteUsageScopedWeekly(t *testing.T) {
 	var b strings.Builder
-	writeUsage(&b, &UsageInfo{
+	writeUsage(&b, "", &UsageInfo{
 		FiveHour:          usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay:          usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
 		WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: time.Now().Add(72 * time.Hour)},
@@ -509,7 +509,7 @@ func TestWriteUsageScopedWeekly(t *testing.T) {
 
 func TestWriteUsageCredits(t *testing.T) {
 	var b strings.Builder
-	writeUsage(&b, &UsageInfo{
+	writeUsage(&b, "", &UsageInfo{
 		FiveHour: usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay: usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
 		Credits:  creditsInfo{Enabled: true, Used: 2550, Limit: 100000, Currency: "USD", DecimalPlaces: 2},
@@ -536,7 +536,7 @@ func TestWriteUsageAdaptiveWidth(t *testing.T) {
 	}
 	bars := func(cols int) int {
 		var b strings.Builder
-		writeUsage(&b, u, cols)
+		writeUsage(&b, "", u, cols)
 		return strings.Count(b.String(), "█") + strings.Count(b.String(), "░")
 	}
 	if got := bars(200); got != 2*usageBarMax {
@@ -547,6 +547,173 @@ func TestWriteUsageAdaptiveWidth(t *testing.T) {
 	}
 	if got := bars(10); got != 2*usageBarMin {
 		t.Errorf("tiny terminal: bar cells = %d, want floor %d", got, 2*usageBarMin)
+	}
+}
+
+func TestDedupeAccounts(t *testing.T) {
+	// Fresh non-nil snapshots; identity (pointer) matters for "first wins".
+	info := func() *UsageInfo { return &UsageInfo{} }
+
+	t.Run("same email local and remote collapse, local wins", func(t *testing.T) {
+		localInfo := info()
+		// Case difference proves the dedupe key is lowercased.
+		local := AccountUsage{Account: "Dev@Example.com", Info: localInfo}
+		remotes := []RemoteResult{
+			{Name: "pi", Usage: &AccountUsage{Account: "dev@example.com", Info: info()}},
+		}
+		got := dedupeAccounts(local, remotes)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1: %#v", len(got), got)
+		}
+		if got[0].label != "Dev" {
+			t.Errorf("label = %q, want local-part %q", got[0].label, "Dev")
+		}
+		if got[0].info != localInfo {
+			t.Error("first occurrence (local) should win the shared account")
+		}
+	})
+
+	t.Run("distinct emails render both, labeled by local-part", func(t *testing.T) {
+		local := AccountUsage{Account: "andy@work.com", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: info()}},
+		}
+		got := dedupeAccounts(local, remotes)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2: %#v", len(got), got)
+		}
+		if got[0].label != "andy" || got[1].label != "bot" {
+			t.Errorf("labels = %q,%q want andy,bot", got[0].label, got[1].label)
+		}
+	})
+
+	t.Run("unknown accounts never merge, labeled by host name", func(t *testing.T) {
+		local := AccountUsage{Account: "andy@work.com", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "beluga", Usage: &AccountUsage{Account: "", Info: info()}},
+			{Name: "walrus", Usage: &AccountUsage{Account: "", Info: info()}},
+		}
+		got := dedupeAccounts(local, remotes)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (unknowns never merge): %#v", len(got), got)
+		}
+		if got[1].label != "beluga" || got[2].label != "walrus" {
+			t.Errorf("unknown labels = %q,%q want beluga,walrus", got[1].label, got[2].label)
+		}
+	})
+
+	t.Run("nil Info entries drop without polluting the dedupe set", func(t *testing.T) {
+		// local's account is nil-Info (dropped) — its email must not pre-claim
+		// the dedupe key, so the later live snapshot for the same account shows.
+		local := AccountUsage{Account: "bot@ci.com", Info: nil}
+		remotes := []RemoteResult{
+			{Name: "old", Usage: nil}, // pre-propagation server
+			{Name: "live", Usage: &AccountUsage{Account: "bot@ci.com", Info: info()}},
+		}
+		got := dedupeAccounts(local, remotes)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1 (only the live snapshot): %#v", len(got), got)
+		}
+		if got[0].label != "bot" {
+			t.Errorf("label = %q, want bot", got[0].label)
+		}
+	})
+}
+
+// headerUsageLines returns the account bar lines a full-view render emits: line
+// 0 is the title, then the usage lines, then a blank separator. It slices out
+// everything between the title and that blank line.
+func headerUsageLines(out string) []string {
+	lines := strings.Split(out, "\n")
+	var usage []string
+	for _, l := range lines[1:] {
+		if strings.TrimSpace(l) == "" {
+			break
+		}
+		usage = append(usage, l)
+	}
+	return usage
+}
+
+func TestRenderHeaderSingleAccountRendersBareLine(t *testing.T) {
+	// Zero ResetsAt keeps formatUntil deterministic ("<1m"), so the byte
+	// comparison against the bare writeUsage output can't flake on a clock tick.
+	info := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+		nil, "", &AccountUsage{Account: "andy@work.com", Info: info}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 1 {
+		t.Fatalf("single account rendered %d usage lines, want 1: %#v", len(usage), usage)
+	}
+	var bare strings.Builder
+	writeUsage(&bare, "", info, 0)
+	want := strings.TrimRight(bare.String(), "\n")
+	if usage[0] != want {
+		t.Errorf("single-account line = %q, want bare (no label) %q", usage[0], want)
+	}
+}
+
+func TestRenderHeaderSoleForeignRemoteKeepsLabel(t *testing.T) {
+	// Local usage never fetched, one remote on a different account: the lone
+	// line must keep its label or the remote's limits masquerade as local's.
+	info := &UsageInfo{FiveHour: usageBucket{Pct: 50}, SevenDay: usageBucket{Pct: 20}}
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	remotes := []RemoteResult{
+		{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: info}},
+	}
+	var out bytes.Buffer
+	RenderAll(&out, "1", local, remotes, "", &AccountUsage{Account: "andy@work.com", Info: nil}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 1 {
+		t.Fatalf("sole remote rendered %d usage lines, want 1: %#v", len(usage), usage)
+	}
+	if !strings.HasPrefix(usage[0], dim("bot")+" ") {
+		t.Errorf("sole foreign-remote line must keep its label: %q", usage[0])
+	}
+}
+
+func TestRenderHeaderSoleLocalUnknownEmailRendersBare(t *testing.T) {
+	// Identity read failure ("" account) on the only line — still this
+	// machine's own limits, so the pre-propagation bare layout applies.
+	info := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+		nil, "", &AccountUsage{Account: "", Info: info}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 1 {
+		t.Fatalf("rendered %d usage lines, want 1: %#v", len(usage), usage)
+	}
+	var bare strings.Builder
+	writeUsage(&bare, "", info, 0)
+	if want := strings.TrimRight(bare.String(), "\n"); usage[0] != want {
+		t.Errorf("sole local line = %q, want bare %q", usage[0], want)
+	}
+}
+
+func TestRenderHeaderMultiAccountLabelsEachLine(t *testing.T) {
+	mk := func(five float64) *UsageInfo {
+		return &UsageInfo{FiveHour: usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
+	}
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	remotes := []RemoteResult{
+		{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: mk(50)}},
+	}
+	var out bytes.Buffer
+	RenderAll(&out, "1", local, remotes, "", &AccountUsage{Account: "andy@work.com", Info: mk(9)}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 2 {
+		t.Fatalf("two accounts rendered %d usage lines, want 2: %#v", len(usage), usage)
+	}
+	if !strings.HasPrefix(usage[0], dim("andy")+" ") {
+		t.Errorf("first account line missing local-part label prefix: %q", usage[0])
+	}
+	if !strings.HasPrefix(usage[1], dim("bot")+" ") {
+		t.Errorf("second account line missing remote host label prefix: %q", usage[1])
 	}
 }
 

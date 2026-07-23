@@ -63,6 +63,10 @@ type server struct {
 	// hostSnapshot returns this host's latest resource usage; nil yields an
 	// empty HostUsage so old clients and tests without a hub still get 200.
 	hostSnapshot func() HostUsage
+	// usageSnapshot returns this host's account rate-limit usage paired with the
+	// account it belongs to. nil (no hub) or a nil return (no fetch yet) omits
+	// the "usage" key, so old clients and tests without a hub still get 200.
+	usageSnapshot func() *AccountUsage
 	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
 	// a stub to assert bounds and header wiring without touching tmux.
 	previewLoader func(int, PreviewLimits) (PreviewResult, error)
@@ -252,12 +256,21 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 	if s.hostSnapshot != nil {
 		hostUsage = s.hostSnapshot()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"hostname":  s.host,
 		"ts":        time.Now().Unix(),
 		"hostUsage": hostUsage,
 		"sessions":  sessions,
-	})
+	}
+	// "usage" is optional: present only once this host's poller has a snapshot,
+	// so a client can attribute the limits to this host's account. Omitted when
+	// absent — older clients ignore it and it never nulls out the response.
+	if s.usageSnapshot != nil {
+		if u := s.usageSnapshot(); u != nil {
+			resp["usage"] = u
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) setDisabled(w http.ResponseWriter, r *http.Request) {
@@ -734,10 +747,25 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	hostUsageHub := NewHostUsageHub(hostUsageInterval)
 	defer hostUsageHub.Shutdown()
 
+	// Account rate-limit usage: the same background poller the client uses, so a
+	// remote host can surface its own account's limits (which may differ from the
+	// client's account) in the client's header. The login email is read once at
+	// startup — it's stable for the process's lifetime.
+	usageHub := NewUsageHub()
+	defer usageHub.Shutdown()
+	accountEmail := loadAccountEmail()
+
 	s := &server{
 		token:        tok,
 		host:         host,
 		hostSnapshot: hostUsageHub.Snapshot,
+		usageSnapshot: func() *AccountUsage {
+			info := usageHub.Snapshot()
+			if info == nil {
+				return nil
+			}
+			return &AccountUsage{Account: accountEmail, Info: info}
+		},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)

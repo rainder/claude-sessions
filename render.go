@@ -209,9 +209,9 @@ const (
 	usageBarMin = 4
 )
 
-// writeUsage prints the account rate-limit line that sits under the title,
-// or nothing when usage data isn't available (nil). All buckets share one
-// line: "5h <bar> 42% 2h   wk <bar> 13% 3d   Fable <bar> 10% 5d   cr <bar> 5% $1,123".
+// writeUsage prints one account rate-limit line under the title, or nothing
+// when usage data isn't available (nil). All buckets share the line:
+// "5h <bar> 42% 2h   wk <bar> 13% 3d   Fable <bar> 10% 5d   cr <bar> 5% $1,123".
 // The trailing figure is the time remaining until that bucket resets (rate
 // limits) or the amount of credits spent (extra usage). The model-scoped
 // weekly segment (labeled with the model's display name, e.g. "Fable") only
@@ -219,9 +219,20 @@ const (
 // appears when extra usage is enabled on the account. Bars are sized to fit
 // cols (usageBarMin..usageBarMax cells each); cols <= 0 means unknown width
 // and gets the maximum.
-func writeUsage(w io.Writer, u *UsageInfo, cols int) {
+//
+// label is an optional dim account prefix (email local-part, or a host name)
+// for the multi-account header; "" renders the bare line, byte-for-byte the
+// single-account layout. Its width counts toward the fixed budget so the bars
+// still shrink to fit cols.
+func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	if u == nil {
 		return
+	}
+	prefix := ""
+	prefixW := 0
+	if label != "" {
+		prefix = dim(label) + " "
+		prefixW = len(label) + 1
 	}
 	type seg struct {
 		label, trailer string
@@ -249,9 +260,9 @@ func writeUsage(w io.Writer, u *UsageInfo, cols int) {
 			c.Pct(),
 		})
 	}
-	// Everything except the bars is fixed width; divide what's left of the
-	// terminal between the bars.
-	fixed := 3 * (len(segs) - 1) // inter-segment separators
+	// Everything except the bars is fixed width (including the account prefix);
+	// divide what's left of the terminal between the bars.
+	fixed := prefixW + 3*(len(segs)-1) // prefix + inter-segment separators
 	for _, s := range segs {
 		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%.0f%%", s.pct)) + 1 + len(s.trailer)
 	}
@@ -272,7 +283,85 @@ func writeUsage(w io.Writer, u *UsageInfo, cols int) {
 			s.pct,
 			dim(s.trailer))
 	}
-	fmt.Fprintln(w, strings.Join(parts, "   "))
+	fmt.Fprintln(w, prefix+strings.Join(parts, "   "))
+}
+
+// accountUsageLine is one resolved header account line: a usage snapshot with
+// the dim label to prefix it with. dedupeAccounts produces these in display
+// order; writeAccounts turns each into a writeUsage line.
+type accountUsageLine struct {
+	label string     // email local-part, or host name for an unknown account
+	info  *UsageInfo
+	// mine marks a line attributable to this machine's account: the local
+	// entry itself, or a remote sharing the local email. Only such a line may
+	// render bare (unlabeled) when it's the sole survivor — a lone foreign
+	// remote must keep its label or it masquerades as the local account.
+	mine bool
+}
+
+// accountLocalPart is the label for a known account: the part before "@"
+// (johndoe@example.com → "johndoe"), or the whole string when there's no "@".
+func accountLocalPart(email string) string {
+	if i := strings.IndexByte(email, '@'); i >= 0 {
+		return email[:i]
+	}
+	return email
+}
+
+// dedupeAccounts resolves which account usage lines the header shows and in
+// what order: local first, then remotes in config order. Entries whose Info is
+// nil (never-fetched, or an older server that doesn't report usage) are
+// dropped. Known accounts dedupe by lowercased email so several hosts on one
+// account collapse to a single line — first occurrence wins, keeping local's
+// snapshot when it shares the account. Unknown accounts ("" email: an identity
+// read error, or a pre-propagation server) never dedupe — each keeps its own
+// line keyed by host so two anonymous hosts don't merge. Each surviving line
+// carries a dim label for the multi-account header: the email's local-part for
+// a known account, the host name for an unknown one (local's fallback is
+// "local", since the function has no name for the current machine).
+func dedupeAccounts(local AccountUsage, remotes []RemoteResult) []accountUsageLine {
+	var lines []accountUsageLine
+	seen := make(map[string]bool)
+	add := func(account, host string, info *UsageInfo, isLocal bool) {
+		if info == nil {
+			return
+		}
+		mine := isLocal || (account != "" && strings.EqualFold(account, local.Account))
+		if account == "" {
+			lines = append(lines, accountUsageLine{label: host, info: info, mine: mine})
+			return
+		}
+		key := strings.ToLower(account)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		lines = append(lines, accountUsageLine{label: accountLocalPart(account), info: info, mine: mine})
+	}
+	add(local.Account, "local", local.Info, true)
+	for _, r := range remotes {
+		if r.Usage != nil {
+			add(r.Usage.Account, r.Name, r.Usage.Info, false)
+		}
+	}
+	return lines
+}
+
+// writeAccounts prints the header's account rate-limit line(s). A single
+// surviving line renders bare (no label) — byte-for-byte the pre-propagation
+// layout — but only when it's attributable to this machine's account (mine);
+// a lone foreign remote keeps its label so its limits can't masquerade as
+// local. Several lines render one labeled line each so limits stay legible
+// when remotes run different Anthropic accounts. Empty (no usage anywhere)
+// writes nothing.
+func writeAccounts(w io.Writer, accounts []accountUsageLine, cols int) {
+	if len(accounts) == 1 && accounts[0].mine {
+		writeUsage(w, "", accounts[0].info, cols)
+		return
+	}
+	for _, a := range accounts {
+		writeUsage(w, a.label, a.info, cols)
+	}
 }
 
 // formatTokens renders a context-token count compactly: 0 → "-", under 1k as
@@ -630,8 +719,9 @@ func plural(n int, word string) string {
 }
 
 // renderHeader prints the title line with live counts, the optional account
-// usage bars, and the trailing blank line — shared by all three views.
-func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo, cols int) {
+// usage bars (one line per distinct account, see dedupeAccounts), and the
+// trailing blank line — shared by all three views.
+func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, cols int) {
 	live, busy, subs := 0, 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -652,7 +742,7 @@ func renderHeader(w io.Writer, sections []section, mode string, usage *UsageInfo
 		ansiBold, time.Now().Format("15:04:05"),
 		plural(live+subs, "agent"), plural(live, "session"), busyStr,
 		ansiReset, dim("["+mode+"]"))
-	writeUsage(w, usage, cols)
+	writeAccounts(w, accounts, cols)
 	fmt.Fprintln(w)
 }
 
@@ -688,17 +778,24 @@ func (w *frameWriter) record(targetID string, openable bool) {
 // loop uses the frame to crop a viewport and resolve mouse clicks, while
 // RenderAll wraps it for callers that only want the text. Arguments mirror
 // RenderAll (see its doc for cols/step/sortMode semantics).
-func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) tableFrame {
+func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *AccountUsage, cols, step int, sortMode string) tableFrame {
 	sections := buildSections(local, remotes)
+	// Pair the local snapshot with every remote's, dedupe by account, and carry
+	// the resolved lines through the header so each distinct account shows once.
+	var localAU AccountUsage
+	if localUsage != nil {
+		localAU = *localUsage
+	}
+	accounts := dedupeAccounts(localAU, remotes)
 	w := &frameWriter{}
 	var overflowing bool
 	switch viewMode {
 	case "2":
-		overflowing = renderAllMinimal(w, sections, sel, usage, cols, step, sortMode)
+		overflowing = renderAllMinimal(w, sections, sel, accounts, cols, step, sortMode)
 	case "3":
-		overflowing = renderAllIntermediate(w, sections, sel, usage, cols, step, sortMode)
+		overflowing = renderAllIntermediate(w, sections, sel, accounts, cols, step, sortMode)
 	default:
-		overflowing = renderAllFull(w, sections, sel, usage, cols, step, sortMode)
+		overflowing = renderAllFull(w, sections, sel, accounts, cols, step, sortMode)
 	}
 	return tableFrame{
 		lines:       strings.Split(w.buf.String(), "\n"),
@@ -709,17 +806,19 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 
 // RenderAll writes the live table (or a one-shot snapshot) to w, with all
 // rows sorted by cwd. Per-host remote sections appear after the local one,
-// each separated by a hostname label and a blank line. When usage is non-nil,
-// account rate-limit bars are printed below the title, sized to cols
-// (cols <= 0 = unknown terminal width). step is the shared marquee clock (see
-// marqueeCell); overflowing reports whether any visible DIR cell was scrolled,
-// so the caller can drive animation ticks only when needed.
+// each separated by a hostname label and a blank line. localUsage is this
+// machine's account rate-limit snapshot (nil when unknown); it is deduped
+// against every remote's own usage and rendered as one bar line per distinct
+// account below the title, sized to cols (cols <= 0 = unknown terminal width).
+// step is the shared marquee clock (see marqueeCell); overflowing reports
+// whether any visible DIR cell was scrolled, so the caller can drive animation
+// ticks only when needed.
 //
 // It is a thin compatibility wrapper over BuildTableFrame: joining the frame
 // lines with newlines reproduces the exact bytes the row writers emitted, so
 // the `--once` path and existing callers/tests keep the same output and return.
-func RenderAll(w io.Writer, viewMode string, local LocalHost, remotes []RemoteResult, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
-	frame := BuildTableFrame(viewMode, local, remotes, sel, usage, cols, step, sortMode)
+func RenderAll(w io.Writer, viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *AccountUsage, cols, step int, sortMode string) (overflowing bool) {
+	frame := BuildTableFrame(viewMode, local, remotes, sel, localUsage, cols, step, sortMode)
 	io.WriteString(w, strings.Join(frame.lines, "\n"))
 	return frame.overflowing
 }
@@ -828,7 +927,7 @@ func modelCell(model string, width int, plain bool) string {
 	return cell
 }
 
-func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
+func renderAllFull(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -858,7 +957,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 		tmuxW = max(tmuxW, len(t))
 	}
 
-	renderHeader(w, sections, "full", usage, cols)
+	renderHeader(w, sections, "full", accounts, cols)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -953,7 +1052,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, usage *UsageI
 // Intermediate view — full's columns minus TMUX, VER, SID.
 // ============================================================================
 
-func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
+func renderAllIntermediate(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -978,7 +1077,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, usage
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	renderHeader(w, sections, "intermediate", usage, cols)
+	renderHeader(w, sections, "intermediate", accounts, cols)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -1078,7 +1177,7 @@ func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
 	}
 }
 
-func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *UsageInfo, cols, step int, sortMode string) (overflowing bool) {
+func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -1102,7 +1201,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, usage *Usa
 		nameW = max(nameW, len(r.display))
 	}
 
-	renderHeader(w, sections, "minimal", usage, cols)
+	renderHeader(w, sections, "minimal", accounts, cols)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
