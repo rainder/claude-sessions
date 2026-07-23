@@ -702,7 +702,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "  "+bold("SUBCOMMANDS")+"  (from the shell)")
 	fmt.Fprintln(&b, "    claude-sessions kill PID [-y]")
 	fmt.Fprintln(&b, "    claude-sessions migrate PID [-y]")
-	fmt.Fprintln(&b, "    claude-sessions new --cwd PATH [--name NAME]")
+	fmt.Fprintln(&b, "    claude-sessions new --dir PATH [--name NAME] [--command PRESET] [--server SERVER] [PROMPT...]")
 	fmt.Fprintln(&b, "    claude-sessions preview PID")
 	fmt.Fprintln(&b, "    claude-sessions tmux-info PID")
 	fmt.Fprintln(&b, "    claude-sessions attach PID")

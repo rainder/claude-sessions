@@ -65,7 +65,10 @@ subcommands:
                                   --bind tailscale auto-detects Tailscale IPv4)
   kill PID [-y]                   kill a session (tmux-aware)
   migrate PID [-y]                kill + resume in a new tmux session
-  new --cwd PATH [--name NAME]    spawn a new tmux+claude session
+  new --dir PATH [--name NAME] [--command PRESET] [--server SERVER] [PROMPT...]
+                                  spawn a new tmux+claude session, locally or
+                                  on a configured server (--cwd is a synonym
+                                  for --dir)
   attach PID                      tmux attach (or switch-client) to a session
   preview PID                     print tmux capture or transcript tail
   tmux-info PID                   print tmux session name for a pid

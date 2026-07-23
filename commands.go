@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -90,36 +91,78 @@ func cmdMigrate(args []string) int {
 	return 0
 }
 
-func cmdNew(args []string) int {
-	var cwd, name string
+// newArgs is cmdNew's parsed flags plus the joined trailing prompt.
+type newArgs struct {
+	dir, name, command, server, prompt string
+}
+
+// parseNewArgs parses `new`'s flags. --dir and --cwd are synonyms (--dir is
+// preferred, --cwd kept for backward compatibility). Any non-flag args are
+// joined with spaces to form the optional initial prompt, so callers can
+// write it unquoted: `new --dir X some initial prompt`.
+func parseNewArgs(args []string) (newArgs, error) {
+	var a newArgs
+	var promptParts []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--cwd":
+		case "--dir", "--cwd":
 			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "new: --cwd needs a value")
-				return 2
+				return newArgs{}, fmt.Errorf("%s needs a value", args[i])
 			}
-			cwd = args[i+1]
+			a.dir = args[i+1]
 			i++
 		case "--name":
 			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "new: --name needs a value")
-				return 2
+				return newArgs{}, fmt.Errorf("--name needs a value")
 			}
-			name = args[i+1]
+			a.name = args[i+1]
+			i++
+		case "--command":
+			if i+1 >= len(args) {
+				return newArgs{}, fmt.Errorf("--command needs a value")
+			}
+			a.command = args[i+1]
+			i++
+		case "--server":
+			if i+1 >= len(args) {
+				return newArgs{}, fmt.Errorf("--server needs a value")
+			}
+			a.server = args[i+1]
 			i++
 		default:
-			fmt.Fprintf(os.Stderr, "new: unknown arg %q\n", args[i])
-			return 2
+			if strings.HasPrefix(args[i], "--") {
+				return newArgs{}, fmt.Errorf("unknown arg %q", args[i])
+			}
+			promptParts = append(promptParts, args[i])
 		}
 	}
-	if cwd == "" {
-		fmt.Fprintln(os.Stderr, "usage: claude-sessions new --cwd PATH [--name NAME]")
+	a.prompt = strings.Join(promptParts, " ")
+	return a, nil
+}
+
+const newUsage = "usage: claude-sessions new --dir PATH [--name NAME] [--command PRESET] [--server SERVER] [PROMPT...]"
+
+func cmdNew(args []string) int {
+	a, err := parseNewArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "new:", err)
 		return 2
 	}
-	cwd = expandTilde(cwd)
-	if !isDir(cwd) {
-		fmt.Fprintf(os.Stderr, "not a directory: %s\n", cwd)
+	if a.dir == "" {
+		fmt.Fprintln(os.Stderr, newUsage)
+		return 2
+	}
+	if a.server != "" {
+		return cmdNewRemote(a)
+	}
+	return cmdNewLocal(a)
+}
+
+// cmdNewLocal spawns a new tmux+claude session on this host.
+func cmdNewLocal(a newArgs) int {
+	dir := expandTilde(a.dir)
+	if !isDir(dir) {
+		fmt.Fprintf(os.Stderr, "not a directory: %s\n", dir)
 		return 1
 	}
 	presets, err := LoadCommandPresets()
@@ -127,12 +170,94 @@ func cmdNew(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	tname, err := SpawnNew(cwd, name, presets[0].Command)
+	preset := presets[0]
+	if a.command != "" {
+		var ok bool
+		preset, ok = findCommandPreset(presets, a.command)
+		if !ok {
+			names := make([]string, len(presets))
+			for i, p := range presets {
+				names[i] = p.Name
+			}
+			fmt.Fprintf(os.Stderr, "new: command preset not found: %s (available: %s)\n", a.command, strings.Join(names, ", "))
+			return 2
+		}
+	}
+	command := preset.Command
+	if a.prompt != "" {
+		command = command + " " + shellQuote(a.prompt)
+	}
+	tname, err := SpawnNew(dir, a.name, command)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	if a.prompt != "" {
+		// Run synchronously, not backgrounded: unlike the TUI (a long-running
+		// process where a goroutine can outlive the triggering keypress), this
+		// CLI process exits the moment cmdNew returns, which would kill a
+		// goroutine before it ever polled. dismissTrustPrompt bounds itself to
+		// trustPromptTimeout, so this adds at most a few seconds.
+		dismissTrustPrompt(tname)
+	}
 	fmt.Println(tname)
+	return 0
+}
+
+// cmdNewRemote spawns a new tmux+claude session on a configured remote server.
+func cmdNewRemote(a newArgs) int {
+	if _, ok := LookupServer(a.server); !ok {
+		cfgs, _ := LoadServerConfigs()
+		names := make([]string, len(cfgs))
+		for i, c := range cfgs {
+			names[i] = c.Name
+		}
+		fmt.Fprintf(os.Stderr, "new: unknown server %q (configured: %s)\n", a.server, strings.Join(names, ", "))
+		return 2
+	}
+	if a.command != "" {
+		// Validate against the remote's own preset names before spawning, so a
+		// typo fails fast locally with the list of what that host actually
+		// offers. An old server without the /presets route can't be asked
+		// ahead of time; fall through and let /sessions/new validate as before.
+		if presets, err := fetchRemotePresets(a.server); err == nil {
+			found := false
+			for _, name := range presets {
+				if name == a.command {
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(os.Stderr, "new: command preset not found on %s: %s (available: %s)\n", a.server, a.command, strings.Join(presets, ", "))
+				return 2
+			}
+		}
+	}
+	// No local ~ expansion or directory check: dir lives on the remote host,
+	// whose home and filesystem differ from ours. The server resolves and
+	// validates it.
+	body, _ := json.Marshal(map[string]string{
+		"cwd":     a.dir,
+		"name":    a.name,
+		"command": a.command,
+		"prompt":  a.prompt,
+	})
+	resp, err := remoteRequest(a.server, "/sessions/new", "POST", body)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "new:", err)
+		return 1
+	}
+	var r actionResult
+	if err := json.Unmarshal(resp, &r); err != nil {
+		fmt.Fprintln(os.Stderr, "new: bad response from server:", err)
+		return 1
+	}
+	if !r.OK || r.Tmux == "" {
+		fmt.Fprintln(os.Stderr, "new:", r.Error)
+		return 1
+	}
+	fmt.Println(r.Tmux)
 	return 0
 }
 

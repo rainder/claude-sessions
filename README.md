@@ -82,7 +82,8 @@ claude-sessions -s --bind 0.0.0.0 --port 9000   # any address / port
 
 claude-sessions kill PID [-y]              # kill a session (tmux-aware)
 claude-sessions migrate PID [-y]           # kill + resume in a new tmux session
-claude-sessions new --cwd PATH [--name N]  # spawn a tmux+claude session
+claude-sessions new --dir PATH [--name N] [--command PRESET] [--server S] [PROMPT...]
+                                            # spawn a tmux+claude session, locally or on a server
 claude-sessions attach PID                 # tmux attach (or switch-client)
 claude-sessions preview PID                # tmux capture or transcript tail
 claude-sessions tmux-info PID              # tmux session name for a pid
@@ -147,6 +148,13 @@ commands:
   host's config matching preset names if you want the same picker options
   there. The command text for a given preset name may legitimately differ per
   host (e.g. a different binary path).
+- The client fetches a remote host's preset *names* on demand (`GET
+  /presets`, names only — command text never crosses the wire) to populate
+  the `n` modal's choices and to validate `claude-sessions new --server S
+  --command NAME` before spawning. An old server without that route is
+  skipped gracefully: the modal falls back to this host's local presets, and
+  `--command` proceeds to the spawn request, which the remote still
+  validates itself.
 - Remote CWD suggestions load on demand over the HTTP API when a remote host
   is selected in the modal; if they don't arrive in time, the modal falls back
   to a note plus a manual path-entry row instead of blocking.
