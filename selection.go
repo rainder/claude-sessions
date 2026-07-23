@@ -93,11 +93,11 @@ func selectionForTmux(targets []selectionTarget, host, tmuxSession string) strin
 	return ""
 }
 
-// firstIdleTarget returns the id of the topmost target whose session is idle,
-// or "" if none is idle.
+// firstIdleTarget returns the id of the topmost target whose session is idle
+// and not disabled, or "" if none qualifies.
 func firstIdleTarget(targets []selectionTarget) string {
 	for _, target := range targets {
-		if target.session != nil && target.session.Status == "idle" {
+		if target.session != nil && target.session.Status == "idle" && !target.session.Disabled {
 			return target.id
 		}
 	}

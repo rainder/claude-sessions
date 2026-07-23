@@ -29,6 +29,14 @@ func TestFirstIdleTarget(t *testing.T) {
 	if got := firstIdleTarget(noneIdle); got != "" {
 		t.Fatalf("firstIdleTarget with no idle sessions = %q, want empty", got)
 	}
+
+	skipDisabled := buildSelectionTargets([]Session{
+		{PID: 1, CWD: "/a", Status: "idle", Disabled: true},
+		{PID: 2, CWD: "/b", Status: "idle"},
+	}, nil)
+	if got, want := firstIdleTarget(skipDisabled), "2"; got != want {
+		t.Fatalf("firstIdleTarget with disabled idle row = %q, want %q", got, want)
+	}
 }
 
 func TestBuildSelectionTargets(t *testing.T) {
