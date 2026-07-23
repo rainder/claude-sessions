@@ -85,6 +85,44 @@ func TestCwdSuggestionsReturnsRankedHistory(t *testing.T) {
 	}
 }
 
+func TestPresetsRequiresAuth(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/presets", nil)
+	rec := httptest.NewRecorder()
+	(&server{token: "secret"}).presets(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestPresetsReturnsNamesOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCommandConfig(t, home)
+
+	req := httptest.NewRequest(http.MethodGet, "/presets", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	(&server{token: "secret"}).presets(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	var got struct {
+		Presets []string `json:"presets"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Claude", "Fable"}
+	if len(got.Presets) != len(want) || got.Presets[0] != want[0] || got.Presets[1] != want[1] {
+		t.Fatalf("presets = %#v, want %#v", got.Presets, want)
+	}
+	if strings.Contains(body, "claude --model fable") {
+		t.Fatal("response leaked command text, want names only")
+	}
+}
+
 func writeCommandConfig(t *testing.T, home string) {
 	t.Helper()
 	dir := filepath.Join(home, ".config", "claude-sessions")
@@ -322,6 +360,48 @@ func TestFetchRemotePreviewRejectsOversizedBody(t *testing.T) {
 	_, err := fetchRemotePreview("box", 42, PreviewLimits{MaxLines: 10, MaxBytes: 1024})
 	if err == nil {
 		t.Fatal("want error for oversized body")
+	}
+}
+
+func TestFetchRemotePresets(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"presets":["Claude","Fable"]}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	got, err := fetchRemotePresets("box")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	want := []string{"Claude", "Fable"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("presets = %#v, want %#v", got, want)
+	}
+}
+
+func TestFetchRemotePresetsMaps404ToSentinel(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	_, err := fetchRemotePresets("box")
+	if !errors.Is(err, errPresetsUnavailable) {
+		t.Fatalf("err = %v, want errPresetsUnavailable", err)
 	}
 }
 

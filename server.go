@@ -334,6 +334,29 @@ func (s *server) cwdSuggestions(w http.ResponseWriter, r *http.Request) {
 	}{Home: home, Suggestions: collectCwdSuggestions()})
 }
 
+// presets lists this host's configured command preset names (not the command
+// text itself — that's local shell input a remote client has no business
+// seeing or replaying). Used by remote clients to validate `--command` and
+// populate the new-session picker without guessing at this host's config.
+func (s *server) presets(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	presets, err := LoadCommandPresets()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	names := make([]string, len(presets))
+	for i, p := range presets {
+		names[i] = p.Name
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Presets []string `json:"presets"`
+	}{Presets: names})
+}
+
 func (s *server) preview(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -671,6 +694,7 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("PUT /sessions/{pid}/disabled", s.setDisabled)
 	mux.HandleFunc("GET /cwd-suggestions", s.cwdSuggestions)
+	mux.HandleFunc("GET /presets", s.presets)
 	mux.HandleFunc("GET /sessions/{pid}/preview", s.preview)
 	mux.HandleFunc("GET /sessions/{pid}/tmux-info", s.tmuxInfo)
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)

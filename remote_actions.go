@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -153,6 +154,55 @@ func fetchRemoteCwdSuggestions(host string) (suggestions []cwdSuggestion, home s
 	return response.Suggestions, response.Home, nil
 }
 
+// errPresetsUnavailable signals that a remote server's /presets response
+// couldn't be used — either it predates the route (404) or its body isn't
+// the expected JSON shape. Callers treat this as "unknown" and fall back to
+// a local decision rather than a hard failure.
+var errPresetsUnavailable = errors.New("presets endpoint unavailable")
+
+// fetchRemotePresets retrieves the configured command preset NAMES from the
+// named server's /presets endpoint. Names only — the server never exposes
+// its command text to remote clients. Old servers without the route (404),
+// or any response that isn't the expected JSON body, map to
+// errPresetsUnavailable so callers can degrade gracefully instead of hard
+// failing.
+func fetchRemotePresets(host string) ([]string, error) {
+	srv, ok := LookupServer(host)
+	if !ok {
+		return nil, fmt.Errorf("unknown server: %s", host)
+	}
+	url := fmt.Sprintf("http://%s:%d/presets", srv.Host, srv.Port)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+srv.Token)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errPresetsUnavailable
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var response struct {
+		Presets []string `json:"presets"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, errPresetsUnavailable
+	}
+	return response.Presets, nil
+}
+
 // actKillRemote handles `k` on a remote-selected row.
 func actKillRemote(c *actCtx) {
 	s := c.selected()
@@ -271,10 +321,28 @@ func remoteNewRows(defaultCWD string, suggestions []cwdSuggestion, home string) 
 	return lines, start, entries
 }
 
+// remoteCommandPresetsForPicker returns the command preset choices to offer
+// when spawning on a remote host: the remote's own preset names fetched live
+// over /presets, so the picker reflects what that host actually has
+// configured rather than this one. The server never exposes command text, so
+// Command mirrors Name — pickerCommandRows' dimmed second line then shows the
+// name again instead of stale or wrong text. Falls back to this host's local
+// presets when the remote is unreachable or predates the /presets route.
+func remoteCommandPresetsForPicker(host string) ([]CommandPreset, error) {
+	if names, err := fetchRemotePresets(host); err == nil && len(names) > 0 {
+		presets := make([]CommandPreset, len(names))
+		for i, name := range names {
+			presets[i] = CommandPreset{Name: name, Command: name}
+		}
+		return presets, nil
+	}
+	return LoadCommandPresets()
+}
+
 // actNewRemote prompts for a cwd and POSTs /sessions/new to the named remote
 // server. A populated remote row supplies defaultCWD; an empty host does not.
 func actNewRemote(c *actCtx, host, defaultCWD string) {
-	presets, err := LoadCommandPresets()
+	presets, err := remoteCommandPresetsForPicker(host)
 	if err != nil {
 		c.prepareLineOutput()
 		fmt.Printf("\nload commands: %v\n", err)
