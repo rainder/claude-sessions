@@ -7,26 +7,25 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 func parseDarwinTop(out string) HostUsage {
-	var cpuLine, memoryLine, loadLine string
+	var cpuLine, loadLine string
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "CPU usage:") {
 			cpuLine = line
-		}
-		if strings.HasPrefix(line, "PhysMem:") {
-			memoryLine = line
 		}
 		if strings.HasPrefix(line, "Load Avg:") {
 			loadLine = line
 		}
 	}
 	return HostUsage{
-		CPUPercent:    parseDarwinCPU(cpuLine),
-		MemoryPercent: parseDarwinMemory(memoryLine),
-		Load:          parseDarwinLoadAverage(loadLine),
+		CPUPercent: parseDarwinCPU(cpuLine),
+		Load:       parseDarwinLoadAverage(loadLine),
 	}
 }
 
@@ -78,84 +77,124 @@ func parseDarwinCPU(line string) *float64 {
 	return nil
 }
 
-func parseDarwinMemory(line string) *float64 {
-	usedToken, ok := tokenBeforeMarker(line, " used")
+// parseDarwinMemory computes real memory pressure from `vm_stat` output the
+// way Activity Monitor does: wired + compressed + (anonymous - purgeable),
+// over total physical pages. `top`'s PhysMem "used" figure (the previous
+// source) lumps in reclaimable inactive/file-cache pages as "used", which on
+// a machine with a lot of disk cache wildly overstates real memory pressure
+// (observed: top said 97% used while Activity Monitor showed 61%).
+func parseDarwinMemory(vmStatOut string, memSizeBytes uint64) *float64 {
+	if memSizeBytes == 0 {
+		return nil
+	}
+	pageSize, ok := parseDarwinPageSize(vmStatOut)
+	if !ok || pageSize == 0 {
+		return nil
+	}
+	wired, ok := vmStatPages(vmStatOut, "Pages wired down")
 	if !ok {
 		return nil
 	}
-	unusedToken, ok := tokenBeforeMarker(line, " unused")
+	compressed, ok := vmStatPages(vmStatOut, "Pages occupied by compressor")
 	if !ok {
 		return nil
 	}
-	used, ok := parseDarwinSize(usedToken)
+	anonymous, ok := vmStatPages(vmStatOut, "Anonymous pages")
 	if !ok {
 		return nil
 	}
-	unused, ok := parseDarwinSize(unusedToken)
-	if !ok || used+unused == 0 {
+	purgeable, ok := vmStatPages(vmStatOut, "Pages purgeable")
+	if !ok {
 		return nil
 	}
-	return hostPercent(used / (used + unused) * 100)
+	if purgeable > anonymous {
+		purgeable = anonymous
+	}
+	totalPages := memSizeBytes / pageSize
+	if totalPages == 0 {
+		return nil
+	}
+	usedPages := wired + compressed + (anonymous - purgeable)
+	return hostPercent(float64(usedPages) / float64(totalPages) * 100)
 }
 
-func tokenBeforeMarker(s, marker string) (string, bool) {
-	i := strings.LastIndex(s, marker)
+// parseDarwinPageSize extracts the page size (bytes) from vm_stat's header
+// line, e.g. "Mach Virtual Memory Statistics: (page size of 16384 bytes)".
+func parseDarwinPageSize(vmStatOut string) (uint64, bool) {
+	const marker = "page size of "
+	i := strings.Index(vmStatOut, marker)
 	if i < 0 {
-		return "", false
+		return 0, false
 	}
-	fields := strings.Fields(s[:i])
-	if len(fields) == 0 {
-		return "", false
+	rest := vmStatOut[i+len(marker):]
+	j := strings.Index(rest, " bytes")
+	if j < 0 {
+		return 0, false
 	}
-	return strings.Trim(fields[len(fields)-1], "(),."), true
+	return parseDarwinUint(rest[:j])
 }
 
-func parseDarwinSize(s string) (float64, bool) {
-	s = strings.TrimSpace(strings.TrimSuffix(s, "+"))
-	if s == "" {
+// vmStatPages returns the page count for a "Label:  NNN." line in vm_stat
+// output.
+func vmStatPages(vmStatOut, label string) (uint64, bool) {
+	prefix := label + ":"
+	for _, line := range strings.Split(vmStatOut, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		return parseDarwinUint(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(line, prefix)), "."))
+	}
+	return 0, false
+}
+
+func parseDarwinUint(s string) (uint64, bool) {
+	v, err := strconv.ParseUint(strings.TrimSpace(s), 10, 64)
+	if err != nil {
 		return 0, false
 	}
-	multipliers := map[byte]float64{
-		'B': 1,
-		'K': 1 << 10,
-		'M': 1 << 20,
-		'G': 1 << 30,
-		'T': 1 << 40,
-	}
-	unit := s[len(s)-1]
-	multiplier, ok := multipliers[unit]
-	if ok {
-		s = s[:len(s)-1]
-	} else {
-		multiplier = 1
-	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil || v < 0 {
-		return 0, false
-	}
-	return v * multiplier, true
+	return v, true
 }
 
 type darwinHostUsageCollector struct {
-	runTop func(context.Context) ([]byte, error)
+	runTop       func(context.Context) ([]byte, error)
+	runVMStat    func(context.Context) ([]byte, error)
+	memSizeBytes uint64
 }
 
 func newDarwinHostUsageCollector() hostUsageCollector {
-	return &darwinHostUsageCollector{runTop: runDarwinTop}
+	memSizeBytes, _ := unix.SysctlUint64("hw.memsize")
+	return &darwinHostUsageCollector{
+		runTop:       runDarwinTop,
+		runVMStat:    runDarwinVMStat,
+		memSizeBytes: memSizeBytes,
+	}
 }
 
 func runDarwinTop(ctx context.Context) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "top", "-l", "2", "-n", "0", "-s", "0")
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	// Detach from the controlling terminal so iTerm's "show job name in
+	// title" doesn't see `top` as the pane's foreground process and flip
+	// the window title every poll interval (host_usage.go hostUsageInterval).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd.Output()
+}
+
+func runDarwinVMStat(ctx context.Context) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "vm_stat")
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	return cmd.Output()
 }
 
 func (c *darwinHostUsageCollector) Sample(ctx context.Context) HostUsage {
-	out, err := c.runTop(ctx)
-	if err != nil {
-		return HostUsage{}
+	usage := HostUsage{}
+	if out, err := c.runTop(ctx); err == nil {
+		usage = parseDarwinTop(string(out))
 	}
-	usage := parseDarwinTop(string(out))
+	if vmOut, err := c.runVMStat(ctx); err == nil {
+		usage.MemoryPercent = parseDarwinMemory(string(vmOut), c.memSizeBytes)
+	}
 	usage.NumCPU = runtime.NumCPU()
 	return usage
 }
