@@ -191,9 +191,12 @@ func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []
 	line := left.String()
 	if rightVis > 0 && cols-leftVis-rightVis >= 2 {
 		pad := cols - leftVis - rightVis
-		line += strings.Repeat(" ", pad) + dim(right)
+		line += strings.Repeat(" ", pad) + right
+	} else if cols > leftVis {
+		// Pad so the white bar spans the full width even without a right side.
+		line += strings.Repeat(" ", cols-leftVis)
 	}
-	fmt.Fprintln(w, clipLine(line, cols))
+	fmt.Fprintln(w, ansiPreviewBar+clipLine(line, cols)+ansiReset)
 	return hits
 }
 

@@ -17,6 +17,9 @@ const (
 	ansiDim        = "\033[2m"
 	ansiInvert     = "\033[7m"
 	ansiSelectedBG = "\033[48;5;236m"
+	// ansiPreviewBar makes the inspector footer unmistakable (black on white):
+	// a preview looks exactly like an attached session otherwise.
+	ansiPreviewBar = "\033[30;47m"
 )
 
 // statusColor maps the raw `status` field to an ANSI SGR code.
