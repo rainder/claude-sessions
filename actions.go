@@ -181,24 +181,26 @@ func actKill(c *actCtx) {
 		actKillRemote(c)
 		return
 	}
-	c.prepareLineOutput()
-	defer c.enterRaw()
 
-	var prompt string
+	var question string
 	if s.Tmux != "" {
 		sessName, err := tmuxSessionName(s.Tmux)
 		if err != nil {
+			c.prepareLineOutput()
 			fmt.Printf("\nkill failed: %v\n", err)
 			pauseForKey(c.fd, c.oldState)
+			c.enterRaw()
 			return
 		}
-		prompt = fmt.Sprintf("\nkill tmux session %q (PID %d)? [y/N] ", sessName, s.PID)
+		question = fmt.Sprintf("kill tmux session %q (PID %d)?", sessName, s.PID)
 	} else {
-		prompt = fmt.Sprintf("\nkill PID %d? [y/N] ", s.PID)
+		question = fmt.Sprintf("kill PID %d?", s.PID)
 	}
-	if !confirm(prompt) {
+	if !confirmOverlay(question, c.modalWakes) {
 		return
 	}
+	c.prepareLineOutput()
+	defer c.enterRaw()
 	if err := KillSession(*s); err != nil {
 		fmt.Printf("\nkill failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
@@ -222,12 +224,11 @@ func actAttach(c *actCtx) {
 		return
 	}
 	// Not in tmux — offer migration.
-	c.prepareLineOutput()
-	prompt := fmt.Sprintf("\nPID %d is not in tmux. Migrate (kill + resume in tmux) first? [y/N] ", s.PID)
-	if !confirm(prompt) {
-		c.enterRaw()
+	question := fmt.Sprintf("PID %d is not in tmux. Migrate (kill + resume in tmux) first?", s.PID)
+	if !confirmOverlay(question, c.modalWakes) {
 		return
 	}
+	c.prepareLineOutput()
 	fmt.Printf("\nmigrating PID %d... ", s.PID)
 	tname, err := MigrateLocal(s.PID)
 	if err != nil {

@@ -210,12 +210,12 @@ func actKillRemote(c *actCtx) {
 		return
 	}
 	host, pid := s.Host, s.PID
+	if !confirmOverlay(fmt.Sprintf("kill PID %d on %s?", pid, host), c.modalWakes) {
+		return
+	}
 	c.prepareLineOutput()
 	defer c.enterRaw()
 
-	if !confirm(fmt.Sprintf("\nkill PID %d on %s? [y/N] ", pid, host)) {
-		return
-	}
 	fmt.Print("\nsending remote kill... ")
 	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/kill", pid), "POST", []byte(`{}`))
 	if err != nil {
@@ -266,11 +266,11 @@ func actAttachRemote(c *actCtx) {
 	tname := info.Tmux
 	if tname == "" {
 		// Not in tmux — offer migration.
-		c.prepareLineOutput()
-		if !confirm(fmt.Sprintf("\nPID %d on %s is not in tmux. Migrate first? [y/N] ", pid, host)) {
-			c.enterRaw()
+		question := fmt.Sprintf("PID %d on %s is not in tmux. Migrate first?", pid, host)
+		if !confirmOverlay(question, c.modalWakes) {
 			return
 		}
+		c.prepareLineOutput()
 		fmt.Print("\nmigrating... ")
 		mresp, merr := remoteRequest(host, fmt.Sprintf("/sessions/%d/migrate", pid), "POST", []byte(`{}`))
 		if merr != nil {
