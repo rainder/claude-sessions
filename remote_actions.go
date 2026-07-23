@@ -10,8 +10,28 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// runRemoteAttach runs the interactive `ssh -t <target> tmux attach -t <tname>`,
+// relaying local-clipboard image pastes to srv for the lifetime of the attach.
+// The relay goroutine (pasteRelayLoop) never reads stdin or writes the terminal
+// — those belong to ssh — and is cancelled and joined the moment the attach
+// returns.
+func runRemoteAttach(c *actCtx, srv ServerConfig, tname string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pasteRelayLoop(ctx, srv, tname)
+	}()
+	err := c.runInteractive("ssh", "-t", srv.EffectiveSSHTarget(), "tmux", "attach", "-t", tname)
+	cancel()
+	wg.Wait()
+	return err
+}
 
 // Remote action helpers — invoked from the TUI when the selected row is on a
 // configured server. Mirror the local actions, but talk to the server's HTTP
@@ -247,7 +267,6 @@ func actAttachRemote(c *actCtx) {
 		c.enterRaw()
 		return
 	}
-	sshTarget := srv.EffectiveSSHTarget()
 
 	// Fetch tmux info.
 	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/tmux-info", pid), "GET", nil)
@@ -292,8 +311,9 @@ func actAttachRemote(c *actCtx) {
 		c.enterRaw()
 	}
 
-	// SSH into the host and attach to the tmux session.
-	_ = c.runInteractive("ssh", "-t", sshTarget, "tmux", "attach", "-t", tname)
+	// SSH into the host and attach to the tmux session, relaying clipboard
+	// image pastes back to the server for the duration of the attach.
+	_ = runRemoteAttach(c, srv, tname)
 }
 
 // remoteNewRows renders the picker rows for a remote new-session modal. It
@@ -416,9 +436,8 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 	fmt.Printf("ok → %s\n", r.Tmux)
 
 	srv, _ := LookupServer(host)
-	sshTarget := srv.EffectiveSSHTarget()
 	c.enterRaw()
-	_ = c.runInteractive("ssh", "-t", sshTarget, "tmux", "attach", "-t", r.Tmux)
+	_ = runRemoteAttach(c, srv, r.Tmux)
 }
 
 // pidPart extracts the integer pid from a "host:pid" ID. Returns 0 if not a

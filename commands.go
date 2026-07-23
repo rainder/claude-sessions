@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Scriptable subcommands. Used by the HTTP server (shell-out) and available
@@ -331,3 +334,50 @@ func cmdAttach(args []string) int {
 // trimColon returns the part before the first colon. Useful when tmux-info
 // includes the window/pane suffix (session:1.0) but we only want "session".
 func trimColon(s string) string { return strings.SplitN(s, ":", 2)[0] }
+
+// cmdClipRequest is invoked by the tmux Ctrl+V binding on a server host:
+// `claude-sessions clip-request <pane_id> [port]`. It asks this host's own
+// server to handle a remote-image paste for that pane. On any failure it falls
+// back to passing the raw Ctrl+V through itself, so Ctrl+V is never a dead key.
+// Always exits 0 — tmux run-shell surfaces non-zero exits and stderr obnoxiously.
+func cmdClipRequest(args []string) int {
+	if len(args) == 0 || !validPaneID(args[0]) {
+		return 0
+	}
+	paneID := args[0]
+	port := defaultServerPort
+	if len(args) > 1 {
+		if p, err := strconv.Atoi(args[1]); err == nil && p > 0 {
+			port = p
+		}
+	}
+	if !clipRequestRelay(paneID, port) {
+		_ = tmuxSendPassthrough(paneID)
+	}
+	return 0
+}
+
+// clipRequestRelay POSTs /paste-request to the local server on port. It returns
+// true when the server handled the keystroke (queued it for a waiter, or passed
+// it through itself), and false on any transport/auth error so the caller can do
+// its own passthrough. The token is read from the shared token file the server
+// itself uses.
+func clipRequestRelay(paneID string, port int) bool {
+	tok, err := readServerToken()
+	if err != nil {
+		return false
+	}
+	u := fmt.Sprintf("http://127.0.0.1:%d/paste-request?pane_id=%s", port, url.QueryEscape(paneID))
+	req, err := http.NewRequest(http.MethodPost, u, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}

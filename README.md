@@ -237,6 +237,8 @@ usage.go             account rate-limit polling (5h/weekly bars in header)
 actions.go           local action handlers (kill/attach/preview/new)
 remote_actions.go    remote action handlers
 commands.go          scriptable subcommands (used by server shell-out)
+paste.go             remote-image-paste server (broker + tmux binding)
+clipboard.go         remote-image-paste client (clipboard read + relay)
 migrate.go           shared migrate/spawn logic
 preview.go           tmux capture / JSONL transcript renderer
 picker.go            cwd suggestions for `new` (live + history)

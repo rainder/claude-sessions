@@ -48,6 +48,8 @@ func main() {
 		os.Exit(cmdTmuxInfo(args[1:]))
 	case "attach":
 		os.Exit(cmdAttach(args[1:]))
+	case "clip-request":
+		os.Exit(cmdClipRequest(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)

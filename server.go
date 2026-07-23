@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,15 @@ import (
 
 // HTTP server mode (-s flag). Exposes this host's sessions over JSON+bearer-
 // auth so a client running elsewhere can include them in its live view.
+
+// defaultServerPort is the port the server binds and clip-request POSTs to.
+const defaultServerPort = 8765
+
+// activeServerPort is the port this process's server is (or would be) reachable
+// on. cmdServer sets it from its resolved --port so SpawnNew — called from the
+// server without the port in hand — can embed the right port in the tmux paste
+// binding. Stays at the default in non-server contexts (local CLI/TUI).
+var activeServerPort = defaultServerPort
 
 // actionResult is the JSON shape returned by mutating endpoints.
 // Mirrors the bash version so existing scripts/clients keep working.
@@ -67,6 +77,11 @@ type server struct {
 	disabledMu         sync.RWMutex
 	disabledSessionIDs map[string]struct{}
 	disabledGeneration uint64
+
+	// paste is the remote-image-paste broker (see paste.go); pb() lazily
+	// initializes it so both cmdServer and tests get a working broker.
+	pasteOnce sync.Once
+	paste     *pasteBroker
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -549,6 +564,35 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, actionResult{OK: true, Tmux: tname})
 }
 
+// serverTokenPath is the on-disk location of the shared bearer token, or "" if
+// there's no home directory.
+func serverTokenPath() string {
+	dir := ConfigDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "server-token")
+}
+
+// readServerToken reads the existing server token without creating one. Used by
+// same-host tooling (clip-request) that must not mint a token the running
+// server never loaded.
+func readServerToken() (string, error) {
+	path := serverTokenPath()
+	if path == "" {
+		return "", fmt.Errorf("no home directory")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	tok := strings.TrimSpace(string(data))
+	if tok == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	return tok, nil
+}
+
 // loadOrCreateToken reads ~/.config/claude-sessions/server-token, creating it
 // (0600) with a random value if missing. Returns the token on stdout for the
 // admin to copy to client config.
@@ -557,7 +601,7 @@ func loadOrCreateToken() (string, error) {
 	if dir == "" {
 		return "", fmt.Errorf("no home directory")
 	}
-	path := filepath.Join(dir, "server-token")
+	path := serverTokenPath()
 	if data, err := os.ReadFile(path); err == nil {
 		tok := strings.TrimSpace(string(data))
 		if tok == "" {
@@ -621,7 +665,7 @@ func shortHostname() string {
 //	--bind 0.0.0.0      every interface (not recommended)
 //	--bind <addr>       any explicit address
 func cmdServer(args []string) int {
-	port := 8765
+	port := defaultServerPort
 	bind := "127.0.0.1"
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -705,6 +749,27 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)
 	mux.HandleFunc("POST /sessions/{pid}/migrate", s.migrate)
 	mux.HandleFunc("POST /sessions/new", s.newSession)
+	mux.HandleFunc("GET /paste-wait", s.pasteWait)
+	mux.HandleFunc("POST /paste-request", s.pasteRequest)
+	mux.HandleFunc("POST /paste", s.pasteUpload)
+
+	// Publish the resolved port so SpawnNew (invoked without it) embeds the right
+	// port in the tmux paste binding. Intercept Ctrl+V in tmux so remote-image
+	// paste works, and drop any paste temp files left behind by an earlier run.
+	// Both are linux-only no-ops elsewhere. Re-assert the binding periodically in
+	// case the tmux server was restarted (or first started) after us.
+	activeServerPort = port
+	installPasteBinding(port)
+	gcOldPastes(time.Now(), pasteGCMaxAge)
+	if runtime.GOOS == "linux" {
+		go func() {
+			t := time.NewTicker(60 * time.Second)
+			defer t.Stop()
+			for range t.C {
+				installPasteBinding(port)
+			}
+		}()
+	}
 
 	addr := fmt.Sprintf("%s:%d", bind, port)
 	fmt.Fprintf(os.Stderr, "listening on %s\n", addr)

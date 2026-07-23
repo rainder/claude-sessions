@@ -97,6 +97,9 @@ func SpawnNew(cwd, displayName, command string) (string, error) {
 	if err := exec.Command("tmux", "send-keys", "-t", tname, command, "Enter").Run(); err != nil {
 		return "", fmt.Errorf("tmux send-keys: %w", err)
 	}
+	// A brand-new tmux session may be what started the tmux server; (re)assert
+	// the Ctrl+V paste binding on it. Linux-only no-op elsewhere.
+	installPasteBinding(activeServerPort)
 	return tname, nil
 }
 

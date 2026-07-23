@@ -9,6 +9,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Remote image paste: pressing Ctrl+V while attached to a remote session pastes
+  the image from the local clipboard into the remote Claude prompt as a file
+  path. A tmux binding on the server host relays the request through the server
+  (`/paste-request`, `/paste-wait`, `/paste`); the attached client reads its own
+  clipboard (`pngpaste`/`osascript` on macOS, `wl-paste`/`xclip` on Linux) and
+  pushes the PNG. With no client attached or an empty clipboard, the keystroke
+  passes through as a native Ctrl+V. The binding is installed only on Linux
+  servers (macOS keeps native local paste).
 - Local and remote host headings now show the raw 1-, 5-, and 15-minute load
   averages (`LOAD 1.24 0.96 0.72`) alongside the aggregate CPU/MEM figures.
   Unavailable load renders atomically as dashes (`LOAD -- -- --`).
