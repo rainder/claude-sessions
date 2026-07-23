@@ -51,6 +51,15 @@ func TestFirstIdleTarget(t *testing.T) {
 	if got := firstIdleTarget(noneQualify); got != "" {
 		t.Fatalf("firstIdleTarget with no idle/shell sessions = %q, want empty", got)
 	}
+
+	waitingBeatsIdle := buildSelectionTargets([]Session{
+		{PID: 1, CWD: "/a", Status: "idle"},
+		{PID: 2, CWD: "/b", Status: "waiting"},
+		{PID: 3, CWD: "/c", Status: "waiting"},
+	}, nil)
+	if got, want := firstIdleTarget(waitingBeatsIdle), "2"; got != want {
+		t.Fatalf("firstIdleTarget waiting priority = %q, want %q", got, want)
+	}
 }
 
 func TestBuildSelectionTargets(t *testing.T) {
