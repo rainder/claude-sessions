@@ -515,6 +515,12 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return
 	}
+	if body.Prompt != "" {
+		// The client won't attach to this session, so nobody's there to accept
+		// a first-run workspace trust dialog for body.CWD — dismiss it here if
+		// it shows, without blocking the response on the poll.
+		go dismissTrustPrompt(tname)
+	}
 	s.invalidateSessions()
 	writeJSON(w, http.StatusOK, actionResult{OK: true, Tmux: tname})
 }

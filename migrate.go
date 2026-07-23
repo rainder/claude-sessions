@@ -100,6 +100,48 @@ func SpawnNew(cwd, displayName, command string) (string, error) {
 	return tname, nil
 }
 
+// trustPromptMarker is unique text from Claude Code's first-run workspace
+// trust dialog ("Is this a project you created or one you trust?"). A
+// directory that has never been opened with Claude before shows this dialog
+// and waits for a keypress before doing anything else — including consuming
+// a seeded initial prompt passed as a CLI argument.
+const trustPromptMarker = "Yes, I trust this folder"
+
+// trustPromptPollInterval/trustPromptTimeout bound dismissTrustPrompt's poll
+// loop. Vars rather than consts so tests can shrink them instead of eating
+// the full real-time timeout on every run.
+var (
+	trustPromptPollInterval = 250 * time.Millisecond
+	trustPromptTimeout      = 3 * time.Second
+)
+
+// dismissTrustPrompt polls the tmux pane for up to trustPromptTimeout and, if the workspace
+// trust dialog appears, accepts its default "trust this folder" option so the
+// session can proceed to the prompt it was launched with. It's a no-op
+// (settling quickly) when the dialog never shows, e.g. because the directory
+// was already trusted by an earlier session.
+//
+// Only the background/prompt spawn path calls this: an attached launch has
+// the user right there to see and decide on the dialog themselves within a
+// second or two, same as before this existed. An unattended background
+// launch has nobody watching, so without this it hangs at the dialog forever
+// and the seeded prompt never reaches Claude — call it in a goroutine right
+// after a successful SpawnNew so the caller doesn't block waiting on it.
+func dismissTrustPrompt(tname string) {
+	deadline := time.Now().Add(trustPromptTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(trustPromptPollInterval)
+		out, err := exec.Command("tmux", "capture-pane", "-t", tname, "-p").Output()
+		if err != nil {
+			return // session already gone; nothing to dismiss
+		}
+		if strings.Contains(string(out), trustPromptMarker) {
+			_ = exec.Command("tmux", "send-keys", "-t", tname, "Enter").Run()
+			return
+		}
+	}
+}
+
 // killDeps are the side-effecting operations KillSession performs, injected so
 // the kill routing can be tested without signalling a real PID or sleeping.
 type killDeps struct {

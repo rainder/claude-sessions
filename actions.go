@@ -323,6 +323,7 @@ func actNew(c *actCtx) {
 	if prompt != "" {
 		fmt.Printf("ok → %s (running in background)\n", tname)
 		c.spawnedBackground = true
+		go dismissTrustPrompt(tname)
 		return
 	}
 	fmt.Printf("ok → %s\n", tname)

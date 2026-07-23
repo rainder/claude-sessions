@@ -33,6 +33,86 @@ func TestSpawnNewSendsConfiguredCommand(t *testing.T) {
 	}
 }
 
+// withFastTrustPromptTiming shrinks dismissTrustPrompt's poll interval and
+// timeout for the duration of a test so it doesn't eat the real 3s default.
+func withFastTrustPromptTiming(t *testing.T) {
+	t.Helper()
+	oldInterval, oldTimeout := trustPromptPollInterval, trustPromptTimeout
+	trustPromptPollInterval = time.Millisecond
+	trustPromptTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		trustPromptPollInterval = oldInterval
+		trustPromptTimeout = oldTimeout
+	})
+}
+
+// installFakeTmuxCapture writes a fake `tmux` on PATH whose `capture-pane`
+// always prints paneOutput and whose `send-keys` appends "sent\n" to a log
+// file, returning the log's path.
+func installFakeTmuxCapture(t *testing.T, paneOutput string) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "sent.log")
+	script := filepath.Join(dir, "tmux")
+	body := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  capture-pane) printf '%s' \"$PANE_OUTPUT\" ;;\n" +
+		"  send-keys) echo sent >> \"$SENT_LOG\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PANE_OUTPUT", paneOutput)
+	t.Setenv("SENT_LOG", logPath)
+	return logPath
+}
+
+func TestDismissTrustPromptSendsEnterWhenDialogShown(t *testing.T) {
+	withFastTrustPromptTiming(t)
+	logPath := installFakeTmuxCapture(t, "Quick safety check... 1. Yes, I trust this folder")
+
+	dismissTrustPrompt("some-session")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(data), "sent") {
+		t.Fatalf("expected Enter to be sent, log = %q err = %v", data, err)
+	}
+}
+
+func TestDismissTrustPromptNoOpWhenDialogNeverShown(t *testing.T) {
+	withFastTrustPromptTiming(t)
+	logPath := installFakeTmuxCapture(t, "$ claude 'fix bug'\nWelcome back!")
+
+	dismissTrustPrompt("some-session")
+
+	if _, err := os.ReadFile(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no send-keys call, log err = %v", err)
+	}
+}
+
+func TestDismissTrustPromptReturnsOnCaptureError(t *testing.T) {
+	withFastTrustPromptTiming(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tmux")
+	body := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	done := make(chan struct{})
+	go func() {
+		dismissTrustPrompt("gone-session")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("dismissTrustPrompt did not return promptly on capture-pane error")
+	}
+}
+
 func TestTmuxSessionName(t *testing.T) {
 	cases := []struct {
 		loc     string
