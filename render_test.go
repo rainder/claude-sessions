@@ -1004,6 +1004,49 @@ func TestRenderHeaderMultiClaudePlusCodexAlign(t *testing.T) {
 	}
 }
 
+func TestRenderHeaderMixedBlocksShareBarWidth(t *testing.T) {
+	// The Claude line here has three segments; the Codex line has one. On a narrow
+	// terminal the Claude bars shrink below usageBarMax, and the Codex bars must
+	// shrink to the SAME width rather than staying at usageBarMax (the bug). On a
+	// wide terminal both sit at usageBarMax.
+	claude := &UsageInfo{
+		FiveHour:          usageBucket{Pct: 42, ResetsAt: time.Now().Add(2 * time.Hour)},
+		SevenDay:          usageBucket{Pct: 88, ResetsAt: time.Now().Add(48 * time.Hour)},
+		WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: time.Now().Add(72 * time.Hour)},
+		WeeklyScopedLabel: "Fable",
+	}
+	codex := &CodexAccountUsage{Account: "me@work.com", Info: &CodexUsageInfo{
+		Windows: []codexWindow{{Label: "wk", Pct: 30, ResetsAt: time.Now().Add(48 * time.Hour)}},
+	}}
+	barCells := func(s string) int { return strings.Count(s, "█") + strings.Count(s, "░") }
+	const claudeSegN, codexSegN = 3, 1
+
+	render := func(cols int) (claudeBarW, codexBarW int) {
+		var out bytes.Buffer
+		RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+			nil, "", &LocalUsage{Claude: &AccountUsage{Account: "me@work.com", Info: claude}, Codex: codex}, cols, 0, "dir")
+		usage := headerUsageLines(out.String())
+		if len(usage) != 2 {
+			t.Fatalf("cols=%d: want 2 lines (claude + codex), got %d: %#v", cols, len(usage), usage)
+		}
+		// Per-line bar cells = barW × segment count; divide to recover barW.
+		return barCells(usage[0]) / claudeSegN, barCells(usage[1]) / codexSegN
+	}
+
+	cbw, xbw := render(70)
+	if cbw != xbw {
+		t.Errorf("narrow: bar widths differ (claude %d, codex %d) — codex bar not shrunk to match", cbw, xbw)
+	}
+	if cbw >= usageBarMax {
+		t.Errorf("narrow: expected bars to shrink below usageBarMax=%d, got %d (widen the test's cols)", usageBarMax, cbw)
+	}
+
+	cbw, xbw = render(200)
+	if cbw != usageBarMax || xbw != usageBarMax {
+		t.Errorf("wide: want both usageBarMax=%d, got claude %d codex %d", usageBarMax, cbw, xbw)
+	}
+}
+
 func TestRenderHeaderCodexMultiAccountLabelsEachLine(t *testing.T) {
 	codexInfo := func() *CodexUsageInfo {
 		return &CodexUsageInfo{Windows: []codexWindow{{Label: "wk", Pct: 20}}}

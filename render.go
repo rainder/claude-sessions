@@ -216,13 +216,22 @@ const (
 // limits) or the amount of credits spent (extra usage). The model-scoped weekly
 // segment (labeled with the model's display name, e.g. "Fable") only appears
 // when the account has such a limit; the credits segment only appears when extra
-// usage is enabled on the account. It builds the Anthropic segments and hands
-// them to renderUsageSegs — see there for the label/prefix and cols/bar-sizing
-// mechanics shared with the Codex line.
+// usage is enabled on the account. It builds the Anthropic segments (claudeSegs)
+// and renders them at this line's own affordable bar width (lineBarW) — the
+// standalone path; the header block instead shares one bar width across lines
+// (see writeUsageHeader).
 func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	if u == nil {
 		return
 	}
+	segs := claudeSegs(u)
+	renderUsageSegs(w, label, segs, lineBarW(label, segs, cols))
+}
+
+// claudeSegs builds the Anthropic header segments for a non-nil snapshot: the 5h
+// and weekly buckets, the model-scoped weekly segment when the account has one,
+// and the credits segment when extra usage is enabled.
+func claudeSegs(u *UsageInfo) []usageSeg {
 	segs := []usageSeg{
 		{"5h", formatUntil(u.FiveHour.ResetsAt), u.FiveHour.Pct},
 		{"wk", formatUntil(u.SevenDay.ResetsAt), u.SevenDay.Pct},
@@ -245,7 +254,7 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 			c.Pct(),
 		})
 	}
-	renderUsageSegs(w, label, segs, cols)
+	return segs
 }
 
 // usageSeg is one labeled bar segment on a header usage line: a short label, its
@@ -257,35 +266,21 @@ type usageSeg struct {
 	pct            float64
 }
 
-// renderUsageSegs writes one header usage line: an optional dim label prefix
-// followed by the segments, each "<label> <bar> <pct>% <trailer>", joined by
-// three spaces. Bars are sized to fit cols (usageBarMin..usageBarMax cells each,
-// shared across the line); cols <= 0 means unknown width and gets the maximum.
-//
-// label is an optional dim account prefix (email local-part, host name, or the
-// "codex" provider tag) for the multi-account header; "" renders the bare line.
-// Its width counts toward the fixed budget so the bars still shrink to fit cols.
-// Trailing spaces (from padding every label to a common width) sit outside the
-// dim escape so they don't leave a visible dim tail, and are still counted in
-// prefixW so the first segment lands in the same column on every line. Empty
-// segs writes nothing.
-func renderUsageSegs(w io.Writer, label string, segs []usageSeg, cols int) {
-	if len(segs) == 0 {
-		return
+// lineBarW computes the bar width one header line can afford: the terminal width
+// (cols) minus everything fixed — the padded label prefix, the segment labels,
+// percentages, trailers, and inter-segment separators — split across the
+// segments, clamped to usageBarMin..usageBarMax. cols <= 0 (unknown width, or no
+// segments) yields usageBarMax. label is the already-padded label ("" for a bare
+// line); an empty trailer (a Codex window with no reset time) costs neither its
+// separating space nor width, matching renderUsageSegs.
+func lineBarW(label string, segs []usageSeg, cols int) int {
+	if cols <= 0 || len(segs) == 0 {
+		return usageBarMax
 	}
-	prefix := ""
 	prefixW := 0
 	if label != "" {
-		core := strings.TrimRight(label, " ")
-		pad := len(label) - len(core)
-		prefix = dim(core) + " " + strings.Repeat(" ", pad)
 		prefixW = len(label) + 1
 	}
-	// Everything except the bars is fixed width (including the account prefix);
-	// divide what's left of the terminal between the bars. An empty trailer (a
-	// Codex window with no reset time) contributes neither its separating space
-	// nor any width; Anthropic trailers are never empty, so its budget and bytes
-	// are unchanged.
 	fixed := prefixW + 3*(len(segs)-1) // prefix + inter-segment separators
 	for _, s := range segs {
 		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%3.0f%%", s.pct))
@@ -294,13 +289,35 @@ func renderUsageSegs(w io.Writer, label string, segs []usageSeg, cols int) {
 		}
 	}
 	barW := usageBarMax
-	if cols > 0 {
-		if b := (cols - fixed) / len(segs); b < barW {
-			barW = b
-		}
-		if barW < usageBarMin {
-			barW = usageBarMin
-		}
+	if b := (cols - fixed) / len(segs); b < barW {
+		barW = b
+	}
+	if barW < usageBarMin {
+		barW = usageBarMin
+	}
+	return barW
+}
+
+// renderUsageSegs writes one header usage line: an optional dim label prefix
+// followed by the segments, each "<label> <bar> <pct>% <trailer>", joined by
+// three spaces, every bar barW cells wide. The caller sizes barW — lineBarW for
+// a standalone line, or the shared minimum across a header block so every line's
+// bars are the same width (see writeUsageHeader).
+//
+// label is an optional dim account prefix (email local-part, host name, or the
+// "claude"/"codex" provider tag); "" renders the bare line. Trailing pad spaces
+// (from padding every label to a common width) sit outside the dim escape so
+// they don't leave a visible dim tail. An empty trailer emits neither its
+// separating space nor any text. Empty segs writes nothing.
+func renderUsageSegs(w io.Writer, label string, segs []usageSeg, barW int) {
+	if len(segs) == 0 {
+		return
+	}
+	prefix := ""
+	if label != "" {
+		core := strings.TrimRight(label, " ")
+		pad := len(label) - len(core)
+		prefix = dim(core) + " " + strings.Repeat(" ", pad)
 	}
 	parts := make([]string, len(segs))
 	for i, s := range segs {
@@ -393,10 +410,13 @@ func dedupeAccounts(local AccountUsage, remotes []RemoteResult) []accountUsageLi
 
 // writeUsageHeader prints the header's account rate-limit line(s) for both
 // providers — Anthropic lines first, then Codex — with their bars vertically
-// aligned: every line's dim label is padded to one width shared across both
-// blocks (rune-counted), so the first segment ("5h"/"wk"/…) starts in the same
-// column on every line. Bars line up at usageBarMax on a wide terminal;
-// narrow-terminal shrink stays per-line and is not force-aligned.
+// aligned in two respects: every line's dim label is padded to one width shared
+// across both blocks (rune-counted) so the first segment ("5h"/"wk"/…) starts in
+// the same column, and every line's bars are the same width. A shorter Codex
+// line (fewer/narrower segments) would otherwise afford wider bars than a Claude
+// line the terminal has shrunk, so the shared width is the minimum any line can
+// afford (clamped usageBarMin..usageBarMax); on a wide terminal that's
+// usageBarMax for all.
 //
 // Anthropic labeling: a sole line attributable to this machine (mine) renders
 // bare — byte-for-byte the pre-Codex layout — when there's no Codex block, but
@@ -414,11 +434,28 @@ func dedupeAccounts(local AccountUsage, remotes []RemoteResult) []accountUsageLi
 // Empty (no usage for either provider) writes nothing.
 func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int) {
 	type entry struct {
-		label  string
-		render func(paddedLabel string)
+		label string
+		segs  []usageSeg
 	}
 	var entries []entry
 	codexPresent := len(codexAccounts) > 0
+
+	addClaude := func(label string, info *UsageInfo) {
+		if info == nil {
+			return
+		}
+		if segs := claudeSegs(info); len(segs) > 0 {
+			entries = append(entries, entry{label, segs})
+		}
+	}
+	addCodex := func(label string, info *CodexUsageInfo) {
+		if info == nil {
+			return
+		}
+		if segs := codexSegs(info); len(segs) > 0 {
+			entries = append(entries, entry{label, segs})
+		}
+	}
 
 	// Anthropic block.
 	if len(accounts) == 1 && accounts[0].mine {
@@ -426,57 +463,81 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		if codexPresent {
 			label = "claude"
 		}
-		info := accounts[0].info
-		entries = append(entries, entry{label, func(p string) { writeUsage(w, p, info, cols) }})
+		addClaude(label, accounts[0].info)
 	} else {
 		for _, a := range accounts {
-			info := a.info
-			entries = append(entries, entry{a.label, func(p string) { writeUsage(w, p, info, cols) }})
+			addClaude(a.label, a.info)
 		}
 	}
 
 	// Codex block.
 	if len(codexAccounts) == 1 && codexAccounts[0].mine {
-		info := codexAccounts[0].info
-		entries = append(entries, entry{"codex", func(p string) { writeCodexUsage(w, p, info, cols) }})
+		addCodex("codex", codexAccounts[0].info)
 	} else {
 		for _, a := range codexAccounts {
-			info := a.info
-			entries = append(entries, entry{"codex " + a.label, func(p string) { writeCodexUsage(w, p, info, cols) }})
+			addCodex("codex "+a.label, a.info)
 		}
 	}
 
+	if len(entries) == 0 {
+		return
+	}
+
+	// One label width across both blocks so the first segment lands in the same
+	// column on every line.
 	labelW := 0
 	for _, e := range entries {
 		if n := utf8.RuneCountInString(e.label); n > labelW {
 			labelW = n
 		}
 	}
-	for _, e := range entries {
-		e.render(e.label + strings.Repeat(" ", labelW-utf8.RuneCountInString(e.label)))
+	// Bars must be the same width on every line, so size them to the narrowest
+	// line's affordable width (computed against the padded labels) and render all
+	// lines with it. cols <= 0 leaves every line at usageBarMax.
+	padded := make([]string, len(entries))
+	barW := usageBarMax
+	for i, e := range entries {
+		padded[i] = e.label + strings.Repeat(" ", labelW-utf8.RuneCountInString(e.label))
+		if b := lineBarW(padded[i], e.segs, cols); b < barW {
+			barW = b
+		}
+	}
+	for i, e := range entries {
+		renderUsageSegs(w, padded[i], e.segs, barW)
 	}
 }
 
 // writeCodexUsage prints one Codex account usage line: a dim label prefix
 // followed by one bar segment per rate-limit window the endpoint reported (5h /
 // wk / mo …, see codexWindowLabel). Bars, colors, percent formatting, and the
-// dim reset trailer match writeUsage. Nil info or an account with no windows
-// writes nothing.
+// dim reset trailer match writeUsage. It renders at this line's own affordable
+// bar width (lineBarW) — the standalone path; the header block instead shares
+// one bar width across lines (see writeUsageHeader). Nil info or an account with
+// no windows writes nothing.
 func writeCodexUsage(w io.Writer, label string, info *CodexUsageInfo, cols int) {
-	if info == nil || len(info.Windows) == 0 {
+	if info == nil {
 		return
 	}
-	segs := make([]usageSeg, len(info.Windows))
-	for i, win := range info.Windows {
-		// A window with no reset time (ResetsAt zero) shows a bar and percentage
-		// but no countdown trailer — better a blank than a misleading "<1m".
+	segs := codexSegs(info)
+	if len(segs) == 0 {
+		return
+	}
+	renderUsageSegs(w, label, segs, lineBarW(label, segs, cols))
+}
+
+// codexSegs builds one segment per Codex rate-limit window; a window with no
+// reset time (ResetsAt zero) gets an empty trailer — better a blank than a
+// misleading "<1m" countdown.
+func codexSegs(info *CodexUsageInfo) []usageSeg {
+	segs := make([]usageSeg, 0, len(info.Windows))
+	for _, win := range info.Windows {
 		trailer := ""
 		if !win.ResetsAt.IsZero() {
 			trailer = formatUntil(win.ResetsAt)
 		}
-		segs[i] = usageSeg{label: win.Label, trailer: trailer, pct: win.Pct}
+		segs = append(segs, usageSeg{label: win.Label, trailer: trailer, pct: win.Pct})
 	}
-	renderUsageSegs(w, label, segs, cols)
+	return segs
 }
 
 // codexAccountLine is one resolved Codex header line, mirroring accountUsageLine
