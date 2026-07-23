@@ -618,6 +618,20 @@ func TestDedupeAccounts(t *testing.T) {
 			t.Errorf("label = %q, want bot", got[0].label)
 		}
 	})
+
+	t.Run("colliding local-parts fall back to full email", func(t *testing.T) {
+		local := AccountUsage{Account: "andy@trecs.aero", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "pi", Usage: &AccountUsage{Account: "andy@avisoma.com", Info: info()}},
+		}
+		got := dedupeAccounts(local, remotes)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2: %#v", len(got), got)
+		}
+		if got[0].label != "andy@trecs.aero" || got[1].label != "andy@avisoma.com" {
+			t.Errorf("labels = %q,%q want full emails on collision", got[0].label, got[1].label)
+		}
+	})
 }
 
 // headerUsageLines returns the account bar lines a full-view render emits: line
@@ -714,6 +728,33 @@ func TestRenderHeaderMultiAccountLabelsEachLine(t *testing.T) {
 	}
 	if !strings.HasPrefix(usage[1], dim("bot")+" ") {
 		t.Errorf("second account line missing remote host label prefix: %q", usage[1])
+	}
+}
+
+func TestRenderHeaderMultiAccountColumnsAlign(t *testing.T) {
+	// 0% vs 93%: a single- vs double-digit percentage on the first segment
+	// used to shift every segment after it out of column on the wider row.
+	mk := func(five float64) *UsageInfo {
+		return &UsageInfo{FiveHour: usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
+	}
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	remotes := []RemoteResult{
+		{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: mk(93)}},
+	}
+	var out bytes.Buffer
+	RenderAll(&out, "1", local, remotes, "", &AccountUsage{Account: "andy@work.com", Info: mk(0)}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 2 {
+		t.Fatalf("two accounts rendered %d usage lines, want 2: %#v", len(usage), usage)
+	}
+	plain0, plain1 := stripANSI(usage[0]), stripANSI(usage[1])
+	i0, i1 := strings.Index(plain0, "wk"), strings.Index(plain1, "wk")
+	if i0 < 0 || i1 < 0 {
+		t.Fatalf("wk segment missing: %q / %q", plain0, plain1)
+	}
+	if i0 != i1 {
+		t.Errorf("wk column misaligned: line0 col %d (%q), line1 col %d (%q)", i0, plain0, i1, plain1)
 	}
 }
 

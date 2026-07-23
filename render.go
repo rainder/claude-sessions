@@ -223,7 +223,10 @@ const (
 // label is an optional dim account prefix (email local-part, or a host name)
 // for the multi-account header; "" renders the bare line, byte-for-byte the
 // single-account layout. Its width counts toward the fixed budget so the bars
-// still shrink to fit cols.
+// still shrink to fit cols. Trailing spaces (from writeAccounts padding every
+// label to a common width) sit outside the dim escape so they don't leave a
+// visible dim tail, and are still counted in prefixW so the "5h" segment
+// lands in the same column on every line.
 func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	if u == nil {
 		return
@@ -231,7 +234,9 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	prefix := ""
 	prefixW := 0
 	if label != "" {
-		prefix = dim(label) + " "
+		core := strings.TrimRight(label, " ")
+		pad := len(label) - len(core)
+		prefix = dim(core) + " " + strings.Repeat(" ", pad)
 		prefixW = len(label) + 1
 	}
 	type seg struct {
@@ -264,7 +269,7 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	// divide what's left of the terminal between the bars.
 	fixed := prefixW + 3*(len(segs)-1) // prefix + inter-segment separators
 	for _, s := range segs {
-		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%.0f%%", s.pct)) + 1 + len(s.trailer)
+		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%3.0f%%", s.pct)) + 1 + len(s.trailer)
 	}
 	barW := usageBarMax
 	if cols > 0 {
@@ -277,7 +282,7 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	}
 	parts := make([]string, len(segs))
 	for i, s := range segs {
-		parts[i] = fmt.Sprintf("%s %s %.0f%% %s",
+		parts[i] = fmt.Sprintf("%s %s %3.0f%% %s",
 			s.label,
 			colorize(usageColor(s.pct), usageBar(s.pct, barW)),
 			s.pct,
@@ -291,6 +296,7 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 // order; writeAccounts turns each into a writeUsage line.
 type accountUsageLine struct {
 	label string     // email local-part, or host name for an unknown account
+	email string     // full account email ("" for an unknown account); disambiguates a label collision
 	info  *UsageInfo
 	// mine marks a line attributable to this machine's account: the local
 	// entry itself, or a remote sharing the local email. Only such a line may
@@ -318,7 +324,11 @@ func accountLocalPart(email string) string {
 // line keyed by host so two anonymous hosts don't merge. Each surviving line
 // carries a dim label for the multi-account header: the email's local-part for
 // a known account, the host name for an unknown one (local's fallback is
-// "local", since the function has no name for the current machine).
+// "local", since the function has no name for the current machine). Two
+// distinct accounts that happen to share a local-part (andy@trecs.aero,
+// andy@avisoma.com) would otherwise render identical, indistinguishable
+// labels, so a final pass promotes any colliding known-account labels to the
+// full email.
 func dedupeAccounts(local AccountUsage, remotes []RemoteResult) []accountUsageLine {
 	var lines []accountUsageLine
 	seen := make(map[string]bool)
@@ -336,12 +346,21 @@ func dedupeAccounts(local AccountUsage, remotes []RemoteResult) []accountUsageLi
 			return
 		}
 		seen[key] = true
-		lines = append(lines, accountUsageLine{label: accountLocalPart(account), info: info, mine: mine})
+		lines = append(lines, accountUsageLine{label: accountLocalPart(account), email: account, info: info, mine: mine})
 	}
 	add(local.Account, "local", local.Info, true)
 	for _, r := range remotes {
 		if r.Usage != nil {
 			add(r.Usage.Account, r.Name, r.Usage.Info, false)
+		}
+	}
+	labelCount := make(map[string]int)
+	for _, l := range lines {
+		labelCount[l.label]++
+	}
+	for i, l := range lines {
+		if l.email != "" && labelCount[l.label] > 1 {
+			lines[i].label = l.email
 		}
 	}
 	return lines
@@ -359,8 +378,18 @@ func writeAccounts(w io.Writer, accounts []accountUsageLine, cols int) {
 		writeUsage(w, "", accounts[0].info, cols)
 		return
 	}
+	// Pad every label to the widest one so the "5h" segment (and everything
+	// after it) starts in the same column on every line, regardless of how
+	// long each account's label is.
+	labelW := 0
 	for _, a := range accounts {
-		writeUsage(w, a.label, a.info, cols)
+		if n := utf8.RuneCountInString(a.label); n > labelW {
+			labelW = n
+		}
+	}
+	for _, a := range accounts {
+		pad := labelW - utf8.RuneCountInString(a.label)
+		writeUsage(w, a.label+strings.Repeat(" ", pad), a.info, cols)
 	}
 }
 
