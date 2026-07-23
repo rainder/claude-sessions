@@ -15,6 +15,26 @@ func TestWriteMouseMode(t *testing.T) {
 	}
 }
 
+func TestShellQuote(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", "''"},
+		{"hello", "'hello'"},
+		{"hello world", "'hello world'"},
+		{"it's", `'it'\''s'`},
+		{"$(rm -rf /)", "'$(rm -rf /)'"},
+		{"`echo hi`", "'`echo hi`'"},
+		{"a; b && c | d", "'a; b && c | d'"},
+	}
+	for _, c := range cases {
+		if got := shellQuote(c.in); got != c.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestWriteInteractiveHandoff(t *testing.T) {
 	var b strings.Builder
 	writeInteractiveHandoff(&b)

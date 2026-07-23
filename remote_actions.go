@@ -296,7 +296,7 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 	}
 	lines, start, entries := remoteNewRows(defaultCWD, suggestions, home)
 
-	row, presetIndex, ok := pickNewSession("New session on "+host, lines, start, presets, presetStart, note, c.modalWakes)
+	row, presetIndex, prompt, ok := pickNewSession("New session on "+host, lines, start, presets, presetStart, note, c.modalWakes)
 	if !ok {
 		return
 	}
@@ -323,6 +323,7 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 	body, _ := json.Marshal(map[string]string{
 		"cwd":     cwd,
 		"command": preset.Name,
+		"prompt":  prompt,
 	})
 	resp, err := remoteRequest(host, "/sessions/new", "POST", body)
 	if err != nil {
@@ -337,9 +338,14 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 		pauseForKey(c.fd, c.oldState)
 		return
 	}
-	fmt.Printf("ok → %s\n", r.Tmux)
 	c.spawnedHost = host
 	c.spawnedTmux = r.Tmux
+	if prompt != "" {
+		fmt.Printf("ok → %s (running in background)\n", r.Tmux)
+		c.spawnedBackground = true
+		return
+	}
+	fmt.Printf("ok → %s\n", r.Tmux)
 
 	srv, _ := LookupServer(host)
 	sshTarget := srv.EffectiveSSHTarget()

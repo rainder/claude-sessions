@@ -13,10 +13,20 @@ import (
 // Filter, when non-empty, narrows the visible rows to a case-insensitive
 // substring match; RowCount always reflects the currently-filtered row count,
 // which the caller recomputes each iteration.
+//
+// PromptMode/Prompt hold a third, independent axis: pressing 'p' with no
+// active Filter opens a free-text prompt buffer (Prompt) layered on top of the
+// current Row/Preset selection. Confirming it (Enter) launches the session in
+// the background with that prompt instead of attaching; Esc discards the
+// buffer and returns to normal picker navigation. Prompt text is not subject
+// to the Filter special-casing ('q' cancels, digits jump-select) — every
+// printable byte is literal prompt content.
 type newPickerState struct {
 	Row, Preset           int
 	RowCount, PresetCount int
 	Filter                string
+	PromptMode            bool
+	Prompt                string
 }
 
 // handle applies one key event to the state, returning whether the picker
@@ -56,6 +66,12 @@ func (s *newPickerState) handle(key string) (confirm, cancel bool) {
 		if s.Filter == "" && (key == "q" || key == "Q") {
 			return false, true
 		}
+		// 'p' opens the background-prompt overlay, only when not filtering
+		// ('p' is a valid path character while a filter is active).
+		if s.Filter == "" && (key == "p" || key == "P") {
+			s.PromptMode = true
+			return false, false
+		}
 		// Digit quick-select only when not filtering; otherwise digits are
 		// ordinary filter text.
 		if s.Filter == "" && len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
@@ -71,6 +87,38 @@ func (s *newPickerState) handle(key string) (confirm, cancel bool) {
 		if len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e {
 			s.Filter += key
 			s.Row = 0
+		}
+	}
+	return false, false
+}
+
+// handlePrompt applies one key event while PromptMode is active, editing the
+// free-text Prompt buffer. Enter confirms the whole picker (the caller reads
+// row + preset + the composed Prompt) as long as the buffer is non-empty;
+// Esc discards the buffer and drops back to normal picker navigation without
+// cancelling the picker; Ctrl+C cancels the picker entirely, mirroring
+// handle's Ctrl+C behavior.
+func (s *newPickerState) handlePrompt(key string) (confirm, cancel bool) {
+	switch key {
+	case "\r", "\n", KeyEnter:
+		if s.Prompt == "" {
+			return false, false
+		}
+		return true, false
+	case "\x03":
+		return false, true
+	case KeyEsc:
+		s.PromptMode = false
+		s.Prompt = ""
+	case "\x7f", "\x08":
+		if s.Prompt != "" {
+			s.Prompt = s.Prompt[:len(s.Prompt)-1]
+		}
+	default:
+		// Every printable ASCII byte is literal prompt content — unlike the
+		// cwd Filter, there is no jump-select or cancel shortcut to carve out.
+		if len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e {
+			s.Prompt += key
 		}
 	}
 	return false, false
@@ -164,7 +212,24 @@ func pickerFooter(filter string) string {
 	return pickerHelp
 }
 
-const pickerHelp = "↑/↓ cwd · ←/→ command · type to filter · Enter select · q cancel"
+const pickerHelp = "↑/↓ cwd · ←/→ command · type to filter · p prompt · Enter select · q cancel"
+
+// renderPromptInput draws the background-prompt overlay: the chosen command
+// preset and cwd for context, then the free-text buffer being composed.
+// Confirming launches the session detached (no attach) with this prompt as
+// its initial input.
+func renderPromptInput(title string, preset CommandPreset, cwdLabel, prompt string) string {
+	var b strings.Builder
+	b.WriteString("\n " + bold(title) + "\n\n")
+	fmt.Fprintf(&b, " Command:  %s\n", bold(preset.Name))
+	if cwdLabel != "" {
+		fmt.Fprintf(&b, " Cwd:      %s\n", cwdLabel)
+	}
+	b.WriteString("\n " + dim("Prompt (runs in background, no attach):") + "\n")
+	fmt.Fprintf(&b, " > %s%s\n", prompt, dim("_"))
+	b.WriteString("\n " + dim("Enter run in background · ⌫ edit · Esc back") + "\n")
+	return b.String()
+}
 
 func pickerCommandRows(preset CommandPreset) []string {
 	return []string{
@@ -266,9 +331,15 @@ func renderNewPickerCompact(title string, lines []string, preset CommandPreset, 
 
 // pickNewSession drives the picker in a read/handle loop until the user
 // confirms a row+preset selection or cancels. Must be called in raw mode.
-func pickNewSession(title string, lines []string, rowStart int, presets []CommandPreset, presetStart int, note string, wakes []wakeFD) (row, preset int, ok bool) {
+//
+// prompt is empty for a normal confirm (caller attaches as before). A
+// non-empty prompt means the user composed one via the 'p' overlay and
+// confirmed it: the caller should spawn and launch in the background —
+// append the prompt to the command and skip attaching — instead of
+// attaching interactively.
+func pickNewSession(title string, lines []string, rowStart int, presets []CommandPreset, presetStart int, note string, wakes []wakeFD) (row, preset int, prompt string, ok bool) {
 	if len(lines) == 0 || len(presets) == 0 {
-		return 0, 0, false
+		return 0, 0, "", false
 	}
 	state := newPickerState{Row: rowStart, Preset: presetStart, PresetCount: len(presets)}
 	if state.Row < 0 || state.Row >= len(lines) {
@@ -299,23 +370,38 @@ func pickNewSession(title string, lines []string, rowStart int, presets []Comman
 		if err != nil {
 			cols, rows = 0, 0
 		}
-		_ = renderer.Draw(renderNewPickerViewport(title, filtered, presets, state, note, rows), cols, rows)
+		var content string
+		if state.PromptMode {
+			cwdLabel := ""
+			if state.Row < len(filtered) {
+				cwdLabel = stripSGR(filtered[state.Row])
+			}
+			content = renderPromptInput(title, presets[state.Preset], cwdLabel, state.Prompt)
+		} else {
+			content = renderNewPickerViewport(title, filtered, presets, state, note, rows)
+		}
+		_ = renderer.Draw(content, cols, rows)
 		keys, _ := readModalEvents(decoder, wakes)
 		for _, key := range keys {
 			// Recompute before each key so RowCount and the index map reflect
 			// any filter edit earlier in the same batch (e.g. a pasted
 			// "foo\r": Enter must map through the post-"foo" indices).
 			_, indices = sync()
-			confirm, cancel := state.handle(key)
+			var confirm, cancel bool
+			if state.PromptMode {
+				confirm, cancel = state.handlePrompt(key)
+			} else {
+				confirm, cancel = state.handle(key)
+			}
 			if cancel {
-				return 0, 0, false
+				return 0, 0, "", false
 			}
 			if confirm {
 				if state.RowCount == 0 {
 					// Nothing matches the current filter; ignore the confirm.
 					continue
 				}
-				return indices[state.Row], state.Preset, true
+				return indices[state.Row], state.Preset, state.Prompt, true
 			}
 		}
 	}

@@ -141,3 +141,13 @@ func sanitizeForTmux(s string) string {
 	}
 	return out
 }
+
+// shellQuote wraps s in single quotes for safe interpolation into a shell
+// command line, escaping embedded single quotes with the standard POSIX
+// close-escape-reopen break-out sequence. SpawnNew's tmux send-keys types the
+// assembled command into a live shell, so an unquoted prompt containing shell
+// metacharacters (backticks, $(), ;, quotes) would execute as arbitrary
+// commands rather than reach claude as text.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}

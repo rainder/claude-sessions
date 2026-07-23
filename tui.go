@@ -497,6 +497,10 @@ func RunTUI(interval time.Duration) error {
 				if ctx.spawnedTmux != "" {
 					state.pending = &pendingSpawn{host: ctx.spawnedHost, tmux: ctx.spawnedTmux}
 				}
+				if ctx.spawnedBackground {
+					toast = "spawned " + ctx.spawnedTmux + " in background"
+					toastUntil = time.Now().Add(4 * time.Second)
+				}
 				refresh(true)
 				render()
 			case "m", "M":
@@ -675,7 +679,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    mouse wheel  scroll list or inspector")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("ACTIONS")+"  (on selected row)")
-	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command)")
+	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command · p prompt in background)")
 	fmt.Fprintln(&b, "    - / +        disable / enable session")
 	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")

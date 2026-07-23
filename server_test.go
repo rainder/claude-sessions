@@ -352,6 +352,42 @@ func TestNewSessionKnownPresetUsesItsCommand(t *testing.T) {
 	}
 }
 
+// TestNewSessionPromptIsShellQuoted: a prompt is appended to the preset
+// command as a single shell-quoted argument, so shell metacharacters in the
+// prompt (backticks, $(), quotes) land as literal text typed into the fresh
+// pane's shell rather than executing.
+func TestNewSessionPromptIsShellQuoted(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCommandConfig(t, home)
+	logPath := installFakeTmux(t)
+
+	body, _ := json.Marshal(map[string]string{
+		"cwd":    home,
+		"prompt": `fix the $(whoami) bug; say 'hi'`,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/sessions/new", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	(&server{token: "test-token"}).newSession(rec, req)
+
+	var got actionResult
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.OK || got.Tmux == "" {
+		t.Fatalf("result = %#v", got)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<claude " + shellQuote(`fix the $(whoami) bug; say 'hi'`) + "><Enter>"
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("tmux argv missing quoted prompt:\ngot:  %s\nwant substring: %s", data, want)
+	}
+}
+
 // TestKillHandlerUsesServerDerivedSession: the kill handler resolves the PID
 // against server-collected rows and terminates that exact server-derived
 // session — never a client-supplied one.

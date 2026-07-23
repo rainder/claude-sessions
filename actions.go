@@ -43,6 +43,10 @@ type actCtx struct {
 	// no new session was spawned (cancelled, or spawn failed).
 	spawnedHost string
 	spawnedTmux string
+	// spawnedBackground is set when the just-spawned session (above) was
+	// launched with a prompt via the 'p' overlay: it's already running
+	// unattended, so the caller shows a toast instead of attaching.
+	spawnedBackground bool
 
 	updateDisabled func(
 		host string,
@@ -279,7 +283,7 @@ func actNew(c *actCtx) {
 		lines = append(lines, fmt.Sprintf("%-50s%s", picker.shortName(p.cwd), freq))
 	}
 	lines = append(lines, "enter path manually…")
-	row, presetIndex, ok := pickNewSession("New tmux session", lines, start, presets, presetStart, "", c.modalWakes)
+	row, presetIndex, prompt, ok := pickNewSession("New tmux session", lines, start, presets, presetStart, "", c.modalWakes)
 	if !ok {
 		return
 	}
@@ -304,15 +308,24 @@ func actNew(c *actCtx) {
 		pauseForKey(c.fd, c.oldState)
 		return
 	}
+	command := preset.Command
+	if prompt != "" {
+		command = command + " " + shellQuote(prompt)
+	}
 	fmt.Printf("\nspawning in %s... ", cwd)
-	tname, err := SpawnNew(cwd, "", preset.Command)
+	tname, err := SpawnNew(cwd, "", command)
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		return
 	}
-	fmt.Printf("ok → %s\n", tname)
 	c.spawnedTmux = tname
+	if prompt != "" {
+		fmt.Printf("ok → %s (running in background)\n", tname)
+		c.spawnedBackground = true
+		return
+	}
+	fmt.Printf("ok → %s\n", tname)
 	c.enterRaw()
 	runTmuxAttach(c, tname)
 }

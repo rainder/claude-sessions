@@ -473,6 +473,7 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		CWD     string `json:"cwd"`
 		Name    string `json:"name"`
 		Command string `json:"command"` // preset name, never raw command text
+		Prompt  string `json:"prompt"`  // free text; shell-quoted before use, never interpreted
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -505,7 +506,11 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	tname, err := SpawnNew(body.CWD, body.Name, preset.Command)
+	command := preset.Command
+	if body.Prompt != "" {
+		command = command + " " + shellQuote(body.Prompt)
+	}
+	tname, err := SpawnNew(body.CWD, body.Name, command)
 	if err != nil {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return

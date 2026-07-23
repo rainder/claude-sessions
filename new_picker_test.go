@@ -190,6 +190,112 @@ func TestNewPickerZeroMatchesNoCrash(t *testing.T) {
 	}
 }
 
+func TestNewPickerPKeyOpensPromptModeOnlyWithoutFilter(t *testing.T) {
+	state := newPickerState{RowCount: 2, PresetCount: 1}
+	if confirm, cancel := state.handle("p"); confirm || cancel || !state.PromptMode {
+		t.Fatalf("p with empty filter: confirm %v cancel %v promptMode %v", confirm, cancel, state.PromptMode)
+	}
+
+	// While filtering, 'p' is literal filter text (a valid path character), not
+	// the prompt-overlay shortcut.
+	filtering := newPickerState{RowCount: 2, PresetCount: 1, Filter: "a"}
+	if confirm, cancel := filtering.handle("p"); confirm || cancel || filtering.PromptMode || filtering.Filter != "ap" {
+		t.Fatalf("p while filtering: confirm %v cancel %v promptMode %v filter %q",
+			confirm, cancel, filtering.PromptMode, filtering.Filter)
+	}
+}
+
+func TestNewPickerHandlePromptTypesAndConfirms(t *testing.T) {
+	state := newPickerState{RowCount: 1, PresetCount: 1, PromptMode: true}
+	for _, key := range []string{"f", "i", "x", " ", "b", "u", "g"} {
+		if confirm, cancel := state.handlePrompt(key); confirm || cancel {
+			t.Fatalf("typing %q: confirm %v cancel %v", key, confirm, cancel)
+		}
+	}
+	if state.Prompt != "fix bug" {
+		t.Fatalf("Prompt = %q, want %q", state.Prompt, "fix bug")
+	}
+	confirm, cancel := state.handlePrompt(KeyEnter)
+	if !confirm || cancel {
+		t.Fatalf("Enter with non-empty prompt: confirm %v cancel %v", confirm, cancel)
+	}
+}
+
+func TestNewPickerHandlePromptEnterIgnoredWhenEmpty(t *testing.T) {
+	state := newPickerState{RowCount: 1, PresetCount: 1, PromptMode: true}
+	if confirm, cancel := state.handlePrompt(KeyEnter); confirm || cancel {
+		t.Fatalf("Enter with empty prompt: confirm %v cancel %v", confirm, cancel)
+	}
+}
+
+func TestNewPickerHandlePromptBackspace(t *testing.T) {
+	state := newPickerState{PromptMode: true, Prompt: "ab"}
+	state.handlePrompt("\x7f")
+	if state.Prompt != "a" {
+		t.Fatalf("Prompt after backspace = %q, want %q", state.Prompt, "a")
+	}
+	state.handlePrompt("\x08")
+	if state.Prompt != "" {
+		t.Fatalf("Prompt after second backspace = %q, want empty", state.Prompt)
+	}
+	// Backspace on an empty prompt is a harmless no-op.
+	if confirm, cancel := state.handlePrompt("\x7f"); confirm || cancel || state.Prompt != "" {
+		t.Fatalf("backspace on empty prompt: confirm %v cancel %v prompt %q", confirm, cancel, state.Prompt)
+	}
+}
+
+func TestNewPickerHandlePromptEscReturnsToPickerWithoutCancelling(t *testing.T) {
+	state := newPickerState{PromptMode: true, Prompt: "some text"}
+	confirm, cancel := state.handlePrompt(KeyEsc)
+	if confirm || cancel {
+		t.Fatalf("Esc from prompt mode: confirm %v cancel %v, want neither (drop back to picker)", confirm, cancel)
+	}
+	if state.PromptMode || state.Prompt != "" {
+		t.Fatalf("state after Esc = %#v, want PromptMode=false Prompt=\"\"", state)
+	}
+}
+
+func TestNewPickerHandlePromptCtrlCCancelsPicker(t *testing.T) {
+	state := newPickerState{PromptMode: true, Prompt: "some text"}
+	confirm, cancel := state.handlePrompt("\x03")
+	if confirm || !cancel {
+		t.Fatalf("Ctrl+C from prompt mode: confirm %v cancel %v, want cancel", confirm, cancel)
+	}
+}
+
+func TestNewPickerHandlePromptQAndDigitsAreLiteral(t *testing.T) {
+	// Unlike the cwd Filter, 'q' and digits inside the prompt buffer are never
+	// shortcuts — every printable byte is literal prompt content.
+	state := newPickerState{PromptMode: true}
+	for _, key := range []string{"q", "1", "9"} {
+		state.handlePrompt(key)
+	}
+	if state.Prompt != "q19" {
+		t.Fatalf("Prompt = %q, want %q", state.Prompt, "q19")
+	}
+}
+
+func TestPickerHelpMentionsPrompt(t *testing.T) {
+	if !strings.Contains(pickerHelp, "p prompt") {
+		t.Fatalf("pickerHelp = %q, want it to mention the prompt shortcut", pickerHelp)
+	}
+	// Must stay contiguous — TestRenderNewPickerViewportKeepsSelectionVisible
+	// matches this exact substring.
+	if !strings.Contains(pickerHelp, "Enter select · q cancel") {
+		t.Fatalf("pickerHelp = %q, lost the contiguous tail substring", pickerHelp)
+	}
+}
+
+func TestRenderPromptInput(t *testing.T) {
+	preset := CommandPreset{Name: "Claude", Command: "claude"}
+	out := renderPromptInput("New tmux session", preset, "/repo", "fix bug")
+	for _, want := range []string{"New tmux session", "Claude", "/repo", "fix bug", "background, no attach", "Esc back"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("renderPromptInput missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestFilterNewPickerLines(t *testing.T) {
 	lines := []string{"/alpha", "/BETA", "/gamma  " + dim("(2)")}
 	// Empty filter is the identity with an identity index map.
