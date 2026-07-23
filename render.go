@@ -318,10 +318,10 @@ func renderUsageSegs(w io.Writer, label string, segs []usageSeg, cols int) {
 
 // accountUsageLine is one resolved header account line: a usage snapshot with
 // the dim label to prefix it with. dedupeAccounts produces these in display
-// order; writeAccounts turns each into a writeUsage line.
+// order; writeUsageHeader turns each into a writeUsage line.
 type accountUsageLine struct {
-	label string     // email local-part, or host name for an unknown account
-	email string     // full account email ("" for an unknown account); disambiguates a label collision
+	label string // email local-part, or host name for an unknown account
+	email string // full account email ("" for an unknown account); disambiguates a label collision
 	info  *UsageInfo
 	// mine marks a line attributable to this machine's account: the local
 	// entry itself, or a remote sharing the local email. Only such a line may
@@ -391,30 +391,69 @@ func dedupeAccounts(local AccountUsage, remotes []RemoteResult) []accountUsageLi
 	return lines
 }
 
-// writeAccounts prints the header's account rate-limit line(s). A single
-// surviving line renders bare (no label) — byte-for-byte the pre-propagation
-// layout — but only when it's attributable to this machine's account (mine);
-// a lone foreign remote keeps its label so its limits can't masquerade as
-// local. Several lines render one labeled line each so limits stay legible
-// when remotes run different Anthropic accounts. Empty (no usage anywhere)
-// writes nothing.
-func writeAccounts(w io.Writer, accounts []accountUsageLine, cols int) {
-	if len(accounts) == 1 && accounts[0].mine {
-		writeUsage(w, "", accounts[0].info, cols)
-		return
+// writeUsageHeader prints the header's account rate-limit line(s) for both
+// providers — Anthropic lines first, then Codex — with their bars vertically
+// aligned: every line's dim label is padded to one width shared across both
+// blocks (rune-counted), so the first segment ("5h"/"wk"/…) starts in the same
+// column on every line. Bars line up at usageBarMax on a wide terminal;
+// narrow-terminal shrink stays per-line and is not force-aligned.
+//
+// Anthropic labeling: a sole line attributable to this machine (mine) renders
+// bare — byte-for-byte the pre-Codex layout — when there's no Codex block, but
+// takes the dim "claude" tag once a Codex block shares the header, symmetric
+// with "codex". A lone foreign remote keeps its account label so its limits
+// can't masquerade as local; several lines each carry their account (local-part
+// / host / full email on collision).
+//
+// Codex labeling: a sole mine line is the bare "codex" tag; every other line is
+// "codex <account>". The same anti-masquerade carve-out applies — a lone foreign
+// remote keeps its account so "codex" alone can't imply the local account.
+//
+// The pad spaces sit outside the dim escape (see renderUsageSegs); a bare ""
+// label pads to nothing and stays byte-identical to the pre-Codex bare layout.
+// Empty (no usage for either provider) writes nothing.
+func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int) {
+	type entry struct {
+		label  string
+		render func(paddedLabel string)
 	}
-	// Pad every label to the widest one so the "5h" segment (and everything
-	// after it) starts in the same column on every line, regardless of how
-	// long each account's label is.
+	var entries []entry
+	codexPresent := len(codexAccounts) > 0
+
+	// Anthropic block.
+	if len(accounts) == 1 && accounts[0].mine {
+		label := ""
+		if codexPresent {
+			label = "claude"
+		}
+		info := accounts[0].info
+		entries = append(entries, entry{label, func(p string) { writeUsage(w, p, info, cols) }})
+	} else {
+		for _, a := range accounts {
+			info := a.info
+			entries = append(entries, entry{a.label, func(p string) { writeUsage(w, p, info, cols) }})
+		}
+	}
+
+	// Codex block.
+	if len(codexAccounts) == 1 && codexAccounts[0].mine {
+		info := codexAccounts[0].info
+		entries = append(entries, entry{"codex", func(p string) { writeCodexUsage(w, p, info, cols) }})
+	} else {
+		for _, a := range codexAccounts {
+			info := a.info
+			entries = append(entries, entry{"codex " + a.label, func(p string) { writeCodexUsage(w, p, info, cols) }})
+		}
+	}
+
 	labelW := 0
-	for _, a := range accounts {
-		if n := utf8.RuneCountInString(a.label); n > labelW {
+	for _, e := range entries {
+		if n := utf8.RuneCountInString(e.label); n > labelW {
 			labelW = n
 		}
 	}
-	for _, a := range accounts {
-		pad := labelW - utf8.RuneCountInString(a.label)
-		writeUsage(w, a.label+strings.Repeat(" ", pad), a.info, cols)
+	for _, e := range entries {
+		e.render(e.label + strings.Repeat(" ", labelW-utf8.RuneCountInString(e.label)))
 	}
 }
 
@@ -496,38 +535,6 @@ func dedupeCodexAccounts(local CodexAccountUsage, remotes []RemoteResult) []code
 		}
 	}
 	return lines
-}
-
-// writeCodexAccounts prints the header's Codex usage line(s), each tagged with
-// the "codex" provider label. A single line attributable to this machine's own
-// account (mine) renders as a bare "codex"; every other line carries its account
-// — "codex <account>" (the account being the email local-part, the host for an
-// unknown account, or the full email on a local-part collision). The mine
-// carve-out mirrors writeAccounts: a lone foreign remote keeps its account label
-// so its limits can't masquerade as the local account's — the "codex" tag alone
-// wouldn't say whose Codex limits these are. With several lines the labels are
-// padded to a common width so the bars align down the block. Empty writes
-// nothing.
-func writeCodexAccounts(w io.Writer, accounts []codexAccountLine, cols int) {
-	if len(accounts) == 0 {
-		return
-	}
-	if len(accounts) == 1 && accounts[0].mine {
-		writeCodexUsage(w, "codex", accounts[0].info, cols)
-		return
-	}
-	labels := make([]string, len(accounts))
-	labelW := 0
-	for i, a := range accounts {
-		labels[i] = "codex " + a.label
-		if n := utf8.RuneCountInString(labels[i]); n > labelW {
-			labelW = n
-		}
-	}
-	for i, a := range accounts {
-		pad := labelW - utf8.RuneCountInString(labels[i])
-		writeCodexUsage(w, labels[i]+strings.Repeat(" ", pad), a.info, cols)
-	}
 }
 
 // LocalUsage carries this machine's own account usage for each provider,
@@ -918,8 +925,7 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 		ansiBold, time.Now().Format("15:04:05"),
 		plural(live+subs, "agent"), plural(live, "session"), busyStr,
 		ansiReset, dim("["+mode+"]"))
-	writeAccounts(w, accounts, cols)
-	writeCodexAccounts(w, codexAccounts, cols)
+	writeUsageHeader(w, accounts, codexAccounts, cols)
 	fmt.Fprintln(w)
 }
 

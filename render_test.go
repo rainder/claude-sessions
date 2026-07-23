@@ -910,8 +910,9 @@ func TestDedupeCodexAccounts(t *testing.T) {
 }
 
 func TestRenderHeaderCodexSingleAccountLabeled(t *testing.T) {
-	// Claude single account (bare line) plus one Codex account: the Codex line
-	// follows, always tagged "codex" even for a single account.
+	// Sole (mine) Claude account plus one Codex account: the Claude line takes the
+	// dim "claude" tag (symmetric with "codex") since a Codex block shares the
+	// header, and the Codex line is tagged "codex".
 	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	codex := &CodexAccountUsage{Account: "dev@example.com", Info: &CodexUsageInfo{
 		Windows: []codexWindow{{Label: "wk", Pct: 96}},
@@ -924,15 +925,82 @@ func TestRenderHeaderCodexSingleAccountLabeled(t *testing.T) {
 	if len(usage) != 2 {
 		t.Fatalf("want 2 usage lines (claude + codex), got %d: %#v", len(usage), usage)
 	}
-	// Claude first (bare, its account is mine), then the labeled codex line.
-	if strings.HasPrefix(stripANSI(usage[0]), "codex") {
-		t.Errorf("claude line unexpectedly labeled codex: %q", usage[0])
+	if !strings.HasPrefix(usage[0], dim("claude")+" ") {
+		t.Errorf("Claude line should take the dim 'claude' tag when Codex is present: %q", usage[0])
 	}
 	if !strings.HasPrefix(usage[1], dim("codex")+" ") {
 		t.Errorf("codex line missing dim codex label: %q", usage[1])
 	}
 	if !strings.Contains(usage[1], "96%") {
 		t.Errorf("codex line missing window pct: %q", usage[1])
+	}
+}
+
+func TestRenderHeaderMixedBlocksLabelsPadEqual(t *testing.T) {
+	// Sole (mine) Claude + sole (mine) Codex: "claude" and "codex" pad to one
+	// shared width, so the first segment starts in the same column on both lines.
+	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	codex := &CodexAccountUsage{Account: "me@work.com", Info: &CodexUsageInfo{
+		Windows: []codexWindow{{Label: "wk", Pct: 40}},
+	}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+		nil, "", &LocalUsage{Claude: &AccountUsage{Account: "me@work.com", Info: claude}, Codex: codex}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 2 {
+		t.Fatalf("want 2 lines (claude + codex), got %d: %#v", len(usage), usage)
+	}
+	if !strings.HasPrefix(usage[0], dim("claude")+" ") {
+		t.Errorf("Claude line should take the dim 'claude' tag: %q", usage[0])
+	}
+	if !strings.HasPrefix(usage[1], dim("codex")+" ") {
+		t.Errorf("codex line missing dim 'codex' tag: %q", usage[1])
+	}
+	plain0, plain1 := stripANSI(usage[0]), stripANSI(usage[1])
+	c0, c1 := strings.Index(plain0, "5h"), strings.Index(plain1, "wk")
+	if c0 < 0 || c1 < 0 {
+		t.Fatalf("first segment missing: %q / %q", plain0, plain1)
+	}
+	if c0 != c1 {
+		t.Errorf("bars misaligned across blocks: claude 5h at col %d (%q), codex wk at col %d (%q)", c0, plain0, c1, plain1)
+	}
+}
+
+func TestRenderHeaderMultiClaudePlusCodexAlign(t *testing.T) {
+	// Two Claude accounts + one Codex account: the shared label width spans all
+	// three lines, so every first-segment column lines up.
+	mk := func(five float64) *UsageInfo {
+		return &UsageInfo{FiveHour: usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
+	}
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	remotes := []RemoteResult{
+		{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: mk(50)}},
+	}
+	var out bytes.Buffer
+	RenderAll(&out, "1", local, remotes, "", &LocalUsage{
+		Claude: &AccountUsage{Account: "andy@work.com", Info: mk(9)},
+		Codex:  &CodexAccountUsage{Account: "andy@work.com", Info: &CodexUsageInfo{Windows: []codexWindow{{Label: "wk", Pct: 33}}}},
+	}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 3 {
+		t.Fatalf("want 3 lines (2 claude + 1 codex), got %d: %#v", len(usage), usage)
+	}
+	// Claude lines lead with "5h", the codex line with "wk"; all must share one column.
+	cols := []int{
+		strings.Index(stripANSI(usage[0]), "5h"),
+		strings.Index(stripANSI(usage[1]), "5h"),
+		strings.Index(stripANSI(usage[2]), "wk"),
+	}
+	for i, c := range cols {
+		if c < 0 {
+			t.Fatalf("line %d missing first segment: %q", i, stripANSI(usage[i]))
+		}
+		if c != cols[0] {
+			t.Errorf("line %d first-segment col %d != %d:\n%q\n%q\n%q", i, c, cols[0],
+				stripANSI(usage[0]), stripANSI(usage[1]), stripANSI(usage[2]))
+		}
 	}
 }
 
@@ -964,7 +1032,7 @@ func TestRenderHeaderCodexMultiAccountLabelsEachLine(t *testing.T) {
 func TestRenderHeaderCodexSoleForeignRemoteKeepsAccountLabel(t *testing.T) {
 	// Local has no Codex; only a remote does. Its limits must NOT render as a
 	// bare "codex" (that reads as the local account's) — the account label stays,
-	// mirroring writeAccounts' anti-masquerade carve-out.
+	// mirroring writeUsageHeader's Anthropic anti-masquerade carve-out.
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
 	remotes := []RemoteResult{
 		{Name: "pi", CodexUsage: &CodexAccountUsage{Account: "bot@ci.com", Info: &CodexUsageInfo{
@@ -1006,7 +1074,10 @@ func TestRenderHeaderCodexSoleLocalAccountRendersBareCodex(t *testing.T) {
 }
 
 func TestRenderHeaderCodexAbsentEverywhereNoLine(t *testing.T) {
-	// Codex nil locally and on every remote: no extra line, header unchanged.
+	// Codex nil locally and on every remote: no extra line, and the sole (mine)
+	// Claude line stays bare — byte-identical to the pre-Codex layout (no "claude"
+	// tag when there's nothing to align against). local and the remote share the
+	// account, so they collapse to a single mine line.
 	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
 	remotes := []RemoteResult{
@@ -1017,10 +1088,19 @@ func TestRenderHeaderCodexAbsentEverywhereNoLine(t *testing.T) {
 	RenderAll(&out, "1", local, remotes, "",
 		&LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: claude}}, 0, 0, "dir")
 
-	for _, l := range headerUsageLines(out.String()) {
+	usage := headerUsageLines(out.String())
+	for _, l := range usage {
 		if strings.Contains(stripANSI(l), "codex") {
 			t.Errorf("codex line rendered with no codex usage anywhere: %q", l)
 		}
+	}
+	if len(usage) != 1 {
+		t.Fatalf("want 1 bare Claude line, got %d: %#v", len(usage), usage)
+	}
+	var bare strings.Builder
+	writeUsage(&bare, "", claude, 0)
+	if want := strings.TrimRight(bare.String(), "\n"); usage[0] != want {
+		t.Errorf("codex-absent Claude line = %q, want bare (byte-identical) %q", usage[0], want)
 	}
 }
 

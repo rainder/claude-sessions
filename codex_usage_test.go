@@ -130,14 +130,14 @@ func TestCodexWindowLabel(t *testing.T) {
 		seconds int
 		want    string
 	}{
-		{18000, "5h"},    // exact 5h
-		{604800, "wk"},   // exact weekly
-		{2592000, "mo"},  // exact monthly
-		{3600, "1h"},     // generic hours
-		{7200, "2h"},     // generic hours
-		{86400, "24h"},   // 24h < 48h boundary stays in hours
-		{172800, "2d"},   // 48h flips to days
-		{259200, "3d"},   // generic days
+		{18000, "5h"},   // exact 5h
+		{604800, "wk"},  // exact weekly
+		{2592000, "mo"}, // exact monthly
+		{3600, "1h"},    // generic hours
+		{7200, "2h"},    // generic hours
+		{86400, "24h"},  // 24h < 48h boundary stays in hours
+		{172800, "2d"},  // 48h flips to days
+		{259200, "3d"},  // generic days
 	}
 	for _, c := range cases {
 		if got := codexWindowLabel(c.seconds); got != c.want {
