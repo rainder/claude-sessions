@@ -37,6 +37,20 @@ func TestFirstIdleTarget(t *testing.T) {
 	if got, want := firstIdleTarget(skipDisabled), "2"; got != want {
 		t.Fatalf("firstIdleTarget with disabled idle row = %q, want %q", got, want)
 	}
+
+	fallsBackToShell := buildSelectionTargets([]Session{
+		{PID: 1, CWD: "/a", Status: "busy"},
+		{PID: 2, CWD: "/b", Status: "shell", Disabled: true},
+		{PID: 3, CWD: "/c", Status: "shell"},
+	}, nil)
+	if got, want := firstIdleTarget(fallsBackToShell), "3"; got != want {
+		t.Fatalf("firstIdleTarget fallback to shell = %q, want %q", got, want)
+	}
+
+	noneQualify := buildSelectionTargets([]Session{{PID: 1, CWD: "/a", Status: "busy"}}, nil)
+	if got := firstIdleTarget(noneQualify); got != "" {
+		t.Fatalf("firstIdleTarget with no idle/shell sessions = %q, want empty", got)
+	}
 }
 
 func TestBuildSelectionTargets(t *testing.T) {

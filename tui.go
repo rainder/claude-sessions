@@ -670,7 +670,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("NAVIGATION"))
 	fmt.Fprintln(&b, "    ↑ / ↓        move selection")
-	fmt.Fprintln(&b, "    Tab          jump to topmost idle session")
+	fmt.Fprintln(&b, "    Tab          jump to topmost idle (or shell) session")
 	fmt.Fprintln(&b, "    mouse click  select row · double-click opens")
 	fmt.Fprintln(&b, "    mouse wheel  scroll list or inspector")
 	fmt.Fprintln(&b)
