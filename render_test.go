@@ -655,7 +655,7 @@ func TestRenderHeaderSingleAccountRendersBareLine(t *testing.T) {
 	info := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	var out bytes.Buffer
 	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
-		nil, "", &AccountUsage{Account: "andy@work.com", Info: info}, 0, 0, "dir")
+		nil, "", &LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: info}}, 0, 0, "dir")
 
 	usage := headerUsageLines(out.String())
 	if len(usage) != 1 {
@@ -678,7 +678,7 @@ func TestRenderHeaderSoleForeignRemoteKeepsLabel(t *testing.T) {
 		{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: info}},
 	}
 	var out bytes.Buffer
-	RenderAll(&out, "1", local, remotes, "", &AccountUsage{Account: "andy@work.com", Info: nil}, 0, 0, "dir")
+	RenderAll(&out, "1", local, remotes, "", &LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: nil}}, 0, 0, "dir")
 
 	usage := headerUsageLines(out.String())
 	if len(usage) != 1 {
@@ -695,7 +695,7 @@ func TestRenderHeaderSoleLocalUnknownEmailRendersBare(t *testing.T) {
 	info := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	var out bytes.Buffer
 	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
-		nil, "", &AccountUsage{Account: "", Info: info}, 0, 0, "dir")
+		nil, "", &LocalUsage{Claude: &AccountUsage{Account: "", Info: info}}, 0, 0, "dir")
 
 	usage := headerUsageLines(out.String())
 	if len(usage) != 1 {
@@ -717,7 +717,7 @@ func TestRenderHeaderMultiAccountLabelsEachLine(t *testing.T) {
 		{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: mk(50)}},
 	}
 	var out bytes.Buffer
-	RenderAll(&out, "1", local, remotes, "", &AccountUsage{Account: "andy@work.com", Info: mk(9)}, 0, 0, "dir")
+	RenderAll(&out, "1", local, remotes, "", &LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: mk(9)}}, 0, 0, "dir")
 
 	usage := headerUsageLines(out.String())
 	if len(usage) != 2 {
@@ -742,7 +742,7 @@ func TestRenderHeaderMultiAccountColumnsAlign(t *testing.T) {
 		{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: mk(93)}},
 	}
 	var out bytes.Buffer
-	RenderAll(&out, "1", local, remotes, "", &AccountUsage{Account: "andy@work.com", Info: mk(0)}, 0, 0, "dir")
+	RenderAll(&out, "1", local, remotes, "", &LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: mk(0)}}, 0, 0, "dir")
 
 	usage := headerUsageLines(out.String())
 	if len(usage) != 2 {
@@ -755,6 +755,272 @@ func TestRenderHeaderMultiAccountColumnsAlign(t *testing.T) {
 	}
 	if i0 != i1 {
 		t.Errorf("wk column misaligned: line0 col %d (%q), line1 col %d (%q)", i0, plain0, i1, plain1)
+	}
+}
+
+func TestWriteCodexUsage(t *testing.T) {
+	var b strings.Builder
+	writeCodexUsage(&b, "codex", &CodexUsageInfo{
+		Windows: []codexWindow{
+			{Label: "5h", Pct: 42, ResetsAt: time.Now().Add(2 * time.Hour)},
+			{Label: "wk", Pct: 96, ResetsAt: time.Now().Add(48 * time.Hour)},
+		},
+	}, 0)
+	out := b.String()
+	if lines := strings.Count(out, "\n"); lines != 1 {
+		t.Errorf("writeCodexUsage wrote %d lines, want 1: %q", lines, out)
+	}
+	if !strings.HasPrefix(out, dim("codex")+" ") {
+		t.Errorf("missing dim codex label: %q", out)
+	}
+	if !strings.Contains(out, "5h") || !strings.Contains(out, "wk") {
+		t.Errorf("missing window labels: %q", out)
+	}
+	if !strings.Contains(out, "42%") || !strings.Contains(out, "96%") {
+		t.Errorf("missing percentages: %q", out)
+	}
+	// 96% is in the red band, matching writeUsage's coloring via the shared helper.
+	if !strings.Contains(out, colorize(usageColor(96), usageBar(96, usageBarMax))) {
+		t.Errorf("codex 96%% window not colored like writeUsage: %q", out)
+	}
+	if got := strings.Count(out, "█") + strings.Count(out, "░"); got != 2*usageBarMax {
+		t.Errorf("bar cells = %d, want %d (2 windows × max width)", got, 2*usageBarMax)
+	}
+}
+
+func TestWriteCodexUsageEmpty(t *testing.T) {
+	var b strings.Builder
+	writeCodexUsage(&b, "codex", nil, 0)
+	writeCodexUsage(&b, "codex", &CodexUsageInfo{}, 0) // non-nil but no windows
+	if b.Len() != 0 {
+		t.Errorf("writeCodexUsage(nil/empty) wrote %q, want nothing", b.String())
+	}
+}
+
+func TestWriteCodexUsageNoResetOmitsTrailer(t *testing.T) {
+	// A window with a zero reset time renders the bar and percentage but no
+	// countdown trailer (no misleading "<1m"), and leaves no trailing space.
+	var b strings.Builder
+	writeCodexUsage(&b, "codex", &CodexUsageInfo{
+		Windows: []codexWindow{{Label: "wk", Pct: 12}}, // ResetsAt zero
+	}, 0)
+	out := strings.TrimSuffix(b.String(), "\n")
+	if strings.Contains(out, "<1m") {
+		t.Errorf("zero-reset window rendered a misleading countdown: %q", out)
+	}
+	if !strings.Contains(out, "12%") {
+		t.Errorf("missing percentage: %q", out)
+	}
+	if strings.HasSuffix(out, " ") {
+		t.Errorf("zero-reset window left a trailing space: %q", out)
+	}
+}
+
+func TestDedupeCodexAccounts(t *testing.T) {
+	// Mirrors TestDedupeAccounts: the resolution logic is identical, only the
+	// snapshot type and remote source field (r.CodexUsage) differ.
+	info := func() *CodexUsageInfo { return &CodexUsageInfo{} }
+
+	t.Run("same email local and remote collapse, local wins", func(t *testing.T) {
+		localInfo := info()
+		local := CodexAccountUsage{Account: "Dev@Example.com", Info: localInfo}
+		remotes := []RemoteResult{
+			{Name: "pi", CodexUsage: &CodexAccountUsage{Account: "dev@example.com", Info: info()}},
+		}
+		got := dedupeCodexAccounts(local, remotes)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1: %#v", len(got), got)
+		}
+		if got[0].label != "Dev" {
+			t.Errorf("label = %q, want local-part %q", got[0].label, "Dev")
+		}
+		if got[0].info != localInfo {
+			t.Error("first occurrence (local) should win the shared account")
+		}
+		if !got[0].mine {
+			t.Error("local account line should be mine")
+		}
+	})
+
+	t.Run("distinct emails render both, labeled by local-part", func(t *testing.T) {
+		local := CodexAccountUsage{Account: "andy@work.com", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "pi", CodexUsage: &CodexAccountUsage{Account: "bot@ci.com", Info: info()}},
+		}
+		got := dedupeCodexAccounts(local, remotes)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2: %#v", len(got), got)
+		}
+		if got[0].label != "andy" || got[1].label != "bot" {
+			t.Errorf("labels = %q,%q want andy,bot", got[0].label, got[1].label)
+		}
+		if !got[0].mine || got[1].mine {
+			t.Errorf("mine = %v,%v want true (local),false (foreign)", got[0].mine, got[1].mine)
+		}
+	})
+
+	t.Run("unknown accounts never merge, labeled by host name", func(t *testing.T) {
+		local := CodexAccountUsage{Account: "andy@work.com", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "beluga", CodexUsage: &CodexAccountUsage{Account: "", Info: info()}},
+			{Name: "walrus", CodexUsage: &CodexAccountUsage{Account: "", Info: info()}},
+		}
+		got := dedupeCodexAccounts(local, remotes)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (unknowns never merge): %#v", len(got), got)
+		}
+		if got[1].label != "beluga" || got[2].label != "walrus" {
+			t.Errorf("unknown labels = %q,%q want beluga,walrus", got[1].label, got[2].label)
+		}
+	})
+
+	t.Run("nil Info entries drop without polluting the dedupe set", func(t *testing.T) {
+		local := CodexAccountUsage{Account: "bot@ci.com", Info: nil}
+		remotes := []RemoteResult{
+			{Name: "old", CodexUsage: nil}, // pre-propagation / no-codex server
+			{Name: "live", CodexUsage: &CodexAccountUsage{Account: "bot@ci.com", Info: info()}},
+		}
+		got := dedupeCodexAccounts(local, remotes)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1 (only the live snapshot): %#v", len(got), got)
+		}
+		if got[0].label != "bot" {
+			t.Errorf("label = %q, want bot", got[0].label)
+		}
+		// The surviving remote shares local's email, so it's attributable to the
+		// local account even though local's own Info was nil (dropped).
+		if !got[0].mine {
+			t.Error("remote sharing local's email should be mine")
+		}
+	})
+
+	t.Run("colliding local-parts fall back to full email", func(t *testing.T) {
+		local := CodexAccountUsage{Account: "andy@trecs.aero", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "pi", CodexUsage: &CodexAccountUsage{Account: "andy@avisoma.com", Info: info()}},
+		}
+		got := dedupeCodexAccounts(local, remotes)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2: %#v", len(got), got)
+		}
+		if got[0].label != "andy@trecs.aero" || got[1].label != "andy@avisoma.com" {
+			t.Errorf("labels = %q,%q want full emails on collision", got[0].label, got[1].label)
+		}
+	})
+}
+
+func TestRenderHeaderCodexSingleAccountLabeled(t *testing.T) {
+	// Claude single account (bare line) plus one Codex account: the Codex line
+	// follows, always tagged "codex" even for a single account.
+	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	codex := &CodexAccountUsage{Account: "dev@example.com", Info: &CodexUsageInfo{
+		Windows: []codexWindow{{Label: "wk", Pct: 96}},
+	}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+		nil, "", &LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: claude}, Codex: codex}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 2 {
+		t.Fatalf("want 2 usage lines (claude + codex), got %d: %#v", len(usage), usage)
+	}
+	// Claude first (bare, its account is mine), then the labeled codex line.
+	if strings.HasPrefix(stripANSI(usage[0]), "codex") {
+		t.Errorf("claude line unexpectedly labeled codex: %q", usage[0])
+	}
+	if !strings.HasPrefix(usage[1], dim("codex")+" ") {
+		t.Errorf("codex line missing dim codex label: %q", usage[1])
+	}
+	if !strings.Contains(usage[1], "96%") {
+		t.Errorf("codex line missing window pct: %q", usage[1])
+	}
+}
+
+func TestRenderHeaderCodexMultiAccountLabelsEachLine(t *testing.T) {
+	codexInfo := func() *CodexUsageInfo {
+		return &CodexUsageInfo{Windows: []codexWindow{{Label: "wk", Pct: 20}}}
+	}
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	remotes := []RemoteResult{
+		{Name: "pi", CodexUsage: &CodexAccountUsage{Account: "bot@ci.com", Info: codexInfo()}},
+	}
+	var out bytes.Buffer
+	// No Claude usage anywhere → only the two codex lines appear.
+	RenderAll(&out, "1", local, remotes, "",
+		&LocalUsage{Codex: &CodexAccountUsage{Account: "andy@work.com", Info: codexInfo()}}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 2 {
+		t.Fatalf("two codex accounts rendered %d usage lines, want 2: %#v", len(usage), usage)
+	}
+	if !strings.HasPrefix(usage[0], dim("codex andy")+" ") {
+		t.Errorf("first codex line missing 'codex <local-part>' label: %q", usage[0])
+	}
+	if !strings.HasPrefix(usage[1], dim("codex bot")+" ") {
+		t.Errorf("second codex line missing 'codex <host/local-part>' label: %q", usage[1])
+	}
+}
+
+func TestRenderHeaderCodexSoleForeignRemoteKeepsAccountLabel(t *testing.T) {
+	// Local has no Codex; only a remote does. Its limits must NOT render as a
+	// bare "codex" (that reads as the local account's) — the account label stays,
+	// mirroring writeAccounts' anti-masquerade carve-out.
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	remotes := []RemoteResult{
+		{Name: "pi", CodexUsage: &CodexAccountUsage{Account: "bot@ci.com", Info: &CodexUsageInfo{
+			Windows: []codexWindow{{Label: "wk", Pct: 30}},
+		}}},
+	}
+	var out bytes.Buffer
+	RenderAll(&out, "1", local, remotes, "", nil, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 1 {
+		t.Fatalf("want 1 codex line, got %d: %#v", len(usage), usage)
+	}
+	if !strings.HasPrefix(usage[0], dim("codex bot")+" ") {
+		t.Errorf("sole foreign-remote codex line must keep its account label: %q", usage[0])
+	}
+}
+
+func TestRenderHeaderCodexSoleLocalAccountRendersBareCodex(t *testing.T) {
+	// This machine's own Codex account, sole line → bare "codex" tag (no account
+	// suffix), since there's nothing to disambiguate against.
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", local, nil, "",
+		&LocalUsage{Codex: &CodexAccountUsage{Account: "me@work.com", Info: &CodexUsageInfo{
+			Windows: []codexWindow{{Label: "wk", Pct: 55}},
+		}}}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 1 {
+		t.Fatalf("want 1 codex line, got %d: %#v", len(usage), usage)
+	}
+	if !strings.HasPrefix(usage[0], dim("codex")+" ") {
+		t.Errorf("sole local codex line should render bare 'codex': %q", usage[0])
+	}
+	if strings.Contains(stripANSI(usage[0]), "codex me") {
+		t.Errorf("sole local codex line should not carry an account suffix: %q", usage[0])
+	}
+}
+
+func TestRenderHeaderCodexAbsentEverywhereNoLine(t *testing.T) {
+	// Codex nil locally and on every remote: no extra line, header unchanged.
+	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	remotes := []RemoteResult{
+		{Name: "pi", Usage: &AccountUsage{Account: "andy@work.com",
+			Info: &UsageInfo{FiveHour: usageBucket{Pct: 1}, SevenDay: usageBucket{Pct: 2}}}},
+	}
+	var out bytes.Buffer
+	RenderAll(&out, "1", local, remotes, "",
+		&LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: claude}}, 0, 0, "dir")
+
+	for _, l := range headerUsageLines(out.String()) {
+		if strings.Contains(stripANSI(l), "codex") {
+			t.Errorf("codex line rendered with no codex usage anywhere: %q", l)
+		}
 	}
 }
 

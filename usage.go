@@ -9,8 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -280,94 +278,15 @@ func loadUsageCache() *UsageInfo {
 	return &c.Info
 }
 
-// UsageHub polls the usage endpoint in a background goroutine so the render
-// loop never blocks on credentials or the network (RemoteHub's pattern,
-// minus the wake pipe — the TUI repaints on its own tick, and a slightly
-// stale percentage is fine). Snapshot is nil until the first fetch lands, so
-// the bar lazily appears on a later repaint; a failed refresh keeps the
-// previous value visible instead of blinking the bar away.
-type UsageHub struct {
-	mu     sync.Mutex
-	info   *UsageInfo
-	paused atomic.Bool
-	kick   chan struct{}
-	stop   chan struct{}
-}
+// UsageHub polls the Anthropic OAuth usage endpoint in the background so the
+// render loop never blocks on credentials or the network (see usagePoller for
+// the shared mechanism it delegates to). The public surface — NewUsageHub,
+// Snapshot, Pause, Resume, Kick, Shutdown — is unchanged.
+type UsageHub = usagePoller[UsageInfo]
 
 // NewUsageHub starts the poller and returns immediately; the first fetch is
-// kicked off asynchronously. A recent disk-cached snapshot seeds the header
-// so a restart while the endpoint is throttling still shows a (stale) bar.
+// kicked off asynchronously. A recent disk-cached snapshot seeds the header so
+// a restart while the endpoint is throttling still shows a (stale) bar.
 func NewUsageHub() *UsageHub {
-	h := &UsageHub{
-		info: loadUsageCache(),
-		kick: make(chan struct{}, 1),
-		stop: make(chan struct{}),
-	}
-	go h.run()
-	h.Kick()
-	return h
-}
-
-func (h *UsageHub) run() {
-	t := time.NewTicker(usageRefreshInterval)
-	defer t.Stop()
-	backoff := usageRetryMin
-	var retry <-chan time.Time
-	for {
-		select {
-		case <-h.stop:
-			return
-		case <-t.C:
-		case <-h.kick:
-		case <-retry:
-		}
-		retry = nil
-		if h.paused.Load() {
-			continue
-		}
-		if info, err := fetchUsage(); err == nil {
-			h.mu.Lock()
-			h.info = info
-			h.mu.Unlock()
-			saveUsageCache(info)
-			backoff = usageRetryMin
-		} else {
-			retry = time.After(backoff)
-			backoff *= 2
-			if backoff > usageRefreshInterval {
-				backoff = usageRefreshInterval
-			}
-		}
-	}
-}
-
-// Snapshot returns the last successful fetch, or nil if none yet.
-func (h *UsageHub) Snapshot() *UsageInfo {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.info
-}
-
-// Pause makes the poller ignore ticks and kicks — used while an external
-// program owns the terminal and nothing renders.
-func (h *UsageHub) Pause() { h.paused.Store(true) }
-
-// Resume re-enables polling and kicks an immediate refetch.
-func (h *UsageHub) Resume() {
-	h.paused.Store(false)
-	h.Kick()
-}
-
-// Kick requests an immediate refetch. Non-blocking; coalesces when one is
-// already pending.
-func (h *UsageHub) Kick() {
-	select {
-	case h.kick <- struct{}{}:
-	default:
-	}
-}
-
-// Shutdown stops the background goroutine.
-func (h *UsageHub) Shutdown() {
-	close(h.stop)
+	return newUsagePoller(loadUsageCache(), fetchUsage, saveUsageCache)
 }

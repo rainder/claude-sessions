@@ -104,6 +104,34 @@ func TestFetchRemoteDecodesOptionalUsage(t *testing.T) {
 	}
 }
 
+func TestFetchRemoteDecodesOptionalCodexUsage(t *testing.T) {
+	// Marshal a CodexAccountUsage exactly as the server does so the test tracks
+	// the real "codex_usage" serialization.
+	codex := CodexAccountUsage{Account: "bot@ci.com", Info: &CodexUsageInfo{
+		Plan:    "pro",
+		Windows: []codexWindow{{Label: "wk", Pct: 88}},
+	}}
+	payload, err := json.Marshal(map[string]any{"sessions": []Session{}, "codex_usage": codex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fetchRemoteFixture(t, string(payload))
+	if got.CodexUsage == nil {
+		t.Fatal("codex_usage decoded as nil, want populated")
+	}
+	if got.CodexUsage.Account != "bot@ci.com" {
+		t.Fatalf("account = %q, want bot@ci.com", got.CodexUsage.Account)
+	}
+	if got.CodexUsage.Info == nil || len(got.CodexUsage.Info.Windows) != 1 || got.CodexUsage.Info.Windows[0].Pct != 88 {
+		t.Fatalf("codex_usage.info wrong: %#v", got.CodexUsage.Info)
+	}
+
+	// An older server (or one with no Codex auth) omits the key → nil, no error.
+	if old := fetchRemoteFixture(t, `{"sessions":[]}`); old.CodexUsage != nil {
+		t.Fatalf("missing codex_usage decoded as %#v, want nil", old.CodexUsage)
+	}
+}
+
 func fetchRemoteFixture(t *testing.T, body string) RemoteResult {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

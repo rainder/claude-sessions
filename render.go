@@ -209,46 +209,26 @@ const (
 	usageBarMin = 4
 )
 
-// writeUsage prints one account rate-limit line under the title, or nothing
-// when usage data isn't available (nil). All buckets share the line:
+// writeUsage prints one Anthropic account rate-limit line under the title, or
+// nothing when usage data isn't available (nil). All buckets share the line:
 // "5h <bar> 42% 2h   wk <bar> 13% 3d   Fable <bar> 10% 5d   cr <bar> 5% $1,123".
 // The trailing figure is the time remaining until that bucket resets (rate
-// limits) or the amount of credits spent (extra usage). The model-scoped
-// weekly segment (labeled with the model's display name, e.g. "Fable") only
-// appears when the account has such a limit; the credits segment only
-// appears when extra usage is enabled on the account. Bars are sized to fit
-// cols (usageBarMin..usageBarMax cells each); cols <= 0 means unknown width
-// and gets the maximum.
-//
-// label is an optional dim account prefix (email local-part, or a host name)
-// for the multi-account header; "" renders the bare line, byte-for-byte the
-// single-account layout. Its width counts toward the fixed budget so the bars
-// still shrink to fit cols. Trailing spaces (from writeAccounts padding every
-// label to a common width) sit outside the dim escape so they don't leave a
-// visible dim tail, and are still counted in prefixW so the "5h" segment
-// lands in the same column on every line.
+// limits) or the amount of credits spent (extra usage). The model-scoped weekly
+// segment (labeled with the model's display name, e.g. "Fable") only appears
+// when the account has such a limit; the credits segment only appears when extra
+// usage is enabled on the account. It builds the Anthropic segments and hands
+// them to renderUsageSegs — see there for the label/prefix and cols/bar-sizing
+// mechanics shared with the Codex line.
 func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	if u == nil {
 		return
 	}
-	prefix := ""
-	prefixW := 0
-	if label != "" {
-		core := strings.TrimRight(label, " ")
-		pad := len(label) - len(core)
-		prefix = dim(core) + " " + strings.Repeat(" ", pad)
-		prefixW = len(label) + 1
-	}
-	type seg struct {
-		label, trailer string
-		pct            float64
-	}
-	segs := []seg{
+	segs := []usageSeg{
 		{"5h", formatUntil(u.FiveHour.ResetsAt), u.FiveHour.Pct},
 		{"wk", formatUntil(u.SevenDay.ResetsAt), u.SevenDay.Pct},
 	}
 	if u.WeeklyScopedLabel != "" {
-		segs = append(segs, seg{
+		segs = append(segs, usageSeg{
 			u.WeeklyScopedLabel,
 			formatUntil(u.WeeklyScoped.ResetsAt),
 			u.WeeklyScoped.Pct,
@@ -259,17 +239,59 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 		if sym == "" || sym == "USD" {
 			sym = "$"
 		}
-		segs = append(segs, seg{
+		segs = append(segs, usageSeg{
 			"cr",
 			sym + moneyGrouped(c.Used, c.DecimalPlaces),
 			c.Pct(),
 		})
 	}
+	renderUsageSegs(w, label, segs, cols)
+}
+
+// usageSeg is one labeled bar segment on a header usage line: a short label, its
+// utilization percentage, and a trailer (a reset countdown, or a credits
+// figure). Provider-agnostic — writeUsage (Anthropic) and writeCodexUsage
+// (Codex) each build their own segments and hand them to renderUsageSegs.
+type usageSeg struct {
+	label, trailer string
+	pct            float64
+}
+
+// renderUsageSegs writes one header usage line: an optional dim label prefix
+// followed by the segments, each "<label> <bar> <pct>% <trailer>", joined by
+// three spaces. Bars are sized to fit cols (usageBarMin..usageBarMax cells each,
+// shared across the line); cols <= 0 means unknown width and gets the maximum.
+//
+// label is an optional dim account prefix (email local-part, host name, or the
+// "codex" provider tag) for the multi-account header; "" renders the bare line.
+// Its width counts toward the fixed budget so the bars still shrink to fit cols.
+// Trailing spaces (from padding every label to a common width) sit outside the
+// dim escape so they don't leave a visible dim tail, and are still counted in
+// prefixW so the first segment lands in the same column on every line. Empty
+// segs writes nothing.
+func renderUsageSegs(w io.Writer, label string, segs []usageSeg, cols int) {
+	if len(segs) == 0 {
+		return
+	}
+	prefix := ""
+	prefixW := 0
+	if label != "" {
+		core := strings.TrimRight(label, " ")
+		pad := len(label) - len(core)
+		prefix = dim(core) + " " + strings.Repeat(" ", pad)
+		prefixW = len(label) + 1
+	}
 	// Everything except the bars is fixed width (including the account prefix);
-	// divide what's left of the terminal between the bars.
+	// divide what's left of the terminal between the bars. An empty trailer (a
+	// Codex window with no reset time) contributes neither its separating space
+	// nor any width; Anthropic trailers are never empty, so its budget and bytes
+	// are unchanged.
 	fixed := prefixW + 3*(len(segs)-1) // prefix + inter-segment separators
 	for _, s := range segs {
-		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%3.0f%%", s.pct)) + 1 + len(s.trailer)
+		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%3.0f%%", s.pct))
+		if s.trailer != "" {
+			fixed += 1 + len(s.trailer)
+		}
 	}
 	barW := usageBarMax
 	if cols > 0 {
@@ -282,11 +304,14 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	}
 	parts := make([]string, len(segs))
 	for i, s := range segs {
-		parts[i] = fmt.Sprintf("%s %s %3.0f%% %s",
+		part := fmt.Sprintf("%s %s %3.0f%%",
 			s.label,
 			colorize(usageColor(s.pct), usageBar(s.pct, barW)),
-			s.pct,
-			dim(s.trailer))
+			s.pct)
+		if s.trailer != "" {
+			part += " " + dim(s.trailer)
+		}
+		parts[i] = part
 	}
 	fmt.Fprintln(w, prefix+strings.Join(parts, "   "))
 }
@@ -391,6 +416,127 @@ func writeAccounts(w io.Writer, accounts []accountUsageLine, cols int) {
 		pad := labelW - utf8.RuneCountInString(a.label)
 		writeUsage(w, a.label+strings.Repeat(" ", pad), a.info, cols)
 	}
+}
+
+// writeCodexUsage prints one Codex account usage line: a dim label prefix
+// followed by one bar segment per rate-limit window the endpoint reported (5h /
+// wk / mo …, see codexWindowLabel). Bars, colors, percent formatting, and the
+// dim reset trailer match writeUsage. Nil info or an account with no windows
+// writes nothing.
+func writeCodexUsage(w io.Writer, label string, info *CodexUsageInfo, cols int) {
+	if info == nil || len(info.Windows) == 0 {
+		return
+	}
+	segs := make([]usageSeg, len(info.Windows))
+	for i, win := range info.Windows {
+		// A window with no reset time (ResetsAt zero) shows a bar and percentage
+		// but no countdown trailer — better a blank than a misleading "<1m".
+		trailer := ""
+		if !win.ResetsAt.IsZero() {
+			trailer = formatUntil(win.ResetsAt)
+		}
+		segs[i] = usageSeg{label: win.Label, trailer: trailer, pct: win.Pct}
+	}
+	renderUsageSegs(w, label, segs, cols)
+}
+
+// codexAccountLine is one resolved Codex header line, mirroring accountUsageLine
+// for the Codex provider (see dedupeCodexAccounts).
+type codexAccountLine struct {
+	label string // email local-part, or host name for an unknown account
+	email string // full account email ("" unknown); disambiguates a label collision
+	info  *CodexUsageInfo
+	// mine marks a line attributable to this machine's Codex account: the local
+	// entry, or a remote sharing the local email (which merges into local
+	// anyway). Only such a line may render as a bare "codex" tag when it's the
+	// sole survivor — a lone foreign remote keeps its account label or its
+	// limits masquerade as the local account's, mirroring accountUsageLine.mine.
+	mine bool
+}
+
+// dedupeCodexAccounts resolves which Codex usage lines the header shows and in
+// what order, mirroring dedupeAccounts exactly for the Codex provider: local
+// first then remotes in config order; nil-Info entries dropped; known accounts
+// deduped by lowercased email (first/local wins); unknown ("" email) accounts
+// never merge and are keyed by host; colliding known-account local-parts
+// promoted to the full email. The only differences from dedupeAccounts are the
+// snapshot type and the remote source field (r.CodexUsage, not r.Usage).
+func dedupeCodexAccounts(local CodexAccountUsage, remotes []RemoteResult) []codexAccountLine {
+	var lines []codexAccountLine
+	seen := make(map[string]bool)
+	add := func(account, host string, info *CodexUsageInfo, isLocal bool) {
+		if info == nil {
+			return
+		}
+		mine := isLocal || (account != "" && strings.EqualFold(account, local.Account))
+		if account == "" {
+			lines = append(lines, codexAccountLine{label: host, info: info, mine: mine})
+			return
+		}
+		key := strings.ToLower(account)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		lines = append(lines, codexAccountLine{label: accountLocalPart(account), email: account, info: info, mine: mine})
+	}
+	add(local.Account, "local", local.Info, true)
+	for _, r := range remotes {
+		if r.CodexUsage != nil {
+			add(r.CodexUsage.Account, r.Name, r.CodexUsage.Info, false)
+		}
+	}
+	labelCount := make(map[string]int)
+	for _, l := range lines {
+		labelCount[l.label]++
+	}
+	for i, l := range lines {
+		if l.email != "" && labelCount[l.label] > 1 {
+			lines[i].label = l.email
+		}
+	}
+	return lines
+}
+
+// writeCodexAccounts prints the header's Codex usage line(s), each tagged with
+// the "codex" provider label. A single line attributable to this machine's own
+// account (mine) renders as a bare "codex"; every other line carries its account
+// — "codex <account>" (the account being the email local-part, the host for an
+// unknown account, or the full email on a local-part collision). The mine
+// carve-out mirrors writeAccounts: a lone foreign remote keeps its account label
+// so its limits can't masquerade as the local account's — the "codex" tag alone
+// wouldn't say whose Codex limits these are. With several lines the labels are
+// padded to a common width so the bars align down the block. Empty writes
+// nothing.
+func writeCodexAccounts(w io.Writer, accounts []codexAccountLine, cols int) {
+	if len(accounts) == 0 {
+		return
+	}
+	if len(accounts) == 1 && accounts[0].mine {
+		writeCodexUsage(w, "codex", accounts[0].info, cols)
+		return
+	}
+	labels := make([]string, len(accounts))
+	labelW := 0
+	for i, a := range accounts {
+		labels[i] = "codex " + a.label
+		if n := utf8.RuneCountInString(labels[i]); n > labelW {
+			labelW = n
+		}
+	}
+	for i, a := range accounts {
+		pad := labelW - utf8.RuneCountInString(labels[i])
+		writeCodexUsage(w, labels[i]+strings.Repeat(" ", pad), a.info, cols)
+	}
+}
+
+// LocalUsage carries this machine's own account usage for each provider,
+// threaded into the renderer so each provider's snapshot is deduped against its
+// remotes' before the header draws. A nil LocalUsage, or a nil field, renders no
+// bars for that provider — the Codex field is independent of the Anthropic one.
+type LocalUsage struct {
+	Claude *AccountUsage
+	Codex  *CodexAccountUsage
 }
 
 // formatTokens renders a context-token count compactly: 0 → "-", under 1k as
@@ -748,9 +894,10 @@ func plural(n int, word string) string {
 }
 
 // renderHeader prints the title line with live counts, the optional account
-// usage bars (one line per distinct account, see dedupeAccounts), and the
-// trailing blank line — shared by all three views.
-func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, cols int) {
+// usage bars (Anthropic lines then Codex lines, one line per distinct account —
+// see dedupeAccounts / dedupeCodexAccounts), and the trailing blank line —
+// shared by all three views.
+func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int) {
 	live, busy, subs := 0, 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -772,6 +919,7 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 		plural(live+subs, "agent"), plural(live, "session"), busyStr,
 		ansiReset, dim("["+mode+"]"))
 	writeAccounts(w, accounts, cols)
+	writeCodexAccounts(w, codexAccounts, cols)
 	fmt.Fprintln(w)
 }
 
@@ -807,24 +955,32 @@ func (w *frameWriter) record(targetID string, openable bool) {
 // loop uses the frame to crop a viewport and resolve mouse clicks, while
 // RenderAll wraps it for callers that only want the text. Arguments mirror
 // RenderAll (see its doc for cols/step/sortMode semantics).
-func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *AccountUsage, cols, step int, sortMode string) tableFrame {
+func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *LocalUsage, cols, step int, sortMode string) tableFrame {
 	sections := buildSections(local, remotes)
-	// Pair the local snapshot with every remote's, dedupe by account, and carry
-	// the resolved lines through the header so each distinct account shows once.
+	// Pair each provider's local snapshot with every remote's, dedupe by account,
+	// and carry the resolved lines through the header so each distinct account
+	// shows once. The two providers dedupe independently.
 	var localAU AccountUsage
+	var localCodex CodexAccountUsage
 	if localUsage != nil {
-		localAU = *localUsage
+		if localUsage.Claude != nil {
+			localAU = *localUsage.Claude
+		}
+		if localUsage.Codex != nil {
+			localCodex = *localUsage.Codex
+		}
 	}
 	accounts := dedupeAccounts(localAU, remotes)
+	codexAccounts := dedupeCodexAccounts(localCodex, remotes)
 	w := &frameWriter{}
 	var overflowing bool
 	switch viewMode {
 	case "2":
-		overflowing = renderAllMinimal(w, sections, sel, accounts, cols, step, sortMode)
+		overflowing = renderAllMinimal(w, sections, sel, accounts, codexAccounts, cols, step, sortMode)
 	case "3":
-		overflowing = renderAllIntermediate(w, sections, sel, accounts, cols, step, sortMode)
+		overflowing = renderAllIntermediate(w, sections, sel, accounts, codexAccounts, cols, step, sortMode)
 	default:
-		overflowing = renderAllFull(w, sections, sel, accounts, cols, step, sortMode)
+		overflowing = renderAllFull(w, sections, sel, accounts, codexAccounts, cols, step, sortMode)
 	}
 	return tableFrame{
 		lines:       strings.Split(w.buf.String(), "\n"),
@@ -836,17 +992,17 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 // RenderAll writes the live table (or a one-shot snapshot) to w, with all
 // rows sorted by cwd. Per-host remote sections appear after the local one,
 // each separated by a hostname label and a blank line. localUsage is this
-// machine's account rate-limit snapshot (nil when unknown); it is deduped
-// against every remote's own usage and rendered as one bar line per distinct
-// account below the title, sized to cols (cols <= 0 = unknown terminal width).
-// step is the shared marquee clock (see marqueeCell); overflowing reports
-// whether any visible DIR cell was scrolled, so the caller can drive animation
-// ticks only when needed.
+// machine's per-provider account rate-limit snapshot (nil when unknown); each
+// provider is deduped against every remote's own usage and rendered as one bar
+// line per distinct account below the title, sized to cols (cols <= 0 = unknown
+// terminal width). step is the shared marquee clock (see marqueeCell);
+// overflowing reports whether any visible DIR cell was scrolled, so the caller
+// can drive animation ticks only when needed.
 //
 // It is a thin compatibility wrapper over BuildTableFrame: joining the frame
 // lines with newlines reproduces the exact bytes the row writers emitted, so
 // the `--once` path and existing callers/tests keep the same output and return.
-func RenderAll(w io.Writer, viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *AccountUsage, cols, step int, sortMode string) (overflowing bool) {
+func RenderAll(w io.Writer, viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *LocalUsage, cols, step int, sortMode string) (overflowing bool) {
 	frame := BuildTableFrame(viewMode, local, remotes, sel, localUsage, cols, step, sortMode)
 	io.WriteString(w, strings.Join(frame.lines, "\n"))
 	return frame.overflowing
@@ -956,7 +1112,7 @@ func modelCell(model string, width int, plain bool) string {
 	return cell
 }
 
-func renderAllFull(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, cols, step int, sortMode string) (overflowing bool) {
+func renderAllFull(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -986,7 +1142,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 		tmuxW = max(tmuxW, len(t))
 	}
 
-	renderHeader(w, sections, "full", accounts, cols)
+	renderHeader(w, sections, "full", accounts, codexAccounts, cols)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -1081,7 +1237,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 // Intermediate view — full's columns minus TMUX, VER, SID.
 // ============================================================================
 
-func renderAllIntermediate(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, cols, step int, sortMode string) (overflowing bool) {
+func renderAllIntermediate(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -1106,7 +1262,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	renderHeader(w, sections, "intermediate", accounts, cols)
+	renderHeader(w, sections, "intermediate", accounts, codexAccounts, cols)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -1206,7 +1362,7 @@ func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
 	}
 }
 
-func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, cols, step int, sortMode string) (overflowing bool) {
+func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -1230,7 +1386,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 		nameW = max(nameW, len(r.display))
 	}
 
-	renderHeader(w, sections, "minimal", accounts, cols)
+	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(

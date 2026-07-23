@@ -67,6 +67,10 @@ type server struct {
 	// account it belongs to. nil (no hub) or a nil return (no fetch yet) omits
 	// the "usage" key, so old clients and tests without a hub still get 200.
 	usageSnapshot func() *AccountUsage
+	// codexUsageSnapshot returns this host's OpenAI Codex account usage. nil (no
+	// hub) or a nil return (no fetch yet, or no Codex auth) omits the
+	// "codex_usage" key — the account email rides in the snapshot itself.
+	codexUsageSnapshot func() *CodexAccountUsage
 	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
 	// a stub to assert bounds and header wiring without touching tmux.
 	previewLoader func(int, PreviewLimits) (PreviewResult, error)
@@ -268,6 +272,12 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 	if s.usageSnapshot != nil {
 		if u := s.usageSnapshot(); u != nil {
 			resp["usage"] = u
+		}
+	}
+	// "codex_usage" is the OpenAI Codex equivalent, same optionality.
+	if s.codexUsageSnapshot != nil {
+		if u := s.codexUsageSnapshot(); u != nil {
+			resp["codex_usage"] = u
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -755,6 +765,12 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	defer usageHub.Shutdown()
 	accountEmail := loadAccountEmail()
 
+	// Codex account usage: same background poller, so a remote host also surfaces
+	// its own Codex account's limits. The snapshot is already account-paired (the
+	// email rides in the Codex payload), so no separate identity read is needed.
+	codexUsageHub := NewCodexUsageHub()
+	defer codexUsageHub.Shutdown()
+
 	s := &server{
 		token:        tok,
 		host:         host,
@@ -766,6 +782,7 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 			}
 			return &AccountUsage{Account: accountEmail, Info: info}
 		},
+		codexUsageSnapshot: codexUsageHub.Snapshot,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)

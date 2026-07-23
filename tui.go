@@ -117,6 +117,11 @@ func RunTUI(interval time.Duration) error {
 	defer usageHub.Shutdown()
 	localAccount := loadAccountEmail()
 
+	// Codex usage bars: same non-blocking poller. The snapshot arrives already
+	// account-paired (email is in the Codex payload), so no local identity read.
+	codexUsageHub := NewCodexUsageHub()
+	defer codexUsageHub.Shutdown()
+
 	hostUsageHub := NewHostUsageHub(interval)
 	defer hostUsageHub.Shutdown()
 	localName := shortHostname()
@@ -246,7 +251,10 @@ func RunTUI(interval time.Duration) error {
 			Name:      localName,
 			Sessions:  local,
 			HostUsage: hostUsageHub.Snapshot(),
-		}, remotes, state.sel, &AccountUsage{Account: localAccount, Info: usageHub.Snapshot()}, cols, 0, sortMode)
+		}, remotes, state.sel, &LocalUsage{
+			Claude: &AccountUsage{Account: localAccount, Info: usageHub.Snapshot()},
+			Codex:  codexUsageHub.Snapshot(),
+		}, cols, 0, sortMode)
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if rows > 0 {
@@ -295,11 +303,13 @@ func RunTUI(interval time.Duration) error {
 			pause: func() {
 				hub.Pause()
 				usageHub.Pause()
+				codexUsageHub.Pause()
 				hostUsageHub.Pause()
 			},
 			resume: func() {
 				hub.Resume()
 				usageHub.Resume()
+				codexUsageHub.Resume()
 				hostUsageHub.Resume()
 			},
 		}
@@ -530,6 +540,7 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "r", "R":
 				usageHub.Kick()
+				codexUsageHub.Kick()
 				hostUsageHub.Kick()
 				refresh(true)
 				render()

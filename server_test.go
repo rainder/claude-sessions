@@ -739,6 +739,67 @@ func TestSessionsOmitsUsageWhenSnapshotNilOrHubAbsent(t *testing.T) {
 	}
 }
 
+func TestSessionsIncludesCodexUsageWhenSnapshotPresent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{
+		token: "secret",
+		host:  "devbox",
+		codexUsageSnapshot: func() *CodexAccountUsage {
+			return &CodexAccountUsage{
+				Account: "bot@ci.com",
+				Info:    &CodexUsageInfo{Plan: "pro", Windows: []codexWindow{{Label: "wk", Pct: 88}}},
+			}
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	var raw map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	codex, ok := raw["codex_usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("codex_usage not an object: %#v", raw["codex_usage"])
+	}
+	if codex["account"] != "bot@ci.com" {
+		t.Fatalf("codex_usage.account = %#v, want bot@ci.com", codex["account"])
+	}
+	if _, ok := codex["info"].(map[string]any); !ok {
+		t.Fatalf("codex_usage.info not an object: %#v", codex["info"])
+	}
+}
+
+func TestSessionsOmitsCodexUsageWhenSnapshotNilOrHubAbsent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cases := map[string]*server{
+		"no hub":       {token: "secret", host: "devbox"},
+		"nil snapshot": {token: "secret", host: "devbox", codexUsageSnapshot: func() *CodexAccountUsage { return nil }},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+			s.sessions(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+			}
+			var raw map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := raw["codex_usage"]; present {
+				t.Fatalf("codex_usage key present when it should be omitted: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func getServerSessions(s *server) (int, []Session, error) {
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
 	req.Header.Set("Authorization", "Bearer secret")
