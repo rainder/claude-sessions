@@ -79,16 +79,22 @@ func (s Session) Headless() bool {
 // DisplayName resolves the label for the NAME column and whether it should
 // render dimmed. Preference: user-set name → worktree dir name → derived name →
 // "-". Only a name the user set themselves renders bright and wins outright;
-// everything auto-derived is dimmed.
+// everything auto-derived is dimmed. A name of literally "-" is treated as
+// unset (matches the column's own empty placeholder) and falls through to
+// the usual chain rather than rendering bright as "-".
 func (s Session) DisplayName() (label string, dimmed bool) {
-	if s.Name != "" && s.NameSource != "derived" {
-		return s.Name, false
+	name := s.Name
+	if name == "-" {
+		name = ""
+	}
+	if name != "" && s.NameSource != "derived" {
+		return name, false
 	}
 	if wt := worktreeName(s.CWD); wt != "" {
 		return wt, true
 	}
-	if s.Name != "" { // derived
-		return s.Name, true
+	if name != "" { // derived
+		return name, true
 	}
 	return "-", true
 }

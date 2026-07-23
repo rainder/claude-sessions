@@ -27,6 +27,8 @@ func TestDisplayName(t *testing.T) {
 		{"worktree fallback dimmed", Session{CWD: wtCWD}, "extraction-tables-unify", true},
 		{"worktree beats tmux", Session{Tmux: "sess:0.0", CWD: wtCWD}, "extraction-tables-unify", true},
 		{"last resort dash", Session{CWD: "/tmp/plain"}, "-", true},
+		{"user-set dash treated as unset", Session{Name: "-", NameSource: "user", CWD: "/tmp/plain"}, "-", true},
+		{"user-set dash falls to worktree", Session{Name: "-", NameSource: "user", CWD: wtCWD}, "extraction-tables-unify", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

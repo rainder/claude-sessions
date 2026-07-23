@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 func parseDarwinTop(out string) HostUsage {
@@ -163,12 +161,25 @@ type darwinHostUsageCollector struct {
 }
 
 func newDarwinHostUsageCollector() hostUsageCollector {
-	memSizeBytes, _ := unix.SysctlUint64("hw.memsize")
+	memSizeBytes, _ := readDarwinMemSize()
 	return &darwinHostUsageCollector{
 		runTop:       runDarwinTop,
 		runVMStat:    runDarwinVMStat,
 		memSizeBytes: memSizeBytes,
 	}
+}
+
+// readDarwinMemSize shells out to `sysctl -n hw.memsize` for total physical
+// memory in bytes. Shelling out — rather than x/sys/unix's SysctlUint64,
+// which only exists on darwin — keeps this file buildable when
+// cross-compiling for linux; the collector it feeds is only ever
+// constructed at runtime when GOOS is actually darwin (see host_usage.go).
+func readDarwinMemSize() (uint64, bool) {
+	out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+	if err != nil {
+		return 0, false
+	}
+	return parseDarwinUint(string(out))
 }
 
 func runDarwinTop(ctx context.Context) ([]byte, error) {
