@@ -10,69 +10,63 @@ import (
 	"syscall"
 )
 
-func parseDarwinTop(out string) HostUsage {
-	var cpuLine, loadLine string
+// parseDarwinIostat extracts whole-host CPU and load averages from the output
+// of `iostat -c 2 -w 1`.
+//
+// Why iostat rather than `top -l 2` (the previous source): top's two-sample
+// invocation performs a full mach task scan per sample to build the per-process
+// figures we never use, costing ~1.15s of mostly-sys CPU on every poll
+// (host_usage.go hostUsageInterval, every 2s in both the TUI and server).
+// iostat reads the same host CPU aggregate and load averages for ~0.00s CPU.
+//
+// iostat prints two header lines (per-disk labels, then column units) followed
+// by one data line per sample. The first data line is the since-boot average
+// and must be ignored; the second — the last data line here — is the 1-second
+// interval sample we want. The disk-column count varies by machine (0..N
+// disks), so we parse from the end: the trailing six fields are always
+// `us sy id 1m 5m 15m` regardless of disk count. Header lines carry
+// non-numeric words and so never match numericFields, leaving the last
+// all-numeric line as the final data sample. With only one data line present
+// (a truncated capture) that line is the last one and gets used, yielding
+// since-boot figures instead of nothing — an acceptable degradation.
+func parseDarwinIostat(out string) HostUsage {
+	var fields []float64
 	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "CPU usage:") {
-			cpuLine = line
-		}
-		if strings.HasPrefix(line, "Load Avg:") {
-			loadLine = line
+		if nums, ok := numericFields(line); ok {
+			fields = nums
 		}
 	}
+	n := len(fields)
+	if n < 6 {
+		return HostUsage{}
+	}
+	// f[n-6..n-1] = us sy id 1m 5m 15m. CPU% follows the old "100 - idle"
+	// convention; hostPercent / hostLoadAverage reject any NaN/Inf that slips
+	// through as a parseable-but-nonsensical value.
 	return HostUsage{
-		CPUPercent: parseDarwinCPU(cpuLine),
-		Load:       parseDarwinLoadAverage(loadLine),
+		CPUPercent: hostPercent(100 - fields[n-4]),
+		Load:       hostLoadAverage(fields[n-3], fields[n-2], fields[n-1]),
 	}
 }
 
-// parseDarwinLoadAverage parses a macOS `top` "Load Avg: 1.24, 0.96, 0.72"
-// line into a LoadAverage via hostLoadAverage. Returns nil for a missing or
-// wrong prefix, a value count other than three, or any unparsable/invalid
-// member (empty, non-numeric, negative, NaN, or infinite).
-func parseDarwinLoadAverage(line string) *LoadAverage {
-	const prefix = "Load Avg:"
-	if !strings.HasPrefix(line, prefix) {
-		return nil
+// numericFields splits line on whitespace and parses every field as a float,
+// returning the values and true only when the line is non-empty and all fields
+// are numeric. iostat's header and blank lines fail this, so scanning for the
+// last line that satisfies it isolates the final data sample.
+func numericFields(line string) ([]float64, bool) {
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return nil, false
 	}
-	parts := strings.Split(strings.TrimPrefix(line, prefix), ",")
-	if len(parts) != 3 {
-		return nil
-	}
-	values := make([]float64, 3)
+	values := make([]float64, len(parts))
 	for i, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			return nil
-		}
 		v, err := strconv.ParseFloat(part, 64)
 		if err != nil {
-			return nil
+			return nil, false
 		}
 		values[i] = v
 	}
-	return hostLoadAverage(values[0], values[1], values[2])
-}
-
-func parseDarwinCPU(line string) *float64 {
-	parts := strings.Split(line, ",")
-	if len(parts) != 3 {
-		return nil
-	}
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if !strings.HasSuffix(part, "% idle") {
-			continue
-		}
-		number := strings.TrimSuffix(part, "% idle")
-		idle, err := strconv.ParseFloat(strings.TrimSpace(number), 64)
-		if err != nil {
-			return nil
-		}
-		return hostPercent(100 - idle)
-	}
-	return nil
+	return values, true
 }
 
 // parseDarwinMemory computes real memory pressure from `vm_stat` output the
@@ -155,7 +149,7 @@ func parseDarwinUint(s string) (uint64, bool) {
 }
 
 type darwinHostUsageCollector struct {
-	runTop       func(context.Context) ([]byte, error)
+	runIostat    func(context.Context) ([]byte, error)
 	runVMStat    func(context.Context) ([]byte, error)
 	memSizeBytes uint64
 }
@@ -163,7 +157,7 @@ type darwinHostUsageCollector struct {
 func newDarwinHostUsageCollector() hostUsageCollector {
 	memSizeBytes, _ := readDarwinMemSize()
 	return &darwinHostUsageCollector{
-		runTop:       runDarwinTop,
+		runIostat:    runDarwinIostat,
 		runVMStat:    runDarwinVMStat,
 		memSizeBytes: memSizeBytes,
 	}
@@ -182,11 +176,11 @@ func readDarwinMemSize() (uint64, bool) {
 	return parseDarwinUint(string(out))
 }
 
-func runDarwinTop(ctx context.Context) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "top", "-l", "2", "-n", "0", "-s", "0")
+func runDarwinIostat(ctx context.Context) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "iostat", "-c", "2", "-w", "1")
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	// Detach from the controlling terminal so iTerm's "show job name in
-	// title" doesn't see `top` as the pane's foreground process and flip
+	// title" doesn't see `iostat` as the pane's foreground process and flip
 	// the window title every poll interval (host_usage.go hostUsageInterval).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	return cmd.Output()
@@ -200,8 +194,8 @@ func runDarwinVMStat(ctx context.Context) ([]byte, error) {
 
 func (c *darwinHostUsageCollector) Sample(ctx context.Context) HostUsage {
 	usage := HostUsage{}
-	if out, err := c.runTop(ctx); err == nil {
-		usage = parseDarwinTop(string(out))
+	if out, err := c.runIostat(ctx); err == nil {
+		usage = parseDarwinIostat(string(out))
 	}
 	if vmOut, err := c.runVMStat(ctx); err == nil {
 		usage.MemoryPercent = parseDarwinMemory(string(vmOut), c.memSizeBytes)
