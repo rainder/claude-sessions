@@ -233,14 +233,14 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 // and the credits segment when extra usage is enabled.
 func claudeSegs(u *UsageInfo) []usageSeg {
 	segs := []usageSeg{
-		{"5h", formatUntil(u.FiveHour.ResetsAt), u.FiveHour.Pct},
-		{"wk", formatUntil(u.SevenDay.ResetsAt), u.SevenDay.Pct},
+		{label: "5h", trailer: formatUntil(u.FiveHour.ResetsAt), pct: u.FiveHour.Pct},
+		{label: "wk", trailer: formatUntil(u.SevenDay.ResetsAt), pct: u.SevenDay.Pct},
 	}
 	if u.WeeklyScopedLabel != "" {
 		segs = append(segs, usageSeg{
-			u.WeeklyScopedLabel,
-			formatUntil(u.WeeklyScoped.ResetsAt),
-			u.WeeklyScoped.Pct,
+			label:   u.WeeklyScopedLabel,
+			trailer: formatUntil(u.WeeklyScoped.ResetsAt),
+			pct:     u.WeeklyScoped.Pct,
 		})
 	}
 	if c := u.Credits; c.Enabled && c.Limit > 0 {
@@ -249,9 +249,9 @@ func claudeSegs(u *UsageInfo) []usageSeg {
 			sym = "$"
 		}
 		segs = append(segs, usageSeg{
-			"cr",
-			sym + moneyGrouped(c.Used, c.DecimalPlaces),
-			c.Pct(),
+			label:   "cr",
+			trailer: sym + moneyGrouped(c.Used, c.DecimalPlaces),
+			pct:     c.Pct(),
 		})
 	}
 	return segs
@@ -264,15 +264,48 @@ func claudeSegs(u *UsageInfo) []usageSeg {
 type usageSeg struct {
 	label, trailer string
 	pct            float64
+	// trailerW is a minimum display width for the trailer column, so the segment
+	// after it lines up across a header's lines when trailers differ in width
+	// ("2h" vs "<1m"). 0 means just len(trailer); writeUsageHeader sets it per
+	// column, standalone callers leave it zero (unpadded). Never widens a line's
+	// last segment (renderUsageSegs skips the pad there — no trailing whitespace).
+	trailerW int
+}
+
+// segTrailerWidth is the display width a segment's trailer content occupies (0
+// when empty and unpadded). A non-last segment is padded to trailerW; the line's
+// last segment is never padded, so it uses its own length regardless of trailerW.
+func segTrailerWidth(s usageSeg, isLast bool) int {
+	w := len(s.trailer)
+	if !isLast && s.trailerW > w {
+		w = s.trailerW
+	}
+	return w
+}
+
+// segTrailerText renders a segment's trailer portion: a separator space plus the
+// dim trailer padded (outside the dim escape) to segTrailerWidth. An empty
+// trailer whose column still has width — a Codex window with no reset time in a
+// non-last, padded column — occupies that width in plain spaces so later columns
+// stay aligned. Zero width (empty and unpadded, or an empty last segment) emits
+// nothing.
+func segTrailerText(s usageSeg, isLast bool) string {
+	w := segTrailerWidth(s, isLast)
+	if w == 0 {
+		return ""
+	}
+	if s.trailer == "" {
+		return strings.Repeat(" ", 1+w)
+	}
+	return " " + dim(s.trailer) + strings.Repeat(" ", w-len(s.trailer))
 }
 
 // lineBarW computes the bar width one header line can afford: the terminal width
 // (cols) minus everything fixed — the padded label prefix, the segment labels,
-// percentages, trailers, and inter-segment separators — split across the
-// segments, clamped to usageBarMin..usageBarMax. cols <= 0 (unknown width, or no
-// segments) yields usageBarMax. label is the already-padded label ("" for a bare
-// line); an empty trailer (a Codex window with no reset time) costs neither its
-// separating space nor width, matching renderUsageSegs.
+// percentages, trailers (at their padded width, see segTrailerWidth), and
+// inter-segment separators — split across the segments, clamped to
+// usageBarMin..usageBarMax. cols <= 0 (unknown width, or no segments) yields
+// usageBarMax. label is the already-padded label ("" for a bare line).
 func lineBarW(label string, segs []usageSeg, cols int) int {
 	if cols <= 0 || len(segs) == 0 {
 		return usageBarMax
@@ -282,10 +315,10 @@ func lineBarW(label string, segs []usageSeg, cols int) int {
 		prefixW = len(label) + 1
 	}
 	fixed := prefixW + 3*(len(segs)-1) // prefix + inter-segment separators
-	for _, s := range segs {
+	for i, s := range segs {
 		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%3.0f%%", s.pct))
-		if s.trailer != "" {
-			fixed += 1 + len(s.trailer)
+		if tw := segTrailerWidth(s, i == len(segs)-1); tw > 0 {
+			fixed += 1 + tw // separator + (possibly padded) trailer
 		}
 	}
 	barW := usageBarMax
@@ -307,8 +340,10 @@ func lineBarW(label string, segs []usageSeg, cols int) int {
 // label is an optional dim account prefix (email local-part, host name, or the
 // "claude"/"codex" provider tag); "" renders the bare line. Trailing pad spaces
 // (from padding every label to a common width) sit outside the dim escape so
-// they don't leave a visible dim tail. An empty trailer emits neither its
-// separating space nor any text. Empty segs writes nothing.
+// they don't leave a visible dim tail. Trailers are padded to their column width
+// (segTrailerText) so later columns line up across lines; the last segment is
+// never padded, so a line never ends in trailing whitespace. Empty segs writes
+// nothing.
 func renderUsageSegs(w io.Writer, label string, segs []usageSeg, barW int) {
 	if len(segs) == 0 {
 		return
@@ -325,9 +360,7 @@ func renderUsageSegs(w io.Writer, label string, segs []usageSeg, barW int) {
 			s.label,
 			colorize(usageColor(s.pct), usageBar(s.pct, barW)),
 			s.pct)
-		if s.trailer != "" {
-			part += " " + dim(s.trailer)
-		}
+		part += segTrailerText(s, i == len(segs)-1)
 		parts[i] = part
 	}
 	fmt.Fprintln(w, prefix+strings.Join(parts, "   "))
@@ -491,9 +524,39 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 			labelW = n
 		}
 	}
+	// Pad the trailer of each segment column to the widest trailer any line has at
+	// that column, so the segment after it stays aligned across lines when
+	// trailers differ in width ("2h" vs "<1m"). Column = plain segment index; a
+	// line's last segment is never padded (renderUsageSegs skips it), so this only
+	// widens columns something actually follows. A single line has nothing to
+	// align against, so skip it entirely (keeps the sole bare Claude line
+	// byte-identical to the pre-Codex layout).
+	if len(entries) > 1 {
+		maxSegs := 0
+		for _, e := range entries {
+			if len(e.segs) > maxSegs {
+				maxSegs = len(e.segs)
+			}
+		}
+		for col := 0; col < maxSegs; col++ {
+			tw := 0
+			for _, e := range entries {
+				if col < len(e.segs) {
+					if n := len(e.segs[col].trailer); n > tw {
+						tw = n
+					}
+				}
+			}
+			for _, e := range entries {
+				if col < len(e.segs) {
+					e.segs[col].trailerW = tw
+				}
+			}
+		}
+	}
 	// Bars must be the same width on every line, so size them to the narrowest
-	// line's affordable width (computed against the padded labels) and render all
-	// lines with it. cols <= 0 leaves every line at usageBarMax.
+	// line's affordable width (computed against the padded labels and trailers)
+	// and render all lines with it. cols <= 0 leaves every line at usageBarMax.
 	padded := make([]string, len(entries))
 	barW := usageBarMax
 	for i, e := range entries {

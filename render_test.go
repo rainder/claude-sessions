@@ -1047,6 +1047,47 @@ func TestRenderHeaderMixedBlocksShareBarWidth(t *testing.T) {
 	}
 }
 
+func TestRenderHeaderTrailerColumnsAlign(t *testing.T) {
+	// Two Claude accounts whose first-segment reset trailers differ in width ("2h"
+	// = 2 chars vs "<1m" = 3): the second segment ("wk") must still start in the
+	// same column on both lines (the narrower trailer is padded). Their last
+	// segments differ in width too ("2d" vs "12d"), which must NOT add trailing
+	// whitespace since the last segment is never padded.
+	now := time.Now()
+	lineA := &UsageInfo{
+		FiveHour: usageBucket{Pct: 10, ResetsAt: now.Add(2*time.Hour + 30*time.Minute)},  // "2h"
+		SevenDay: usageBucket{Pct: 20, ResetsAt: now.Add(2*24*time.Hour + 12*time.Hour)}, // "2d"
+	}
+	lineB := &UsageInfo{
+		FiveHour: usageBucket{Pct: 30, ResetsAt: now.Add(-time.Hour)},                     // "<1m"
+		SevenDay: usageBucket{Pct: 40, ResetsAt: now.Add(12*24*time.Hour + 12*time.Hour)}, // "12d"
+	}
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
+	remotes := []RemoteResult{{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: lineB}}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", local, remotes, "",
+		&LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: lineA}}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 2 {
+		t.Fatalf("want 2 lines, got %d: %#v", len(usage), usage)
+	}
+	p0, p1 := stripANSI(usage[0]), stripANSI(usage[1])
+	// Sanity: the differing-width first trailers are actually present.
+	if !strings.Contains(p0, "2h") || !strings.Contains(p1, "<1m") {
+		t.Fatalf("expected differing-width first trailers 2h / <1m:\n%q\n%q", p0, p1)
+	}
+	if i0, i1 := strings.Index(p0, "wk"), strings.Index(p1, "wk"); i0 != i1 {
+		t.Errorf("wk column shifted by first-trailer width: line0 col %d (%q), line1 col %d (%q)", i0, p0, i1, p1)
+	}
+	// Last segment (wk) is never padded → no trailing whitespace on either line.
+	for i, p := range []string{p0, p1} {
+		if strings.HasSuffix(p, " ") {
+			t.Errorf("line %d has trailing whitespace (last segment padded): %q", i, p)
+		}
+	}
+}
+
 func TestRenderHeaderCodexMultiAccountLabelsEachLine(t *testing.T) {
 	codexInfo := func() *CodexUsageInfo {
 		return &CodexUsageInfo{Windows: []codexWindow{{Label: "wk", Pct: 20}}}
