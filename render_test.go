@@ -1878,7 +1878,7 @@ func TestDisabledRailAddsFixedHeaderColumnAcrossModes(t *testing.T) {
 		marker     string
 		wantPrefix string
 	}{
-		{"1", "PID", "        PID"},
+		{"1", "PID", "    PID"},
 		{"2", "DIR▲", "    DIR▲  NAME"},
 		{"3", "NAME", "    NAME"},
 	}
@@ -1906,6 +1906,32 @@ func TestDisabledRailAddsFixedHeaderColumnAcrossModes(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestFullViewPIDColumnSizesToWidestPID(t *testing.T) {
+	short := Session{
+		PID: 42, SessionID: "short", Name: "short", NameSource: "user",
+		CWD: "/work/short", Status: "idle",
+	}
+	long := Session{
+		PID: 1234567, SessionID: "long", Name: "long", NameSource: "user",
+		CWD: "/work/long", Status: "idle",
+	}
+
+	var narrow strings.Builder
+	RenderAll(&narrow, "1", testLocalHost(short), nil, "", nil, 0, 0, "dir")
+	if header := findRow(t, narrow.String(), "PID"); !strings.HasPrefix(header, "    PID") {
+		t.Fatalf("single small pid header = %q, want PID label unpadded", header)
+	}
+
+	var wide strings.Builder
+	RenderAll(&wide, "1", testLocalHost(short, long), nil, "", nil, 0, 0, "dir")
+	if header := findRow(t, wide.String(), "PID"); !strings.HasPrefix(header, "        PID") {
+		t.Fatalf("7-digit pid header = %q, want PID right-aligned to 7", header)
+	}
+	if row := findRow(t, wide.String(), "short"); !strings.Contains(row, "     42  ") {
+		t.Fatalf("small pid row = %q, want pid padded to widest pid", row)
 	}
 }
 

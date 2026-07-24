@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1259,7 +1260,9 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 
 	dirLabel, statusLabel, ageLabel := sortLabels(sortMode)
 	nameW, dirW, modelW, costW, statusW, tmuxW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), utf8.RuneCountInString(statusLabel), len("TMUX")
+	pidW := len("PID")
 	for _, r := range all {
+		pidW = max(pidW, len(strconv.Itoa(r.s.PID)))
 		nameW = max(nameW, len(r.nameStr))
 		dirW = max(dirW, len(r.cwdStr))
 		modelW = max(modelW, len(r.modelStr))
@@ -1276,8 +1279,8 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			"    %7s  %-*s  %-*s  %-*s  %-*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
-			"PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL",
+			"    %*s  %-*s  %-*s  %-*s  %-*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
+			pidW, "PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL",
 			statusW, statusLabel, costW, "COST",
 			"CTX", tmuxW, "TMUX", "CPU%", ageLabel, "VER", "SID",
 		)
@@ -1321,8 +1324,8 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 					sidCell = dim(sidCell)
 				}
 			}
-			body := fmt.Sprintf("%7d  %s  %s  %s  %s  %s  %s  %s  %5s  %5s  %-8s  %s ",
-				r.s.PID,
+			body := fmt.Sprintf("%*d  %s  %s  %s  %s  %s  %s  %s  %5s  %5s  %-8s  %s ",
+				pidW, r.s.PID,
 				nameCell,
 				marqueeCell(r.cwdStr, dirW, step),
 				modelCell(r.modelStr, modelW, plainCells),
