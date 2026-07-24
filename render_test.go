@@ -264,6 +264,14 @@ func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
 		{"nine", "nine:0.0", &nine, colorize("1;32", "▶ ")},
 		{"ten", "ten:0.0", &ten, colorize("1;32", "▶ ")},
 	}
+	// The viewer slot is reserved per-frame, so a lone blank-symbol session would
+	// collapse it away. Co-render a tmux-attached anchor to keep the slot reserved
+	// in every frame; the target row's viewer prefix is then what we assert.
+	anchor := Session{
+		PID: 200, Name: "anchor", NameSource: "user", CWD: "/work/anchor",
+		Status: "idle", Entrypoint: "cli", UpdatedAt: now,
+		Tmux: "anchor:0.0", TmuxAttached: &one,
+	}
 	for _, mode := range []string{"1", "2", "3"} {
 		for i, tc := range cases {
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
@@ -278,7 +286,9 @@ func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
 					Tmux:         tc.tmux,
 					TmuxAttached: tc.attached,
 				}
-				row := renderSessionRowForTest(t, mode, s, false)
+				var b strings.Builder
+				RenderAll(&b, mode, testLocalHost(s, anchor), nil, "", nil, 0, 0, "dir")
+				row := findRow(t, b.String(), tc.name)
 				if !strings.HasPrefix(row, tc.want) {
 					t.Errorf("mode %s row prefix = %q, want %q in row %q", mode, row[:len(tc.want)], tc.want, row)
 				}
@@ -1834,12 +1844,18 @@ func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 	disabled.SessionID = "disable"
 	disabled.Name = "disable"
 	disabled.CWD = "/work/disable"
+	disabled.Tmux = "disable:0.0"
 	disabled.Disabled = true
 
 	for _, mode := range []string{"1", "2", "3"} {
 		t.Run(mode, func(t *testing.T) {
-			enabledRow := renderSessionRowForTest(t, mode, enabled, false)
-			disabledRow := renderSessionRowForTest(t, mode, disabled, false)
+			// Both in one frame: the disabled session reserves the rail slot for
+			// every row, so the enabled row carries two blank rail cells and stays
+			// width-aligned with the disabled one.
+			var b strings.Builder
+			RenderAll(&b, mode, testLocalHost(enabled, disabled), nil, "", nil, 0, 0, "dir")
+			enabledRow := findRow(t, b.String(), enabled.Name)
+			disabledRow := findRow(t, b.String(), disabled.Name)
 
 			if !strings.HasPrefix(stripANSI(disabledRow), "▶ │ ") {
 				t.Fatalf("mode %s disabled visible prefix = %q", mode, stripANSI(disabledRow))
@@ -1869,18 +1885,20 @@ func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 }
 
 func TestDisabledRailAddsFixedHeaderColumnAcrossModes(t *testing.T) {
+	// A disabled session reserves the rail slot (and only that slot: no tmux, no
+	// group), so the header indents by exactly one 2-cell slot in every mode.
 	session := Session{
 		PID: 42, SessionID: "one", Name: "one", NameSource: "user",
-		CWD: "/work/one", Status: "idle",
+		CWD: "/work/one", Status: "idle", Disabled: true,
 	}
 	cases := []struct {
 		mode       string
 		marker     string
 		wantPrefix string
 	}{
-		{"1", "PID", "    PID"},
-		{"2", "DIR▲", "    DIR▲  NAME"},
-		{"3", "NAME", "    NAME"},
+		{"1", "PID", "  PID"},
+		{"2", "DIR▲", "  DIR▲  NAME"},
+		{"3", "NAME", "  NAME"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
@@ -1919,15 +1937,17 @@ func TestFullViewPIDColumnSizesToWidestPID(t *testing.T) {
 		CWD: "/work/long", Status: "idle",
 	}
 
+	// No tmux, group or disabled session, so no first-column slot is reserved and
+	// the header sits flush left: the PID field width is all that pads it.
 	var narrow strings.Builder
 	RenderAll(&narrow, "1", testLocalHost(short), nil, "", nil, 0, 0, "dir")
-	if header := findRow(t, narrow.String(), "PID"); !strings.HasPrefix(header, "    PID") {
+	if header := findRow(t, narrow.String(), "PID"); !strings.HasPrefix(header, "PID") {
 		t.Fatalf("single small pid header = %q, want PID label unpadded", header)
 	}
 
 	var wide strings.Builder
 	RenderAll(&wide, "1", testLocalHost(short, long), nil, "", nil, 0, 0, "dir")
-	if header := findRow(t, wide.String(), "PID"); !strings.HasPrefix(header, "        PID") {
+	if header := findRow(t, wide.String(), "PID"); !strings.HasPrefix(header, "    PID") {
 		t.Fatalf("7-digit pid header = %q, want PID right-aligned to 7", header)
 	}
 	if row := findRow(t, wide.String(), "short"); !strings.Contains(row, "     42  ") {
@@ -1994,16 +2014,116 @@ func TestSelectedDisabledRowsKeepBackgroundColorsAndAmberRail(t *testing.T) {
 	}
 }
 
+// TestDisabledRailPreservesViewerPrefixWidth locks the two-slot case: a frame
+// whose session is both tmux-visible and disabled reserves the viewer AND rail
+// slots together, so the rail never displaces the viewer symbol. The row body
+// shows both (▶ then │, 4 cells) and the header indents by the same 4 cells to
+// stay aligned above it.
 func TestDisabledRailPreservesViewerPrefixWidth(t *testing.T) {
 	attached := 3
 	session := Session{
+		PID: 7, SessionID: "both", Name: "both", NameSource: "user",
+		CWD: "/work/both", Status: "idle",
 		Tmux: "dev:0.0", TmuxAttached: &attached, Disabled: true,
 	}
-	got := visualLen(
-		tmuxViewerPrefix(session, true) + disabledRail(session, false),
+	var out strings.Builder
+	RenderAll(&out, "1", testLocalHost(session), nil, "", nil, 0, 0, "dir")
+
+	row := findRow(t, out.String(), "both")
+	if !strings.HasPrefix(stripANSI(row), "▶ │ ") {
+		t.Fatalf("disabled+visible row prefix = %q, want %q", stripANSI(row), "▶ │ ")
+	}
+	header := findRow(t, out.String(), "PID")
+	if !strings.HasPrefix(header, "    PID") || strings.HasPrefix(header, "     PID") {
+		t.Fatalf("two-slot header indent not 4 cols: %q", header)
+	}
+}
+
+// TestNoFirstColumnSlotsWhenNoIndicators covers the all-off frame: no
+// tmux-visible, grouped or disabled session, so every first-column slot
+// collapses. Row bodies start flush (no viewer/badge/rail cells ahead of the PID
+// field) and the header carries no indent.
+func TestNoFirstColumnSlotsWhenNoIndicators(t *testing.T) {
+	// 3-digit PIDs so the PID field (sized to the "PID" label, width 3) needs no
+	// right-padding: a flush row then starts with a digit, and any first-column
+	// slot would push a space/glyph/escape ahead of it.
+	local := testLocalHost(
+		Session{PID: 100, SessionID: "s1", Name: "alpha", NameSource: "user",
+			CWD: "/w", Status: "idle", Entrypoint: "cli"},
+		Session{PID: 200, SessionID: "s2", Name: "bravo", NameSource: "user",
+			CWD: "/w", Status: "idle", Entrypoint: "cli"},
 	)
-	if got != 4 {
-		t.Fatalf("viewer + disabled rail width = %d, want 4", got)
+	out := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{}))
+
+	if hdr := findRow(t, out, "PID"); !strings.HasPrefix(hdr, "PID") {
+		t.Fatalf("header not flush with no indicators: %q", hdr)
+	}
+	row := findRow(t, out, "alpha")
+	if strings.HasPrefix(row, " ") || strings.HasPrefix(row, "\033") {
+		t.Fatalf("row carries a first-column prefix with no indicators: %q", row)
+	}
+}
+
+// TestDisabledSessionReservesRailForAllRows covers a frame with one disabled
+// session among enabled ones: the rail slot is reserved for every row, so an
+// enabled row carries two blank rail cells and stays width-aligned with the
+// disabled row's amber rail. No tmux or group, so the rail is the only slot and
+// the header indents by exactly it.
+func TestDisabledSessionReservesRailForAllRows(t *testing.T) {
+	// Equal-length SessionIDs: the SID column is the last one and renders
+	// unpadded, so unequal ids would skew row widths independently of the slot.
+	local := testLocalHost(
+		Session{PID: 1, SessionID: "sid-on", Name: "alive", NameSource: "user",
+			CWD: "/w/alive", Status: "idle", Entrypoint: "cli"},
+		Session{PID: 2, SessionID: "sid-of", Name: "asleep", NameSource: "user",
+			CWD: "/w/asleep", Status: "idle", Entrypoint: "cli", Disabled: true},
+	)
+	out := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{}))
+
+	enabledRow := findRow(t, out, "alive")
+	disabledRow := findRow(t, out, "asleep")
+	if !strings.HasPrefix(stripANSI(disabledRow), "│ ") {
+		t.Fatalf("disabled row missing rail: %q", stripANSI(disabledRow))
+	}
+	if strings.Contains(enabledRow, "│") {
+		t.Fatalf("enabled row should not draw the rail glyph: %q", enabledRow)
+	}
+	if visualLen(enabledRow) != visualLen(disabledRow) {
+		t.Fatalf("rail slot not reserved uniformly: enabled=%d disabled=%d",
+			visualLen(enabledRow), visualLen(disabledRow))
+	}
+	if hdr := findRow(t, out, "PID"); !strings.HasPrefix(hdr, "  PID") {
+		t.Fatalf("header not indented by the rail slot: %q", hdr)
+	}
+}
+
+// TestAttachedTmuxSessionReservesViewerForAllRows covers a frame with one
+// tmux-visible session among non-tmux ones: the viewer slot is reserved for
+// every row, so a session with no tmux carries two blank viewer cells and stays
+// width-aligned with the ▶ row. No group or disabled session, so the viewer is
+// the only slot and the header indents by exactly it.
+func TestAttachedTmuxSessionReservesViewerForAllRows(t *testing.T) {
+	attached := 2
+	local := testLocalHost(
+		Session{PID: 1, SessionID: "vis", Name: "visible", NameSource: "user",
+			CWD: "/w/vis", Status: "idle", Entrypoint: "cli",
+			Tmux: "vis:0.0", TmuxAttached: &attached},
+		Session{PID: 2, SessionID: "pln", Name: "plainsesh", NameSource: "user",
+			CWD: "/w/pln", Status: "idle", Entrypoint: "cli"},
+	)
+	out := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{}))
+
+	visRow := findRow(t, out, "visible")
+	plainRow := findRow(t, out, "plainsesh")
+	if !strings.HasPrefix(stripANSI(visRow), "▶ ") {
+		t.Fatalf("tmux-visible row missing viewer symbol: %q", stripANSI(visRow))
+	}
+	if visualLen(visRow) != visualLen(plainRow) {
+		t.Fatalf("viewer slot not reserved uniformly: visible=%d plain=%d",
+			visualLen(visRow), visualLen(plainRow))
+	}
+	if hdr := findRow(t, out, "PID"); !strings.HasPrefix(hdr, "  PID") {
+		t.Fatalf("header not indented by the viewer slot: %q", hdr)
 	}
 }
 
@@ -2062,13 +2182,16 @@ func TestGroupBadgeSlotOnlyWhenGroupVisible(t *testing.T) {
 			visualLen(plainWith), visualLen(plainNone)+2, plainWith, plainNone)
 	}
 
+	// These sessions have no tmux and aren't disabled, so the badge is the only
+	// slot: its frame indents the header by one 2-cell slot, the plain frame not
+	// at all (flush left).
 	hdrWith := findRow(t, frameText(with), "PID")
 	hdrNone := findRow(t, frameText(none), "PID")
-	if !strings.HasPrefix(hdrWith, "      PID") {
-		t.Fatalf("badged header indent not 6 cols: %q", hdrWith)
+	if !strings.HasPrefix(hdrWith, "  PID") {
+		t.Fatalf("badged header indent not 2 cols: %q", hdrWith)
 	}
-	if !strings.HasPrefix(hdrNone, "    PID") || strings.HasPrefix(hdrNone, "     PID") {
-		t.Fatalf("unbadged header indent not 4 cols: %q", hdrNone)
+	if !strings.HasPrefix(hdrNone, "PID") {
+		t.Fatalf("unbadged header not flush: %q", hdrNone)
 	}
 }
 

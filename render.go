@@ -101,13 +101,19 @@ var groupSGR = map[int]string{
 
 // groupView carries the client-side group state threaded through the render
 // path: the sessionID→group map (for badges and the filter predicate), the
-// active view filter (0 = none), and whether the 2-char badge slot is reserved
-// this frame (set by BuildTableFrame once it knows at least one visible session
-// has a group). Its zero value renders exactly as before groups existed.
+// active view filter (0 = none), and the per-frame first-column slot
+// reservations. showViewer, showBadge and showRail each gate one 2-char
+// indicator slot (tmux viewer, group badge, disabled rail), and are set by
+// BuildTableFrame once it knows which slots at least one visible session needs.
+// A slot is present on every row of the frame (headers included) or on none.
+// The zero value hides all three slots — rendering exactly as before groups
+// and conditional slots existed.
 type groupView struct {
-	groups    map[string]int
-	filter    int
-	showBadge bool
+	groups     map[string]int
+	filter     int
+	showViewer bool
+	showBadge  bool
+	showRail   bool
 }
 
 // groupOf returns the group assigned to s (1..9), or 0 for an ungrouped session
@@ -177,8 +183,17 @@ func (gv groupView) badge(s Session, style badgeStyle) string {
 
 func decorateSessionRow(session Session, selected bool, body string, gv groupView) string {
 	plain := sessionRowPlain(session, selected)
-	viewer := tmuxViewerPrefix(session, plain)
-	rail := disabledRail(session, selected)
+	// Each slot reserves its 2 cells only when this frame reserves it, otherwise
+	// it collapses to nothing (byte-empty, never spaces) so the row body sits
+	// flush. The badge already self-gates on gv.showBadge inside gv.badge.
+	viewer := ""
+	if gv.showViewer {
+		viewer = tmuxViewerPrefix(session, plain)
+	}
+	rail := ""
+	if gv.showRail {
+		rail = disabledRail(session, selected)
+	}
 
 	var row string
 	switch {
@@ -1217,9 +1232,10 @@ func (w *frameWriter) record(targetID string, openable bool) {
 // RenderAll (see its doc for cols/step/sortMode semantics).
 func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *LocalUsage, cols, step int, sortMode string, gv groupView) tableFrame {
 	sections := buildSections(local, remotes, gv)
-	// Reserve the badge slot only when at least one visible (post-filter) session
-	// carries a group, so the ungrouped layout stays byte-identical to before.
-	gv.showBadge = sectionsHaveGroup(sections, gv)
+	// Reserve each first-column slot only when at least one visible (post-filter)
+	// session needs it, so a frame with none of a given indicator stays
+	// byte-identical to the layout from before that slot existed.
+	gv.showViewer, gv.showBadge, gv.showRail = sectionSlotReservations(sections, gv)
 	// Pair each provider's local snapshot with every remote's, dedupe by account,
 	// and carry the resolved lines through the header so each distinct account
 	// shows once. The two providers dedupe independently.
@@ -1252,17 +1268,29 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	}
 }
 
-// sectionsHaveGroup reports whether any (already filtered) section row carries a
-// group, which is what reserves the badge slot for the whole frame.
-func sectionsHaveGroup(sections []section, gv groupView) bool {
+// sectionSlotReservations scans the already-filtered sections once and reports
+// which of the three first-column indicator slots the frame must reserve:
+// viewer (any row whose tmux viewer symbol isn't blank), badge (any grouped
+// row), rail (any disabled row). A slot is reserved for every row of the frame
+// or for none, so one visible row needing it settles the whole frame.
+func sectionSlotReservations(sections []section, gv groupView) (viewer, badge, rail bool) {
 	for _, sec := range sections {
 		for _, s := range sec.rows {
+			if sym, _ := tmuxViewerSymbol(s); sym != " " {
+				viewer = true
+			}
 			if gv.groupOf(s) != 0 {
-				return true
+				badge = true
+			}
+			if s.Disabled {
+				rail = true
+			}
+			if viewer && badge && rail {
+				return
 			}
 		}
 	}
-	return false
+	return
 }
 
 // RenderAll writes the live table (or a one-shot snapshot) to w, with all
@@ -1389,13 +1417,21 @@ func modelCell(model string, width int, plain bool) string {
 }
 
 // rowIndent is the leading indent for the column-header and separator lines. It
-// widens by the 2-char badge slot when the slot is reserved so the column labels
-// stay aligned above the row bodies (viewer + badge + rail).
+// reserves 2 cells per active first-column slot (viewer + badge + rail) so the
+// column labels stay aligned above the row bodies. With no slot active the
+// indent is empty and the labels sit flush left, aligned with the row bodies.
 func rowIndent(gv groupView) string {
-	if gv.showBadge {
-		return "      "
+	n := 0
+	if gv.showViewer {
+		n++
 	}
-	return "    "
+	if gv.showBadge {
+		n++
+	}
+	if gv.showRail {
+		n++
+	}
+	return strings.Repeat("  ", n)
 }
 
 func renderAllFull(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
