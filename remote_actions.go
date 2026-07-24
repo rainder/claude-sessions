@@ -14,6 +14,19 @@ import (
 	"time"
 )
 
+// sshMuxFlags turn on SSH connection multiplexing: the first attach to a host
+// leaves a master connection behind (socket under ~/.ssh), and every attach
+// within the next 60 seconds reuses it, skipping the handshake entirely.
+// ControlPersist self-expires the master, so there is no cleanup path to
+// manage; if the socket can't be created ssh degrades to a normal connection.
+// %C hashes local host + remote host/port/user, keeping the path short and
+// per-destination.
+var sshMuxFlags = []string{
+	"-o", "ControlMaster=auto",
+	"-o", "ControlPath=~/.ssh/cs-mux-%C",
+	"-o", "ControlPersist=60",
+}
+
 // runRemoteAttach runs the interactive `ssh -t <target> tmux attach -t <tname>`,
 // relaying local-clipboard image pastes to srv for the lifetime of the attach.
 // The relay goroutine (pasteRelayLoop) never reads stdin or writes the terminal
@@ -27,7 +40,9 @@ func runRemoteAttach(c *actCtx, srv ServerConfig, tname string) error {
 		defer wg.Done()
 		pasteRelayLoop(ctx, srv, tname)
 	}()
-	err := c.runInteractive("ssh", "-t", srv.EffectiveSSHTarget(), "tmux", "attach", "-t", tname)
+	args := append(append([]string{}, sshMuxFlags...),
+		"-t", srv.EffectiveSSHTarget(), "tmux", "attach", "-t", tname)
+	err := c.runInteractive("ssh", args...)
 	cancel()
 	wg.Wait()
 	return err
