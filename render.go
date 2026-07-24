@@ -105,7 +105,7 @@ var groupSGR = map[int]string{
 // no text filter), and the per-frame first-column slot reservations. The group
 // filter and the query compose (AND) in filterSessionRows / filterRemoteResults.
 // showViewer, showBadge and showRail each gate one 2-char indicator slot (tmux
-// viewer, disabled rail, group badge — in row order), and are set by BuildTableFrame once it
+// viewer, group badge, disabled rail), and are set by BuildTableFrame once it
 // knows which slots at least one visible session needs. A slot is present on
 // every row of the frame (headers included) or on none. The zero value applies
 // no filter and hides all three slots — rendering exactly as before groups,
@@ -244,13 +244,13 @@ func decorateSessionRow(session Session, selected bool, body string, gv groupVie
 	var row string
 	switch {
 	case selected:
-		row = viewer + rail + gv.badge(session, badgeColored) + body
+		row = viewer + gv.badge(session, badgeColored) + rail + body
 	case session.Disabled:
-		row = dim(viewer) + rail + gv.badge(session, badgeDim) + dim(body)
+		row = dim(viewer) + gv.badge(session, badgeDim) + rail + dim(body)
 	case session.Headless():
-		row = dim(viewer + rail + gv.badge(session, badgePlain) + body)
+		row = dim(viewer + gv.badge(session, badgePlain) + rail + body)
 	default:
-		row = viewer + rail + gv.badge(session, badgeColored) + body
+		row = viewer + gv.badge(session, badgeColored) + rail + body
 	}
 	return highlightSelectedRow(row, selected)
 }
@@ -1490,7 +1490,7 @@ func modelCell(model string, width int, plain bool) string {
 }
 
 // rowIndent is the leading indent for the column-header and separator lines. It
-// reserves 2 cells per active first-column slot (viewer + rail + badge) so the
+// reserves 2 cells per active first-column slot (viewer + badge + rail) so the
 // column labels stay aligned above the row bodies. With no slot active the
 // indent is empty and the labels sit flush left, aligned with the row bodies.
 func rowIndent(gv groupView) string {
