@@ -45,6 +45,7 @@ type ResumableSession struct {
 	SessionID    string    `json:"session_id"`
 	CWD          string    `json:"cwd"`
 	GitBranch    string    `json:"git_branch,omitempty"`
+	Name         string    `json:"name,omitempty"` // best-effort session name (user-set name or summary)
 	FirstPrompt  string    `json:"first_prompt,omitempty"`
 	MessageCount int       `json:"message_count"`
 	ModifiedAt   time.Time `json:"modified_at"`
@@ -82,6 +83,7 @@ func collectResumableFrom(home string, live map[string]bool, now time.Time) []Re
 		return nil
 	}
 	cutoff := now.Add(-resumableMaxAge)
+	names := resumableNameMap(home)
 
 	byID := make(map[string]ResumableSession, len(matches))
 	for _, path := range matches {
@@ -105,10 +107,17 @@ func collectResumableFrom(home string, live map[string]bool, now time.Time) []Re
 		if !ok || head.cwd == "" || scratchCwd(head.cwd) {
 			continue
 		}
+		// NAME is best-effort: a user-set name from a still-present session file
+		// wins; otherwise a transcript summary; otherwise empty (rendered "-").
+		name := names[sid]
+		if name == "" {
+			name = head.summary
+		}
 		byID[sid] = ResumableSession{
 			SessionID:    sid,
 			CWD:          head.cwd,
 			GitBranch:    head.gitBranch,
+			Name:         name,
 			FirstPrompt:  head.firstPrompt,
 			MessageCount: countFileLines(path),
 			ModifiedAt:   mtime,
@@ -128,6 +137,30 @@ func collectResumableFrom(home string, live map[string]bool, now time.Time) []Re
 	return out
 }
 
+// resumableNameMap builds a sessionId→name lookup from the live-session JSON
+// files under ~/.claude/sessions (reusing session.go's readSessionFile parser).
+// Only user-set names are kept: a name is included when it's non-empty and its
+// nameSource is present and not "derived" — derived names merely echo the cwd,
+// which the DIR column already shows. These files usually vanish when a session
+// ends, so hits are rare but authoritative when present.
+func resumableNameMap(home string) map[string]string {
+	matches, err := filepath.Glob(filepath.Join(home, ".claude", "sessions", "*.json"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+	names := make(map[string]string, len(matches))
+	for _, p := range matches {
+		s, ok := readSessionFile(p)
+		if !ok || s.SessionID == "" || s.Name == "" {
+			continue
+		}
+		if s.NameSource != "" && s.NameSource != "derived" {
+			names[s.SessionID] = s.Name
+		}
+	}
+	return names
+}
+
 // scratchCwd reports sessions run out of temp dirs — /tmp and /private (macOS's
 // home for scratchpads and /tmp itself) — which aren't worth resuming. Narrower
 // than picker.go's hiddenCwd on purpose: worktree checkouts stay resumable.
@@ -141,6 +174,7 @@ type resumableHead struct {
 	cwd         string
 	gitBranch   string
 	firstPrompt string
+	summary     string // from a {"type":"summary","summary":"..."} line, if any
 }
 
 // readResumableHead scans up to resumeHeadLines lines of a transcript for the
@@ -164,6 +198,7 @@ func readResumableHead(path string) (resumableHead, bool) {
 			Type      string `json:"type"`
 			CWD       string `json:"cwd"`
 			GitBranch string `json:"gitBranch"`
+			Summary   string `json:"summary"`
 			IsMeta    bool   `json:"isMeta"`
 			Message   *struct {
 				Role    string          `json:"role"`
@@ -178,6 +213,13 @@ func readResumableHead(path string) (resumableHead, bool) {
 		}
 		if head.gitBranch == "" && line.GitBranch != "" {
 			head.gitBranch = line.GitBranch
+		}
+		if head.summary == "" && line.Type == "summary" {
+			// Collapse and bound the summary the same way as a prompt; it has no
+			// caveat/command-wrapper concern so cleanPrompt's '<' rule is skipped.
+			if s := strings.Join(strings.Fields(line.Summary), " "); s != "" {
+				head.summary = truncateRunes(s, resumePromptMax)
+			}
 		}
 		if head.firstPrompt == "" && line.Type == "user" && !line.IsMeta && line.Message != nil {
 			if text := firstPromptText(line.Message.Content); text != "" {
@@ -342,26 +384,57 @@ func gatherResumable() (sessions []ResumableSession, unreachable []string) {
 }
 
 // resumeRows formats gathered sessions into aligned picker lines
-// (AGE  HOST  DIR  BRANCH  #MSG  PROMPT) and the matching dimmed header.
+// (AGE  HOST  NAME  DIR  BRANCH  #MSG  PROMPT) and the matching dimmed header.
 // localHome collapses local-row dirs to "~"; remote-row dirs (home unknown)
 // render raw. Column widths size to the data, capped so one long value can't
-// blow out the layout. Metadata columns are dimmed; DIR and PROMPT stay bright.
-func resumeRows(sessions []ResumableSession, localHome, localName string, now time.Time) (lines []string, header string) {
+// blow out the layout. Metadata columns are dimmed; NAME, DIR, and PROMPT stay
+// bright.
+//
+// The HOST column is shown only when at least one row is remote: an all-local
+// list would just repeat this host's name on every row, so it's omitted outright
+// (never dropped in the width ladder either — when present it's always
+// meaningful).
+//
+// cols is the terminal width used for autocompaction. When the full layout would
+// overflow cols, columns are shed/shrunk in this order until it fits: shrink
+// PROMPT (down to a floor), drop #MSG, drop BRANCH, shrink DIR (down to a
+// floor), shrink NAME (down to a floor). AGE, NAME, and DIR always survive; the
+// header always mirrors the chosen columns and widths. cols<=0 (unknown) renders
+// the full layout.
+func resumeRows(sessions []ResumableSession, localHome, localName string, cols int, now time.Time) (lines []string, header string) {
 	const (
 		ageW      = 3
 		hostCap   = 12
+		nameCap   = 20
 		dirCap    = 34
 		branchCap = 18
 		msgW      = 5
+		nameMin   = 8
+		dirMin    = 12
+		promptMin = 10
+		gap       = 2 // inter-column separator width
 	)
-	type cells struct{ age, host, dir, branch, msg, prompt string }
 
+	showHost := false
+	for _, s := range sessions {
+		if s.Host != "" {
+			showHost = true
+			break
+		}
+	}
+
+	type cells struct{ age, host, name, dir, branch, msg, prompt string }
 	rows := make([]cells, len(sessions))
-	hostW, dirW, branchW := len("HOST"), len("DIR"), len("BRANCH")
+	hostW, nameW, dirW, branchW := len("HOST"), len("NAME"), len("DIR"), len("BRANCH")
+	promptW := len("PROMPT")
 	for i, s := range sessions {
 		host, dir := localName, collapseHome(s.CWD, localHome)
 		if s.Host != "" {
 			host, dir = s.Host, s.CWD // remote home unknown, show the raw path
+		}
+		name := s.Name
+		if name == "" {
+			name = "-"
 		}
 		branch := s.GitBranch
 		if branch == "" {
@@ -372,11 +445,14 @@ func resumeRows(sessions []ResumableSession, localHome, localName string, now ti
 			prompt = "-"
 		}
 		host = truncateRunes(host, hostCap)
+		name = truncateRunes(name, nameCap)
 		dir = truncateDirTail(dir, dirCap)
 		branch = truncateRunes(branch, branchCap)
+		prompt = truncateRunes(prompt, resumePromptMax)
 		rows[i] = cells{
 			age:    formatAge(now.Sub(s.ModifiedAt).Seconds()),
 			host:   host,
+			name:   name,
 			dir:    dir,
 			branch: branch,
 			msg:    strconv.Itoa(s.MessageCount),
@@ -385,30 +461,119 @@ func resumeRows(sessions []ResumableSession, localHome, localName string, now ti
 		if n := utf8.RuneCountInString(host); n > hostW {
 			hostW = n
 		}
+		if n := utf8.RuneCountInString(name); n > nameW {
+			nameW = n
+		}
 		if n := utf8.RuneCountInString(dir); n > dirW {
 			dirW = n
 		}
 		if n := utf8.RuneCountInString(branch); n > branchW {
 			branchW = n
 		}
+		if n := utf8.RuneCountInString(prompt); n > promptW {
+			promptW = n
+		}
+	}
+
+	// Autocompact ladder. prefix is the width consumed by every column left of
+	// PROMPT (including the separator that precedes PROMPT); PROMPT then takes
+	// whatever remains. A stage "fits" once PROMPT can hold at least promptMin.
+	showBranch, showMsg, showPrompt := true, true, true
+	naturalPromptW := promptW
+	prefix := func() int {
+		w := ageW + gap + nameW + gap + dirW + gap
+		if showHost {
+			w += hostW + gap
+		}
+		if showBranch {
+			w += branchW + gap
+		}
+		if showMsg {
+			w += msgW + gap
+		}
+		return w
+	}
+	if cols > 0 {
+		fits := func() bool { return cols-prefix() >= promptMin }
+		if !fits() { // shrinking PROMPT alone isn't enough → drop #MSG
+			showMsg = false
+		}
+		if !fits() { // still tight → drop BRANCH
+			showBranch = false
+		}
+		if !fits() { // shrink DIR toward its floor
+			dirW = shrinkToFit(dirW, dirMin, prefix()-(cols-promptMin))
+		}
+		if !fits() { // shrink NAME toward its floor
+			nameW = shrinkToFit(nameW, nameMin, prefix()-(cols-promptMin))
+		}
+		// Resolve PROMPT to the remaining space. In pathologically narrow
+		// terminals even the floors overflow; PROMPT then gets what's left, or is
+		// dropped when nothing remains.
+		avail := cols - prefix()
+		switch {
+		case avail < 1:
+			showPrompt = false
+		case avail < naturalPromptW:
+			promptW = avail
+		}
 	}
 
 	lines = make([]string, len(rows))
 	for i, c := range rows {
-		lines[i] = dim(padRight(c.age, ageW)) + "  " +
-			dim(padRight(c.host, hostW)) + "  " +
-			padRight(c.dir, dirW) + "  " +
-			dim(padRight(c.branch, branchW)) + "  " +
-			dim(padLeft(c.msg, msgW)) + "  " +
-			c.prompt
+		parts := make([]string, 0, 7)
+		parts = append(parts, dim(padRight(c.age, ageW)))
+		if showHost {
+			parts = append(parts, dim(padRight(c.host, hostW)))
+		}
+		parts = append(parts, padRight(truncateRunes(c.name, nameW), nameW))
+		parts = append(parts, padRight(truncateDirTail(c.dir, dirW), dirW))
+		if showBranch {
+			parts = append(parts, dim(padRight(c.branch, branchW)))
+		}
+		if showMsg {
+			parts = append(parts, dim(padLeft(c.msg, msgW)))
+		}
+		if showPrompt {
+			parts = append(parts, truncateRunes(c.prompt, promptW))
+		}
+		lines[i] = strings.Join(parts, strings.Repeat(" ", gap))
 	}
-	header = padRight("AGE", ageW) + "  " +
-		padRight("HOST", hostW) + "  " +
-		padRight("DIR", dirW) + "  " +
-		padRight("BRANCH", branchW) + "  " +
-		padLeft("#MSG", msgW) + "  " +
-		"PROMPT"
+
+	hparts := make([]string, 0, 7)
+	hparts = append(hparts, padRight("AGE", ageW))
+	if showHost {
+		hparts = append(hparts, padRight("HOST", hostW))
+	}
+	hparts = append(hparts, padRight("NAME", nameW))
+	hparts = append(hparts, padRight("DIR", dirW))
+	if showBranch {
+		hparts = append(hparts, padRight("BRANCH", branchW))
+	}
+	if showMsg {
+		hparts = append(hparts, padLeft("#MSG", msgW))
+	}
+	if showPrompt {
+		hparts = append(hparts, truncateRunes("PROMPT", promptW))
+	}
+	header = strings.Join(hparts, strings.Repeat(" ", gap))
 	return lines, header
+}
+
+// shrinkToFit reduces a column width w by over runes to reclaim horizontal
+// space, but never below floor (clamped to w when floor already exceeds it, so a
+// naturally narrow column is left untouched). over<=0 is a no-op.
+func shrinkToFit(w, floor, over int) int {
+	if floor > w {
+		floor = w
+	}
+	if over <= 0 {
+		return w
+	}
+	if w-over < floor {
+		return floor
+	}
+	return w - over
 }
 
 // truncateRunes shortens s to at most n runes, replacing the tail with "…" when
@@ -645,7 +810,15 @@ func actResume(c *actCtx) {
 	}
 
 	home, _ := os.UserHomeDir()
-	lines, header := resumeRows(sessions, home, shortHostname(), time.Now())
+	// Size the picker rows to the terminal width once, up front. pickResumeSession
+	// re-measures height per frame for its viewport, but the row layout (which
+	// columns, how wide) is fixed here — a resize while the picker is open keeps
+	// the width it opened with, which is acceptable.
+	cols, _, err := term.GetSize(c.fd)
+	if err != nil {
+		cols = 0
+	}
+	lines, header := resumeRows(sessions, home, shortHostname(), cols, time.Now())
 	note := ""
 	if len(unreachable) > 0 {
 		note = "unreachable: " + strings.Join(unreachable, ", ")

@@ -30,6 +30,20 @@ func writeResumableTranscript(t *testing.T, home, dir, sid string, mtime time.Ti
 	return path
 }
 
+// writeSessionFile writes a live-session JSON blob to
+// <home>/.claude/sessions/<pid>.json, the source resumableNameMap reads for
+// user-set names.
+func writeSessionFile(t *testing.T, home, pid, content string) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, pid+".json"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCollectResumableFiltersAndSorts(t *testing.T) {
 	home := t.TempDir()
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
@@ -145,6 +159,61 @@ func TestCollectResumableDedupesBySessionID(t *testing.T) {
 	}
 }
 
+func TestCollectResumableName(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+
+	// (a) A still-present session file with a user-set name wins over the
+	// transcript summary.
+	writeResumableTranscript(t, home, "proj", "namedses", now.Add(-1*time.Hour),
+		`{"type":"summary","summary":"summary that should be overridden"}`,
+		`{"type":"attachment","cwd":"/home/u/named"}`,
+		`{"type":"user","message":{"role":"user","content":"hi"}}`,
+	)
+	writeSessionFile(t, home, "111",
+		`{"pid":111,"sessionId":"namedses","cwd":"/home/u/named","name":"Refactor parser","nameSource":"user"}`)
+
+	// (b) A derived nameSource is ignored (it just echoes the dir); the summary
+	// is used instead.
+	writeResumableTranscript(t, home, "proj", "derivses", now.Add(-2*time.Hour),
+		`{"type":"summary","summary":"Investigate flaky test"}`,
+		`{"type":"attachment","cwd":"/home/u/derv"}`,
+		`{"type":"user","message":{"role":"user","content":"hi"}}`,
+	)
+	writeSessionFile(t, home, "222",
+		`{"pid":222,"sessionId":"derivses","cwd":"/home/u/derv","name":"derv","nameSource":"derived"}`)
+
+	// (c) No session file, summary present → the summary is the name.
+	writeResumableTranscript(t, home, "proj", "summsess", now.Add(-3*time.Hour),
+		`{"type":"summary","summary":"Wire up the resume picker"}`,
+		`{"type":"attachment","cwd":"/home/u/summ"}`,
+		`{"type":"user","message":{"role":"user","content":"hi"}}`,
+	)
+
+	// (d) Neither a session file nor a summary → empty name (rendered "-").
+	writeResumableTranscript(t, home, "proj", "bareseso", now.Add(-4*time.Hour),
+		`{"type":"attachment","cwd":"/home/u/bare"}`,
+		`{"type":"user","message":{"role":"user","content":"hi"}}`,
+	)
+
+	names := map[string]string{}
+	for _, s := range collectResumableFrom(home, nil, now) {
+		names[s.SessionID] = s.Name
+	}
+	if names["namedses"] != "Refactor parser" {
+		t.Errorf("user-set name = %q, want %q", names["namedses"], "Refactor parser")
+	}
+	if names["derivses"] != "Investigate flaky test" {
+		t.Errorf("derived name should be ignored in favor of summary; got %q", names["derivses"])
+	}
+	if names["summsess"] != "Wire up the resume picker" {
+		t.Errorf("summary name = %q", names["summsess"])
+	}
+	if names["bareseso"] != "" {
+		t.Errorf("bare name = %q, want empty", names["bareseso"])
+	}
+}
+
 func TestFirstPromptText(t *testing.T) {
 	cases := []struct {
 		name string
@@ -223,10 +292,11 @@ func TestFormatAge(t *testing.T) {
 func TestResumeRowsAlignmentAndFilter(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	sessions := []ResumableSession{
-		{SessionID: "local001", CWD: "/home/u/proj", GitBranch: "main", FirstPrompt: "do a thing", MessageCount: 12, ModifiedAt: now.Add(-1 * time.Hour)},
+		{SessionID: "local001", CWD: "/home/u/proj", GitBranch: "main", Name: "Fix parser", FirstPrompt: "do a thing", MessageCount: 12, ModifiedAt: now.Add(-1 * time.Hour)},
 		{SessionID: "remote01", CWD: "/srv/app", FirstPrompt: "", MessageCount: 3, ModifiedAt: now.Add(-2 * time.Hour), Host: "srv"},
 	}
-	lines, header := resumeRows(sessions, "/home/u", "mac", now)
+	// cols=0 (unknown width) → full layout, every column present.
+	lines, header := resumeRows(sessions, "/home/u", "mac", 0, now)
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want 2", len(lines))
 	}
@@ -239,6 +309,9 @@ func TestResumeRowsAlignmentAndFilter(t *testing.T) {
 	}
 	if !strings.Contains(local, "mac ") { // host padded to width of "HOST" (4)
 		t.Errorf("local missing padded host: %q", local)
+	}
+	if !strings.Contains(local, "Fix parser") { // NAME column
+		t.Errorf("local missing name: %q", local)
 	}
 	if !strings.Contains(local, "~/proj") {
 		t.Errorf("local home not collapsed: %q", local)
@@ -261,7 +334,7 @@ func TestResumeRowsAlignmentAndFilter(t *testing.T) {
 	if idxLocal, idxRemote := colStart(local, "mac"), colStart(remote, "srv"); idxLocal != idxRemote {
 		t.Errorf("host column misaligned: local@%d remote@%d", idxLocal, idxRemote)
 	}
-	if !strings.Contains(header, "AGE") || !strings.Contains(header, "PROMPT") {
+	if !strings.Contains(header, "AGE") || !strings.Contains(header, "NAME") || !strings.Contains(header, "PROMPT") {
 		t.Errorf("header missing columns: %q", header)
 	}
 
@@ -281,6 +354,67 @@ func colStart(s, sub string) int {
 		return -1
 	}
 	return len([]rune(s[:i]))
+}
+
+func TestResumeRowsAutocompact(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	// All-local list: HOST is redundant (every row would repeat this host) and is
+	// omitted regardless of width.
+	sessions := []ResumableSession{
+		{SessionID: "alpha001", CWD: "/home/u/alpha", GitBranch: "main", Name: "Alpha work", FirstPrompt: "do the alpha thing", MessageCount: 5, ModifiedAt: now.Add(-1 * time.Hour)},
+		{SessionID: "beta0002", CWD: "/home/u/beta", GitBranch: "develop", Name: "Beta task", FirstPrompt: "beta prompt text here", MessageCount: 12, ModifiedAt: now.Add(-2 * time.Hour)},
+	}
+
+	cases := []struct {
+		cols       int
+		wantBranch bool
+		wantMsg    bool
+	}{
+		{0, true, true},    // unknown width → full layout
+		{70, true, true},   // wide → full layout
+		{55, true, true},   // tight → only PROMPT shrinks, all columns stay
+		{48, true, false},  // #MSG dropped
+		{40, false, false}, // BRANCH dropped too
+		{30, false, false}, // DIR/NAME shrunk toward floors, columns unchanged
+	}
+	for _, tc := range cases {
+		lines, header := resumeRows(sessions, "/home/u", "mac", tc.cols, now)
+		if len(lines) != 2 {
+			t.Fatalf("cols=%d: got %d lines, want 2", tc.cols, len(lines))
+		}
+		// AGE, NAME, DIR always survive; HOST never appears for an all-local list.
+		for _, must := range []string{"AGE", "NAME", "DIR"} {
+			if !strings.Contains(header, must) {
+				t.Errorf("cols=%d: header missing %q: %q", tc.cols, must, header)
+			}
+		}
+		if strings.Contains(header, "HOST") {
+			t.Errorf("cols=%d: HOST shown for all-local list: %q", tc.cols, header)
+		}
+		if got := strings.Contains(header, "BRANCH"); got != tc.wantBranch {
+			t.Errorf("cols=%d: BRANCH present=%v, want %v (%q)", tc.cols, got, tc.wantBranch, header)
+		}
+		if got := strings.Contains(header, "#MSG"); got != tc.wantMsg {
+			t.Errorf("cols=%d: #MSG present=%v, want %v (%q)", tc.cols, got, tc.wantMsg, header)
+		}
+		// Width invariant: neither the header nor any row exceeds cols.
+		if tc.cols > 0 {
+			if w := len([]rune(header)); w > tc.cols {
+				t.Errorf("cols=%d: header width %d exceeds", tc.cols, w)
+			}
+			for _, ln := range lines {
+				if w := len([]rune(stripSGR(ln))); w > tc.cols {
+					t.Errorf("cols=%d: row width %d exceeds: %q", tc.cols, w, stripSGR(ln))
+				}
+			}
+		}
+		// Header matches rows: the DIR column's left edge is identical in the
+		// header and the alpha row, proving equal widths for AGE/NAME to its left.
+		row0 := stripSGR(lines[0])
+		if hd, rd := colStart(header, "DIR"), colStart(row0, "~/alpha"); hd != rd {
+			t.Errorf("cols=%d: DIR column misaligned header@%d row@%d (%q / %q)", tc.cols, hd, rd, header, row0)
+		}
+	}
 }
 
 func TestResumePickerStateFilterFirst(t *testing.T) {
