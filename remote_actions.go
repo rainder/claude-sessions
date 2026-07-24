@@ -189,6 +189,24 @@ func fetchRemoteCwdSuggestions(host string) (suggestions []cwdSuggestion, home s
 	return response.Suggestions, response.Home, nil
 }
 
+// fetchRemoteResumable retrieves the named server's resumable-session list from
+// its /resumable endpoint, using a short 5s timeout so a slow or unreachable
+// host doesn't stall the picker. Host is left blank here; the caller tags each
+// row with the server name.
+func fetchRemoteResumable(host string) ([]ResumableSession, error) {
+	data, err := remoteRequestWithTimeout(host, "/resumable", http.MethodGet, nil, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Sessions []ResumableSession `json:"sessions"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, err
+	}
+	return response.Sessions, nil
+}
+
 // errPresetsUnavailable signals that a remote server's /presets response
 // couldn't be used — either it predates the route (404) or its body isn't
 // the expected JSON shape. Callers treat this as "unknown" and fall back to

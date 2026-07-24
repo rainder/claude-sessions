@@ -614,9 +614,14 @@ func RunTUI(interval time.Duration) error {
 				refresh(false)
 				render()
 			case "r", "R":
-				usageHub.Kick()
-				codexUsageHub.Kick()
-				hostUsageHub.Kick()
+				screen.Invalidate()
+				ctx := makeCtx()
+				actResume(ctx)
+				// Chase the resumed session's tmux pane across refreshes, same as
+				// the new-session landing (only a real spawn sets spawnedTmux).
+				if ctx.spawnedTmux != "" {
+					state.pending = &pendingSpawn{host: ctx.spawnedHost, tmux: ctx.spawnedTmux}
+				}
 				refresh(true)
 				render()
 			case "?":
@@ -974,6 +979,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("ACTIONS")+"  (on selected row)")
 	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command · p prompt in background)")
+	fmt.Fprintln(&b, "    r            resume a past session (searchable · local + remote)")
 	fmt.Fprintln(&b, "    - / +        disable / enable session")
 	fmt.Fprintln(&b, "    Shift-1..9   assign session to group ①..⑨ (same group again ungroups)")
 	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
@@ -993,7 +999,6 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    /            filter rows by text (type to narrow · Enter commits · Esc clears)")
 	fmt.Fprintln(&b, "    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
 	fmt.Fprintln(&b, "                 current sort: "+sortMode)
-	fmt.Fprintln(&b, "    r            refresh now")
 	fmt.Fprintln(&b, "    q / Ctrl-C   quit")
 	fmt.Fprintln(&b, "    ?            this help")
 	fmt.Fprintln(&b)

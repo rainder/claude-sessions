@@ -264,6 +264,51 @@ func (s *server) presets(w http.ResponseWriter, r *http.Request) {
 	}{Presets: names})
 }
 
+// resumable returns this host's resumable (past, ended) sessions, collected
+// in-process — the same primitive the local TUI path uses.
+func (s *server) resumable(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Sessions []ResumableSession `json:"sessions"`
+	}{Sessions: CollectResumable()})
+}
+
+// resume spawns `claude --resume <id>` in a fresh tmux session for the given
+// session id + cwd. A session that's already live is refused with 409;
+// validation and the spawn go through the shared ResumeSession primitive.
+func (s *server) resume(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+		CWD       string `json:"cwd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if body.SessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	tname, err := ResumeSession(body.SessionID, body.CWD)
+	if err != nil {
+		if errors.Is(err, errResumeSessionLive) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
+	s.invalidateSessions()
+	writeJSON(w, http.StatusOK, actionResult{OK: true, Tmux: tname})
+}
+
 func (s *server) preview(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -651,6 +696,8 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("GET /cwd-suggestions", s.cwdSuggestions)
 	mux.HandleFunc("GET /presets", s.presets)
+	mux.HandleFunc("GET /resumable", s.resumable)
+	mux.HandleFunc("POST /sessions/resume", s.resume)
 	mux.HandleFunc("GET /sessions/{pid}/preview", s.preview)
 	mux.HandleFunc("GET /sessions/{pid}/tmux-info", s.tmuxInfo)
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)
