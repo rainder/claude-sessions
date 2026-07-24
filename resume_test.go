@@ -50,7 +50,7 @@ func TestCollectResumableFiltersAndSorts(t *testing.T) {
 
 	writeResumableTranscript(t, home, "proj", "aaaa1111", now.Add(-1*time.Hour),
 		`{"type":"attachment","cwd":"/home/u/proj","gitBranch":"main"}`,
-		`{"type":"user","message":{"role":"user","content":"fix the bug in parser"}}`,
+		`{"type":"user","entrypoint":"cli","message":{"role":"user","content":"fix the bug in parser"}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}`,
 	)
 	// Corrupt first line is skipped; cwd/branch/prompt come from later lines and
@@ -91,6 +91,14 @@ func TestCollectResumableFiltersAndSorts(t *testing.T) {
 	writeResumableTranscript(t, home, "proj", "aaaapriv", now.Add(-3*time.Minute),
 		`{"type":"attachment","cwd":"/private/tmp/claude-501/x"}`,
 		`{"type":"user","message":{"role":"user","content":"scratchpad work"}}`,
+	)
+	// Subagent sidechain transcript → excluded.
+	writeResumableTranscript(t, home, "proj", "aaaaside", now.Add(-4*time.Minute),
+		`{"type":"user","isSidechain":true,"cwd":"/home/u/proj","message":{"role":"user","content":"You are reviewing one task"}}`,
+	)
+	// Headless/SDK run (non-cli entrypoint) → excluded.
+	writeResumableTranscript(t, home, "proj", "aaaahead", now.Add(-5*time.Minute),
+		`{"type":"user","isSidechain":false,"entrypoint":"sdk-cli","cwd":"/home/u/proj","message":{"role":"user","content":"Review this change"}}`,
 	)
 
 	got := collectResumableFrom(home, map[string]bool{"9999live": true}, now)

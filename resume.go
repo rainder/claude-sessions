@@ -104,7 +104,7 @@ func collectResumableFrom(home string, live map[string]bool, now time.Time) []Re
 			continue
 		}
 		head, ok := readResumableHead(path)
-		if !ok || head.cwd == "" || scratchCwd(head.cwd) {
+		if !ok || head.cwd == "" || scratchCwd(head.cwd) || head.agentTranscript() {
 			continue
 		}
 		// NAME is best-effort: a user-set name from a still-present session file
@@ -175,6 +175,16 @@ type resumableHead struct {
 	gitBranch   string
 	firstPrompt string
 	summary     string // from a {"type":"summary","summary":"..."} line, if any
+	sidechain   bool   // any entry marked isSidechain — a subagent transcript
+	entrypoint  string // from the first entry carrying one: "cli" = interactive
+}
+
+// agentTranscript reports transcripts that belong to subagents or headless/SDK
+// runs (Agent-tool sidechains, `claude -p` automation, SDK drivers) rather than
+// an interactive session someone would resume. Older transcripts without an
+// entrypoint field pass — absence is not evidence of automation.
+func (h resumableHead) agentTranscript() bool {
+	return h.sidechain || (h.entrypoint != "" && h.entrypoint != "cli")
 }
 
 // readResumableHead scans up to resumeHeadLines lines of a transcript for the
@@ -195,18 +205,26 @@ func readResumableHead(path string) (resumableHead, bool) {
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for i := 0; scanner.Scan() && i < resumeHeadLines; i++ {
 		var line struct {
-			Type      string `json:"type"`
-			CWD       string `json:"cwd"`
-			GitBranch string `json:"gitBranch"`
-			Summary   string `json:"summary"`
-			IsMeta    bool   `json:"isMeta"`
-			Message   *struct {
+			Type        string `json:"type"`
+			CWD         string `json:"cwd"`
+			GitBranch   string `json:"gitBranch"`
+			Summary     string `json:"summary"`
+			IsMeta      bool   `json:"isMeta"`
+			IsSidechain bool   `json:"isSidechain"`
+			Entrypoint  string `json:"entrypoint"`
+			Message     *struct {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			continue
+		}
+		if line.IsSidechain {
+			head.sidechain = true
+		}
+		if head.entrypoint == "" && line.Entrypoint != "" {
+			head.entrypoint = line.Entrypoint
 		}
 		if head.cwd == "" && line.CWD != "" {
 			head.cwd = line.CWD
@@ -380,6 +398,11 @@ func gatherResumable() (sessions []ResumableSession, unreachable []string) {
 		}
 		sessions = append(sessions, remoteResults[i]...)
 	}
+	// Each host's list arrives mtime-sorted, but the merge concatenates them;
+	// re-sort so the aggregated picker is newest-first across hosts.
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt)
+	})
 	return sessions, unreachable
 }
 
