@@ -763,25 +763,20 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	// startup — it's stable for the process's lifetime.
 	usageHub := NewUsageHub()
 	defer usageHub.Shutdown()
-	accountEmail := loadAccountEmail()
 
 	// Codex account usage: same background poller, so a remote host also surfaces
-	// its own Codex account's limits. The snapshot is already account-paired (the
-	// email rides in the Codex payload), so no separate identity read is needed.
+	// its own Codex account's limits. Both snapshots are account-paired at fetch
+	// time (the Anthropic email is re-read each fetch, the Codex email rides in
+	// its payload), so a mid-run relogin re-attributes the limits and no separate
+	// startup identity read is needed.
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
 
 	s := &server{
-		token:        tok,
-		host:         host,
-		hostSnapshot: hostUsageHub.Snapshot,
-		usageSnapshot: func() *AccountUsage {
-			info := usageHub.Snapshot()
-			if info == nil {
-				return nil
-			}
-			return &AccountUsage{Account: accountEmail, Info: info}
-		},
+		token:              tok,
+		host:               host,
+		hostSnapshot:       hostUsageHub.Snapshot,
+		usageSnapshot:      usageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
 	}
 	mux := http.NewServeMux()

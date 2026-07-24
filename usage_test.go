@@ -141,46 +141,49 @@ func TestUsageCacheRoundTrip(t *testing.T) {
 	if got := loadUsageCache(); got != nil {
 		t.Fatalf("loadUsageCache with no file = %+v, want nil", got)
 	}
-	want := &UsageInfo{
-		FiveHour:          usageBucket{Pct: 85, ResetsAt: time.Now().Add(time.Hour).UTC()},
-		SevenDay:          usageBucket{Pct: 46, ResetsAt: time.Now().Add(48 * time.Hour).UTC()},
-		WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: time.Now().Add(72 * time.Hour).UTC()},
-		WeeklyScopedLabel: "Fable",
-		Credits:           creditsInfo{Enabled: true, Used: 2550, Limit: 100000, Currency: "USD", DecimalPlaces: 2},
+	want := &AccountUsage{
+		Account: "andy@work.com",
+		Info: &UsageInfo{
+			FiveHour:          usageBucket{Pct: 85, ResetsAt: time.Now().Add(time.Hour).UTC()},
+			SevenDay:          usageBucket{Pct: 46, ResetsAt: time.Now().Add(48 * time.Hour).UTC()},
+			WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: time.Now().Add(72 * time.Hour).UTC()},
+			WeeklyScopedLabel: "Fable",
+			Credits:           creditsInfo{Enabled: true, Used: 2550, Limit: 100000, Currency: "USD", DecimalPlaces: 2},
+		},
 	}
 	saveUsageCache(want)
 	got := loadUsageCache()
 	if got == nil {
 		t.Fatal("loadUsageCache after save = nil")
 	}
-	if got.FiveHour.Pct != 85 || got.SevenDay.Pct != 46 || !got.Credits.Enabled || got.Credits.Used != 2550 {
-		t.Errorf("round-trip mismatch: %+v", got)
+	if got.Account != "andy@work.com" {
+		t.Errorf("round-trip account = %q, want andy@work.com", got.Account)
 	}
-	if got.WeeklyScopedLabel != "Fable" || got.WeeklyScoped.Pct != 10 {
-		t.Errorf("scoped weekly round-trip mismatch: %+v/%q", got.WeeklyScoped, got.WeeklyScopedLabel)
+	if got.Info == nil || got.Info.FiveHour.Pct != 85 || got.Info.SevenDay.Pct != 46 || !got.Info.Credits.Enabled || got.Info.Credits.Used != 2550 {
+		t.Errorf("round-trip mismatch: %+v", got.Info)
+	}
+	if got.Info.WeeklyScopedLabel != "Fable" || got.Info.WeeklyScoped.Pct != 10 {
+		t.Errorf("scoped weekly round-trip mismatch: %+v/%q", got.Info.WeeklyScoped, got.Info.WeeklyScopedLabel)
 	}
 }
 
-// A cache written before the scoped-weekly fields existed must still load,
-// degrading to no scoped bar rather than erroring.
-func TestUsageCacheOldFormatNoScoped(t *testing.T) {
+// A pre-relogin cache stored the bare snapshot under "info" (no account). The
+// new envelope keys it under "usage"; the old file must decode to a miss (nil),
+// not an error or a bogus empty-account snapshot.
+func TestUsageCacheOldEnvelopeMigratesToMiss(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
-	old, _ := json.Marshal(cachedUsage{
-		FetchedAt: time.Now(),
-		Info: UsageInfo{
-			FiveHour: usageBucket{Pct: 85, ResetsAt: time.Now().Add(time.Hour).UTC()},
-			SevenDay: usageBucket{Pct: 46, ResetsAt: time.Now().Add(48 * time.Hour).UTC()},
+	old, _ := json.Marshal(map[string]any{
+		"fetched_at": time.Now(),
+		"info": map[string]any{
+			"FiveHour": map[string]any{"Pct": 85},
+			"SevenDay": map[string]any{"Pct": 46},
 		},
 	})
 	if err := os.WriteFile(usageCachePath(), old, 0600); err != nil {
 		t.Fatal(err)
 	}
-	got := loadUsageCache()
-	if got == nil {
-		t.Fatal("loadUsageCache of pre-scoped cache = nil")
-	}
-	if got.WeeklyScopedLabel != "" || got.WeeklyScoped.Pct != 0 {
-		t.Errorf("scoped fields = %+v/%q, want empty", got.WeeklyScoped, got.WeeklyScopedLabel)
+	if got := loadUsageCache(); got != nil {
+		t.Errorf("old-format cache should decode to a miss, got %+v", got)
 	}
 }
 
@@ -188,7 +191,7 @@ func TestUsageCacheExpiry(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	stale, _ := json.Marshal(cachedUsage{
 		FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute),
-		Info:      UsageInfo{FiveHour: usageBucket{Pct: 85}},
+		Usage:     AccountUsage{Account: "a@b.c", Info: &UsageInfo{FiveHour: usageBucket{Pct: 85}}},
 	})
 	if err := os.WriteFile(usageCachePath(), stale, 0600); err != nil {
 		t.Fatal(err)
@@ -201,6 +204,23 @@ func TestUsageCacheExpiry(t *testing.T) {
 	}
 	if got := loadUsageCache(); got != nil {
 		t.Errorf("corrupt cache returned %+v, want nil", got)
+	}
+}
+
+// A new-envelope cache whose nested snapshot is null (only the account written)
+// is a miss too, so the poller waits for a live fetch rather than seeding an
+// info-less bar.
+func TestUsageCacheNilInfoIsMiss(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	nilInfo, _ := json.Marshal(cachedUsage{
+		FetchedAt: time.Now(),
+		Usage:     AccountUsage{Account: "a@b.c", Info: nil},
+	})
+	if err := os.WriteFile(usageCachePath(), nilInfo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadUsageCache(); got != nil {
+		t.Errorf("nil-Info cache should be a miss, got %+v", got)
 	}
 }
 

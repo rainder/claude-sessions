@@ -108,17 +108,15 @@ func RunTUI(interval time.Duration) error {
 	}
 	defer hub.Shutdown()
 
-	// Account usage bars: same non-blocking pattern as the remote hub. The
-	// first paint happens with no bar; it appears once the initial fetch
-	// lands (no wake pipe — the next tick repaints anyway). The local login
-	// email is read once (cheap, stable for the session) so its bar can be
-	// deduped/labeled against remotes that run a different account.
+	// Account usage bars: same non-blocking pattern as the remote hub. The first
+	// paint happens with no bar; it appears once the initial fetch lands (no wake
+	// pipe — the next tick repaints anyway). Both snapshots arrive account-paired
+	// at fetch time (the Anthropic email is re-read each fetch, so a mid-run
+	// relogin re-attributes the bar; the Codex email rides in its payload), so
+	// each bar can be deduped/labeled against remotes on a different account.
 	usageHub := NewUsageHub()
 	defer usageHub.Shutdown()
-	localAccount := loadAccountEmail()
 
-	// Codex usage bars: same non-blocking poller. The snapshot arrives already
-	// account-paired (email is in the Codex payload), so no local identity read.
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
 
@@ -252,7 +250,7 @@ func RunTUI(interval time.Duration) error {
 			Sessions:  local,
 			HostUsage: hostUsageHub.Snapshot(),
 		}, remotes, state.sel, &LocalUsage{
-			Claude: &AccountUsage{Account: localAccount, Info: usageHub.Snapshot()},
+			Claude: usageHub.Snapshot(),
 			Codex:  codexUsageHub.Snapshot(),
 		}, cols, 0, sortMode)
 		toastActive := rows > 0 && time.Now().Before(toastUntil)

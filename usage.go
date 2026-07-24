@@ -192,10 +192,14 @@ func loadOAuthToken() (string, error) {
 	return creds.ClaudeAiOauth.AccessToken, nil
 }
 
-// fetchUsage hits the usage endpoint with the current token. The HTTP leg
-// has a 5s timeout; credential loading (macOS Keychain) is unbounded but
-// runs off the render path in UsageHub's background goroutine.
-func fetchUsage() (*UsageInfo, error) {
+// fetchUsage hits the usage endpoint with the current token and pairs the parsed
+// snapshot with a fresh read of the logged-in account email (loadAccountEmail),
+// so a relogin into a different account mid-run re-attributes the limits instead
+// of reporting them under the account read at startup. The email is read at
+// fetch time, like the token; an unreadable email yields Account "" (not an
+// error). The HTTP leg has a 5s timeout; token loading (macOS Keychain) and the
+// email read are off the render path in the poller's background goroutine.
+func fetchUsage() (*AccountUsage, error) {
 	tok, err := loadOAuthToken()
 	if err != nil {
 		return nil, err
@@ -219,7 +223,11 @@ func fetchUsage() (*UsageInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseUsage(body)
+	info, err := parseUsage(body)
+	if err != nil {
+		return nil, err
+	}
+	return &AccountUsage{Account: loadAccountEmail(), Info: info}, nil
 }
 
 // usageRefreshInterval is how often the background poller refetches. Usage
@@ -245,16 +253,19 @@ func usageCachePath() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("claude-sessions-usage-%d.json", os.Getuid()))
 }
 
-// cachedUsage is the on-disk envelope: the snapshot plus when it was fetched.
+// cachedUsage is the on-disk envelope: the account-paired snapshot plus when it
+// was fetched. The snapshot lives under "usage" (account + info); a pre-relogin
+// cache that stored the bare snapshot under "info" decodes to a zero Usage (nil
+// Info), which loadUsageCache treats as a miss.
 type cachedUsage struct {
-	FetchedAt time.Time `json:"fetched_at"`
-	Info      UsageInfo `json:"info"`
+	FetchedAt time.Time    `json:"fetched_at"`
+	Usage     AccountUsage `json:"usage"`
 }
 
 // saveUsageCache persists a successful fetch. Best-effort: a read-only /tmp
 // just means no warm start next launch.
-func saveUsageCache(info *UsageInfo) {
-	data, err := json.Marshal(cachedUsage{FetchedAt: time.Now(), Info: *info})
+func saveUsageCache(u *AccountUsage) {
+	data, err := json.Marshal(cachedUsage{FetchedAt: time.Now(), Usage: *u})
 	if err != nil {
 		return
 	}
@@ -262,8 +273,10 @@ func saveUsageCache(info *UsageInfo) {
 }
 
 // loadUsageCache returns the cached snapshot, or nil if absent, unreadable,
-// or older than usageCacheMaxAge.
-func loadUsageCache() *UsageInfo {
+// older than usageCacheMaxAge, or missing its snapshot (nil Info — including a
+// pre-relogin cache written in the old "info" envelope, which is a miss, not an
+// error).
+func loadUsageCache() *AccountUsage {
 	data, err := os.ReadFile(usageCachePath())
 	if err != nil {
 		return nil
@@ -272,17 +285,19 @@ func loadUsageCache() *UsageInfo {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil
 	}
-	if c.FetchedAt.IsZero() || time.Since(c.FetchedAt) > usageCacheMaxAge {
+	if c.FetchedAt.IsZero() || time.Since(c.FetchedAt) > usageCacheMaxAge || c.Usage.Info == nil {
 		return nil
 	}
-	return &c.Info
+	return &c.Usage
 }
 
 // UsageHub polls the Anthropic OAuth usage endpoint in the background so the
 // render loop never blocks on credentials or the network (see usagePoller for
-// the shared mechanism it delegates to). The public surface — NewUsageHub,
+// the shared mechanism it delegates to). It holds the account-paired snapshot
+// (AccountUsage) — the account email is re-read every fetch, like the token, so
+// a mid-run relogin re-attributes the limits. The public surface — NewUsageHub,
 // Snapshot, Pause, Resume, Kick, Shutdown — is unchanged.
-type UsageHub = usagePoller[UsageInfo]
+type UsageHub = usagePoller[AccountUsage]
 
 // NewUsageHub starts the poller and returns immediately; the first fetch is
 // kicked off asynchronously. A recent disk-cached snapshot seeds the header so
