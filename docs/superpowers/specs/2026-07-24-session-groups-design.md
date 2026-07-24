@@ -69,6 +69,62 @@ deleted.
 - When the selected row is filtered out, selection falls back via existing
   machinery.
 
+## Hide set (inverse filter) — approved addition, 2026-07-24
+
+Extends the filter with an inverse mode: hide one or more groups instead of
+showing only one.
+
+### State
+
+Replace the runtime `activeFilter int` (tui.go) with:
+
+```go
+type groupFilter struct {
+    mode groupFilterMode // filterNone | filterOnly | filterHide
+    mask uint16          // bits 1–9, one per group
+}
+```
+
+- Runtime-only, never persisted (unchanged from single filter).
+- `filterOnly`: session visible iff its group's bit is set in mask (single bit
+  today; ungrouped sessions hidden — current behavior preserved).
+- `filterHide`: session visible iff ungrouped or its bit is NOT set —
+  ungrouped sessions always survive hide mode.
+- Modes mutually exclusive; entering one resets the mask.
+
+### Keys
+
+- `1`–`9`: mode=only with that single bit; same digit again clears. Exactly
+  today's behavior. Pressing while hide is active switches to only mode.
+- `h`/`H` + `1`–`9`: mode=hide, toggle that group's bit. Removing the last bit
+  clears the filter. `h` arms a pending state; the next keypress decides —
+  digit applies, anything else cancels (no timer).
+- `0`: clears any filter. `⇧1–9` assignment unchanged.
+- Footer hint: `… · 1-9 only · h1-9 hide · ⇧1-9 group …`; help screen lists
+  both bindings.
+
+### Indicator
+
+`groupFilterIndicator` (render.go) renders:
+
+- only mode: `only ③` — badge in its group color (renames current `group ③`).
+- hide mode: `hide ②③⑤` — badges sorted ascending, each in its group color;
+  the `hide` label tinted red.
+- Empty string when no filter (unchanged).
+
+### Touch points
+
+`passesGroupFilter` + callers (`filterSessionRows`, `filterRemoteResults`,
+`buildSections`, `settleRows`) take the struct; digit handler and new `h`
+case + pending-arm var in tui.go; footer/help text.
+
+### Tests (addition)
+
+- Pure filter-transition helper (key → next filter state): digit from none /
+  only / hide; `h`+digit toggle, last-bit clear, cancel on non-digit; `0`.
+- `passesGroupFilter`: only/hide/ungrouped matrix.
+- Indicator strings for only, multi-hide (sorted), none.
+
 ## Tests
 
 - Store: round-trip, atomic save, GC (empty entries, 30-day expiry).
