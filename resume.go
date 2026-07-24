@@ -102,7 +102,7 @@ func collectResumableFrom(home string, live map[string]bool, now time.Time) []Re
 			continue
 		}
 		head, ok := readResumableHead(path)
-		if !ok || head.cwd == "" {
+		if !ok || head.cwd == "" || scratchCwd(head.cwd) {
 			continue
 		}
 		byID[sid] = ResumableSession{
@@ -126,6 +126,14 @@ func collectResumableFrom(home string, live map[string]bool, now time.Time) []Re
 		out = out[:resumableMaxCount]
 	}
 	return out
+}
+
+// scratchCwd reports sessions run out of temp dirs — /tmp and /private (macOS's
+// home for scratchpads and /tmp itself) — which aren't worth resuming. Narrower
+// than picker.go's hiddenCwd on purpose: worktree checkouts stay resumable.
+func scratchCwd(cwd string) bool {
+	return cwd == "/tmp" || strings.HasPrefix(cwd, "/tmp/") ||
+		cwd == "/private" || strings.HasPrefix(cwd, "/private/")
 }
 
 // resumableHead holds the fields pulled from a transcript's first lines.

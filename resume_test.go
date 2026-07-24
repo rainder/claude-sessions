@@ -69,6 +69,15 @@ func TestCollectResumableFiltersAndSorts(t *testing.T) {
 		`{"type":"attachment","cwd":"/home/u/live"}`,
 		`{"type":"user","message":{"role":"user","content":"running now"}}`,
 	)
+	// Scratch cwds (/tmp, /private) → excluded.
+	writeResumableTranscript(t, home, "proj", "aaaatmp1", now.Add(-2*time.Minute),
+		`{"type":"attachment","cwd":"/tmp/scratch"}`,
+		`{"type":"user","message":{"role":"user","content":"temp work"}}`,
+	)
+	writeResumableTranscript(t, home, "proj", "aaaapriv", now.Add(-3*time.Minute),
+		`{"type":"attachment","cwd":"/private/tmp/claude-501/x"}`,
+		`{"type":"user","message":{"role":"user","content":"scratchpad work"}}`,
+	)
 
 	got := collectResumableFrom(home, map[string]bool{"9999live": true}, now)
 
