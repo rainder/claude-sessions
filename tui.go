@@ -94,11 +94,14 @@ func RunTUI(interval time.Duration) error {
 	viewMode := LoadViewMode()
 	sortMode := LoadSortMode()
 	// store holds client-side group assignments and disabled flags (state.go).
-	// activeFilter (0 = none) is runtime-only — never persisted. groups is a
+	// groupFilterState (zero value = no filter) is runtime-only — never
+	// persisted. pendingHide arms the inverse-filter binding: 'h' sets it and the
+	// next keystroke resolves it (see groupFilterTransition). groups is a
 	// per-settle snapshot of the store's assignments, reused for badge rendering
 	// and the filter predicate.
 	store := LoadSessionStore()
-	activeFilter := 0
+	var groupFilterState groupFilter
+	var pendingHide bool
 	var groups map[string]int
 	var lastStateTouch time.Time
 	var local []Session
@@ -206,7 +209,7 @@ func RunTUI(interval time.Duration) error {
 		}
 		// Targets mirror exactly what the frame renders: filtered by the active
 		// group so a filtered-out selection falls back via validateTargetSel.
-		gv := groupView{groups: groups, filter: activeFilter}
+		gv := groupView{groups: groups, filter: groupFilterState}
 		targets = buildSelectionTargets(
 			filterSessionRows(local, gv),
 			filterRemoteResults(remotes, gv),
@@ -283,7 +286,7 @@ func RunTUI(interval time.Duration) error {
 		}, remotes, state.sel, &LocalUsage{
 			Claude: usageHub.Snapshot(),
 			Codex:  codexUsageHub.Snapshot(),
-		}, cols, 0, sortMode, groupView{groups: groups, filter: activeFilter})
+		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if rows > 0 {
@@ -470,6 +473,9 @@ func RunTUI(interval time.Duration) error {
 			if ev.kind == eventMouse {
 				switch state.handleListMouse(ev.mouse, time.Now()) {
 				case commandOpenInspector:
+					// Any pending 'h' arm dies here: the inspector consumes keys of
+					// its own, and a stale arm would flip the next digit into hide mode.
+					pendingHide = false
 					openInspector()
 				case commandRender:
 					render()
@@ -478,8 +484,26 @@ func RunTUI(interval time.Duration) error {
 			}
 			k := ev.key
 			if sessionKeyCommand(k) == commandOpenInspector {
+				pendingHide = false
 				openInspector()
 				continue
+			}
+			// Group view filter (digits, the 'h' arm, and armed hide toggles) runs
+			// through a pure transition so the state machine stays table-testable. A
+			// consumed key updates the filter and never falls through; a non-filter
+			// key reports consumed=false with the arm cleared, so it drops into the
+			// normal switch below (which is how kill/quit still fire while armed).
+			if nextFilter, nextArmed, consumed := groupFilterTransition(groupFilterState, pendingHide, k); consumed {
+				pendingHide = nextArmed
+				if nextFilter != groupFilterState {
+					groupFilterState = nextFilter
+					settleRows()
+					state.requestSelectionAnchor()
+					render()
+				}
+				continue
+			} else {
+				pendingHide = nextArmed
 			}
 			switch k {
 			case "q", "Q", "\x03", "\x04":
@@ -516,18 +540,6 @@ func RunTUI(interval time.Duration) error {
 					state.requestSelectionAnchor()
 					render()
 				}
-			case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
-				// Digits toggle the group view filter: same digit again clears it,
-				// "0" clears too. Runtime-only, never persisted.
-				n := int(k[0] - '0')
-				if n == 0 || activeFilter == n {
-					activeFilter = 0
-				} else {
-					activeFilter = n
-				}
-				settleRows()
-				state.requestSelectionAnchor()
-				render()
 			case "!", "@", "#", "$", "%", "^", "&", "*", "(":
 				// Shift+1..9 assign the selected session's group (single membership;
 				// same group again ungroups). Sessions with no SessionID are ignored.
@@ -710,6 +722,84 @@ func sortRemotes(remotes []RemoteResult, mode string) []RemoteResult {
 	return out
 }
 
+// groupFilterMode selects how a groupFilter's mask is read: no filter, show
+// only the masked groups, or hide the masked groups. filterNone must stay the
+// zero value so a bare groupFilter{} (and groupView{}) means "show everything".
+type groupFilterMode uint8
+
+const (
+	filterNone groupFilterMode = iota
+	filterOnly
+	filterHide
+)
+
+// groupFilter is the runtime-only view filter (never persisted). filterOnly
+// makes a session visible iff its group's bit is set in mask (a single bit
+// today; ungrouped rows are hidden). filterHide makes a session visible iff it
+// is ungrouped or its bit is NOT set (ungrouped rows always survive). Bits
+// 1..9 map to groups 1..9.
+type groupFilter struct {
+	mode groupFilterMode
+	mask uint16
+}
+
+// groupMaskHas reports whether group's bit (1..9) is set in mask.
+func groupMaskHas(mask uint16, group int) bool {
+	if group < 1 || group > 9 {
+		return false
+	}
+	return mask&(1<<uint(group)) != 0
+}
+
+// isDigit1to9 reports whether k is a single '1'..'9' keystroke.
+func isDigit1to9(k string) bool {
+	return len(k) == 1 && k[0] >= '1' && k[0] <= '9'
+}
+
+// groupFilterTransition computes the next filter state after key k, given the
+// current filter and whether an 'h' arm is pending. consumed reports whether k
+// was a filter binding; when false the caller cancels any arm (nextArmed is
+// always false then) and processes k through the normal key switch. Keeping it
+// a pure function makes the digit / hide / arm state machine table-testable.
+//
+// Bindings: 1..9 select only-mode for that single group (same digit again, or
+// 0, clears; pressing while hide is active switches to only); h/H arms a
+// pending state whose next 1..9 toggles that group's bit in hide mode (removing
+// the last bit clears; switching from only starts a fresh mask). An armed
+// non-digit cancels the arm and is reinterpreted unarmed, so 'h' re-arms and
+// any other key falls through.
+func groupFilterTransition(cur groupFilter, armed bool, k string) (next groupFilter, nextArmed, consumed bool) {
+	if armed && isDigit1to9(k) {
+		n := int(k[0] - '0')
+		mask := uint16(0)
+		if cur.mode == filterHide {
+			mask = cur.mask
+		}
+		mask ^= 1 << uint(n)
+		if mask == 0 {
+			return groupFilter{}, false, true
+		}
+		return groupFilter{mode: filterHide, mask: mask}, false, true
+	}
+	// Not an armed digit: any pending arm is cancelled, then k is read as an
+	// unarmed keystroke.
+	if k == "0" {
+		return groupFilter{}, false, true
+	}
+	if isDigit1to9(k) {
+		n := int(k[0] - '0')
+		bit := uint16(1) << uint(n)
+		if cur.mode == filterOnly && cur.mask == bit {
+			return groupFilter{}, false, true // same digit again clears
+		}
+		return groupFilter{mode: filterOnly, mask: bit}, false, true
+	}
+	if k == "h" || k == "H" {
+		return cur, true, true // arm; the filter is unchanged until the next key
+	}
+	return cur, false, false
+}
+
 // shiftDigitGroup maps a US-layout Shift+1..9 keystroke to its group number
 // (1..9), or 0 for any other key.
 func shiftDigitGroup(key string) int {
@@ -744,7 +834,7 @@ func visibleSessionIDs(local []Session, remotes []RemoteResult) []string {
 }
 
 func sessionFooter() string {
-	return dim("-/+ disable/enable  ·  ⇧1-9 group  ·  1-9 filter  ·  ? help")
+	return dim("-/+ disable/enable  ·  1-9 only  ·  h1-9 hide  ·  ⇧1-9 group  ·  ? help")
 }
 
 func sessionBottomRow(toast string, toastActive bool) string {
@@ -782,7 +872,8 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("VIEW"))
 	fmt.Fprintln(&b, "    m            cycle mode (full → intermediate → minimal)  ·  persisted")
-	fmt.Fprintln(&b, "    1..9         filter to group (same digit or 0 shows all)")
+	fmt.Fprintln(&b, "    1..9         show only group (same digit or 0 shows all)")
+	fmt.Fprintln(&b, "    h then 1..9  hide group(s) (repeat to add/remove · last one shows all)")
 	fmt.Fprintln(&b, "    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
 	fmt.Fprintln(&b, "                 current sort: "+sortMode)
 	fmt.Fprintln(&b, "    r            refresh now")
