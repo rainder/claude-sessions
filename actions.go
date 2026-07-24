@@ -14,12 +14,6 @@ import (
 // can capture the write; restore it with t.Cleanup.
 var terminalOutput io.Writer = os.Stdout
 
-type disabledUpdate struct {
-	Host      string
-	SessionID string
-	Disabled  bool
-}
-
 // actCtx is the runtime state passed to action handlers.
 type actCtx struct {
 	fd       int
@@ -48,12 +42,12 @@ type actCtx struct {
 	// unattended, so the caller shows a toast instead of attaching.
 	spawnedBackground bool
 
-	updateDisabled func(
-		host string,
-		pid int,
-		sessionID string,
-		disabled bool,
-	) (disabledState, error)
+	// store is the client-side group/disabled state; actToggleDisabled writes
+	// it. visibleSessionIDs are the sessions currently in view whose last_seen
+	// the ensuing save refreshes. Both may be nil in tests that don't exercise
+	// the store.
+	store             *SessionStore
+	visibleSessionIDs []string
 }
 
 // runInteractive hands the terminal to prog with the pollers suspended,
@@ -135,32 +129,22 @@ func (c *actCtx) selectedRemoteNewTarget() (host, defaultCWD string, ok bool) {
 	return target.host, defaultCWD, true
 }
 
-func actToggleDisabled(c *actCtx) (*disabledUpdate, error) {
+// actToggleDisabled flips the disabled flag for the selected session in the
+// client store — disabled state is entirely client-side now (see state.go), so
+// this is an instant local write with no HTTP. The store is the sole authority:
+// nothing in-memory is patched here (c.selected() points into a throwaway
+// targets copy), so the caller MUST settleRows() afterwards to re-overlay the
+// new value onto the live rows. A row with no selection or no stable SessionID
+// is ignored (it can't be keyed). Reports whether anything changed.
+func actToggleDisabled(c *actCtx) bool {
 	session := c.selected()
-	if session == nil {
-		return nil, nil
+	if session == nil || session.SessionID == "" {
+		return false
 	}
-	if session.SessionID == "" {
-		return nil, fmt.Errorf("PID %d has no stable session ID", session.PID)
+	if c.store != nil {
+		c.store.SetDisabled(session.SessionID, !session.Disabled, c.visibleSessionIDs)
 	}
-	update := c.updateDisabled
-	if update == nil {
-		update = setSessionDisabled
-	}
-	state, err := update(
-		session.Host,
-		session.PID,
-		session.SessionID,
-		!session.Disabled,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return &disabledUpdate{
-		Host:      session.Host,
-		SessionID: state.SessionID,
-		Disabled:  state.Disabled,
-	}, nil
+	return true
 }
 
 func showActionError(c *actCtx, label string, err error) {

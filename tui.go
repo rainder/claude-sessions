@@ -93,6 +93,14 @@ func RunTUI(interval time.Duration) error {
 
 	viewMode := LoadViewMode()
 	sortMode := LoadSortMode()
+	// store holds client-side group assignments and disabled flags (state.go).
+	// activeFilter (0 = none) is runtime-only — never persisted. groups is a
+	// per-settle snapshot of the store's assignments, reused for badge rendering
+	// and the filter predicate.
+	store := LoadSessionStore()
+	activeFilter := 0
+	var groups map[string]int
+	var lastStateTouch time.Time
 	var local []Session
 	var remotes []RemoteResult
 	var targets []selectionTarget
@@ -175,11 +183,34 @@ func RunTUI(interval time.Duration) error {
 	// selection. It chases a pending post-spawn landing until its tmux pane
 	// appears, otherwise falling back if a vanished selected row needs replacing.
 	settleRows := func() {
+		// Refresh the group snapshot and overlay the store's disabled flags onto
+		// both local and remote sessions before sorting — the overlay is
+		// authoritative and overwrites any (now always-false) server-reported
+		// value, and the sort orders disabled rows last.
+		groups = store.GroupsMap()
+		store.OverlayDisabled(local)
 		SortSessions(local, sortMode)
 		// Snapshot() returns the hub's shared slices; sort remotes on copies so
 		// we never race the hub goroutine that owns them.
-		remotes = sortRemotes(hub.Snapshot(), sortMode)
-		targets = buildSelectionTargets(local, remotes)
+		snap := hub.Snapshot()
+		for i := range snap {
+			store.OverlayDisabled(snap[i].Sessions)
+		}
+		remotes = sortRemotes(snap, sortMode)
+		// Keep long-lived group/disabled entries alive under plain viewing:
+		// refresh their last_seen about hourly so the 30-day load-time GC never
+		// drops state for a session that's still on screen.
+		if now := time.Now(); now.Sub(lastStateTouch) >= time.Hour {
+			lastStateTouch = now
+			store.TouchVisible(visibleSessionIDs(local, remotes))
+		}
+		// Targets mirror exactly what the frame renders: filtered by the active
+		// group so a filtered-out selection falls back via validateTargetSel.
+		gv := groupView{groups: groups, filter: activeFilter}
+		targets = buildSelectionTargets(
+			filterSessionRows(local, gv),
+			filterRemoteResults(remotes, gv),
+		)
 		state.settleSelection(targets)
 	}
 
@@ -252,7 +283,7 @@ func RunTUI(interval time.Duration) error {
 		}, remotes, state.sel, &LocalUsage{
 			Claude: usageHub.Snapshot(),
 			Codex:  codexUsageHub.Snapshot(),
-		}, cols, 0, sortMode)
+		}, cols, 0, sortMode, groupView{groups: groups, filter: activeFilter})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if rows > 0 {
@@ -293,11 +324,13 @@ func RunTUI(interval time.Duration) error {
 	modalWakes := []wakeFD{{fd: rw.FD(), kind: wakeResize}}
 	makeCtx := func() *actCtx {
 		return &actCtx{
-			fd:         fd,
-			oldState:   oldState,
-			targets:    targets,
-			sel:        state.sel,
-			modalWakes: modalWakes,
+			fd:                fd,
+			oldState:          oldState,
+			targets:           targets,
+			sel:               state.sel,
+			modalWakes:        modalWakes,
+			store:             store,
+			visibleSessionIDs: visibleSessionIDs(local, remotes),
 			pause: func() {
 				hub.Pause()
 				usageHub.Pause()
@@ -476,26 +509,36 @@ func RunTUI(interval time.Duration) error {
 				refresh(true)
 				render()
 			case "-", "+":
-				ctx := makeCtx()
-				update, err := actToggleDisabled(ctx)
-				if err != nil {
-					screen.Invalidate()
-					showActionError(ctx, "disable toggle failed", err)
+				if actToggleDisabled(makeCtx()) {
+					// The store write is authoritative; settleRows re-overlays it
+					// onto local + remotes, so no per-host patch is needed.
+					settleRows()
+					state.requestSelectionAnchor()
 					render()
-					continue
 				}
-				if update == nil {
-					continue
-				}
-				if update.Host == "" {
-					patchDisabledBySessionID(local, update.SessionID, update.Disabled)
+			case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+				// Digits toggle the group view filter: same digit again clears it,
+				// "0" clears too. Runtime-only, never persisted.
+				n := int(k[0] - '0')
+				if n == 0 || activeFilter == n {
+					activeFilter = 0
 				} else {
-					hub.PatchDisabled(update.Host, update.SessionID, update.Disabled)
-					hub.Refresh()
+					activeFilter = n
 				}
 				settleRows()
 				state.requestSelectionAnchor()
 				render()
+			case "!", "@", "#", "$", "%", "^", "&", "*", "(":
+				// Shift+1..9 assign the selected session's group (single membership;
+				// same group again ungroups). Sessions with no SessionID are ignored.
+				if group := shiftDigitGroup(k); group != 0 {
+					if s := findSelectionTarget(targets, state.sel); s != nil && s.session != nil && s.session.SessionID != "" {
+						store.SetGroup(s.session.SessionID, group, visibleSessionIDs(local, remotes))
+						settleRows()
+						state.requestSelectionAnchor()
+						render()
+					}
+				}
 			case "n", "N":
 				screen.Invalidate()
 				ctx := makeCtx()
@@ -667,8 +710,41 @@ func sortRemotes(remotes []RemoteResult, mode string) []RemoteResult {
 	return out
 }
 
+// shiftDigitGroup maps a US-layout Shift+1..9 keystroke to its group number
+// (1..9), or 0 for any other key.
+func shiftDigitGroup(key string) int {
+	const shifted = "!@#$%^&*("
+	if len(key) != 1 {
+		return 0
+	}
+	if i := strings.IndexByte(shifted, key[0]); i >= 0 {
+		return i + 1
+	}
+	return 0
+}
+
+// visibleSessionIDs collects the SessionIDs of every session currently in view
+// (local + all remotes), for refreshing the store's last_seen on save. Blank
+// IDs are skipped.
+func visibleSessionIDs(local []Session, remotes []RemoteResult) []string {
+	ids := make([]string, 0, len(local))
+	for _, s := range local {
+		if s.SessionID != "" {
+			ids = append(ids, s.SessionID)
+		}
+	}
+	for _, r := range remotes {
+		for _, s := range r.Sessions {
+			if s.SessionID != "" {
+				ids = append(ids, s.SessionID)
+			}
+		}
+	}
+	return ids
+}
+
 func sessionFooter() string {
-	return dim("-/+ disable/enable  ·  ? help")
+	return dim("-/+ disable/enable  ·  ⇧1-9 group  ·  1-9 filter  ·  ? help")
 }
 
 func sessionBottomRow(toast string, toastActive bool) string {
@@ -693,6 +769,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "  "+bold("ACTIONS")+"  (on selected row)")
 	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command · p prompt in background)")
 	fmt.Fprintln(&b, "    - / +        disable / enable session")
+	fmt.Fprintln(&b, "    Shift-1..9   assign session to group ①..⑨ (same group again ungroups)")
 	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
@@ -705,6 +782,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("VIEW"))
 	fmt.Fprintln(&b, "    m            cycle mode (full → intermediate → minimal)  ·  persisted")
+	fmt.Fprintln(&b, "    1..9         filter to group (same digit or 0 shows all)")
 	fmt.Fprintln(&b, "    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
 	fmt.Fprintln(&b, "                 current sort: "+sortMode)
 	fmt.Fprintln(&b, "    r            refresh now")

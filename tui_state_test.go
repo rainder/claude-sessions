@@ -9,7 +9,7 @@ import (
 func TestBuildTableFrameRecordsSessionAndEmptyHostRows(t *testing.T) {
 	frame := BuildTableFrame("2",
 		LocalHost{Name: "local", Sessions: []Session{{PID: 11, CWD: "/tmp/local"}}},
-		[]RemoteResult{{Name: "dev"}}, "11", nil, 100, 0, "dir")
+		[]RemoteResult{{Name: "dev"}}, "11", nil, 100, 0, "dir", groupView{})
 	if frame.targetLine("11") < 0 {
 		t.Fatal("local target row missing")
 	}

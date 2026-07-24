@@ -1811,7 +1811,7 @@ func TestRenderAllMatchesBuildTableFrame(t *testing.T) {
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
 		overflow := RenderAll(&b, mode, testLocalHost(local...), remotes, "1", nil, 120, 0, "dir")
-		frame := BuildTableFrame(mode, testLocalHost(local...), remotes, "1", nil, 120, 0, "dir")
+		frame := BuildTableFrame(mode, testLocalHost(local...), remotes, "1", nil, 120, 0, "dir", groupView{})
 		if got := strings.Join(frame.lines, "\n"); got != b.String() {
 			t.Errorf("mode %s: RenderAll text diverged from frame:\nRenderAll: %q\nframe:     %q", mode, b.String(), got)
 		}
@@ -2004,5 +2004,181 @@ func TestDisabledRailPreservesViewerPrefixWidth(t *testing.T) {
 	)
 	if got != 4 {
 		t.Fatalf("viewer + disabled rail width = %d, want 4", got)
+	}
+}
+
+// ============================================================================
+// Session groups: badges, filter, header indicator.
+// ============================================================================
+
+func frameText(f tableFrame) string { return strings.Join(f.lines, "\n") }
+
+func TestGroupBadgeRendersColoredGlyph(t *testing.T) {
+	gv := groupView{groups: map[string]int{"sid-a": 3}}
+	local := testLocalHost(Session{PID: 1, Name: "galpha", CWD: "/w", SessionID: "sid-a"})
+	frame := BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", gv)
+	row := findRow(t, frameText(frame), "galpha")
+	// Group 3 -> SGR 33, glyph ③ (U+2462).
+	want := "\033[33m\u2462 \033[0m"
+	if !strings.Contains(row, want) {
+		t.Fatalf("row missing colored badge %q:\n%q", want, row)
+	}
+}
+
+func TestGroupBadgePaletteColors(t *testing.T) {
+	for group, sgr := range map[int]string{1: "36", 4: "32", 7: "96", 9: "97"} {
+		gv := groupView{groups: map[string]int{"s": group}}
+		local := testLocalHost(Session{PID: 1, Name: "n", CWD: "/w", SessionID: "s"})
+		frame := BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", gv)
+		row := findRow(t, frameText(frame), " n ")
+		want := "\033[" + sgr + "m" + string(rune(0x2460+group-1)) + " \033[0m"
+		if !strings.Contains(row, want) {
+			t.Fatalf("group %d: row missing badge %q:\n%q", group, want, row)
+		}
+	}
+}
+
+func TestGroupBadgeSlotOnlyWhenGroupVisible(t *testing.T) {
+	grouped := Session{PID: 1, Name: "galpha", CWD: "/w", SessionID: "sid-g"}
+	plain := Session{PID: 2, Name: "pbeta", CWD: "/w", SessionID: "sid-p"}
+	local := testLocalHost(grouped, plain)
+
+	// An empty groups map must be byte-identical to a zero groupView (no slot).
+	none := BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{})
+	emptyMap := BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{groups: map[string]int{}})
+	if frameText(none) != frameText(emptyMap) {
+		t.Fatal("empty groups map changed the layout")
+	}
+
+	// One grouped session reserves a 2-col slot on every row, incl. the ungrouped
+	// one (two blank cells), and shifts the column header 2 cols right.
+	gv := groupView{groups: map[string]int{"sid-g": 1}}
+	with := BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", gv)
+
+	plainWith := findRow(t, frameText(with), "pbeta")
+	plainNone := findRow(t, frameText(none), "pbeta")
+	if visualLen(plainWith) != visualLen(plainNone)+2 {
+		t.Fatalf("ungrouped row width = %d, want %d (2-col blank badge slot)\nwith: %q\nnone: %q",
+			visualLen(plainWith), visualLen(plainNone)+2, plainWith, plainNone)
+	}
+
+	hdrWith := findRow(t, frameText(with), "PID")
+	hdrNone := findRow(t, frameText(none), "PID")
+	if !strings.HasPrefix(hdrWith, "      PID") {
+		t.Fatalf("badged header indent not 6 cols: %q", hdrWith)
+	}
+	if !strings.HasPrefix(hdrNone, "    PID") || strings.HasPrefix(hdrNone, "     PID") {
+		t.Fatalf("unbadged header indent not 4 cols: %q", hdrNone)
+	}
+}
+
+func TestGroupFilterRendersOnlyMatchingRowsAndEmptyHost(t *testing.T) {
+	local := testLocalHost(
+		Session{PID: 1, Name: "aaa", CWD: "/w", SessionID: "sid-a"},
+		Session{PID: 2, Name: "bbb", CWD: "/w", SessionID: "sid-b"},
+	)
+	remotes := []RemoteResult{{
+		Name:     "dev",
+		Sessions: []Session{{PID: 3, Name: "ccc", CWD: "/w", SessionID: "sid-c", Host: "dev"}},
+	}}
+	gv := groupView{
+		groups: map[string]int{"sid-a": 1, "sid-b": 2, "sid-c": 2},
+		filter: 1,
+	}
+	out := frameText(BuildTableFrame("1", local, remotes, "", nil, 0, 0, "dir", gv))
+
+	if !strings.Contains(out, "aaa") {
+		t.Fatalf("group-1 session hidden by its own filter:\n%s", out)
+	}
+	if strings.Contains(out, "bbb") || strings.Contains(out, "ccc") {
+		t.Fatalf("filter leaked non-matching rows:\n%s", out)
+	}
+	// The remote host has no group-1 session, so it still renders its heading and
+	// the empty-host placeholder.
+	if !strings.Contains(out, "(no sessions)") {
+		t.Fatalf("filtered-empty remote host missing empty-host row:\n%s", out)
+	}
+}
+
+func TestGroupFilterHeaderIndicator(t *testing.T) {
+	local := testLocalHost(Session{PID: 1, Name: "n", CWD: "/w", SessionID: "s"})
+	gv := groupView{groups: map[string]int{"s": 3}, filter: 3}
+	out := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", gv))
+	// Colored "group ③" (group 3 -> SGR 33, glyph U+2462).
+	want := "\033[33mgroup \u2462\033[0m"
+	if !strings.Contains(out, want) {
+		t.Fatalf("header missing filter indicator %q:\n%s", want, out)
+	}
+
+	// No filter -> no indicator.
+	off := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{groups: map[string]int{"s": 3}}))
+	if strings.Contains(off, "group \u2462") {
+		t.Fatalf("indicator shown with no active filter:\n%s", off)
+	}
+}
+
+// TestGroupFilterTargetsMatchRenderedRows locks the invariant that makes
+// selection correct under a filter: the recorded (selectable) rows in the frame
+// must be exactly the selection targets settleRows builds. Filtering lives in two
+// places — buildSections (frame) and settleRows (targets) — sharing one
+// predicate; if they ever diverge, a filtered-out selection wouldn't fall back.
+func TestGroupFilterTargetsMatchRenderedRows(t *testing.T) {
+	local := []Session{
+		{PID: 1, Name: "aaa", CWD: "/w", SessionID: "sid-a"},
+		{PID: 2, Name: "bbb", CWD: "/w", SessionID: "sid-b"},
+	}
+	remotes := []RemoteResult{
+		{Name: "dev", Sessions: []Session{
+			{PID: 3, Name: "ccc", CWD: "/w", SessionID: "sid-c", Host: "dev"},
+			{PID: 4, Name: "ddd", CWD: "/w", SessionID: "sid-d", Host: "dev"},
+		}},
+		{Name: "quiet", Sessions: []Session{
+			{PID: 5, Name: "eee", CWD: "/w", SessionID: "sid-e", Host: "quiet"},
+		}},
+	}
+	gv := groupView{
+		groups: map[string]int{"sid-a": 1, "sid-b": 2, "sid-c": 1, "sid-d": 2, "sid-e": 2},
+		filter: 1,
+	}
+
+	frame := BuildTableFrame("1", testLocalHost(local...), remotes, "", nil, 0, 0, "dir", gv)
+	rendered := map[string]bool{}
+	for _, r := range frame.rows {
+		rendered[r.targetID] = true
+	}
+
+	targets := buildSelectionTargets(
+		filterSessionRows(local, gv),
+		filterRemoteResults(remotes, gv),
+	)
+	want := map[string]bool{}
+	for _, tg := range targets {
+		want[tg.id] = true
+	}
+
+	if len(rendered) != len(want) {
+		t.Fatalf("row/target count mismatch:\nrendered=%v\ntargets =%v", rendered, want)
+	}
+	for id := range want {
+		if !rendered[id] {
+			t.Fatalf("target %q has no rendered row; the two filter sites diverged:\nrendered=%v\ntargets =%v", id, rendered, want)
+		}
+	}
+}
+
+func TestSelectedGroupedRowRestoresSelectionBackground(t *testing.T) {
+	gv := groupView{groups: map[string]int{"sid": 4}}
+	local := testLocalHost(Session{PID: 1, Name: "sel", CWD: "/w", SessionID: "sid"})
+	// PID 1 local row has ID "1"; select it.
+	frame := BuildTableFrame("1", local, nil, "1", nil, 0, 0, "dir", gv)
+	row := findRow(t, frameText(frame), "sel")
+	if !strings.HasPrefix(row, ansiSelectedBG) {
+		t.Fatalf("selected row does not open with selection bg: %q", row)
+	}
+	// The badge's own reset must be followed by a re-asserted selection bg so the
+	// highlight survives past the colored glyph (group 4 -> SGR 32, glyph ④).
+	want := "\033[32m\u2463 \033[0m" + ansiSelectedBG
+	if !strings.Contains(row, want) {
+		t.Fatalf("selected grouped badge did not restore bg after reset: %q", row)
 	}
 }

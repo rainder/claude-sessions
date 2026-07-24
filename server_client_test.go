@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -80,9 +79,6 @@ func TestSessionServerConfigUsesLocalAndRemoteEndpoints(t *testing.T) {
 	if localServerTimeout != 750*time.Millisecond {
 		t.Fatalf("local timeout = %s, want 750ms", localServerTimeout)
 	}
-	if disabledWriteTimeout != 5*time.Second {
-		t.Fatalf("disabled write timeout = %s, want 5s", disabledWriteTimeout)
-	}
 
 	writeServerYAML(t, home, "orca", "10.0.0.8", "9876", "remote-secret")
 	remote, err := sessionServerConfig("orca")
@@ -115,131 +111,6 @@ func TestFetchSessionsFromServerHonorsBoundedTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("bounded request took %s", elapsed)
-	}
-}
-
-func TestPutSessionDisabledUsesExplicitStateAndIdentity(t *testing.T) {
-	type capturedRequest struct {
-		method      string
-		path        string
-		auth        string
-		contentType string
-		disabled    *bool
-		sessionID   *string
-		decodeErr   error
-	}
-	requests := make(chan capturedRequest, 1)
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Disabled  *bool   `json:"disabled"`
-			SessionID *string `json:"sessionId"`
-		}
-		decodeErr := json.NewDecoder(r.Body).Decode(&body)
-		requests <- capturedRequest{
-			method:      r.Method,
-			path:        r.URL.Path,
-			auth:        r.Header.Get("Authorization"),
-			contentType: r.Header.Get("Content-Type"),
-			disabled:    body.Disabled,
-			sessionID:   body.SessionID,
-			decodeErr:   decodeErr,
-		}
-		fmt.Fprint(w, `{"disabled":true,"sessionId":"session-42"}`)
-	}))
-	defer backend.Close()
-
-	state, err := putSessionDisabled(
-		serverConfigForURL(t, backend.URL, "secret"),
-		42,
-		"session-42",
-		true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := <-requests
-	if got.decodeErr != nil {
-		t.Fatal(got.decodeErr)
-	}
-	if !state.Disabled || state.SessionID != "session-42" ||
-		got.method != http.MethodPut || got.path != "/sessions/42/disabled" ||
-		got.auth != "Bearer secret" || got.contentType != "application/json" {
-		t.Fatalf("state=%#v request=%#v", state, got)
-	}
-	if got.disabled == nil || !*got.disabled ||
-		got.sessionID == nil || *got.sessionID != "session-42" {
-		t.Fatalf("request body = %#v", got)
-	}
-}
-
-func TestPutSessionDisabledRejectsBadResponses(t *testing.T) {
-	cases := []struct {
-		name string
-		body string
-		want string
-	}{
-		{"malformed JSON", `{`, "bad response:"},
-		{"missing disabled", `{"sessionId":"session-42"}`, "bad response: missing disabled"},
-		{"missing identity", `{"disabled":true}`, "bad response: missing sessionId"},
-		{"empty identity", `{"disabled":true,"sessionId":""}`, "bad response: missing sessionId"},
-		{"mismatched identity", `{"disabled":true,"sessionId":"replacement"}`, "bad response: sessionId mismatch"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprint(w, tc.body)
-			}))
-			defer backend.Close()
-			_, err := putSessionDisabled(
-				serverConfigForURL(t, backend.URL, "secret"),
-				42,
-				"session-42",
-				true,
-			)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %v, want substring %q", err, tc.want)
-			}
-		})
-	}
-}
-
-func TestPutSessionDisabledRejectsEmptyRequestIdentity(t *testing.T) {
-	_, err := putSessionDisabled(ServerConfig{}, 42, "", true)
-	if err == nil || err.Error() != "session ID required" {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestPutSessionDisabledPreservesHTTPError(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "session ended", http.StatusNotFound)
-	}))
-	defer backend.Close()
-	_, err := putSessionDisabled(
-		serverConfigForURL(t, backend.URL, "secret"),
-		42,
-		"session-42",
-		true,
-	)
-	if err == nil || !strings.Contains(err.Error(), "HTTP 404: session ended") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestPatchDisabledBySessionID(t *testing.T) {
-	rows := []Session{{SessionID: "one"}, {SessionID: "two"}}
-	if !patchDisabledBySessionID(rows, "two", true) {
-		t.Fatal("target session was not patched")
-	}
-	if rows[0].Disabled || !rows[1].Disabled {
-		t.Fatalf("rows = %#v", rows)
-	}
-	if patchDisabledBySessionID(rows, "missing", true) {
-		t.Fatal("missing session reported as patched")
-	}
-	rows = append(rows, Session{})
-	if patchDisabledBySessionID(rows, "", true) || rows[2].Disabled {
-		t.Fatal("empty session ID must never be patched")
 	}
 }
 
@@ -303,10 +174,10 @@ func TestLocalServerRequestRetriesTailscaleAfterResponseLessFailure(t *testing.T
 				return nil, false, loopbackErr
 			}
 			if attempt.Host != "100.64.0.5" || attempt.Port != localServerPort || attempt.Token != srv.Token ||
-				path != "/sessions/42/disabled" || method != http.MethodPut || string(body) != `{"disabled":true}` {
+				path != "/sessions/42/kill" || method != http.MethodPost || string(body) != `{"y":true}` {
 				t.Fatalf("fallback request = (%#v, %q, %q, %q)", attempt, path, method, body)
 			}
-			return []byte(`{"disabled":true}`), true, nil
+			return []byte(`{"ok":true}`), true, nil
 		},
 		func(ctx context.Context) string {
 			var ok bool
@@ -318,8 +189,8 @@ func TestLocalServerRequestRetriesTailscaleAfterResponseLessFailure(t *testing.T
 		},
 	)
 
-	got, err := localServerRequestWithTimeout(srv, "/sessions/42/disabled", http.MethodPut, []byte(`{"disabled":true}`), disabledWriteTimeout)
-	if err != nil || string(got) != `{"disabled":true}` {
+	got, err := localServerRequestWithTimeout(srv, "/sessions/42/kill", http.MethodPost, []byte(`{"y":true}`), localServerTimeout)
+	if err != nil || string(got) != `{"ok":true}` {
 		t.Fatalf("request = (%q, %v)", got, err)
 	}
 	if len(attempts) != 2 || attempts[0].Host != localServerHost || attempts[1].Host != "100.64.0.5" {
@@ -381,57 +252,6 @@ func TestFetchLocalServerSessionsFallsBackToDirectCollectionAfterBothEndpointsFa
 	})
 	if err != nil || len(got) != 1 || got[0].SessionID != "direct" {
 		t.Fatalf("result = (%#v, %v)", got, err)
-	}
-	if attempts != 2 {
-		t.Fatalf("attempts = %d, want loopback and Tailscale", attempts)
-	}
-}
-
-func TestSetSessionDisabledRemoteHostBypassesLocalFallback(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"disabled":true,"sessionId":"session-42"}`)
-	}))
-	defer backend.Close()
-
-	u, _ := url.Parse(backend.URL)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	writeServerYAML(t, home, "orca", u.Hostname(), u.Port(), "secret")
-	stubLocalServerFallback(t,
-		func(context.Context, ServerConfig, string, string, []byte) ([]byte, bool, error) {
-			t.Fatal("local fallback request used for named remote host")
-			return nil, false, nil
-		},
-		func(context.Context) string {
-			t.Fatal("Tailscale resolved for named remote host")
-			return ""
-		},
-	)
-
-	state, err := setSessionDisabled("orca", 42, "session-42", true)
-	if err != nil || !state.Disabled || state.SessionID != "session-42" {
-		t.Fatalf("state = (%#v, %v)", state, err)
-	}
-}
-
-func TestPutLocalSessionDisabledReturnsErrorAfterBothEndpointsFail(t *testing.T) {
-	attempts := 0
-	stubLocalServerFallback(t,
-		func(context.Context, ServerConfig, string, string, []byte) ([]byte, bool, error) {
-			attempts++
-			return nil, false, errors.New("unreachable")
-		},
-		func(context.Context) string { return "100.64.0.5" },
-	)
-
-	state, err := putLocalSessionDisabled(
-		ServerConfig{Host: localServerHost, Port: localServerPort, Token: "secret"},
-		42,
-		"session-42",
-		true,
-	)
-	if err == nil || state != (disabledState{}) {
-		t.Fatalf("state = (%#v, %v), want zero state and error", state, err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want loopback and Tailscale", attempts)

@@ -89,6 +89,13 @@ func cmdList() error {
 		return err
 	}
 	remotes := FetchAllRemote()
+	// Disabled state is client-side; overlay it read-only so the scriptable
+	// list matches the TUI. Groups don't affect this output.
+	store := LoadSessionStore()
+	store.OverlayDisabled(local)
+	for i := range remotes {
+		store.OverlayDisabled(remotes[i].Sessions)
+	}
 	sortMode := LoadSortMode()
 	SortSessions(local, sortMode)
 	remotes = sortRemotes(remotes, sortMode)

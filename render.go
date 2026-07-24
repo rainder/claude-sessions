@@ -94,7 +94,88 @@ func sessionRowPlain(session Session, selected bool) bool {
 	return session.Headless() || (session.Disabled && !selected)
 }
 
-func decorateSessionRow(session Session, selected bool, body string) string {
+// groupSGR is the fixed per-group badge palette (SGR codes), 1..9.
+var groupSGR = map[int]string{
+	1: "36", 2: "35", 3: "33", 4: "32", 5: "34", 6: "31", 7: "96", 8: "95", 9: "97",
+}
+
+// groupView carries the client-side group state threaded through the render
+// path: the sessionID→group map (for badges and the filter predicate), the
+// active view filter (0 = none), and whether the 2-char badge slot is reserved
+// this frame (set by BuildTableFrame once it knows at least one visible session
+// has a group). Its zero value renders exactly as before groups existed.
+type groupView struct {
+	groups    map[string]int
+	filter    int
+	showBadge bool
+}
+
+// groupOf returns the group assigned to s (1..9), or 0 for an ungrouped session
+// or one with no stable SessionID.
+func (gv groupView) groupOf(s Session) int {
+	if s.SessionID == "" {
+		return 0
+	}
+	return gv.groups[s.SessionID]
+}
+
+// passesGroupFilter reports whether a session survives the active group filter.
+// A zero filter admits everything; otherwise only sessions whose stored group
+// matches are shown. Sessions with no SessionID can never be grouped, so they
+// never pass a non-zero filter.
+func passesGroupFilter(s Session, groups map[string]int, filter int) bool {
+	if filter == 0 {
+		return true
+	}
+	if s.SessionID == "" {
+		return false
+	}
+	return groups[s.SessionID] == filter
+}
+
+// groupBadgeGlyph returns the circled digit for a group (U+2460 is ①), or "" for
+// an ungrouped group.
+func groupBadgeGlyph(group int) string {
+	if group < 1 || group > 9 {
+		return ""
+	}
+	return string(rune(0x2460 + group - 1))
+}
+
+// badge renders the 2-char badge slot for a row. It returns "" when the slot is
+// not reserved (byte-identical to the pre-groups layout), two spaces for an
+// ungrouped row when the slot is reserved, or the colored circled digit + space
+// otherwise. style selects how the glyph is wrapped so it composes cleanly with
+// the surrounding dim/selected treatment in decorateSessionRow.
+type badgeStyle uint8
+
+const (
+	badgeColored badgeStyle = iota // stand-alone colored token (selected/bright rows)
+	badgeDim                       // self-contained dim token (disabled non-selected rows)
+	badgePlain                     // bare glyph, wrapped by an outer dim() (headless rows)
+)
+
+func (gv groupView) badge(s Session, style badgeStyle) string {
+	if !gv.showBadge {
+		return ""
+	}
+	group := gv.groupOf(s)
+	glyph := groupBadgeGlyph(group)
+	if glyph == "" {
+		return "  "
+	}
+	token := glyph + " "
+	switch style {
+	case badgeDim:
+		return dim(token)
+	case badgePlain:
+		return token
+	default:
+		return colorize(groupSGR[group], token)
+	}
+}
+
+func decorateSessionRow(session Session, selected bool, body string, gv groupView) string {
 	plain := sessionRowPlain(session, selected)
 	viewer := tmuxViewerPrefix(session, plain)
 	rail := disabledRail(session, selected)
@@ -102,13 +183,13 @@ func decorateSessionRow(session Session, selected bool, body string) string {
 	var row string
 	switch {
 	case selected:
-		row = viewer + rail + body
+		row = viewer + gv.badge(session, badgeColored) + rail + body
 	case session.Disabled:
-		row = dim(viewer) + rail + dim(body)
+		row = dim(viewer) + gv.badge(session, badgeDim) + rail + dim(body)
 	case session.Headless():
-		row = dim(viewer + rail + body)
+		row = dim(viewer + gv.badge(session, badgePlain) + rail + body)
 	default:
-		row = viewer + rail + body
+		row = viewer + gv.badge(session, badgeColored) + rail + body
 	}
 	return highlightSelectedRow(row, selected)
 }
@@ -888,20 +969,51 @@ type section struct {
 	loading   bool
 }
 
-func buildSections(local LocalHost, remotes []RemoteResult) []section {
+// filterSessionRows returns the subset of rows passing the active group filter,
+// preserving order. A zero filter returns rows unchanged (same backing array).
+func filterSessionRows(rows []Session, gv groupView) []Session {
+	if gv.filter == 0 {
+		return rows
+	}
+	out := make([]Session, 0, len(rows))
+	for _, s := range rows {
+		if passesGroupFilter(s, gv.groups, gv.filter) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// filterRemoteResults returns copies of the results with each host's Sessions
+// filtered by the active group. The RemoteResult metadata (Error, Loading, etc.)
+// is preserved so empty-after-filter hosts still render their heading + the
+// empty-host row. A zero filter returns the input unchanged.
+func filterRemoteResults(remotes []RemoteResult, gv groupView) []RemoteResult {
+	if gv.filter == 0 {
+		return remotes
+	}
+	out := make([]RemoteResult, len(remotes))
+	for i, r := range remotes {
+		r.Sessions = filterSessionRows(r.Sessions, gv)
+		out[i] = r
+	}
+	return out
+}
+
+func buildSections(local LocalHost, remotes []RemoteResult, gv groupView) []section {
 	out := make([]section, 0, 1+len(remotes))
 	out = append(out, section{
 		name:      local.Name,
 		host:      "",
 		hostUsage: local.HostUsage,
-		rows:      local.Sessions,
+		rows:      filterSessionRows(local.Sessions, gv),
 	})
 	for _, r := range remotes {
 		out = append(out, section{
 			name:      r.Name,
 			host:      r.Name,
 			hostUsage: r.HostUsage,
-			rows:      r.Sessions,
+			rows:      filterSessionRows(r.Sessions, gv),
 			error:     r.Error,
 			loading:   r.Loading,
 		})
@@ -1029,7 +1141,18 @@ func plural(n int, word string) string {
 // usage bars (Anthropic lines then Codex lines, one line per distinct account —
 // see dedupeAccounts / dedupeCodexAccounts), and the trailing blank line —
 // shared by all three views.
-func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int) {
+// groupFilterIndicator renders the "group ③" badge shown in the title while a
+// filter is active, colored with the group's palette entry. Returns "" when no
+// filter is active.
+func groupFilterIndicator(filter int) string {
+	glyph := groupBadgeGlyph(filter)
+	if glyph == "" {
+		return ""
+	}
+	return colorize(groupSGR[filter], "group "+glyph)
+}
+
+func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, filter int) {
 	live, busy, subs := 0, 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -1046,10 +1169,16 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 	// main loops only, and occupied main loops. colorize ends with a full
 	// reset, so re-assert bold after the busy count to keep the title bold.
 	busyStr := colorize(statusColor["busy"], fmt.Sprintf("%d busy", busy)) + ansiBold
-	fmt.Fprintf(w, "%sClaude sessions  %s  (%s, %s, %s)  %s%s\n",
+	// An active group filter shows a colored "group ③" indicator (which ends in
+	// a reset), so re-assert bold afterwards to keep the trailing [mode] bright.
+	filterStr := ""
+	if ind := groupFilterIndicator(filter); ind != "" {
+		filterStr = "  " + ind + ansiBold
+	}
+	fmt.Fprintf(w, "%sClaude sessions  %s  (%s, %s, %s)%s  %s%s\n",
 		ansiBold, time.Now().Format("15:04:05"),
 		plural(live+subs, "agent"), plural(live, "session"), busyStr,
-		ansiReset, dim("["+mode+"]"))
+		filterStr, ansiReset, dim("["+mode+"]"))
 	writeUsageHeader(w, accounts, codexAccounts, cols)
 	fmt.Fprintln(w)
 }
@@ -1086,8 +1215,11 @@ func (w *frameWriter) record(targetID string, openable bool) {
 // loop uses the frame to crop a viewport and resolve mouse clicks, while
 // RenderAll wraps it for callers that only want the text. Arguments mirror
 // RenderAll (see its doc for cols/step/sortMode semantics).
-func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *LocalUsage, cols, step int, sortMode string) tableFrame {
-	sections := buildSections(local, remotes)
+func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *LocalUsage, cols, step int, sortMode string, gv groupView) tableFrame {
+	sections := buildSections(local, remotes, gv)
+	// Reserve the badge slot only when at least one visible (post-filter) session
+	// carries a group, so the ungrouped layout stays byte-identical to before.
+	gv.showBadge = sectionsHaveGroup(sections, gv)
 	// Pair each provider's local snapshot with every remote's, dedupe by account,
 	// and carry the resolved lines through the header so each distinct account
 	// shows once. The two providers dedupe independently.
@@ -1107,17 +1239,30 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	var overflowing bool
 	switch viewMode {
 	case "2":
-		overflowing = renderAllMinimal(w, sections, sel, accounts, codexAccounts, cols, step, sortMode)
+		overflowing = renderAllMinimal(w, sections, sel, accounts, codexAccounts, cols, step, sortMode, gv)
 	case "3":
-		overflowing = renderAllIntermediate(w, sections, sel, accounts, codexAccounts, cols, step, sortMode)
+		overflowing = renderAllIntermediate(w, sections, sel, accounts, codexAccounts, cols, step, sortMode, gv)
 	default:
-		overflowing = renderAllFull(w, sections, sel, accounts, codexAccounts, cols, step, sortMode)
+		overflowing = renderAllFull(w, sections, sel, accounts, codexAccounts, cols, step, sortMode, gv)
 	}
 	return tableFrame{
 		lines:       strings.Split(w.buf.String(), "\n"),
 		rows:        w.rows,
 		overflowing: overflowing,
 	}
+}
+
+// sectionsHaveGroup reports whether any (already filtered) section row carries a
+// group, which is what reserves the badge slot for the whole frame.
+func sectionsHaveGroup(sections []section, gv groupView) bool {
+	for _, sec := range sections {
+		for _, s := range sec.rows {
+			if gv.groupOf(s) != 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RenderAll writes the live table (or a one-shot snapshot) to w, with all
@@ -1134,7 +1279,7 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 // lines with newlines reproduces the exact bytes the row writers emitted, so
 // the `--once` path and existing callers/tests keep the same output and return.
 func RenderAll(w io.Writer, viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *LocalUsage, cols, step int, sortMode string) (overflowing bool) {
-	frame := BuildTableFrame(viewMode, local, remotes, sel, localUsage, cols, step, sortMode)
+	frame := BuildTableFrame(viewMode, local, remotes, sel, localUsage, cols, step, sortMode, groupView{})
 	io.WriteString(w, strings.Join(frame.lines, "\n"))
 	return frame.overflowing
 }
@@ -1243,7 +1388,17 @@ func modelCell(model string, width int, plain bool) string {
 	return cell
 }
 
-func renderAllFull(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string) (overflowing bool) {
+// rowIndent is the leading indent for the column-header and separator lines. It
+// widens by the 2-char badge slot when the slot is reserved so the column labels
+// stay aligned above the row bodies (viewer + badge + rail).
+func rowIndent(gv groupView) string {
+	if gv.showBadge {
+		return "      "
+	}
+	return "    "
+}
+
+func renderAllFull(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -1275,11 +1430,11 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 		tmuxW = max(tmuxW, len(t))
 	}
 
-	renderHeader(w, sections, "full", accounts, codexAccounts, cols)
+	renderHeader(w, sections, "full", accounts, codexAccounts, cols, gv.filter)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			"    %*s  %-*s  %-*s  %-*s  %-*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
+			rowIndent(gv)+"%*s  %-*s  %-*s  %-*s  %-*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
 			pidW, "PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL",
 			statusW, statusLabel, costW, "COST",
 			"CTX", tmuxW, "TMUX", "CPU%", ageLabel, "VER", "SID",
@@ -1335,7 +1490,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 				tmuxCell,
 				r.s.CPU, r.ageStr, r.s.Version, sidCell,
 			)
-			row := decorateSessionRow(r.s, selected, body)
+			row := decorateSessionRow(r.s, selected, body, gv)
 			w.record(r.s.ID(), true)
 			fmt.Fprintln(w, row)
 		}
@@ -1370,7 +1525,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 // Intermediate view — full's columns minus TMUX, VER, SID.
 // ============================================================================
 
-func renderAllIntermediate(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string) (overflowing bool) {
+func renderAllIntermediate(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -1395,11 +1550,11 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	renderHeader(w, sections, "intermediate", accounts, codexAccounts, cols)
+	renderHeader(w, sections, "intermediate", accounts, codexAccounts, cols, gv.filter)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			"    %-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s ",
+			rowIndent(gv)+"%-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s ",
 			nameW, "NAME", dirW, dirLabel, statusW, statusLabel,
 			modelW, "MODEL", costW, "COST",
 			"CTX", ageLabel,
@@ -1438,7 +1593,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
 				r.ageStr,
 			)
-			row := decorateSessionRow(r.s, selected, body)
+			row := decorateSessionRow(r.s, selected, body, gv)
 			w.record(r.s.ID(), true)
 			fmt.Fprintln(w, row)
 		}
@@ -1495,7 +1650,7 @@ func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
 	}
 }
 
-func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string) (overflowing bool) {
+func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -1519,11 +1674,11 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 		nameW = max(nameW, len(r.display))
 	}
 
-	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols)
+	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols, gv.filter)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			"    %-*s  %-*s  %-*s  %5s ",
+			rowIndent(gv)+"%-*s  %-*s  %-*s  %5s ",
 			dirW, dirLabel, nameW, "NAME", statusW, statusLabel, ageLabel,
 		)
 	}
@@ -1562,7 +1717,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 				statusCell,
 				r.ageStr,
 			)
-			row := decorateSessionRow(r.s, selected, body)
+			row := decorateSessionRow(r.s, selected, body, gv)
 			w.record(r.s.ID(), true)
 			fmt.Fprintln(w, row)
 		}

@@ -107,31 +107,19 @@ func LookupServer(name string) (ServerConfig, bool) {
 	return ServerConfig{}, false
 }
 
-type disabledOverrideKey struct {
-	host      string
-	sessionID string
-}
-
-type pendingDisabledOverride struct {
-	disabled       bool
-	protectThrough uint64
-}
-
 // RemoteHub polls remote /sessions endpoints in a background goroutine and
 // streams results into per-host slots as each reply arrives, so the TUI never
 // has to wait for the slowest host. A WakeFD pipe becomes readable each time
 // any slot updates, letting the render loop repaint immediately instead of
 // waiting for its next tick.
 type RemoteHub struct {
-	mu              sync.Mutex
-	results         []RemoteResult
-	fetchGeneration uint64
-	pendingDisabled map[disabledOverrideKey]pendingDisabledOverride
-	paused          atomic.Bool
-	kick            chan struct{}
-	stop            chan struct{}
-	wakeR           int // read end: passed to unix.Select in the TUI loop
-	wakeW           int // write end: signaled after each per-host update
+	mu      sync.Mutex
+	results []RemoteResult
+	paused  atomic.Bool
+	kick    chan struct{}
+	stop    chan struct{}
+	wakeR   int // read end: passed to unix.Select in the TUI loop
+	wakeW   int // write end: signaled after each per-host update
 }
 
 // NewRemoteHub starts the background poller and returns immediately. The
@@ -151,11 +139,10 @@ func NewRemoteHub(interval time.Duration) (*RemoteHub, error) {
 	_ = unix.SetNonblock(p[0], true)
 	_ = unix.SetNonblock(p[1], true)
 	h := &RemoteHub{
-		pendingDisabled: make(map[disabledOverrideKey]pendingDisabledOverride),
-		kick:            make(chan struct{}, 1),
-		stop:            make(chan struct{}),
-		wakeR:           p[0],
-		wakeW:           p[1],
+		kick:  make(chan struct{}, 1),
+		stop:  make(chan struct{}),
+		wakeR: p[0],
+		wakeW: p[1],
 	}
 	go h.run(interval)
 	h.Refresh()
@@ -203,9 +190,6 @@ func (h *RemoteHub) fetchAll() {
 		return
 	}
 	h.mu.Lock()
-	h.fetchGeneration++
-	generation := h.fetchGeneration
-
 	prev := make(map[string]RemoteResult, len(h.results))
 	for _, r := range h.results {
 		prev[r.Name] = r
@@ -229,7 +213,7 @@ func (h *RemoteHub) fetchAll() {
 		go func() {
 			defer wg.Done()
 			r := FetchRemote(c)
-			h.storeRemoteResult(i, generation, r)
+			h.storeRemoteResult(i, r)
 			h.signalWake()
 		}()
 	}
@@ -253,68 +237,8 @@ func (h *RemoteHub) Snapshot() []RemoteResult {
 	return results
 }
 
-func (h *RemoteHub) PatchDisabled(host, sessionID string, disabled bool) {
-	if sessionID == "" {
-		return
-	}
-
+func (h *RemoteHub) storeRemoteResult(index int, result RemoteResult) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.pendingDisabled == nil {
-		h.pendingDisabled = make(map[disabledOverrideKey]pendingDisabledOverride)
-	}
-
-	key := disabledOverrideKey{host: host, sessionID: sessionID}
-	h.pendingDisabled[key] = pendingDisabledOverride{
-		disabled:       disabled,
-		protectThrough: h.fetchGeneration,
-	}
-
-	for i := range h.results {
-		if h.results[i].Name == host {
-			patchDisabledBySessionID(
-				h.results[i].Sessions,
-				sessionID,
-				disabled,
-			)
-		}
-	}
-}
-
-func (h *RemoteHub) applyPendingDisabledLocked(
-	generation uint64,
-	result *RemoteResult,
-) {
-	if result.Error != "" {
-		return
-	}
-
-	for key, pending := range h.pendingDisabled {
-		if key.host != result.Name {
-			continue
-		}
-
-		if generation > pending.protectThrough {
-			delete(h.pendingDisabled, key)
-			continue
-		}
-
-		patchDisabledBySessionID(
-			result.Sessions,
-			key.sessionID,
-			pending.disabled,
-		)
-	}
-}
-
-func (h *RemoteHub) storeRemoteResult(
-	index int,
-	generation uint64,
-	result RemoteResult,
-) {
-	h.mu.Lock()
-	h.applyPendingDisabledLocked(generation, &result)
 	h.results[index] = result
 	h.mu.Unlock()
 }

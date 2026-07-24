@@ -2,105 +2,56 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"strings"
 	"testing"
 )
 
-func TestActToggleDisabledRoutesLocalAndRemoteAndUsesServerResponse(t *testing.T) {
+func TestActToggleDisabledTogglesStore(t *testing.T) {
 	cases := []struct {
-		name           string
-		session        Session
-		wantHost       string
-		wantRequest    bool
-		serverDisabled bool
+		name    string
+		session Session
+		want    bool // disabled value expected after the toggle
 	}{
-		{"local enable to disabled", Session{PID: 10, SessionID: "local"}, "", true, true},
-		{"local disabled to enabled", Session{PID: 11, SessionID: "local-off", Disabled: true}, "", false, false},
-		{"remote enable to disabled", Session{PID: 20, SessionID: "remote", Host: "orca"}, "orca", true, true},
-		{"server response is authoritative", Session{PID: 30, SessionID: "authoritative"}, "", true, false},
+		{"local enable to disabled", Session{PID: 10, SessionID: "local"}, true},
+		{"local disabled to enabled", Session{PID: 11, SessionID: "local-off", Disabled: true}, false},
+		{"remote enable to disabled", Session{PID: 20, SessionID: "remote", Host: "orca"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			store := loadSessionStore("", nil)
+			if tc.session.Disabled {
+				store.SetDisabled(tc.session.SessionID, true, nil)
+			}
 			target := sessionSelectionTarget(tc.session)
-			c := &actCtx{targets: []selectionTarget{target}, sel: target.id}
-			c.updateDisabled = func(
-				host string,
-				pid int,
-				sessionID string,
-				disabled bool,
-			) (disabledState, error) {
-				if host != tc.wantHost || pid != tc.session.PID ||
-					sessionID != tc.session.SessionID || disabled != tc.wantRequest {
-					t.Fatalf(
-						"request = (%q, %d, %q, %v)",
-						host,
-						pid,
-						sessionID,
-						disabled,
-					)
-				}
-				return disabledState{
-					SessionID: tc.session.SessionID,
-					Disabled:  tc.serverDisabled,
-				}, nil
+			c := &actCtx{targets: []selectionTarget{target}, sel: target.id, store: store}
+			if !actToggleDisabled(c) {
+				t.Fatal("actToggleDisabled = false, want true")
 			}
-			update, err := actToggleDisabled(c)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if update == nil || update.Host != tc.wantHost ||
-				update.SessionID != tc.session.SessionID ||
-				update.Disabled != tc.serverDisabled {
-				t.Fatalf("update = %#v", update)
+			// The store is the sole authority — the live rows pick the value up
+			// via the caller's settleRows() re-overlay, not an in-place patch.
+			if got := store.Disabled(tc.session.SessionID); got != tc.want {
+				t.Fatalf("store.Disabled = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestActToggleDisabledIgnoresEmptyHostAndReturnsFailure(t *testing.T) {
-	empty := emptyHostSelectionTarget("orca")
-	called := false
-	c := &actCtx{
-		targets: []selectionTarget{empty},
-		sel:     empty.id,
-		updateDisabled: func(string, int, string, bool) (disabledState, error) {
-			called = true
-			return disabledState{}, nil
-		},
-	}
-	update, err := actToggleDisabled(c)
-	if err != nil || update != nil || called {
-		t.Fatalf("empty target = (%#v, %v), called=%v", update, err, called)
-	}
+func TestActToggleDisabledIgnoresEmptyHostAndMissingID(t *testing.T) {
+	store := loadSessionStore("", nil)
 
-	target := sessionSelectionTarget(Session{PID: 1, SessionID: "one"})
-	c = &actCtx{
-		targets: []selectionTarget{target},
-		sel:     target.id,
-		updateDisabled: func(string, int, string, bool) (disabledState, error) {
-			return disabledState{}, errors.New("server unavailable")
-		},
-	}
-	update, err = actToggleDisabled(c)
-	if update != nil || err == nil || err.Error() != "server unavailable" {
-		t.Fatalf("failed update = (%#v, %v)", update, err)
+	empty := emptyHostSelectionTarget("orca")
+	c := &actCtx{targets: []selectionTarget{empty}, sel: empty.id, store: store}
+	if actToggleDisabled(c) {
+		t.Fatal("empty-host target toggled")
 	}
 
 	missingID := sessionSelectionTarget(Session{PID: 2})
-	called = false
-	c = &actCtx{
-		targets: []selectionTarget{missingID},
-		sel:     missingID.id,
-		updateDisabled: func(string, int, string, bool) (disabledState, error) {
-			called = true
-			return disabledState{}, nil
-		},
+	c = &actCtx{targets: []selectionTarget{missingID}, sel: missingID.id, store: store}
+	if actToggleDisabled(c) {
+		t.Fatal("missing-SessionID target toggled")
 	}
-	update, err = actToggleDisabled(c)
-	if update != nil || err == nil ||
-		err.Error() != "PID 2 has no stable session ID" || called {
-		t.Fatalf("missing-ID update = (%#v, %v), called=%v", update, err, called)
+	if len(store.entries) != 0 {
+		t.Fatalf("store mutated on ignored toggles: %#v", store.entries)
 	}
 }
 

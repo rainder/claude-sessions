@@ -161,117 +161,6 @@ func fetchRemoteFixture(t *testing.T, body string) RemoteResult {
 	return result
 }
 
-func TestRemoteHubPatchDisabledProtectsOnlyPreWriteFetchGeneration(t *testing.T) {
-	h := &RemoteHub{
-		fetchGeneration: 4,
-		results: []RemoteResult{{
-			Name:     "alias",
-			Sessions: []Session{{PID: 42, SessionID: "session-42"}},
-		}},
-	}
-
-	h.PatchDisabled("alias", "session-42", true)
-	snapshot := h.Snapshot()
-	if !snapshot[0].Sessions[0].Disabled {
-		t.Fatal("immediate remote patch was not visible")
-	}
-
-	h.storeRemoteResult(0, 4, RemoteResult{
-		Name:     "alias",
-		Sessions: []Session{{PID: 42, SessionID: "session-42", Disabled: false}},
-	})
-	snapshot = h.Snapshot()
-	if !snapshot[0].Sessions[0].Disabled {
-		t.Fatal("pre-write fetch overwrote pending disabled state")
-	}
-	if len(h.pendingDisabled) != 1 {
-		t.Fatalf("pending overrides = %d, want 1", len(h.pendingDisabled))
-	}
-
-	h.storeRemoteResult(0, 5, RemoteResult{
-		Name:     "alias",
-		Sessions: []Session{{PID: 42, SessionID: "session-42", Disabled: true}},
-	})
-	if len(h.pendingDisabled) != 0 {
-		t.Fatalf("post-write authoritative fetch did not clear override: %#v", h.pendingDisabled)
-	}
-}
-
-func TestRemoteHubNewerAuthoritativeWriteSupersedesPendingState(t *testing.T) {
-	h := &RemoteHub{
-		fetchGeneration: 8,
-		results: []RemoteResult{{
-			Name:     "alias",
-			Sessions: []Session{{PID: 42, SessionID: "session-42"}},
-		}},
-	}
-	h.PatchDisabled("alias", "session-42", true)
-
-	h.storeRemoteResult(0, 8, RemoteResult{
-		Name:     "alias",
-		Sessions: []Session{{PID: 42, SessionID: "session-42", Disabled: false}},
-	})
-	if !h.Snapshot()[0].Sessions[0].Disabled {
-		t.Fatal("pre-write fetch was not fenced")
-	}
-
-	h.storeRemoteResult(0, 9, RemoteResult{
-		Name:     "alias",
-		Sessions: []Session{{PID: 42, SessionID: "session-42", Disabled: false}},
-	})
-	snapshot := h.Snapshot()
-	if snapshot[0].Sessions[0].Disabled {
-		t.Fatal("later authoritative write did not supersede pending state")
-	}
-	if len(h.pendingDisabled) != 0 {
-		t.Fatalf("superseded override was not cleared: %#v", h.pendingDisabled)
-	}
-}
-
-func TestRemoteHubPendingDisabledSurvivesErrorAndClearsWhenSessionEnds(t *testing.T) {
-	h := &RemoteHub{
-		fetchGeneration: 2,
-		results: []RemoteResult{{
-			Name:     "alias",
-			Sessions: []Session{{PID: 42, SessionID: "session-42"}},
-		}},
-	}
-	h.PatchDisabled("alias", "session-42", true)
-	h.storeRemoteResult(0, 3, RemoteResult{Name: "alias", Error: "timeout"})
-	if len(h.pendingDisabled) != 1 {
-		t.Fatal("remote error cleared pending override")
-	}
-	h.storeRemoteResult(0, 4, RemoteResult{Name: "alias", Sessions: nil})
-	if len(h.pendingDisabled) != 0 {
-		t.Fatal("successful post-write absent-session response did not clear override")
-	}
-}
-
-func TestRemoteHubPendingDisabledIsScopedByHost(t *testing.T) {
-	h := &RemoteHub{
-		results: []RemoteResult{
-			{Name: "orca", Sessions: []Session{{PID: 42, SessionID: "shared-id"}}},
-			{Name: "beluga", Sessions: []Session{{PID: 42, SessionID: "shared-id"}}},
-		},
-	}
-	h.PatchDisabled("orca", "shared-id", true)
-	snapshot := h.Snapshot()
-	if !snapshot[0].Sessions[0].Disabled {
-		t.Fatal("target host was not patched")
-	}
-	if snapshot[1].Sessions[0].Disabled {
-		t.Fatal("same session ID on another host was patched")
-	}
-	if len(h.pendingDisabled) != 1 {
-		t.Fatalf("pending overrides = %#v", h.pendingDisabled)
-	}
-
-	h.PatchDisabled("orca", "", true)
-	if len(h.pendingDisabled) != 1 {
-		t.Fatalf("empty session ID created override: %#v", h.pendingDisabled)
-	}
-}
-
 func TestRemoteHubSnapshotDoesNotAliasHubState(t *testing.T) {
 	h := &RemoteHub{
 		results: []RemoteResult{{
@@ -283,22 +172,29 @@ func TestRemoteHubSnapshotDoesNotAliasHubState(t *testing.T) {
 		}},
 	}
 
-	beforePatch := h.Snapshot()
-	h.PatchDisabled("alias", "session-42", true)
-	if beforePatch[0].Sessions[0].Disabled {
-		t.Fatal("hub patch retroactively changed prior snapshot")
+	// A snapshot taken before a store must not observe the later result.
+	before := h.Snapshot()
+	h.storeRemoteResult(0, RemoteResult{
+		Name:     "alias",
+		Sessions: []Session{{PID: 42, SessionID: "session-42", Disabled: true}},
+	})
+	if before[0].Sessions[0].Disabled {
+		t.Fatal("hub store retroactively changed prior snapshot")
 	}
 
+	// Mutating a returned snapshot must not touch hub-owned state.
 	callerCopy := h.Snapshot()
+	if !callerCopy[0].Sessions[0].Disabled {
+		t.Fatal("snapshot missing stored state")
+	}
 	callerCopy[0].Sessions[0].Disabled = false
 	if !h.Snapshot()[0].Sessions[0].Disabled {
 		t.Fatal("caller mutation changed hub-owned session state")
 	}
 }
 
-func TestRemoteHubSnapshotPatchAndStoreAreRaceFree(t *testing.T) {
+func TestRemoteHubSnapshotAndStoreAreRaceFree(t *testing.T) {
 	h := &RemoteHub{
-		fetchGeneration: 1,
 		results: []RemoteResult{{
 			Name: "alias",
 			Sessions: []Session{{
@@ -310,7 +206,7 @@ func TestRemoteHubSnapshotPatchAndStoreAreRaceFree(t *testing.T) {
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
@@ -326,14 +222,7 @@ func TestRemoteHubSnapshotPatchAndStoreAreRaceFree(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for i := range 200 {
-			h.PatchDisabled("alias", "session-42", i%2 == 0)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		for i := range 200 {
-			h.storeRemoteResult(0, 1, RemoteResult{
+			h.storeRemoteResult(0, RemoteResult{
 				Name: "alias",
 				Sessions: []Session{{
 					PID:       42,
