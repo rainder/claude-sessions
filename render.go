@@ -85,9 +85,9 @@ func disabledRail(session Session, selected bool) string {
 		return "  "
 	}
 	if selected {
-		return "\033[33m│\033[39m "
+		return "\033[33m−\033[39m "
 	}
-	return colorize("33", "│") + " "
+	return colorize("33", "−") + " "
 }
 
 func sessionRowPlain(session Session, selected bool) bool {
@@ -101,8 +101,8 @@ var groupSGR = map[int]string{
 
 // groupView carries the client-side group state threaded through the render
 // path: the sessionID→group map (for badges and the filter predicate), the
-// active view filter (0 = none), and the per-frame first-column slot
-// reservations. showViewer, showBadge and showRail each gate one 2-char
+// active view filter (zero value = no filter), and the per-frame first-column
+// slot reservations. showViewer, showBadge and showRail each gate one 2-char
 // indicator slot (tmux viewer, group badge, disabled rail), and are set by
 // BuildTableFrame once it knows which slots at least one visible session needs.
 // A slot is present on every row of the frame (headers included) or on none.
@@ -110,7 +110,7 @@ var groupSGR = map[int]string{
 // and conditional slots existed.
 type groupView struct {
 	groups     map[string]int
-	filter     int
+	filter     groupFilter
 	showViewer bool
 	showBadge  bool
 	showRail   bool
@@ -126,17 +126,23 @@ func (gv groupView) groupOf(s Session) int {
 }
 
 // passesGroupFilter reports whether a session survives the active group filter.
-// A zero filter admits everything; otherwise only sessions whose stored group
-// matches are shown. Sessions with no SessionID can never be grouped, so they
-// never pass a non-zero filter.
-func passesGroupFilter(s Session, groups map[string]int, filter int) bool {
-	if filter == 0 {
+// filterNone admits everything. In filterOnly a session is visible iff its
+// stored group's bit is set in mask (ungrouped sessions, incl. those with no
+// SessionID, are hidden). In filterHide a session is visible iff it is
+// ungrouped or its bit is not set (ungrouped sessions always survive).
+func passesGroupFilter(s Session, groups map[string]int, filter groupFilter) bool {
+	group := 0
+	if s.SessionID != "" {
+		group = groups[s.SessionID]
+	}
+	switch filter.mode {
+	case filterOnly:
+		return group != 0 && groupMaskHas(filter.mask, group)
+	case filterHide:
+		return group == 0 || !groupMaskHas(filter.mask, group)
+	default:
 		return true
 	}
-	if s.SessionID == "" {
-		return false
-	}
-	return groups[s.SessionID] == filter
 }
 
 // groupBadgeGlyph returns the circled digit for a group (U+2460 is ①), or "" for
@@ -985,9 +991,9 @@ type section struct {
 }
 
 // filterSessionRows returns the subset of rows passing the active group filter,
-// preserving order. A zero filter returns rows unchanged (same backing array).
+// preserving order. No active filter returns rows unchanged (same backing array).
 func filterSessionRows(rows []Session, gv groupView) []Session {
-	if gv.filter == 0 {
+	if gv.filter.mode == filterNone {
 		return rows
 	}
 	out := make([]Session, 0, len(rows))
@@ -1002,9 +1008,9 @@ func filterSessionRows(rows []Session, gv groupView) []Session {
 // filterRemoteResults returns copies of the results with each host's Sessions
 // filtered by the active group. The RemoteResult metadata (Error, Loading, etc.)
 // is preserved so empty-after-filter hosts still render their heading + the
-// empty-host row. A zero filter returns the input unchanged.
+// empty-host row. No active filter returns the input unchanged.
 func filterRemoteResults(remotes []RemoteResult, gv groupView) []RemoteResult {
-	if gv.filter == 0 {
+	if gv.filter.mode == filterNone {
 		return remotes
 	}
 	out := make([]RemoteResult, len(remotes))
@@ -1156,18 +1162,36 @@ func plural(n int, word string) string {
 // usage bars (Anthropic lines then Codex lines, one line per distinct account —
 // see dedupeAccounts / dedupeCodexAccounts), and the trailing blank line —
 // shared by all three views.
-// groupFilterIndicator renders the "group ③" badge shown in the title while a
-// filter is active, colored with the group's palette entry. Returns "" when no
-// filter is active.
-func groupFilterIndicator(filter int) string {
-	glyph := groupBadgeGlyph(filter)
-	if glyph == "" {
+// groupFilterIndicator renders the badge shown in the title while a filter is
+// active. only mode shows "only ③" colored with the group's palette entry;
+// hide mode shows a red "hide" label followed by the hidden groups' badges in
+// ascending order, each in its own group color. Returns "" when no filter is
+// active. Every branch ends in a reset, so renderHeader can re-assert bold.
+func groupFilterIndicator(filter groupFilter) string {
+	if filter.mode == filterNone || filter.mask == 0 {
 		return ""
 	}
-	return colorize(groupSGR[filter], "group "+glyph)
+	if filter.mode == filterOnly {
+		for g := 1; g <= 9; g++ {
+			if groupMaskHas(filter.mask, g) {
+				return colorize(groupSGR[g], "only "+groupBadgeGlyph(g))
+			}
+		}
+		return ""
+	}
+	// filterHide: red "hide" label + the hidden groups' badges, each in its color.
+	var b strings.Builder
+	b.WriteString(colorize("31", "hide"))
+	b.WriteByte(' ')
+	for g := 1; g <= 9; g++ {
+		if groupMaskHas(filter.mask, g) {
+			b.WriteString(colorize(groupSGR[g], groupBadgeGlyph(g)))
+		}
+	}
+	return b.String()
 }
 
-func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, filter int) {
+func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int, filter groupFilter) {
 	live, busy, subs := 0, 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -1184,8 +1208,8 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 	// main loops only, and occupied main loops. colorize ends with a full
 	// reset, so re-assert bold after the busy count to keep the title bold.
 	busyStr := colorize(statusColor["busy"], fmt.Sprintf("%d busy", busy)) + ansiBold
-	// An active group filter shows a colored "group ③" indicator (which ends in
-	// a reset), so re-assert bold afterwards to keep the trailing [mode] bright.
+	// An active group filter shows a colored "only ③" / "hide ②③" indicator
+	// (which ends in a reset), so re-assert bold to keep the trailing [mode] bright.
 	filterStr := ""
 	if ind := groupFilterIndicator(filter); ind != "" {
 		filterStr = "  " + ind + ansiBold
