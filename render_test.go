@@ -2340,6 +2340,107 @@ func TestGroupFilterTargetsMatchRenderedRows(t *testing.T) {
 	}
 }
 
+func TestMatchesTextFilter(t *testing.T) {
+	// A session touching every searchable field: display name (Name), cwd, host,
+	// and tmux session name (part before ":").
+	s := Session{
+		Name:      "api-server",
+		CWD:       "/home/andy/Developer/trecs-brain",
+		Tmux:      "worksesh:1.0",
+		SessionID: "sid",
+	}
+	cases := []struct {
+		name  string
+		sess  Session
+		host  string
+		query string
+		want  bool
+	}{
+		// "prod" appears only in the host, isolating host matching from the cwd
+		// (which contains "Developer" → would match a "dev" token).
+		{"empty query matches", s, "prod-box", "", true},
+		{"whitespace-only query matches", s, "prod-box", "   ", true},
+		{"match display name", s, "prod-box", "api", true},
+		{"match cwd", s, "prod-box", "trecs", true},
+		{"match host", s, "prod-box", "prod", true},
+		{"match tmux session name", s, "prod-box", "worksesh", true},
+		{"tmux window/pane not matched", s, "prod-box", "1.0", false},
+		{"case-insensitive query", s, "prod-box", "API-SERVER", true},
+		{"case-insensitive field", Session{Name: "API"}, "", "api", true},
+		{"all tokens must match (AND) - both present", s, "prod-box", "api trecs", true},
+		{"all tokens must match (AND) - one absent", s, "prod-box", "api nope", false},
+		{"tokens may match different fields", s, "prod-box", "api prod", true},
+		{"no field matches", s, "prod-box", "zzz", false},
+		{"empty host is not matched", s, "", "prod", false},
+	}
+	for _, c := range cases {
+		if got := matchesTextFilter(c.sess, c.host, c.query); got != c.want {
+			t.Errorf("%s: matchesTextFilter(%q, host=%q) = %v, want %v", c.name, c.query, c.host, got, c.want)
+		}
+	}
+}
+
+// TestTextFilterComposition locks that filterSessionRows applies the group filter
+// AND the text query together, using each row's own Host as the searchable host.
+func TestTextFilterComposition(t *testing.T) {
+	rows := []Session{
+		{PID: 1, Name: "api", CWD: "/w", SessionID: "sid-a"}, // group 1, matches "api"
+		{PID: 2, Name: "web", CWD: "/w", SessionID: "sid-b"}, // group 1, no "api"
+		{PID: 3, Name: "api", CWD: "/w", SessionID: "sid-c"}, // group 2, matches "api"
+	}
+	gv := groupView{
+		groups: map[string]int{"sid-a": 1, "sid-b": 1, "sid-c": 2},
+		filter: groupFilter{mode: filterOnly, mask: 1 << 1}, // only group 1
+		query:  "api",
+	}
+	got := filterSessionRows(rows, gv)
+	if len(got) != 1 || got[0].PID != 1 {
+		t.Fatalf("group AND text should keep only PID 1, got %+v", got)
+	}
+
+	// Text-only filter (no group filter) still narrows.
+	textOnly := filterSessionRows(rows, groupView{query: "api"})
+	if len(textOnly) != 2 {
+		t.Fatalf("text-only filter should keep 2 rows (api), got %d", len(textOnly))
+	}
+
+	// No filter returns the same backing array unchanged.
+	none := filterSessionRows(rows, groupView{})
+	if len(none) != len(rows) || &none[0] != &rows[0] {
+		t.Fatalf("no filter should return rows unchanged (same backing array)")
+	}
+}
+
+func TestTextFilterHeaderIndicator(t *testing.T) {
+	local := testLocalHost(Session{PID: 1, Name: "n", CWD: "/w", SessionID: "s"})
+
+	// Query only: dim "/api" after the counts, no group indicator.
+	out := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir",
+		groupView{groups: map[string]int{"s": 3}, query: "api"}))
+	if want := dim("/api"); !strings.Contains(out, want) {
+		t.Fatalf("header missing text-query indicator %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "only") {
+		t.Fatalf("group indicator shown with no group filter:\n%s", out)
+	}
+
+	// None: no query, no indicator.
+	none := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir",
+		groupView{groups: map[string]int{"s": 3}}))
+	if strings.Contains(none, dim("/")) {
+		t.Fatalf("text-query indicator shown with no query:\n%s", none)
+	}
+
+	// Combined: group indicator then dim "/api", separated by two spaces, each
+	// re-asserting bold so the trailing [mode] stays bright.
+	combined := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir",
+		groupView{groups: map[string]int{"s": 3}, filter: groupFilter{mode: filterOnly, mask: 1 << 3}, query: "api"}))
+	want := colorize(groupSGR[3], "only "+groupBadgeGlyph(3)) + ansiBold + "  " + dim("/api") + ansiBold
+	if !strings.Contains(combined, want) {
+		t.Fatalf("combined indicator wrong:\nwant substring %q\ngot:\n%s", want, combined)
+	}
+}
+
 func TestSelectedGroupedRowRestoresSelectionBackground(t *testing.T) {
 	gv := groupView{groups: map[string]int{"sid": 4}}
 	local := testLocalHost(Session{PID: 1, Name: "sel", CWD: "/w", SessionID: "sid"})

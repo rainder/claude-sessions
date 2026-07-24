@@ -99,18 +99,21 @@ var groupSGR = map[int]string{
 	1: "36", 2: "35", 3: "33", 4: "32", 5: "34", 6: "31", 7: "96", 8: "95", 9: "97",
 }
 
-// groupView carries the client-side group state threaded through the render
+// groupView carries the client-side view state threaded through the render
 // path: the sessionID→group map (for badges and the filter predicate), the
-// active view filter (zero value = no filter), and the per-frame first-column
-// slot reservations. showViewer, showBadge and showRail each gate one 2-char
-// indicator slot (tmux viewer, group badge, disabled rail), and are set by
-// BuildTableFrame once it knows which slots at least one visible session needs.
-// A slot is present on every row of the frame (headers included) or on none.
-// The zero value hides all three slots — rendering exactly as before groups
-// and conditional slots existed.
+// active group filter (zero value = no filter), the free-text query (empty =
+// no text filter), and the per-frame first-column slot reservations. The group
+// filter and the query compose (AND) in filterSessionRows / filterRemoteResults.
+// showViewer, showBadge and showRail each gate one 2-char indicator slot (tmux
+// viewer, group badge, disabled rail), and are set by BuildTableFrame once it
+// knows which slots at least one visible session needs. A slot is present on
+// every row of the frame (headers included) or on none. The zero value applies
+// no filter and hides all three slots — rendering exactly as before groups,
+// the text filter, and conditional slots existed.
 type groupView struct {
 	groups     map[string]int
 	filter     groupFilter
+	query      string
 	showViewer bool
 	showBadge  bool
 	showRail   bool
@@ -143,6 +146,43 @@ func passesGroupFilter(s Session, groups map[string]int, filter groupFilter) boo
 	default:
 		return true
 	}
+}
+
+// matchesTextFilter reports whether session s (rendered under section host)
+// satisfies the free-form text query. The query is split on spaces into tokens
+// and every token must match (AND); a token matches when it is a
+// case-insensitive substring of at least one searchable field — the display
+// name, cwd, section host name, or tmux session name (the part before ":"). An
+// empty (or all-whitespace) query matches everything. Pure so it is
+// table-testable.
+func matchesTextFilter(s Session, host, query string) bool {
+	tokens := strings.Fields(query)
+	if len(tokens) == 0 {
+		return true
+	}
+	name, _ := s.DisplayName()
+	tmuxName := s.Tmux
+	if i := strings.IndexByte(tmuxName, ':'); i >= 0 {
+		tmuxName = tmuxName[:i]
+	}
+	fields := []string{name, s.CWD, host, tmuxName}
+	for i, f := range fields {
+		fields[i] = strings.ToLower(f)
+	}
+	for _, tok := range tokens {
+		tok = strings.ToLower(tok)
+		found := false
+		for _, f := range fields {
+			if strings.Contains(f, tok) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // groupBadgeGlyph returns the circled digit for a group (U+2460 is ①), or "" for
@@ -990,15 +1030,18 @@ type section struct {
 	loading   bool
 }
 
-// filterSessionRows returns the subset of rows passing the active group filter,
-// preserving order. No active filter returns rows unchanged (same backing array).
+// filterSessionRows returns the subset of rows passing the active view filter
+// (the group filter AND the free-text query, composed), preserving order. Each
+// row's own Host labels the section it renders under (empty for local), so the
+// text filter can match the host name. With neither filter active, rows are
+// returned unchanged (same backing array).
 func filterSessionRows(rows []Session, gv groupView) []Session {
-	if gv.filter.mode == filterNone {
+	if gv.filter.mode == filterNone && gv.query == "" {
 		return rows
 	}
 	out := make([]Session, 0, len(rows))
 	for _, s := range rows {
-		if passesGroupFilter(s, gv.groups, gv.filter) {
+		if passesGroupFilter(s, gv.groups, gv.filter) && matchesTextFilter(s, s.Host, gv.query) {
 			out = append(out, s)
 		}
 	}
@@ -1006,11 +1049,12 @@ func filterSessionRows(rows []Session, gv groupView) []Session {
 }
 
 // filterRemoteResults returns copies of the results with each host's Sessions
-// filtered by the active group. The RemoteResult metadata (Error, Loading, etc.)
-// is preserved so empty-after-filter hosts still render their heading + the
-// empty-host row. No active filter returns the input unchanged.
+// filtered by the active view filter (group AND text). The RemoteResult metadata
+// (Error, Loading, etc.) is preserved so empty-after-filter hosts still render
+// their heading + the empty-host row. With neither filter active the input is
+// returned unchanged.
 func filterRemoteResults(remotes []RemoteResult, gv groupView) []RemoteResult {
-	if gv.filter.mode == filterNone {
+	if gv.filter.mode == filterNone && gv.query == "" {
 		return remotes
 	}
 	out := make([]RemoteResult, len(remotes))
@@ -1158,10 +1202,11 @@ func plural(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-// renderHeader prints the title line with live counts, the optional account
-// usage bars (Anthropic lines then Codex lines, one line per distinct account —
-// see dedupeAccounts / dedupeCodexAccounts), and the trailing blank line —
-// shared by all three views.
+// renderHeader prints the title line with live counts, the active view-filter
+// indicators (the group badge then a dim "/query" when a text filter is active),
+// the optional account usage bars (Anthropic lines then Codex lines, one line
+// per distinct account — see dedupeAccounts / dedupeCodexAccounts), and the
+// trailing blank line — shared by all three views.
 // groupFilterIndicator renders the badge shown in the title while a filter is
 // active. only mode shows "only ③" colored with the group's palette entry;
 // hide mode shows a red "hide" label followed by the hidden groups' badges in
@@ -1191,7 +1236,7 @@ func groupFilterIndicator(filter groupFilter) string {
 	return b.String()
 }
 
-func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int, filter groupFilter) {
+func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int, filter groupFilter, query string) {
 	live, busy, subs := 0, 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -1208,11 +1253,15 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 	// main loops only, and occupied main loops. colorize ends with a full
 	// reset, so re-assert bold after the busy count to keep the title bold.
 	busyStr := colorize(statusColor["busy"], fmt.Sprintf("%d busy", busy)) + ansiBold
-	// An active group filter shows a colored "only ③" / "hide ②③" indicator
-	// (which ends in a reset), so re-assert bold to keep the trailing [mode] bright.
+	// An active group filter shows a colored "only ③" / "hide ②③" indicator, and
+	// an active text query appends a dim "/query" after it (each ends in a reset),
+	// so re-assert bold after every segment to keep the trailing [mode] bright.
 	filterStr := ""
 	if ind := groupFilterIndicator(filter); ind != "" {
 		filterStr = "  " + ind + ansiBold
+	}
+	if query != "" {
+		filterStr += "  " + dim("/"+query) + ansiBold
 	}
 	fmt.Fprintf(w, "%sClaude sessions  %s  (%s, %s, %s)%s  %s%s\n",
 		ansiBold, time.Now().Format("15:04:05"),
@@ -1490,7 +1539,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 		tmuxW = max(tmuxW, len(t))
 	}
 
-	renderHeader(w, sections, "full", accounts, codexAccounts, cols, gv.filter)
+	renderHeader(w, sections, "full", accounts, codexAccounts, cols, gv.filter, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -1610,7 +1659,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	renderHeader(w, sections, "intermediate", accounts, codexAccounts, cols, gv.filter)
+	renderHeader(w, sections, "intermediate", accounts, codexAccounts, cols, gv.filter, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -1734,7 +1783,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 		nameW = max(nameW, len(r.display))
 	}
 
-	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols, gv.filter)
+	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols, gv.filter, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(

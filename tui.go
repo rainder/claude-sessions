@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -96,12 +97,14 @@ func RunTUI(interval time.Duration) error {
 	// store holds client-side group assignments and disabled flags (state.go).
 	// groupFilterState (zero value = no filter) is runtime-only — never
 	// persisted. pendingHide arms the inverse-filter binding: 'h' sets it and the
-	// next keystroke resolves it (see groupFilterTransition). groups is a
-	// per-settle snapshot of the store's assignments, reused for badge rendering
-	// and the filter predicate.
+	// next keystroke resolves it (see groupFilterTransition). textFilter is the
+	// '/'-driven free-text filter (also runtime-only); its effective query
+	// composes with groupFilterState (AND). groups is a per-settle snapshot of the
+	// store's assignments, reused for badge rendering and the filter predicate.
 	store := LoadSessionStore()
 	var groupFilterState groupFilter
 	var pendingHide bool
+	var textFilter textFilterState
 	var groups map[string]int
 	var lastStateTouch time.Time
 	var local []Session
@@ -208,8 +211,9 @@ func RunTUI(interval time.Duration) error {
 			store.TouchVisible(visibleSessionIDs(local, remotes))
 		}
 		// Targets mirror exactly what the frame renders: filtered by the active
-		// group so a filtered-out selection falls back via validateTargetSel.
-		gv := groupView{groups: groups, filter: groupFilterState}
+		// group and text query so a filtered-out selection falls back via
+		// validateTargetSel.
+		gv := groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery()}
 		targets = buildSelectionTargets(
 			filterSessionRows(local, gv),
 			filterRemoteResults(remotes, gv),
@@ -286,7 +290,7 @@ func RunTUI(interval time.Duration) error {
 		}, remotes, state.sel, &LocalUsage{
 			Claude: usageHub.Snapshot(),
 			Codex:  codexUsageHub.Snapshot(),
-		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState})
+		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery()})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if rows > 0 {
@@ -313,11 +317,13 @@ func RunTUI(interval time.Duration) error {
 			out = visible.text
 		}
 		if rows > 0 {
-			out = withBottomRow(
-				out,
-				rows,
-				sessionBottomRow(toast, toastActive),
-			)
+			// While '/'-input mode is active, the edit prompt replaces the footer
+			// hint (and any toast) so the user sees the query they're typing.
+			bottom := sessionBottomRow(toast, toastActive)
+			if textFilter.editing {
+				bottom = textFilterPrompt(textFilter.buffer, cols)
+			}
+			out = withBottomRow(out, rows, bottom)
 		}
 		_ = screen.Draw(out, cols, rows)
 	}
@@ -483,6 +489,22 @@ func RunTUI(interval time.Duration) error {
 				continue
 			}
 			k := ev.key
+			// Free-text filter ('/') runs through a pure transition ahead of every
+			// other key handler: while input mode is active it captures all keys
+			// (hotkeys suspended); otherwise only '/' is consumed, entering input
+			// mode preloaded with the committed query. Any consumed key re-filters
+			// and re-renders. Entering input mode also cancels a pending 'h' arm so a
+			// stale arm can't leak into the next digit.
+			if next, consumed := textFilterTransition(textFilter, k); consumed {
+				if next.editing && !textFilter.editing {
+					pendingHide = false
+				}
+				textFilter = next
+				settleRows()
+				state.requestSelectionAnchor()
+				render()
+				continue
+			}
 			if sessionKeyCommand(k) == commandOpenInspector {
 				pendingHide = false
 				openInspector()
@@ -813,6 +835,100 @@ func shiftDigitGroup(key string) int {
 	return 0
 }
 
+// textFilterState is the runtime-only free-text filter driven by '/': a
+// committed query that narrows the visible rows, plus a transient buffer holding
+// the query being typed while input mode is active. Never persisted.
+type textFilterState struct {
+	editing   bool   // true while '/'-input mode is active
+	buffer    string // the query being edited (meaningful only while editing)
+	committed string // the active committed query ("" = no text filter)
+}
+
+// effectiveQuery is the query currently narrowing the rows: the live edit buffer
+// while editing (so rows narrow incrementally as the user types), otherwise the
+// committed query.
+func (t textFilterState) effectiveQuery() string {
+	if t.editing {
+		return t.buffer
+	}
+	return t.committed
+}
+
+// textFilterTransition applies key k to the text-filter state and reports
+// whether it was consumed. When not editing, only '/' is consumed: it enters
+// input mode preloaded with the committed query for editing; every other key
+// reports consumed=false so the caller runs its normal key handling. While
+// editing, every key is consumed (all hotkeys are suspended) except Ctrl+C /
+// Ctrl+D, which pass through so the hard-quit stays live: text input (ASCII
+// printable, and multi-byte input appended as-is) extends the buffer, Backspace
+// (DEL/BS) deletes the last rune, Ctrl+U clears the buffer, Enter commits it
+// (an empty buffer clears the filter), and Esc cancels and clears the query.
+// Any other key (a suspended hotkey or navigation key) is swallowed unchanged.
+// Pure so the state machine is table-testable.
+func textFilterTransition(cur textFilterState, k string) (next textFilterState, consumed bool) {
+	if !cur.editing {
+		if k == "/" {
+			return textFilterState{editing: true, buffer: cur.committed, committed: cur.committed}, true
+		}
+		return cur, false
+	}
+	switch {
+	case k == "\x03" || k == "\x04":
+		// The universal hard-quit stays live mid-edit: report not-consumed so the
+		// caller's normal key switch handles Ctrl+C / Ctrl+D.
+		return cur, false
+	case k == KeyEnter:
+		return textFilterState{committed: cur.buffer}, true
+	case k == KeyEsc:
+		return textFilterState{}, true
+	case k == "\x7f" || k == "\x08": // DEL / Backspace
+		return textFilterState{editing: true, buffer: trimLastRune(cur.buffer), committed: cur.committed}, true
+	case k == "\x15": // Ctrl+U clears the line
+		return textFilterState{editing: true, buffer: "", committed: cur.committed}, true
+	case isTextInput(k):
+		return textFilterState{editing: true, buffer: cur.buffer + k, committed: cur.committed}, true
+	default:
+		return cur, true
+	}
+}
+
+// isTextInput reports whether decoded key k is literal text to append to the
+// filter buffer rather than a control or navigation key. Control bytes (< 0x20)
+// and DEL (0x7f) are rejected, which also excludes the "\x00…" navigation
+// sentinels (KeyUp, KeyEnter, KeyEsc, …); printable ASCII and multi-byte input
+// (which the decoder emits as high bytes) pass.
+func isTextInput(k string) bool {
+	if k == "" {
+		return false
+	}
+	b := k[0]
+	return b >= 0x20 && b != 0x7f
+}
+
+// trimLastRune drops the final UTF-8 rune of s (a no-op on the empty string), so
+// Backspace deletes a whole rune rather than a stray byte.
+func trimLastRune(s string) string {
+	if s == "" {
+		return s
+	}
+	_, size := utf8.DecodeLastRuneInString(s)
+	return s[:len(s)-size]
+}
+
+// textFilterPrompt is the bottom row shown while '/'-input mode is active: the
+// query buffer after a leading '/', capped by a block cursor. It replaces the
+// footer hint line so the user sees exactly what they are typing. A buffer too
+// long for the terminal keeps its tail (where the cursor is), dropping leading
+// runes, so typing never pushes the cursor off-screen.
+func textFilterPrompt(buffer string, cols int) string {
+	if cols > 2 { // leading '/' + cursor block
+		if runes := []rune(buffer); len(runes) > cols-2 {
+			buffer = string(runes[len(runes)-(cols-2):])
+		}
+	}
+	return "/" + buffer + "▌"
+}
+
 // visibleSessionIDs collects the SessionIDs of every session currently in view
 // (local + all remotes), for refreshing the store's last_seen on save. Blank
 // IDs are skipped.
@@ -834,7 +950,7 @@ func visibleSessionIDs(local []Session, remotes []RemoteResult) []string {
 }
 
 func sessionFooter() string {
-	return dim("-/+ disable/enable  ·  1-9 only  ·  h1-9 hide  ·  ⇧1-9 group  ·  ? help")
+	return dim("-/+ disable/enable  ·  1-9 only  ·  h1-9 hide  ·  ⇧1-9 group  ·  / search  ·  ? help")
 }
 
 func sessionBottomRow(toast string, toastActive bool) string {
@@ -874,6 +990,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    m            cycle mode (full → intermediate → minimal)  ·  persisted")
 	fmt.Fprintln(&b, "    1..9         show only group (same digit or 0 shows all)")
 	fmt.Fprintln(&b, "    h then 1..9  hide group(s) (repeat to add/remove · last one shows all)")
+	fmt.Fprintln(&b, "    /            filter rows by text (type to narrow · Enter commits · Esc clears)")
 	fmt.Fprintln(&b, "    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
 	fmt.Fprintln(&b, "                 current sort: "+sortMode)
 	fmt.Fprintln(&b, "    r            refresh now")
