@@ -123,6 +123,31 @@ returns `"<pid>"`. Remote rows have `Host == "<name>"` and `ID()` returns
 `"<name>:<pid>"`. Action dispatch uses `s.Host != ""` to route between local and
 remote handlers.
 
+### Resume picker
+
+`resume.go` owns the whole `r`-key feature: collect past transcripts
+(`~/.claude/projects/*/*.jsonl`; session id = filename stem), a searchable
+picker (reuses `filterNewPickerLines`), and `ResumeSession(sessionID, cwd)` —
+the shared primitive both the local TUI path and the server's
+`POST /sessions/resume` handler call (409 when the session is already live).
+Remote lists come from `GET /resumable`, fetched concurrently per host and
+merged newest-first.
+
+Collector filters (all server-side, in `collectResumableFrom`): >30 days old,
+currently-live session ids, zero-byte/corrupt files, scratch cwds (`/tmp`,
+`/private` — narrower than picker.go's `hiddenCwd`; worktrees stay resumable),
+and agent transcripts — any entry with `isSidechain:true` or an `entrypoint`
+other than `"cli"` (headless `claude -p` / SDK runs); a missing entrypoint
+field passes (old format). Metadata comes from a single ~30-line head scan;
+NAME is best-effort: user-set name from a lingering `~/.claude/sessions`
+file (`nameSource != "derived"`), else the transcript's summary line, else
+`-`. Session ids arriving over HTTP are format-validated
+(`resumeSessionIDRe`) before touching the filesystem or tmux.
+
+`resumeRows` autocompacts to terminal width: HOST only when a remote row
+exists; then shed order is shrink PROMPT → drop #MSG → drop BRANCH → shrink
+DIR → shrink NAME. AGE/NAME/DIR always survive; header mirrors the layout.
+
 ### Usage polling
 
 `usage.go` polls Anthropic's OAuth usage endpoint (token from the macOS Keychain
@@ -168,6 +193,6 @@ I/O. Keep it that way — single-binary deployment is the whole point of the rew
 
 ## Files at a glance
 
-(See README.md for the full layout table. The biggest files are `render.go` ~510,
-`tui.go` ~345, `server.go` ~300, `remote_actions.go` ~250, `actions.go` ~210,
-`usage.go` ~190.)
+(See README.md for the full layout table. The biggest files are `render.go`
+~1900, `tui.go` ~1000, `resume.go` ~900, `server.go` ~740, `remote_actions.go`
+~490.)
