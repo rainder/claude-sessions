@@ -1857,19 +1857,19 @@ func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 			enabledRow := findRow(t, b.String(), enabled.Name)
 			disabledRow := findRow(t, b.String(), disabled.Name)
 
-			if !strings.HasPrefix(stripANSI(disabledRow), "▶ − ") {
+			if !strings.HasPrefix(stripANSI(disabledRow), "▶ – ") {
 				t.Fatalf("mode %s disabled visible prefix = %q", mode, stripANSI(disabledRow))
 			}
 			if !strings.Contains(
 				disabledRow,
-				colorize("33", "−")+" "+ansiDim,
+				colorize("33", "–")+" "+ansiDim,
 			) {
 				t.Fatalf("mode %s rail is not outside muted body: %q", mode, disabledRow)
 			}
 			if !strings.HasPrefix(disabledRow, ansiDim+"▶ "+ansiReset) {
 				t.Fatalf("mode %s viewer prefix is not muted: %q", mode, disabledRow)
 			}
-			if strings.Contains(enabledRow, "−") {
+			if strings.Contains(enabledRow, "–") {
 				t.Fatalf("mode %s enabled row contains rail: %q", mode, enabledRow)
 			}
 			if visualLen(enabledRow) != visualLen(disabledRow) {
@@ -1965,7 +1965,7 @@ func TestHeadlessDisabledRowKeepsAmberRail(t *testing.T) {
 	}
 	for _, mode := range []string{"1", "2", "3"} {
 		row := renderSessionRowForTest(t, mode, session, false)
-		if !strings.Contains(row, colorize("33", "−")+" ") ||
+		if !strings.Contains(row, colorize("33", "–")+" ") ||
 			!strings.Contains(row, ansiDim) {
 			t.Fatalf(
 				"mode %s headless disabled row lost rail or dim: %q",
@@ -1989,8 +1989,8 @@ func TestSelectedDisabledRowsKeepBackgroundColorsAndAmberRail(t *testing.T) {
 			Disabled: true,
 		}
 		row := renderSessionRowForTest(t, mode, session, true)
-		assertWholeRowSelected(t, row, "▶ − ")
-		if !strings.Contains(row, "\033[33m−\033[39m ") {
+		assertWholeRowSelected(t, row, "▶ – ")
+		if !strings.Contains(row, "\033[33m–\033[39m ") {
 			t.Fatalf(
 				"mode %s selected disabled row lacks amber rail: %q",
 				mode,
@@ -2017,7 +2017,7 @@ func TestSelectedDisabledRowsKeepBackgroundColorsAndAmberRail(t *testing.T) {
 // TestDisabledRailPreservesViewerPrefixWidth locks the two-slot case: a frame
 // whose session is both tmux-visible and disabled reserves the viewer AND rail
 // slots together, so the rail never displaces the viewer symbol. The row body
-// shows both (▶ then −, 4 cells) and the header indents by the same 4 cells to
+// shows both (▶ then –, 4 cells) and the header indents by the same 4 cells to
 // stay aligned above it.
 func TestDisabledRailPreservesViewerPrefixWidth(t *testing.T) {
 	attached := 3
@@ -2030,8 +2030,8 @@ func TestDisabledRailPreservesViewerPrefixWidth(t *testing.T) {
 	RenderAll(&out, "1", testLocalHost(session), nil, "", nil, 0, 0, "dir")
 
 	row := findRow(t, out.String(), "both")
-	if !strings.HasPrefix(stripANSI(row), "▶ − ") {
-		t.Fatalf("disabled+visible row prefix = %q, want %q", stripANSI(row), "▶ − ")
+	if !strings.HasPrefix(stripANSI(row), "▶ – ") {
+		t.Fatalf("disabled+visible row prefix = %q, want %q", stripANSI(row), "▶ – ")
 	}
 	header := findRow(t, out.String(), "PID")
 	if !strings.HasPrefix(header, "    PID") || strings.HasPrefix(header, "     PID") {
@@ -2082,10 +2082,10 @@ func TestDisabledSessionReservesRailForAllRows(t *testing.T) {
 
 	enabledRow := findRow(t, out, "alive")
 	disabledRow := findRow(t, out, "asleep")
-	if !strings.HasPrefix(stripANSI(disabledRow), "− ") {
+	if !strings.HasPrefix(stripANSI(disabledRow), "– ") {
 		t.Fatalf("disabled row missing rail: %q", stripANSI(disabledRow))
 	}
-	if strings.Contains(enabledRow, "−") {
+	if strings.Contains(enabledRow, "–") {
 		t.Fatalf("enabled row should not draw the rail glyph: %q", enabledRow)
 	}
 	if visualLen(enabledRow) != visualLen(disabledRow) {

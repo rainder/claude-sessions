@@ -85,9 +85,9 @@ func disabledRail(session Session, selected bool) string {
 		return "  "
 	}
 	if selected {
-		return "\033[33m−\033[39m "
+		return "\033[33m–\033[39m "
 	}
-	return colorize("33", "−") + " "
+	return colorize("33", "–") + " "
 }
 
 func sessionRowPlain(session Session, selected bool) bool {
