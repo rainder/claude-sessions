@@ -163,6 +163,9 @@ func CollectLocal() ([]Session, error) {
 		if isScratchCWD(s.CWD) {
 			continue
 		}
+		if s.Headless() {
+			continue
+		}
 		if c, ok := cpu[s.PID]; ok {
 			s.CPU = c
 		} else {
