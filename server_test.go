@@ -1588,3 +1588,12 @@ func TestRegisterDeviceEnforcesCap(t *testing.T) {
 		t.Fatalf("status = %d re-registering an existing device at the cap, want %d", code, http.StatusNoContent)
 	}
 }
+
+// A zero-length hostname is permitted — a UTS namespace can set one — and it
+// reaches the pairing QR as a missing trailing field. shortHostname is used as
+// a display name, so it must never be empty.
+func TestShortHostnameIsNeverEmpty(t *testing.T) {
+	if got := shortHostname(); got == "" {
+		t.Fatalf("shortHostname() = %q, want a non-empty label", got)
+	}
+}

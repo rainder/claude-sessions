@@ -742,7 +742,13 @@ func shortHostname() string {
 		return "unknown"
 	}
 	if i := strings.Index(h, "."); i >= 0 {
-		return h[:i]
+		h = h[:i]
+	}
+	// A zero-length hostname is permitted (a UTS namespace can set one), and it
+	// reaches the pairing QR as a missing trailing field. Callers treat this as
+	// a display name, so give them something rather than nothing.
+	if h == "" {
+		return "unknown"
 	}
 	return h
 }
