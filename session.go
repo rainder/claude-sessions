@@ -60,6 +60,16 @@ func (s Session) StatusDisplay() string {
 	return s.Status
 }
 
+// Waiting reports whether the session is blocked on the user.
+//
+// WaitingFor is the reliable signal, not Status: Claude Code writes shapes like
+// {Status: "busy", WaitingFor: "permission prompt"}, which StatusDisplay and
+// sessionStatusRank both already treat as waiting. selection.go's
+// firstStatusTarget compares Status directly and therefore disagrees; that
+// divergence predates this accessor and is deliberately left alone. All new
+// code uses this method.
+func (s Session) Waiting() bool { return s.WaitingFor != "" }
+
 // ID is the stable identifier used for selection: <pid> for local rows,
 // <host>:<pid> for remote.
 func (s Session) ID() string {
@@ -188,6 +198,38 @@ func CollectLocal() ([]Session, error) {
 	// Sort by cwd (case-insensitive), newest-started first as tiebreaker. This
 	// is the server-side default; the client re-sorts per its own mode.
 	SortSessions(out, "dir")
+	return out, nil
+}
+
+// CollectLocalLite reads every *.json under ~/.claude/sessions and applies the
+// same liveness and visibility filters as CollectLocal, but skips CPU, tmux,
+// and transcript enrichment entirely.
+//
+// The notification ticker runs this every couple of seconds and needs only
+// identity and status. CollectLocal's per-session transcript scans (cost,
+// model, context tokens, running subagents) are far too expensive at that
+// cadence. Results are unsorted: callers key them by SessionID.
+func CollectLocalLite() ([]Session, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	matches, err := filepath.Glob(filepath.Join(home, ".claude", "sessions", "*.json"))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Session, 0, len(matches))
+	for _, p := range matches {
+		s, ok := readSessionFile(p)
+		if !ok {
+			continue
+		}
+		if !pidAlive(s.PID) || isScratchCWD(s.CWD) || s.Headless() {
+			continue
+		}
+		s.Home = home
+		out = append(out, s)
+	}
 	return out, nil
 }
 

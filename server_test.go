@@ -1326,3 +1326,89 @@ func TestRemoveWorktreeHandlerRemoves(t *testing.T) {
 		t.Fatalf("removed %q, want %q", got, root)
 	}
 }
+
+// TestSessionsResponseMatchesGolden pins the wire shape the iOS client decodes.
+//
+// Session is both the on-disk model and the HTTP DTO, so a field rename here is
+// a silent client break with no compile error on either side. The same fixture
+// is decoded by a test in the Swift package, so the two fail together. If this
+// test fails because the shape legitimately changed, update the fixture AND the
+// Swift test.
+func TestSessionsResponseMatchesGolden(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "sessions-golden.json"))
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	var resp struct {
+		Hostname  string    `json:"hostname"`
+		TS        int64     `json:"ts"`
+		HostUsage HostUsage `json:"hostUsage"`
+		Sessions  []Session `json:"sessions"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("golden does not decode against the current shape: %v", err)
+	}
+	if len(resp.Sessions) != 4 {
+		t.Fatalf("len(sessions) = %d, want the four documented shapes", len(resp.Sessions))
+	}
+
+	// Fully enriched.
+	full := resp.Sessions[0]
+	if full.Model != "claude-opus-5" || full.ContextTokens != 84213 {
+		t.Fatalf("enriched session lost model/context: %+v", full)
+	}
+	if full.CostUSD != 3.4712 || full.CostSubagentsUSD != 1.208 || full.AgentsRunning != 2 {
+		t.Fatalf("enriched session lost cost/agents: %+v", full)
+	}
+	if full.TmuxAttached == nil || *full.TmuxAttached != 1 {
+		t.Fatalf("tmuxAttached = %v, want a pointer to 1", full.TmuxAttached)
+	}
+	if !full.Waiting() {
+		t.Fatalf("session with waitingFor set must report Waiting()")
+	}
+
+	// Minimal: every omitempty field absent.
+	minimal := resp.Sessions[1]
+	if minimal.Model != "" || minimal.CostUSD != 0 || minimal.TmuxAttached != nil {
+		t.Fatalf("minimal session gained values from nowhere: %+v", minimal)
+	}
+	if minimal.Waiting() {
+		t.Fatalf("session with empty waitingFor must not report Waiting()")
+	}
+
+	// A newer server's unknown key must not break decoding.
+	future := resp.Sessions[3]
+	if future.Name != "from a newer server" {
+		t.Fatalf("unknown key broke decoding: %+v", future)
+	}
+
+	// Partial host usage: cpu present, load absent, rendered as dashes client-side.
+	if resp.HostUsage.CPUPercent == nil || *resp.HostUsage.CPUPercent != 23.4 {
+		t.Fatalf("cpuPercent = %v, want 23.4", resp.HostUsage.CPUPercent)
+	}
+	if resp.HostUsage.Load != nil {
+		t.Fatalf("loadAverage = %v, want absent", resp.HostUsage.Load)
+	}
+	if resp.HostUsage.MemoryPercent != nil {
+		t.Fatalf("memoryPercent = %v, want absent", resp.HostUsage.MemoryPercent)
+	}
+
+	// The always-present keys are the client's hard contract: no omitempty, so
+	// they appear even at zero value. Losing one silently changes the wire shape.
+	encoded, err := json.Marshal(minimal)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	var keys map[string]any
+	if err := json.Unmarshal(encoded, &keys); err != nil {
+		t.Fatalf("decode re-encoded: %v", err)
+	}
+	for _, k := range []string{
+		"pid", "sessionId", "cwd", "status", "waitingFor", "version",
+		"entrypoint", "name", "nameSource", "startedAt", "updatedAt", "cpu", "tmux",
+	} {
+		if _, ok := keys[k]; !ok {
+			t.Fatalf("key %q vanished from the wire shape", k)
+		}
+	}
+}

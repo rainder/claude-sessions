@@ -433,3 +433,134 @@ func TestSortSessionsKeepsDisabledRowsLastInEveryMode(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionWaiting(t *testing.T) {
+	tests := []struct {
+		name string
+		s    Session
+		want bool
+	}{
+		{"blank", Session{}, false},
+		{"idle", Session{Status: "idle"}, false},
+		// The status field is not reliable on its own: this shape appears in
+		// TestSortSessionsStatus and must count as waiting.
+		{"busy but waiting on a prompt", Session{Status: "busy", WaitingFor: "permission prompt"}, true},
+		{"waiting", Session{Status: "waiting", WaitingFor: "user input"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.s.Waiting(); got != tt.want {
+				t.Fatalf("Waiting() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// writeSessionFixture writes one session file under home.
+//
+// Named by SessionID, not PID: several fixtures deliberately share a live PID
+// so they survive the liveness filter, and naming by PID would make each one
+// overwrite the last.
+func writeSessionFixture(t *testing.T, home string, s Session) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	path := filepath.Join(dir, s.SessionID+".json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+}
+
+func TestCollectLocalLiteFiltersAndFields(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	live := os.Getpid()
+	writeSessionFixture(t, home, Session{
+		PID: live, SessionID: "live-1", CWD: "/Users/x/proj",
+		Status: "busy", WaitingFor: "permission prompt", Entrypoint: "cli",
+	})
+	// Dead pid: filtered.
+	writeSessionFixture(t, home, Session{
+		PID: 1 << 29, SessionID: "dead-1", CWD: "/Users/x/proj", Entrypoint: "cli",
+	})
+	// Scratch cwd: filtered.
+	writeSessionFixture(t, home, Session{
+		PID: live, SessionID: "scratch-1", CWD: "/tmp/whatever", Entrypoint: "cli",
+	})
+	// Headless: filtered.
+	writeSessionFixture(t, home, Session{
+		PID: live, SessionID: "headless-1", CWD: "/Users/x/proj", Entrypoint: "sdk-cli",
+	})
+
+	got, err := CollectLocalLite()
+	if err != nil {
+		t.Fatalf("CollectLocalLite: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].SessionID != "live-1" {
+		t.Fatalf("SessionID = %q, want %q", got[0].SessionID, "live-1")
+	}
+	if !got[0].Waiting() {
+		t.Fatalf("expected the live session to report Waiting()")
+	}
+	if got[0].WaitingFor != "permission prompt" {
+		t.Fatalf("WaitingFor = %q, want %q", got[0].WaitingFor, "permission prompt")
+	}
+}
+
+// TestCollectLocalLiteLeavesEnrichmentFieldsZero guards against someone later
+// "helpfully" calling the enrichment helpers from the lite path. It is a guard,
+// not a proof — the benchmark below is what actually measures the cost.
+func TestCollectLocalLiteLeavesEnrichmentFieldsZero(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	live := os.Getpid()
+	writeSessionFixture(t, home, Session{
+		PID: live, SessionID: "enriched-1", CWD: "/Users/x/proj", Entrypoint: "cli",
+	})
+
+	got, err := CollectLocalLite()
+	if err != nil {
+		t.Fatalf("CollectLocalLite: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(got))
+	}
+	if got[0].Model != "" || got[0].CostUSD != 0 || got[0].AgentsRunning != 0 || got[0].CPU != "" || got[0].Tmux != "" {
+		t.Fatalf("expected no enrichment, got %+v", got[0])
+	}
+}
+
+func BenchmarkCollectLocalLite(b *testing.B) {
+	home := b.TempDir()
+	b.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		b.Fatalf("mkdir: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		data, _ := json.Marshal(Session{
+			PID: os.Getpid(), SessionID: "bench-" + strconv.Itoa(i),
+			CWD: "/Users/x/proj", Entrypoint: "cli",
+		})
+		if err := os.WriteFile(filepath.Join(dir, "bench-"+strconv.Itoa(i)+".json"), data, 0o644); err != nil {
+			b.Fatalf("write: %v", err)
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := CollectLocalLite(); err != nil {
+			b.Fatalf("CollectLocalLite: %v", err)
+		}
+	}
+}
