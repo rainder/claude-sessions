@@ -9,6 +9,27 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Push notifications to a paired iPhone when a session becomes blocked on you.
+  The server polls a new cheap collection path (identity and status only, no
+  transcript scanning) and runs an explicit wait-generation state machine, so an
+  alert fires only after a session has been waiting for two consecutive polls —
+  a prompt answered at the keyboard within a couple of seconds never reaches the
+  phone. Each host signs its own ES256 provider tokens and talks to Apple
+  directly; there is no relay and no third-party service. Configure via
+  `~/.config/claude-sessions/apns.yaml`; without it the server behaves exactly as
+  before and logs one line saying notifications are off.
+- `claude-sessions pair` prints a terminal QR for the iOS client. It encodes the
+  host, port, and a five-minute single-use code — never the bearer token, which
+  the app fetches once by exchanging the code. The code is cleared when `pair`
+  exits, so a photographed QR stops working almost immediately.
+- `claude-sessions notify-test` sends a test push to every registered device and
+  prints Apple's reason string per failure, so a silently broken watchdog is
+  visible rather than indistinguishable from a quiet week.
+- New authed routes `POST /devices`, `DELETE /devices/{token}`, `POST /pair/arm`,
+  and `POST /pair/disarm`, plus `POST /pair/exchange` — the only unauthenticated
+  route, and inert unless `pair` is running with a live code.
+- README now documents launchd and systemd units for running the server
+  supervised.
 - Killing the last session running in a git worktree now offers to remove that
   worktree. Available from the TUI (local and remote rows), and from
   `claude-sessions kill` via a second prompt or `--remove-worktree`. Removal

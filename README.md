@@ -86,6 +86,8 @@ claude-sessions kill PID [-y] [--remove-worktree]
 claude-sessions migrate PID [-y]           # kill + resume in a new tmux session
 claude-sessions new --dir PATH [--name N] [--command PRESET] [--server S] [PROMPT...]
                                             # spawn a tmux+claude session, locally or on a server
+claude-sessions pair [--port N]            # print a pairing QR for the iOS app
+claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)
 claude-sessions preview PID                # tmux capture or transcript tail
 claude-sessions tmux-info PID              # tmux session name for a pid
@@ -210,6 +212,110 @@ above `1.00`. Unavailable metrics render as dashes without hiding any session
 rows — CPU and MEM each fall back to `--`, and load renders atomically as
 `LOAD -- -- --` (all three or none, never a partial triple).
 
+### iOS app
+
+`claude-sessions pair` prints a QR the iOS client scans to add this host.
+
+```sh
+claude-sessions -s --bind tailscale   # in one terminal
+claude-sessions pair                  # in another; leave it running while you scan
+```
+
+The QR encodes the host, port, and a **five-minute single-use code** — never the
+bearer token. The app exchanges the code for the token over the tailnet, once.
+The code exists only while `pair` is running: it is cleared when the command
+exits, including on Ctrl-C. A photographed QR is worthless a few minutes later,
+which is the entire point of not putting the token in it.
+
+`pair` needs `-s` already running on the same host, and needs a Tailscale IPv4 —
+a QR pointing at `127.0.0.1` is unscannable from a phone, so it refuses rather
+than printing one.
+
+### Push notifications
+
+The server can push an alert to a paired iPhone within a few seconds of any
+session becoming blocked on you (a permission prompt, or anything else that sets
+`waitingFor`). It talks to Apple directly — no relay, no third-party service.
+
+Create `~/.config/claude-sessions/apns.yaml`:
+
+```yaml
+key_file: ~/.config/claude-sessions/AuthKey_ABC123.p8
+key_id: ABC123DEFG
+team_id: XYZ9876543
+bundle_id: com.avisoma.claude-sessions
+environment: production   # default for devices that don't declare one
+```
+
+Without this file the server runs exactly as it always has and logs one line
+saying notifications are off. It is never a hard dependency.
+
+Notes:
+
+- Use a **topic-restricted** APNs key, scoped to the bundle ID, not a team-wide
+  one. The `.p8` has to be copied to every host, so limiting what it can do
+  matters more than where it sits. `chmod 0600` it.
+- Rotating the key means rolling the new one to every host *before* revoking the
+  old one.
+- `environment` is a default, not a global. Each device registers its own, so one
+  host can serve a production TestFlight build and a sandbox debug build at the
+  same time.
+- Run `claude-sessions notify-test` to confirm delivery end to end. It prints
+  Apple's own reason string per device, which is the difference between "not
+  working" and "not working *because* the key id is wrong".
+
+An alert fires when a session has been waiting for two consecutive polls, so a
+prompt you answer at the keyboard within a couple of seconds never reaches your
+phone. Sessions already waiting when the server starts are adopted silently — a
+restart is something you do at the keyboard, and an alert burst there is noise.
+
+### Running as a service
+
+The server is a foreground process. A watchdog that dies silently is
+indistinguishable from a quiet week, so supervise it.
+
+macOS — `~/Library/LaunchAgents/com.avisoma.claude-sessions.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.avisoma.claude-sessions</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/claude-sessions</string>
+    <string>-s</string>
+    <string>--bind</string>
+    <string>tailscale</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/claude-sessions.log</string>
+</dict>
+</plist>
+```
+
+`launchctl load ~/Library/LaunchAgents/com.avisoma.claude-sessions.plist`
+
+Linux — `~/.config/systemd/user/claude-sessions.service`:
+
+```ini
+[Unit]
+Description=claude-sessions server
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/claude-sessions -s --bind tailscale
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+`systemctl --user enable --now claude-sessions`
+
 ## Files
 
 - `~/.claude/sessions/<pid>.json` — session metadata (written by Claude Code)
@@ -218,6 +324,9 @@ rows — CPU and MEM each fall back to `--`, and load renders atomically as
 - `~/.config/claude-sessions/server-token` — bearer token (server side, 0600)
 - `~/.config/claude-sessions/servers.yaml` — client server list + `commands:` presets
 - `~/.config/claude-sessions/command-preset` — remembered command preset name
+- `~/.config/claude-sessions/apns.yaml` — APNs push credentials (server side, 0600)
+- `~/.config/claude-sessions/devices.json` — registered push devices (0600)
+- `~/.config/claude-sessions/host-id` — stable identifier for this host
 
 ## License
 
@@ -244,6 +353,11 @@ clipboard.go         remote-image-paste client (clipboard read + relay)
 migrate.go           shared migrate/spawn logic
 worktree.go          worktree detection + removal on last-session kill
 preview.go           tmux capture / JSONL transcript renderer
+notify.go            wait-generation state machine + push hub
+apns.go              ES256 provider tokens + APNs delivery
+apns_config.go       apns.yaml + stable host id
+devices.go           registered push devices
+pair.go              pairing code, QR, arm/disarm/exchange routes
 picker.go            cwd suggestions for `new` (live + history)
 new_picker.go        two-axis new-session modal (command preset x cwd)
 helpers.go           terminal mode helpers, prompts

@@ -98,6 +98,11 @@ type server struct {
 	// than panicking.
 	devices *DeviceStore
 
+	// pairing is the in-flight pairing offer, nil unless `pair` has armed one.
+	// Guarded because arm and exchange arrive on different connections.
+	pairingMu sync.Mutex
+	pairing   *pairingCode
+
 	sessionCache sessionCache
 
 	// paste is the remote-image-paste broker (see paste.go); pb() lazily
@@ -881,6 +886,9 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	mux.HandleFunc("POST /worktree/remove", s.removeWorktree)
 	mux.HandleFunc("POST /devices", s.registerDevice)
 	mux.HandleFunc("DELETE /devices/{token}", s.unregisterDevice)
+	mux.HandleFunc("POST /pair/arm", s.armPairing)
+	mux.HandleFunc("POST /pair/disarm", s.disarmPairing)
+	mux.HandleFunc("POST /pair/exchange", s.pairExchange)
 	mux.HandleFunc("GET /paste-wait", s.pasteWait)
 	mux.HandleFunc("POST /paste-request", s.pasteRequest)
 	mux.HandleFunc("POST /paste", s.pasteUpload)

@@ -52,6 +52,8 @@ func main() {
 		os.Exit(cmdClipRequest(args[1:]))
 	case "notify-test":
 		os.Exit(cmdNotifyTest(args[1:]))
+	case "pair":
+		os.Exit(cmdPair(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -78,6 +80,7 @@ subcommands:
   attach PID                      tmux attach (or switch-client) to a session
   preview PID                     print tmux capture or transcript tail
   tmux-info PID                   print tmux session name for a pid
+  pair [--port N]                 print a pairing QR for the iOS app
   notify-test                     send a test push to every registered device
   -h, --help                      this help
 
