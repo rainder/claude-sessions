@@ -9,6 +9,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Killing the last session running in a git worktree now offers to remove that
+  worktree. Available from the TUI (local and remote rows), and from
+  `claude-sessions kill` via a second prompt or `--remove-worktree`. Removal
+  runs plain `git worktree remove` from the main checkout — no `--force`, so a
+  dirty or untracked-file worktree is kept and git's refusal is shown. The
+  branch is never touched. Remote kills carry the decision in the kill response
+  and remove through the new authed `POST /worktree/remove`, which validates the
+  path and refuses a worktree that has since gained a live session.
 - Remote image paste: pressing Ctrl+V while attached to a remote session pastes
   the image from the local clipboard into the remote Claude prompt as a file
   path. A tmux binding on the server host relays the request through the server

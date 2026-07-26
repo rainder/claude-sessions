@@ -1164,3 +1164,165 @@ func TestSessionsRetriesAfterInvalidationDuringCollection(t *testing.T) {
 		t.Fatalf("collect calls = %d, want 3", collectCalls)
 	}
 }
+
+func TestKillHandlerReportsEmptiedWorktree(t *testing.T) {
+	repo := t.TempDir()
+	root := makeWorktree(t, repo, "DR-860")
+	target := Session{PID: 55, CWD: root}
+	s := &server{
+		token:     "secret",
+		collect:   func() ([]Session, error) { return []Session{target}, nil },
+		terminate: func(Session) error { return nil },
+	}
+	req := httptest.NewRequest("POST", "/sessions/55/kill", nil)
+	req.SetPathValue("pid", "55")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.kill(rec, req)
+
+	var r actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !r.OK {
+		t.Fatalf("response not OK: %s", r.Error)
+	}
+	if r.Worktree == nil {
+		t.Fatal("worktree missing from kill response")
+	}
+	if r.Worktree.Path != root || r.Worktree.Name != "DR-860" {
+		t.Fatalf("worktree = %+v, want path %q name DR-860", *r.Worktree, root)
+	}
+}
+
+func TestKillHandlerOmitsOccupiedWorktree(t *testing.T) {
+	repo := t.TempDir()
+	root := makeWorktree(t, repo, "DR-860")
+	sessions := []Session{{PID: 55, CWD: root}, {PID: 56, CWD: filepath.Join(root, "app")}}
+	s := &server{
+		token:     "secret",
+		collect:   func() ([]Session, error) { return sessions, nil },
+		terminate: func(Session) error { return nil },
+	}
+	req := httptest.NewRequest("POST", "/sessions/55/kill", nil)
+	req.SetPathValue("pid", "55")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.kill(rec, req)
+
+	var r actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if r.Worktree != nil {
+		t.Fatalf("worktree = %+v, want none while another session runs in it", *r.Worktree)
+	}
+}
+
+func TestRemoveWorktreeHandlerRequiresAuth(t *testing.T) {
+	removed := false
+	s := &server{token: "secret", removeTree: func(string) error { removed = true; return nil }}
+	req := httptest.NewRequest("POST", "/worktree/remove", strings.NewReader(`{"path":"/repo/.claude/worktrees/x"}`))
+	rec := httptest.NewRecorder()
+
+	s.removeWorktree(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if removed {
+		t.Fatal("removeTree called without auth")
+	}
+}
+
+func TestRemoveWorktreeHandlerRejectsBadPaths(t *testing.T) {
+	repo := t.TempDir()
+	root := makeWorktree(t, repo, "DR-860")
+	for _, path := range []string{
+		"",
+		"relative/.claude/worktrees/DR-860",
+		root + "/../../../../etc",
+		filepath.Join(root, "sub"),
+		repo,
+		filepath.Join(repo, ".claude", "worktrees", "ghost"),
+	} {
+		removed := false
+		s := &server{
+			token:      "secret",
+			collect:    func() ([]Session, error) { return nil, nil },
+			removeTree: func(string) error { removed = true; return nil },
+		}
+		body, _ := json.Marshal(map[string]string{"path": path})
+		req := httptest.NewRequest("POST", "/worktree/remove", strings.NewReader(string(body)))
+		req.Header.Set("Authorization", "Bearer secret")
+		rec := httptest.NewRecorder()
+
+		s.removeWorktree(rec, req)
+
+		var r actionResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+			t.Fatalf("%q: decode response: %v", path, err)
+		}
+		if r.OK || removed {
+			t.Fatalf("%q accepted, want rejection", path)
+		}
+	}
+}
+
+func TestRemoveWorktreeHandlerRefusesWhileInUse(t *testing.T) {
+	repo := t.TempDir()
+	root := makeWorktree(t, repo, "DR-860")
+	removed := false
+	s := &server{
+		token:      "secret",
+		collect:    func() ([]Session, error) { return []Session{{PID: 77, CWD: filepath.Join(root, "app")}}, nil },
+		removeTree: func(string) error { removed = true; return nil },
+	}
+	body, _ := json.Marshal(map[string]string{"path": root})
+	req := httptest.NewRequest("POST", "/worktree/remove", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.removeWorktree(rec, req)
+
+	var r actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if r.OK || removed {
+		t.Fatal("removed a worktree that still has a live session")
+	}
+	if !strings.Contains(r.Error, "77") {
+		t.Fatalf("error = %q, want the occupying PID", r.Error)
+	}
+}
+
+func TestRemoveWorktreeHandlerRemoves(t *testing.T) {
+	repo := t.TempDir()
+	root := makeWorktree(t, repo, "DR-860")
+	got := ""
+	s := &server{
+		token:      "secret",
+		collect:    func() ([]Session, error) { return nil, nil },
+		removeTree: func(path string) error { got = path; return nil },
+	}
+	body, _ := json.Marshal(map[string]string{"path": root})
+	req := httptest.NewRequest("POST", "/worktree/remove", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.removeWorktree(rec, req)
+
+	var r actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !r.OK {
+		t.Fatalf("response not OK: %s", r.Error)
+	}
+	if got != root {
+		t.Fatalf("removed %q, want %q", got, root)
+	}
+}

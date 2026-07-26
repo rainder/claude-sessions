@@ -148,6 +148,32 @@ file (`nameSource != "derived"`), else the transcript's summary line, else
 exists; then shed order is shrink PROMPT → drop #MSG → drop BRANCH → shrink
 DIR → shrink NAME. AGE/NAME/DIR always survive; header mirrors the layout.
 
+### Worktree cleanup on kill
+
+`worktree.go` decides whether a kill empties a `<repo>/.claude/worktrees/<name>`
+checkout and removes it on request. `worktreeCleanupTarget(target, all)` returns
+the root only when the path is a *registered* worktree (`.git` is a FILE, not a
+dir) and `worktreeSurvivors` is empty — survivors exclude the target, other
+hosts, and the target's **tmux siblings** (a tmux-backed kill runs `tmux
+kill-session`, so every pane in that session dies with it).
+
+Three rules hold everywhere. The check runs **before** the kill (afterwards the
+session is in no list). It runs against a **freshly collected** list, never the
+TUI's rows — `localWorktreeCleanupTarget` re-collects because `c.targets` is
+filtered by the active group and text query, and a filtered-out session in the
+same worktree would read as "no survivors"; `git worktree remove` doesn't care
+that a live process is sitting in the checkout. And removal is plain `git
+worktree remove` from the main checkout — never `--force`, so a dirty worktree
+survives and git's refusal is what the user sees. The branch is never deleted.
+
+Three entry points: `actKill` (local TUI, second `confirmOverlay` — note it
+needs raw mode back, since `prepareLineOutput` left cooked mode for the kill),
+`cmdKill` (`--remove-worktree`, or a prompt when interactive; a bare `-y` run
+keeps the worktree), and the server, which puts a `worktree` object in the kill
+response and removes via authed `POST /worktree/remove`. That endpoint takes a
+client-supplied path, so `validateWorktreePath` gates it (absolute, clean,
+worktree root, real worktree) and the handler re-checks the live session list.
+
 ### Usage polling
 
 `usage.go` polls Anthropic's OAuth usage endpoint (token from the macOS Keychain

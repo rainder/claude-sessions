@@ -37,6 +37,17 @@ type actionResult struct {
 	OK    bool   `json:"ok"`
 	Tmux  string `json:"tmux,omitempty"`  // tmux session name for migrate/new
 	Error string `json:"error,omitempty"` // human-readable failure reason
+	// Worktree is set by kill when the killed session was the last one running
+	// in a git worktree, so the client can offer to remove it. Omitted
+	// otherwise; older clients ignore it, and a new client against an old
+	// server simply never sees it.
+	Worktree *worktreeInfo `json:"worktree,omitempty"`
+}
+
+// worktreeInfo describes a worktree a kill has just left idle.
+type worktreeInfo struct {
+	Path string `json:"path"` // worktree checkout root
+	Name string `json:"name"` // last path element, for the prompt
 }
 
 type sessionFlight struct {
@@ -78,6 +89,9 @@ type server struct {
 	// where they fall back to CollectLocal / KillSession.
 	collect   func() ([]Session, error)
 	terminate func(Session) error
+	// removeTree removes a worktree checkout; nil falls back to RemoveWorktree,
+	// so tests exercise the handler without a real git repo.
+	removeTree func(string) error
 
 	sessionCache sessionCache
 
@@ -184,6 +198,13 @@ func (s *server) terminateSession(target Session) error {
 		return s.terminate(target)
 	}
 	return KillSession(target)
+}
+
+func (s *server) removeWorktreeAt(path string) error {
+	if s.removeTree != nil {
+		return s.removeTree(path)
+	}
+	return RemoveWorktree(path)
 }
 
 func writeJSON(w http.ResponseWriter, code int, data any) {
@@ -412,11 +433,58 @@ func (s *server) kill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, actionResult{Error: fmt.Sprintf("PID %d is not a live Claude session", pid)})
 		return
 	}
+	// Whether this kill empties a worktree is decided here, from the same
+	// server-collected list: the client never gets to assert it.
+	worktree := worktreeCleanupTarget(*target, sessions)
 	if err := s.terminateSession(*target); err != nil {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return
 	}
 	s.invalidateSessions()
+	result := actionResult{OK: true}
+	if worktree != "" {
+		result.Worktree = &worktreeInfo{Path: worktree, Name: filepath.Base(worktree)}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// removeWorktree handles POST /worktree/remove. The path arrives from a client,
+// so it is validated (absolute, clean, worktree-shaped, a real git worktree)
+// before anything touches disk, and re-checked against the live session list so
+// a session started since the kill blocks the removal.
+func (s *server) removeWorktree(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request body", http.StatusBadRequest)
+		return
+	}
+	if err := validateWorktreePath(req.Path); err != nil {
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
+	sessions, err := s.collectLocal()
+	if err != nil {
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
+	for _, sess := range sessions {
+		if worktreeRoot(sess.CWD) == req.Path {
+			writeJSON(w, http.StatusOK, actionResult{
+				Error: fmt.Sprintf("worktree still in use by PID %d", sess.PID),
+			})
+			return
+		}
+	}
+	if err := s.removeWorktreeAt(req.Path); err != nil {
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, actionResult{OK: true})
 }
 
@@ -703,6 +771,7 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)
 	mux.HandleFunc("POST /sessions/{pid}/migrate", s.migrate)
 	mux.HandleFunc("POST /sessions/new", s.newSession)
+	mux.HandleFunc("POST /worktree/remove", s.removeWorktree)
 	mux.HandleFunc("GET /paste-wait", s.pasteWait)
 	mux.HandleFunc("POST /paste-request", s.pasteRequest)
 	mux.HandleFunc("POST /paste", s.pasteUpload)

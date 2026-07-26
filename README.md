@@ -80,7 +80,9 @@ claude-sessions -s                         # run HTTP server (defaults to 127.0.
 claude-sessions -s --bind tailscale        # bind to this host's Tailscale IPv4
 claude-sessions -s --bind 0.0.0.0 --port 9000   # any address / port
 
-claude-sessions kill PID [-y]              # kill a session (tmux-aware)
+claude-sessions kill PID [-y] [--remove-worktree]
+                                            # kill a session (tmux-aware); offers to remove
+                                            # a worktree left with no live sessions
 claude-sessions migrate PID [-y]           # kill + resume in a new tmux session
 claude-sessions new --dir PATH [--name N] [--command PRESET] [--server S] [PROMPT...]
                                             # spawn a tmux+claude session, locally or on a server
@@ -240,6 +242,7 @@ commands.go          scriptable subcommands (used by server shell-out)
 paste.go             remote-image-paste server (broker + tmux binding)
 clipboard.go         remote-image-paste client (clipboard read + relay)
 migrate.go           shared migrate/spawn logic
+worktree.go          worktree detection + removal on last-session kill
 preview.go           tmux capture / JSONL transcript renderer
 picker.go            cwd suggestions for `new` (live + history)
 new_picker.go        two-axis new-session modal (command preset x cwd)

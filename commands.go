@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,9 +16,33 @@ import (
 // Scriptable subcommands. Used by the HTTP server (shell-out) and available
 // from the shell for ad-hoc automation. All non-interactive.
 
+// killFlags are the order-independent flags cmdKill accepts after the PID.
+type killFlags struct {
+	assumeYes      bool // -y: skip the kill confirmation
+	removeWorktree bool // --remove-worktree: also remove a worktree left empty
+}
+
+// parseKillFlags reads the flags following the PID. An unrecognized flag is an
+// error rather than a silent no-op, so a typo never reads as "kill anyway".
+func parseKillFlags(args []string) (killFlags, error) {
+	var f killFlags
+	for _, a := range args {
+		switch a {
+		case "-y":
+			f.assumeYes = true
+		case "--remove-worktree":
+			f.removeWorktree = true
+		default:
+			return f, fmt.Errorf("unknown flag: %s", a)
+		}
+	}
+	return f, nil
+}
+
 func cmdKill(args []string) int {
+	const usage = "usage: claude-sessions kill PID [-y] [--remove-worktree]"
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: claude-sessions kill PID [-y]")
+		fmt.Fprintln(os.Stderr, usage)
 		return 2
 	}
 	pid, err := strconv.Atoi(args[0])
@@ -25,7 +50,12 @@ func cmdKill(args []string) int {
 		fmt.Fprintf(os.Stderr, "kill: not a pid: %s\n", args[0])
 		return 2
 	}
-	assumeYes := len(args) > 1 && args[1] == "-y"
+	flags, err := parseKillFlags(args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kill: %v\n%s\n", err, usage)
+		return 2
+	}
+	assumeYes := flags.assumeYes
 	sess, ok := readSessionByPID(pid)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "PID %d is not a live Claude session\n", pid)
@@ -50,6 +80,12 @@ func cmdKill(args []string) int {
 			return 0
 		}
 	}
+	// Decide the worktree question before the kill, while the session is still
+	// in the list. Only worktree-resident sessions pay for the collect.
+	worktree, err := localWorktreeCleanupTarget(sess)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worktree check skipped: %v\n", err)
+	}
 	if err := KillSession(sess); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -59,7 +95,32 @@ func cmdKill(args []string) int {
 	} else {
 		fmt.Printf("killed PID %d\n", pid)
 	}
+	if worktree != "" {
+		cleanupWorktreeCLI(worktree, flags)
+	}
 	return 0
+}
+
+// cleanupWorktreeCLI handles the "that was the last session in this worktree"
+// case for the kill subcommand. --remove-worktree removes it outright;
+// otherwise an interactive run asks. A -y run without --remove-worktree keeps
+// the worktree: a non-interactive kill never removes what wasn't asked for.
+// Never fatal — the kill already succeeded, so this only reports.
+func cleanupWorktreeCLI(worktree string, flags killFlags) {
+	if !flags.removeWorktree {
+		if flags.assumeYes {
+			fmt.Printf("worktree %s is now idle (pass --remove-worktree to remove it)\n", worktree)
+			return
+		}
+		if !confirm(fmt.Sprintf("last session in worktree %q — remove %s? [y/N] ", filepath.Base(worktree), worktree)) {
+			return
+		}
+	}
+	if err := RemoveWorktree(worktree); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	fmt.Printf("removed worktree %s\n", worktree)
 }
 
 func cmdMigrate(args []string) int {

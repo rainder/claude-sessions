@@ -65,7 +65,9 @@ subcommands:
   -s, --server [--port N] [--bind ADDR]
                                   run HTTP server (default 127.0.0.1:8765;
                                   --bind tailscale auto-detects Tailscale IPv4)
-  kill PID [-y]                   kill a session (tmux-aware)
+  kill PID [-y] [--remove-worktree]
+                                  kill a session (tmux-aware); offers to remove
+                                  the git worktree it was the last session in
   migrate PID [-y]                kill + resume in a new tmux session
   new --dir PATH [--name NAME] [--command PRESET] [--server SERVER] [PROMPT...]
                                   spawn a new tmux+claude session, locally or

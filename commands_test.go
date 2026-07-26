@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseNewArgs(t *testing.T) {
 	tests := []struct {
@@ -58,5 +61,48 @@ func TestParseNewArgs(t *testing.T) {
 				t.Errorf("parseNewArgs(%v) = %+v, want %+v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseKillFlags(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		want    killFlags
+		wantErr bool
+	}{
+		{name: "no flags", args: nil},
+		{name: "yes", args: []string{"-y"}, want: killFlags{assumeYes: true}},
+		{name: "remove worktree", args: []string{"--remove-worktree"}, want: killFlags{removeWorktree: true}},
+		{
+			name: "both",
+			args: []string{"-y", "--remove-worktree"},
+			want: killFlags{assumeYes: true, removeWorktree: true},
+		},
+		{
+			name: "both reversed",
+			args: []string{"--remove-worktree", "-y"},
+			want: killFlags{assumeYes: true, removeWorktree: true},
+		},
+		{name: "unknown flag", args: []string{"--force"}, wantErr: true},
+		{name: "typo is not silently ignored", args: []string{"-Y"}, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseKillFlags(c.args)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("parseKillFlags(%v) error = %v, wantErr %v", c.args, err, c.wantErr)
+			}
+			if err == nil && got != c.want {
+				t.Fatalf("parseKillFlags(%v) = %+v, want %+v", c.args, got, c.want)
+			}
+		})
+	}
+}
+
+func TestWorktreeRemovalQuestionNamesWorktree(t *testing.T) {
+	got := worktreeRemovalQuestion("/repo/.claude/worktrees/DR-860")
+	if !strings.Contains(got, "DR-860") {
+		t.Fatalf("question = %q, want it to name the worktree", got)
 	}
 }

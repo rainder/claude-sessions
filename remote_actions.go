@@ -281,7 +281,42 @@ func actKillRemote(c *actCtx) {
 	if !r.OK {
 		fmt.Printf("failed: %s\n", r.Error)
 		pauseForKey(c.fd, c.oldState)
+		return
 	}
+	if r.Worktree == nil {
+		return
+	}
+	// The server decided this kill emptied a worktree; ask, then have it remove.
+	c.enterRaw() // confirmOverlay owns a fullscreen modal
+	if !confirmOverlay(worktreeRemovalQuestion(r.Worktree.Path), c.modalWakes) {
+		return
+	}
+	c.prepareLineOutput()
+	fmt.Print("\nremoving worktree... ")
+	if err := removeRemoteWorktree(host, r.Worktree.Path); err != nil {
+		fmt.Printf("failed: %v\n", err)
+		pauseForKey(c.fd, c.oldState)
+	}
+}
+
+// removeRemoteWorktree asks host's server to remove a worktree checkout.
+func removeRemoteWorktree(host, path string) error {
+	body, err := json.Marshal(map[string]string{"path": path})
+	if err != nil {
+		return err
+	}
+	resp, err := remoteRequest(host, "/worktree/remove", "POST", body)
+	if err != nil {
+		return err
+	}
+	var r actionResult
+	if err := json.Unmarshal(resp, &r); err != nil {
+		return err
+	}
+	if !r.OK {
+		return fmt.Errorf("%s", r.Error)
+	}
+	return nil
 }
 
 // actAttachRemote handles `a` on a remote-selected row. Gets the tmux session

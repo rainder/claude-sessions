@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/term"
@@ -183,12 +184,36 @@ func actKill(c *actCtx) {
 	if !confirmOverlay(question, c.modalWakes) {
 		return
 	}
+	// Resolve the worktree question before the kill — afterwards the session is
+	// in no list to reason about. A failed collect simply means no offer.
+	worktree, _ := localWorktreeCleanupTarget(*s)
 	c.prepareLineOutput()
-	defer c.enterRaw()
 	if err := KillSession(*s); err != nil {
 		fmt.Printf("\nkill failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
+		c.enterRaw()
+		return
 	}
+	// confirmOverlay owns a fullscreen modal and needs raw mode back.
+	c.enterRaw()
+	if worktree == "" {
+		return
+	}
+	if !confirmOverlay(worktreeRemovalQuestion(worktree), c.modalWakes) {
+		return
+	}
+	c.prepareLineOutput()
+	defer c.enterRaw()
+	if err := RemoveWorktree(worktree); err != nil {
+		fmt.Printf("\n%v\n", err)
+		pauseForKey(c.fd, c.oldState)
+	}
+}
+
+// worktreeRemovalQuestion is the second confirmation shown once a kill leaves a
+// worktree with no live sessions.
+func worktreeRemovalQuestion(root string) string {
+	return fmt.Sprintf("last session in worktree %q — remove it?", filepath.Base(root))
 }
 
 // actAttach attaches to the tmux session containing the selected pid. If the
