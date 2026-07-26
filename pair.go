@@ -62,6 +62,14 @@ func (p *pairingCode) Redeem(code string) bool {
 	return true
 }
 
+// matches reports whether this offer holds the given code, without consuming
+// it and without counting against the attempt cap.
+func (p *pairingCode) matches(code string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return subtle.ConstantTimeCompare([]byte(code), []byte(p.code)) == 1
+}
+
 // pairPayload is what the QR encodes. Deliberately not a URL and no scheme is
 // registered: it is parsed only by the in-app scanner, so there is nothing for
 // another app on the device to intercept.
@@ -160,8 +168,17 @@ func (s *server) disarmPairing(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// Only clear an offer this caller could have armed. Two `pair` commands
+	// overlapping would otherwise have the first one's exit disarm the second
+	// one's live code.
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&body)
 	s.pairingMu.Lock()
-	s.pairing = nil
+	if body.Code == "" || (s.pairing != nil && s.pairing.matches(body.Code)) {
+		s.pairing = nil
+	}
 	s.pairingMu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -230,19 +247,37 @@ func cmdPair(args []string) int {
 		fmt.Fprintln(os.Stderr, "start the server with --bind tailscale, then run pair again")
 		return 1
 	}
+	tok, err := loadOrCreateToken()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "claude-sessions:", err)
+		return 1
+	}
+	// The server binds exactly one address, so a --bind tailscale server is not
+	// listening on loopback at all. Ask the address we are about to advertise,
+	// and only fall back to loopback to produce a better diagnostic.
+	base := serverBaseURL(host, port, tok)
+	if base == "" {
+		if serverBaseURL("127.0.0.1", port, tok) != "" {
+			fmt.Fprintf(os.Stderr, "claude-sessions: the server is bound to loopback, so the phone cannot reach it\n")
+			fmt.Fprintf(os.Stderr, "restart it with: claude-sessions -s --bind tailscale\n")
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "claude-sessions: no server answering on %s:%d\n", host, port)
+		fmt.Fprintln(os.Stderr, "is `claude-sessions -s` running on this host?")
+		return 1
+	}
 	code, err := sixDigitCode()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "claude-sessions:", err)
 		return 1
 	}
-	if err := armLocalPairing(port, code); err != nil {
+	if err := armPairingAt(base, tok, code); err != nil {
 		fmt.Fprintf(os.Stderr, "claude-sessions: could not arm pairing (%v)\n", err)
-		fmt.Fprintln(os.Stderr, "is `claude-sessions -s` running on this host?")
 		return 1
 	}
 	// The code must not outlive this command: the guarantee is that it exists
 	// only while `pair` is running. Disarm on every exit path, Ctrl-C included.
-	defer func() { _ = disarmLocalPairing(port) }()
+	defer func() { _ = disarmPairingAt(base, tok, code) }()
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 
@@ -264,24 +299,38 @@ func cmdPair(args []string) int {
 	return 0
 }
 
-// armLocalPairing posts the code to this host's own server over loopback. The
-// token comes off local disk, which is the same trust level as running the
-// binary at all.
-func armLocalPairing(port int, code string) error {
-	tok, err := loadOrCreateToken()
+// serverBaseURL returns the base URL if this host's server answers there, or ""
+// if it does not. /presets is a cheap authed GET with no side effects.
+func serverBaseURL(host string, port int, token string) string {
+	base := fmt.Sprintf("http://%s:%d", host, port)
+	req, err := http.NewRequest(http.MethodGet, base+"/presets", nil)
 	if err != nil {
-		return err
+		return ""
 	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	return base
+}
+
+// armPairingAt posts the code to the running server. The token comes off local
+// disk, which is the same trust level as running the binary at all.
+func armPairingAt(base, token, code string) error {
 	body, err := json.Marshal(map[string]string{"code": code})
 	if err != nil {
 		return err
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/pair/arm", port)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, base+"/pair/arm", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {
@@ -294,18 +343,18 @@ func armLocalPairing(port int, code string) error {
 	return nil
 }
 
-// disarmLocalPairing clears any in-flight pairing offer on the running server.
-func disarmLocalPairing(port int) error {
-	tok, err := loadOrCreateToken()
+// disarmPairingAt clears any in-flight pairing offer on the running server.
+func disarmPairingAt(base, token, code string) error {
+	body, err := json.Marshal(map[string]string{"code": code})
 	if err != nil {
 		return err
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/pair/disarm", port)
-	req, err := http.NewRequest(http.MethodPost, url, nil)
+	req, err := http.NewRequest(http.MethodPost, base+"/pair/disarm", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {
 		return err

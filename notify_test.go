@@ -499,3 +499,36 @@ func TestNotifyHubDoesNotPushClears(t *testing.T) {
 		t.Fatalf("sent %d pushes, want only the alert: %+v", len(got), got)
 	}
 }
+
+// Session names and prompts are arbitrary text. An oversized payload is
+// rejected by APNs outright, which is indistinguishable from a notification
+// that never arrived.
+func TestBuildAlertPayloadStaysWithinAPNsLimit(t *testing.T) {
+	huge := strings.Repeat("A", 5000)
+	raw := buildAlertPayload(huge, "9f2c", notifyEvent{
+		SessionID: huge, CWD: huge, Name: huge, WaitingFor: huge, Generation: 1,
+	})
+	if len(raw) > apnsPayloadMax {
+		t.Fatalf("payload is %d bytes, want <= %d", len(raw), apnsPayloadMax)
+	}
+	var probe map[string]any
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatalf("degraded payload is not valid json: %v", err)
+	}
+	if _, ok := probe["aps"]; !ok {
+		t.Fatalf("payload lost its aps dictionary: %s", raw)
+	}
+}
+
+func TestTruncateField(t *testing.T) {
+	if got := truncateField("short", 200); got != "short" {
+		t.Fatalf("truncateField shortened a short value: %q", got)
+	}
+	got := truncateField(strings.Repeat("x", 500), 10)
+	if len([]rune(got)) != 10 {
+		t.Fatalf("truncateField returned %d runes, want 10", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("truncateField = %q, want a visible ellipsis", got)
+	}
+}

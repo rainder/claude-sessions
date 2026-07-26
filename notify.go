@@ -215,6 +215,30 @@ func (t *waitTracker) event(kind notifyEventKind, s Session, e *waitEntry) notif
 // roughly four seconds from prompt to push.
 const notifyTickInterval = 2 * time.Second
 
+// perDeviceSendTimeout bounds one push. Each device gets its own, so one slow
+// or unreachable device cannot consume the whole tick's budget.
+const perDeviceSendTimeout = 10 * time.Second
+
+// apnsPayloadMax is Apple's limit for a standard remote notification. A larger
+// body is rejected with PayloadTooLarge, which would look exactly like a
+// notification that never arrived.
+const apnsPayloadMax = 4096
+
+// alertFieldMax bounds the free-text fields that go into a payload. Session
+// names and waitingFor strings are arbitrary, and two of them plus the JSON
+// scaffolding must stay well inside apnsPayloadMax.
+const alertFieldMax = 200
+
+// truncateField shortens s to n characters, ending on an ellipsis so the cut is
+// visible rather than looking like the real value.
+func truncateField(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
 // notifyHubOptions is everything the hub needs. Collect and Sender are seams so
 // tests drive it without touching disk or the network.
 type notifyHubOptions struct {
@@ -231,11 +255,14 @@ type notifyHubOptions struct {
 // background-poller shape (see usage_hub.go) minus the wake pipe: nothing needs
 // to kick it early.
 type notifyHub struct {
-	opts     notifyHubOptions
-	tracker  *waitTracker
-	stop     chan struct{}
-	stopOnce sync.Once
-	done     chan struct{}
+	opts    notifyHubOptions
+	tracker *waitTracker
+	// collectFailing tracks whether the previous tick's collection failed, so a
+	// persistent failure logs once rather than every interval.
+	collectFailing bool
+	stop           chan struct{}
+	stopOnce       sync.Once
+	done           chan struct{}
 }
 
 func newNotifyHub(opts notifyHubOptions) *notifyHub {
@@ -291,7 +318,18 @@ func (h *notifyHub) Shutdown() {
 func (h *notifyHub) tickOnce(ctx context.Context) {
 	sessions, err := h.opts.Collect()
 	if err != nil {
+		// Log the first failure of a streak only. A broken home directory would
+		// otherwise disable every notification silently, but logging every two
+		// seconds would bury the machine in identical lines.
+		if !h.collectFailing {
+			h.collectFailing = true
+			fmt.Fprintf(os.Stderr, "claude-sessions: cannot read sessions, notifications paused: %v\n", err)
+		}
 		return
+	}
+	if h.collectFailing {
+		h.collectFailing = false
+		fmt.Fprintln(os.Stderr, "claude-sessions: sessions readable again, notifications resumed")
 	}
 	for _, e := range h.tracker.Tick(sessions) {
 		if e.Kind != notifyAlert {
@@ -307,7 +345,10 @@ func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
 	payload := buildAlertPayload(h.opts.HostName, h.opts.HostID, e)
 	collapse := h.opts.HostID + ":" + e.SessionID
 	for _, d := range h.opts.Devices.List() {
-		err := h.opts.Sender.Send(ctx, pushRequest{
+		// One deadline per device. A shared per-tick context lets a single slow
+		// device burn the budget and fail every device behind it.
+		sendCtx, cancel := context.WithTimeout(ctx, perDeviceSendTimeout)
+		err := h.opts.Sender.Send(sendCtx, pushRequest{
 			DeviceToken: d.Token,
 			Topic:       h.opts.BundleID,
 			CollapseID:  collapse,
@@ -316,9 +357,14 @@ func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
 			Environment: d.Environment,
 			Payload:     payload,
 		})
+		cancel()
 		switch {
 		case err == nil:
 		case errors.Is(err, errDeviceGone):
+			// Worth a line: a wrong production/sandbox environment reads as a
+			// dead token, and a silently emptied registry looks identical to a
+			// quiet week.
+			fmt.Fprintf(os.Stderr, "claude-sessions: dropping device %s: %v\n", shortToken(d.Token), err)
 			h.opts.Devices.Remove(d.Token)
 		default:
 			// Transient: keep the device. A network blip is not a reason to stop
@@ -347,6 +393,8 @@ func buildAlertPayload(hostName, hostID string, e notifyEvent) []byte {
 	if body == "" {
 		body = "waiting"
 	}
+	label = truncateField(label, alertFieldMax)
+	body = truncateField(body, alertFieldMax)
 	payload := map[string]any{
 		"aps": map[string]any{
 			"alert": map[string]any{
@@ -367,6 +415,13 @@ func buildAlertPayload(hostName, hostID string, e notifyEvent) []byte {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return []byte(`{"aps":{"alert":"a session needs you"}}`)
+	}
+	if len(data) > apnsPayloadMax {
+		// Belt and braces: the field caps above should make this unreachable,
+		// but an oversized payload is rejected outright and is indistinguishable
+		// from a lost notification, so degrade to something deliverable.
+		return []byte(`{"aps":{"alert":{"title":"A session needs you","body":"Open to see which"},` +
+			`"sound":"default","category":"SESSION_WAITING","interruption-level":"time-sensitive"}}`)
 	}
 	return data
 }

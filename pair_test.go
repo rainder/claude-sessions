@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -251,5 +253,65 @@ func TestRenderQRProducesOutput(t *testing.T) {
 		if got := len([]rune(row)); got != width {
 			t.Fatalf("row %d is %d cells wide, want %d", i, got, width)
 		}
+	}
+}
+
+// Two overlapping `pair` commands must not disarm each other: the first one's
+// exit would otherwise kill the second one's live code.
+func TestDisarmPairingOnlyClearsAMatchingCode(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	s := &server{
+		token:   "secret",
+		pairing: newPairingCode("222222", now.Add(pairingTTL), func() time.Time { return now }),
+	}
+
+	stale := httptest.NewRequest(http.MethodPost, "/pair/disarm", strings.NewReader(`{"code":"111111"}`))
+	stale.Header.Set("Authorization", "Bearer secret")
+	staleRec := httptest.NewRecorder()
+	s.disarmPairing(staleRec, stale)
+
+	if s.activePairing() == nil {
+		t.Fatalf("a stale disarm cleared a different command's live code")
+	}
+
+	own := httptest.NewRequest(http.MethodPost, "/pair/disarm", strings.NewReader(`{"code":"222222"}`))
+	own.Header.Set("Authorization", "Bearer secret")
+	ownRec := httptest.NewRecorder()
+	s.disarmPairing(ownRec, own)
+
+	if s.activePairing() != nil {
+		t.Fatalf("a matching disarm left the code armed")
+	}
+}
+
+// serverBaseURL must reject a host that is not answering, which is how cmdPair
+// tells a tailscale-bound server from a loopback-bound one.
+func TestServerBaseURLProbesForALiveServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("port: %v", err)
+	}
+
+	if got := serverBaseURL(host, p, "secret"); got == "" {
+		t.Fatalf("serverBaseURL = %q, want the live server", got)
+	}
+	if got := serverBaseURL(host, p, "wrong"); got != "" {
+		t.Fatalf("serverBaseURL = %q for a bad token, want empty", got)
+	}
+	if got := serverBaseURL(host, p+1, "secret"); got != "" {
+		t.Fatalf("serverBaseURL = %q for a dead port, want empty", got)
 	}
 }
