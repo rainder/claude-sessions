@@ -834,13 +834,38 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
 
+	// The registry is shared: the /devices handlers write it and the push hub
+	// reads it, so they must be the same store, not two views of one file.
+	devices := LoadDeviceStore()
+
 	s := &server{
 		token:              tok,
 		host:               host,
 		hostSnapshot:       hostUsageHub.Snapshot,
 		usageSnapshot:      usageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
-		devices:            LoadDeviceStore(),
+		devices:            devices,
+	}
+
+	// Push notifications are optional. Every failure here logs one line and
+	// leaves the rest of the server untouched — a host without an APNs key runs
+	// exactly as it always has.
+	if cfg, err := LoadAPNsConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "push notifications disabled (%v)\n", err)
+	} else if client, err := newAPNsClient(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "push notifications disabled (%v)\n", err)
+	} else {
+		notifier := newNotifyHub(notifyHubOptions{
+			HostName: host,
+			HostID:   LoadHostID(),
+			BundleID: cfg.BundleID,
+			Devices:  devices,
+			Sender:   client,
+		})
+		notifier.Start()
+		defer notifier.Shutdown()
+		fmt.Fprintf(os.Stderr, "push notifications enabled (%s, %d device(s))\n",
+			cfg.Environment, len(devices.List()))
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)

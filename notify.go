@@ -1,6 +1,16 @@
 package main
 
-import "sort"
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+)
 
 // notifyEventKind distinguishes "the user is needed" from "no longer needed".
 type notifyEventKind int
@@ -198,4 +208,165 @@ func (t *waitTracker) event(kind notifyEventKind, s Session, e *waitEntry) notif
 		WaitingFor: s.WaitingFor,
 		Generation: e.generation,
 	}
+}
+
+// notifyTickInterval is how often the hub samples sessions. Two ticks are
+// required before an alert fires, so this also sets the notification floor:
+// roughly four seconds from prompt to push.
+const notifyTickInterval = 2 * time.Second
+
+// notifyHubOptions is everything the hub needs. Collect and Sender are seams so
+// tests drive it without touching disk or the network.
+type notifyHubOptions struct {
+	HostName string
+	HostID   string
+	BundleID string
+	Devices  *DeviceStore
+	Sender   pushSender
+	Collect  func() ([]Session, error)
+	Interval time.Duration
+}
+
+// notifyHub polls sessions and pushes alerts. It follows the repo's existing
+// background-poller shape (see usage_hub.go) minus the wake pipe: nothing needs
+// to kick it early.
+type notifyHub struct {
+	opts     notifyHubOptions
+	tracker  *waitTracker
+	stop     chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
+}
+
+func newNotifyHub(opts notifyHubOptions) *notifyHub {
+	if opts.Interval == 0 {
+		opts.Interval = notifyTickInterval
+	}
+	if opts.Collect == nil {
+		opts.Collect = CollectLocalLite
+	}
+	return &notifyHub{
+		opts:    opts,
+		tracker: newWaitTracker(),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+// Start runs the poll loop until Shutdown. Tests call tickOnce directly instead.
+func (h *notifyHub) Start() {
+	go h.run()
+}
+
+func (h *notifyHub) run() {
+	defer close(h.done)
+	// Take the baseline immediately rather than waiting out the first tick.
+	// Otherwise a session that starts waiting inside the startup window is
+	// absorbed by the silent-baseline rule and never alerts at all.
+	h.tickOnce(context.Background())
+	t := time.NewTicker(h.opts.Interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-h.stop:
+			return
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(context.Background(), h.opts.Interval*4)
+			h.tickOnce(ctx)
+			cancel()
+		}
+	}
+}
+
+// Shutdown stops the poll loop. Safe to call more than once — cmdServer defers
+// it and tests call it explicitly, and a select-then-close would let two callers
+// both reach the close and panic.
+func (h *notifyHub) Shutdown() {
+	h.stopOnce.Do(func() { close(h.stop) })
+}
+
+// tickOnce samples sessions, advances the state machine, and pushes whatever
+// came out. A collection failure is skipped rather than treated as "every
+// session vanished" — that would clear every live alert.
+func (h *notifyHub) tickOnce(ctx context.Context) {
+	sessions, err := h.opts.Collect()
+	if err != nil {
+		return
+	}
+	for _, e := range h.tracker.Tick(sessions) {
+		if e.Kind != notifyAlert {
+			// Clear events end a Live Activity, which needs the per-activity
+			// token model Apple requires. Nothing to send until that lands.
+			continue
+		}
+		h.dispatch(ctx, e)
+	}
+}
+
+func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
+	payload := buildAlertPayload(h.opts.HostName, h.opts.HostID, e)
+	collapse := h.opts.HostID + ":" + e.SessionID
+	for _, d := range h.opts.Devices.List() {
+		err := h.opts.Sender.Send(ctx, pushRequest{
+			DeviceToken: d.Token,
+			Topic:       h.opts.BundleID,
+			CollapseID:  collapse,
+			PushType:    "alert",
+			Priority:    "10",
+			Environment: d.Environment,
+			Payload:     payload,
+		})
+		switch {
+		case err == nil:
+		case errors.Is(err, errDeviceGone):
+			h.opts.Devices.Remove(d.Token)
+		default:
+			// Transient: keep the device. A network blip is not a reason to stop
+			// notifying a phone forever.
+			fmt.Fprintf(os.Stderr, "claude-sessions: push to %s failed: %v\n", shortToken(d.Token), err)
+		}
+	}
+}
+
+// shortToken trims a device token for log lines — they are 64 hex characters
+// and full ones make the log unreadable.
+func shortToken(token string) string {
+	if len(token) <= 8 {
+		return token
+	}
+	return token[:8] + "…"
+}
+
+// buildAlertPayload renders the APNs body for one waiting session.
+func buildAlertPayload(hostName, hostID string, e notifyEvent) []byte {
+	label := e.Name
+	if label == "" || label == "-" {
+		label = filepath.Base(e.CWD)
+	}
+	body := e.WaitingFor
+	if body == "" {
+		body = "waiting"
+	}
+	payload := map[string]any{
+		"aps": map[string]any{
+			"alert": map[string]any{
+				"title": label + " needs you",
+				"body":  "waiting: " + body,
+			},
+			"sound":              "default",
+			"category":           "SESSION_WAITING",
+			"interruption-level": "time-sensitive",
+		},
+		"host":        hostName,
+		"host_id":     hostID,
+		"pid":         e.PID,
+		"session_id":  e.SessionID,
+		"event_id":    fmt.Sprintf("%s:%s:%d", hostID, e.SessionID, e.Generation),
+		"waiting_for": e.WaitingFor,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return []byte(`{"aps":{"alert":"a session needs you"}}`)
+	}
+	return data
 }

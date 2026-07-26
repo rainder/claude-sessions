@@ -50,6 +50,8 @@ func main() {
 		os.Exit(cmdAttach(args[1:]))
 	case "clip-request":
 		os.Exit(cmdClipRequest(args[1:]))
+	case "notify-test":
+		os.Exit(cmdNotifyTest(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -76,6 +78,7 @@ subcommands:
   attach PID                      tmux attach (or switch-client) to a session
   preview PID                     print tmux capture or transcript tail
   tmux-info PID                   print tmux session name for a pid
+  notify-test                     send a test push to every registered device
   -h, --help                      this help
 
 live-view keys:

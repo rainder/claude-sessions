@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
 
 func waitingSession(id string, waitingFor string) Session {
 	return Session{PID: 100, SessionID: id, CWD: "/Users/x/proj", Name: "proj", WaitingFor: waitingFor}
@@ -260,5 +268,234 @@ func TestWaitTrackerPIDChangeRestartsTheWait(t *testing.T) {
 	}
 	if got[0].PID != 999 {
 		t.Fatalf("PID = %d, want 999", got[0].PID)
+	}
+}
+
+type fakeSender struct {
+	mu   sync.Mutex
+	sent []pushRequest
+	err  error
+}
+
+func (f *fakeSender) Send(ctx context.Context, req pushRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, req)
+	return f.err
+}
+
+func (f *fakeSender) requests() []pushRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]pushRequest(nil), f.sent...)
+}
+
+// snapshotCollector replays a fixed sequence of snapshots, repeating the last.
+func snapshotCollector(snapshots ...[]Session) func() ([]Session, error) {
+	i := 0
+	return func() ([]Session, error) {
+		s := snapshots[min(i, len(snapshots)-1)]
+		i++
+		return s, nil
+	}
+}
+
+func TestBuildAlertPayloadShape(t *testing.T) {
+	raw := buildAlertPayload("myserver", "9f2c", notifyEvent{
+		Kind: notifyAlert, SessionID: "abc-123", PID: 41234,
+		CWD: "/Users/x/trecs-brain", Name: "trecs-brain",
+		WaitingFor: "permission prompt", Generation: 3,
+	})
+	var got struct {
+		APS struct {
+			Alert struct {
+				Title string `json:"title"`
+				Body  string `json:"body"`
+			} `json:"alert"`
+			Category        string `json:"category"`
+			InterruptionLvl string `json:"interruption-level"`
+		} `json:"aps"`
+		Host       string `json:"host"`
+		HostID     string `json:"host_id"`
+		PID        int    `json:"pid"`
+		SessionID  string `json:"session_id"`
+		EventID    string `json:"event_id"`
+		WaitingFor string `json:"waiting_for"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v — %s", err, raw)
+	}
+	if got.APS.Category != "SESSION_WAITING" {
+		t.Fatalf("category = %q", got.APS.Category)
+	}
+	if got.APS.InterruptionLvl != "time-sensitive" {
+		t.Fatalf("interruption-level = %q", got.APS.InterruptionLvl)
+	}
+	if !strings.Contains(got.APS.Alert.Title, "trecs-brain") {
+		t.Fatalf("title = %q, want it to name the session", got.APS.Alert.Title)
+	}
+	if !strings.Contains(got.APS.Alert.Body, "permission prompt") {
+		t.Fatalf("body = %q, want it to name the prompt", got.APS.Alert.Body)
+	}
+	if got.EventID != "9f2c:abc-123:3" {
+		t.Fatalf("event_id = %q, want %q", got.EventID, "9f2c:abc-123:3")
+	}
+	if got.HostID != "9f2c" || got.Host != "myserver" || got.PID != 41234 {
+		t.Fatalf("identity fields = %+v", got)
+	}
+}
+
+// A session with no user-set name falls back to its directory, so the
+// notification says something recognisable rather than "-".
+func TestBuildAlertPayloadFallsBackToDirectoryName(t *testing.T) {
+	raw := buildAlertPayload("h", "i", notifyEvent{
+		SessionID: "s", CWD: "/Users/x/some-repo", Name: "-", WaitingFor: "user input",
+	})
+	if !strings.Contains(string(raw), "some-repo") {
+		t.Fatalf("payload = %s, want the directory name", raw)
+	}
+}
+
+func TestNotifyHubPushesAlertsToEveryDevice(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev-a", Environment: "production"})
+	devices.Upsert(Device{Token: "dev-b", Environment: "sandbox"})
+	sender := &fakeSender{}
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "myserver",
+		HostID:   "9f2c",
+		BundleID: "com.avisoma.claude-sessions",
+		Devices:  devices,
+		Sender:   sender,
+		Collect:  snapshotCollector(nil, waiting, waiting),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 3; n++ {
+		h.tickOnce(context.Background())
+	}
+
+	got := sender.requests()
+	if len(got) != 2 {
+		t.Fatalf("sent %d pushes, want 2 (one per device): %+v", len(got), got)
+	}
+	if got[0].CollapseID != "9f2c:abc-123" {
+		t.Fatalf("collapse id = %q, want %q", got[0].CollapseID, "9f2c:abc-123")
+	}
+	if got[0].Topic != "com.avisoma.claude-sessions" {
+		t.Fatalf("topic = %q", got[0].Topic)
+	}
+	if got[0].PushType != "alert" || got[0].Priority != "10" {
+		t.Fatalf("push type/priority = %q/%q", got[0].PushType, got[0].Priority)
+	}
+	envs := map[string]bool{got[0].Environment: true, got[1].Environment: true}
+	if !envs["production"] || !envs["sandbox"] {
+		t.Fatalf("environments = %v, want each device's own", envs)
+	}
+}
+
+func TestNotifyHubPrunesGoneDevices(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dead"})
+	sender := &fakeSender{err: errDeviceGone}
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "myserver", HostID: "9f2c", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: snapshotCollector(nil, waiting, waiting),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 3; n++ {
+		h.tickOnce(context.Background())
+	}
+
+	if got := devices.List(); len(got) != 0 {
+		t.Fatalf("devices = %+v, want the gone token pruned", got)
+	}
+}
+
+// A send failure that is not errDeviceGone must keep the device: a transient
+// network problem is not a reason to stop notifying a phone forever.
+func TestNotifyHubKeepsDeviceOnTransientFailure(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{err: errors.New("connection reset")}
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "i", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: snapshotCollector(nil, waiting, waiting),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 3; n++ {
+		h.tickOnce(context.Background())
+	}
+
+	if got := devices.List(); len(got) != 1 {
+		t.Fatalf("devices = %+v, want the device kept", got)
+	}
+}
+
+// A collection failure must be skipped, not treated as "every session
+// vanished" — that would clear every live alert.
+func TestNotifyHubSurvivesCollectionErrors(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "i", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: func() ([]Session, error) { return nil, errors.New("disk on fire") },
+	})
+	defer h.Shutdown()
+
+	h.tickOnce(context.Background())
+	h.tickOnce(context.Background())
+
+	if got := sender.requests(); len(got) != 0 {
+		t.Fatalf("sent %+v despite collection failing", got)
+	}
+}
+
+// Shutdown is deferred by cmdServer and called explicitly by tests; a
+// select-then-close would panic when both happen.
+func TestNotifyHubShutdownIsIdempotent(t *testing.T) {
+	h := newNotifyHub(notifyHubOptions{
+		Devices: loadDeviceStore("", fixedClock(time.Now())),
+		Sender:  &fakeSender{},
+		Collect: func() ([]Session, error) { return nil, nil },
+	})
+	h.Shutdown()
+	h.Shutdown()
+}
+
+// Clear events have no consumer until Live Activities land. The hub must not
+// try to push them as alerts in the meantime.
+func TestNotifyHubDoesNotPushClears(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{}
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	idle := []Session{idleSession("abc-123")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "i", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: snapshotCollector(nil, waiting, waiting, idle),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 4; n++ {
+		h.tickOnce(context.Background())
+	}
+
+	if got := sender.requests(); len(got) != 1 {
+		t.Fatalf("sent %d pushes, want only the alert: %+v", len(got), got)
 	}
 }
