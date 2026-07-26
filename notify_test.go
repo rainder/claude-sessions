@@ -213,3 +213,52 @@ func TestWaitTrackerClearOnAbsenceCarriesIdentity(t *testing.T) {
 		t.Fatalf("clear lost identity: %+v", got[0])
 	}
 }
+
+// An evicted entry must not restart generation numbering: a stale notification
+// for the first wait would otherwise pass the freshness check on the second.
+func TestWaitTrackerGenerationNeverRepeats(t *testing.T) {
+	tr := newWaitTracker()
+	tr.Tick(nil)
+	tr.Tick([]Session{waitingSession("a", "permission prompt")})
+	first := tr.Tick([]Session{waitingSession("a", "permission prompt")})
+	if len(first) != 1 {
+		t.Fatalf("len(first) = %d, want 1", len(first))
+	}
+
+	// Two absences evict the entry entirely.
+	tr.Tick(nil)
+	tr.Tick(nil)
+
+	tr.Tick([]Session{waitingSession("a", "permission prompt")})
+	second := tr.Tick([]Session{waitingSession("a", "permission prompt")})
+	if len(second) != 1 {
+		t.Fatalf("len(second) = %d, want 1", len(second))
+	}
+	if second[0].Generation == first[0].Generation {
+		t.Fatalf("generation %d reused after eviction", second[0].Generation)
+	}
+}
+
+// A resumed or migrated session keeps its SessionID but gets a new PID. That is
+// a new wait: it must re-debounce and then alert, not inherit the old alerted
+// state and stay silent forever.
+func TestWaitTrackerPIDChangeRestartsTheWait(t *testing.T) {
+	tr := newWaitTracker()
+	tr.Tick(nil)
+	tr.Tick([]Session{waitingSession("a", "permission prompt")})
+	tr.Tick([]Session{waitingSession("a", "permission prompt")})
+
+	resumed := waitingSession("a", "permission prompt")
+	resumed.PID = 999
+
+	if got := tr.Tick([]Session{resumed}); len(got) != 0 {
+		t.Fatalf("emitted %+v on the first tick of a new pid, want a re-debounce", got)
+	}
+	got := tr.Tick([]Session{resumed})
+	if len(got) != 1 || got[0].Kind != notifyAlert {
+		t.Fatalf("= %+v, want an alert for the resumed session", got)
+	}
+	if got[0].PID != 999 {
+		t.Fatalf("PID = %d, want 999", got[0].PID)
+	}
+}

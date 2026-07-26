@@ -594,18 +594,37 @@ func (s *server) registerDevice(w http.ResponseWriter, r *http.Request) {
 		Platform    string `json:"platform"`
 		Environment string `json:"environment"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	if err := dec.Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if body.DeviceToken == "" || len(body.DeviceToken) > 200 {
-		http.Error(w, "device_token required", http.StatusBadRequest)
+	if dec.More() {
+		http.Error(w, "unexpected trailing json", http.StatusBadRequest)
+		return
+	}
+	// APNs device tokens are hex. Validating the shape here keeps junk out of
+	// the registry, where it would otherwise sit forever failing to deliver.
+	if !isAPNsDeviceToken(body.DeviceToken) {
+		http.Error(w, "device_token must be 64-200 hex characters", http.StatusBadRequest)
 		return
 	}
 	switch body.Environment {
 	case "", "production", "sandbox":
 	default:
 		http.Error(w, "environment must be production or sandbox", http.StatusBadRequest)
+		return
+	}
+	switch body.Platform {
+	case "", "ios":
+	default:
+		http.Error(w, "platform must be ios", http.StatusBadRequest)
+		return
+	}
+	// The registry is unbounded otherwise: anything holding the bearer token
+	// could grow it without limit, and every entry costs a push per alert.
+	if len(s.devices.List()) >= maxRegisteredDevices && !s.devices.Has(body.DeviceToken) {
+		http.Error(w, "too many registered devices", http.StatusConflict)
 		return
 	}
 	s.devices.Upsert(Device{

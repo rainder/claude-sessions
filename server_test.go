@@ -1413,11 +1413,14 @@ func TestSessionsResponseMatchesGolden(t *testing.T) {
 	}
 }
 
+// testDeviceToken is a syntactically valid APNs token: 64 hex characters.
+const testDeviceToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func TestRegisterDeviceStoresToken(t *testing.T) {
 	store := loadDeviceStore("", fixedClock(time.Now()))
 	s := &server{token: "secret", devices: store}
 
-	body := strings.NewReader(`{"device_token":"abc123","environment":"sandbox","platform":"ios"}`)
+	body := strings.NewReader(`{"device_token":"` + testDeviceToken + `","environment":"sandbox","platform":"ios"}`)
 	req := httptest.NewRequest(http.MethodPost, "/devices", body)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
@@ -1428,8 +1431,8 @@ func TestRegisterDeviceStoresToken(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 	got := store.List()
-	if len(got) != 1 || got[0].Token != "abc123" {
-		t.Fatalf("devices = %+v, want one token abc123", got)
+	if len(got) != 1 || got[0].Token != testDeviceToken {
+		t.Fatalf("devices = %+v, want one token %s", got, testDeviceToken)
 	}
 	if got[0].Environment != "sandbox" {
 		t.Fatalf("Environment = %q, want %q", got[0].Environment, "sandbox")
@@ -1444,7 +1447,7 @@ func TestRegisterDeviceIsIdempotent(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/devices",
-			strings.NewReader(`{"device_token":"abc123","environment":"production"}`))
+			strings.NewReader(`{"device_token":"`+testDeviceToken+`","environment":"production"}`))
 		req.Header.Set("Authorization", "Bearer secret")
 		rec := httptest.NewRecorder()
 		s.registerDevice(rec, req)
@@ -1463,7 +1466,11 @@ func TestRegisterDeviceRejectsBadInput(t *testing.T) {
 		body string
 	}{
 		{"empty token", `{"device_token":""}`},
-		{"bad environment", `{"device_token":"abc","environment":"staging"}`},
+		{"too short", `{"device_token":"abc"}`},
+		{"not hex", `{"device_token":"` + strings.Repeat("z", 64) + `"}`},
+		{"bad environment", `{"device_token":"` + testDeviceToken + `","environment":"staging"}`},
+		{"bad platform", `{"device_token":"` + testDeviceToken + `","platform":"android"}`},
+		{"trailing json", `{"device_token":"` + testDeviceToken + `"}{"device_token":"x"}`},
 		{"not json", `nope`},
 	}
 	for _, tt := range tests {
@@ -1504,11 +1511,11 @@ func TestRegisterDeviceUnauthorized(t *testing.T) {
 
 func TestUnregisterDeviceRemovesToken(t *testing.T) {
 	store := loadDeviceStore("", fixedClock(time.Now()))
-	store.Upsert(Device{Token: "abc123"})
+	store.Upsert(Device{Token: testDeviceToken})
 	s := &server{token: "secret", devices: store}
 
-	req := httptest.NewRequest(http.MethodDelete, "/devices/abc123", nil)
-	req.SetPathValue("token", "abc123")
+	req := httptest.NewRequest(http.MethodDelete, "/devices/"+testDeviceToken, nil)
+	req.SetPathValue("token", testDeviceToken)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 
@@ -1524,11 +1531,11 @@ func TestUnregisterDeviceRemovesToken(t *testing.T) {
 
 func TestUnregisterDeviceUnauthorized(t *testing.T) {
 	store := loadDeviceStore("", fixedClock(time.Now()))
-	store.Upsert(Device{Token: "abc123"})
+	store.Upsert(Device{Token: testDeviceToken})
 	s := &server{token: "secret", devices: store}
 
-	req := httptest.NewRequest(http.MethodDelete, "/devices/abc123", nil)
-	req.SetPathValue("token", "abc123")
+	req := httptest.NewRequest(http.MethodDelete, "/devices/"+testDeviceToken, nil)
+	req.SetPathValue("token", testDeviceToken)
 	rec := httptest.NewRecorder()
 
 	s.unregisterDevice(rec, req)
@@ -1552,5 +1559,32 @@ func TestDeviceRoutesWithoutRegistry(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// The registry must not grow without bound, but a device already registered
+// must still be able to re-register — which it does on every app launch.
+func TestRegisterDeviceEnforcesCap(t *testing.T) {
+	store := loadDeviceStore("", fixedClock(time.Now()))
+	for i := 0; i < maxRegisteredDevices; i++ {
+		store.Upsert(Device{Token: fmt.Sprintf("%064x", i)})
+	}
+	s := &server{token: "secret", devices: store}
+
+	post := func(token string) int {
+		req := httptest.NewRequest(http.MethodPost, "/devices",
+			strings.NewReader(`{"device_token":"`+token+`"}`))
+		req.Header.Set("Authorization", "Bearer secret")
+		rec := httptest.NewRecorder()
+		s.registerDevice(rec, req)
+		return rec.Code
+	}
+
+	if code := post(testDeviceToken); code != http.StatusConflict {
+		t.Fatalf("status = %d for a new device at the cap, want %d", code, http.StatusConflict)
+	}
+	existing := fmt.Sprintf("%064x", 0)
+	if code := post(existing); code != http.StatusNoContent {
+		t.Fatalf("status = %d re-registering an existing device at the cap, want %d", code, http.StatusNoContent)
 	}
 }

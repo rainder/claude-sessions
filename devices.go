@@ -45,6 +45,27 @@ type DeviceStore struct {
 	now      func() time.Time
 }
 
+// maxRegisteredDevices caps the registry. A handful of phones is the real use;
+// the limit exists so nothing can grow it without bound.
+const maxRegisteredDevices = 32
+
+// isAPNsDeviceToken reports whether a token looks like one APNs would issue:
+// hex, and long enough to be real. Apple's are 64 characters today, but the
+// upper bound is generous because that has changed before.
+func isAPNsDeviceToken(token string) bool {
+	if len(token) < 64 || len(token) > 200 {
+		return false
+	}
+	for _, c := range token {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // LoadDeviceStore reads the registry from the standard config location.
 func LoadDeviceStore() *DeviceStore {
 	dir := ConfigDir()
@@ -92,7 +113,7 @@ func (s *DeviceStore) Upsert(d Device) {
 	d.LastSeen = s.clockLocked().UTC().Format(time.RFC3339)
 	s.devices[d.Token] = d
 	s.mu.Unlock()
-	s.save()
+	s.saveAndReport()
 }
 
 // Remove drops a device. Called on APNs 410 Gone as well as explicit
@@ -101,7 +122,7 @@ func (s *DeviceStore) Remove(token string) {
 	s.mu.Lock()
 	delete(s.devices, token)
 	s.mu.Unlock()
-	s.save()
+	s.saveAndReport()
 }
 
 // List returns every device, sorted by token so callers and tests see a stable
@@ -117,12 +138,31 @@ func (s *DeviceStore) List() []Device {
 	return out
 }
 
+// Has reports whether a token is already registered, so a re-registration is
+// not rejected by the size cap.
+func (s *DeviceStore) Has(token string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.devices[token]
+	return ok
+}
+
 // clockLocked reads the injectable clock. Callers hold s.mu.
 func (s *DeviceStore) clockLocked() time.Time {
 	if s.now == nil {
 		return time.Now()
 	}
 	return s.now()
+}
+
+// saveAndReport persists and complains on failure. The in-memory registry is
+// still correct after a failed write, so this is not an error the caller can
+// act on — but swallowing it entirely would mean a host that silently forgets
+// every device on restart, with nothing in the log to explain it.
+func (s *DeviceStore) saveAndReport() {
+	if err := s.save(); err != nil {
+		fmt.Fprintf(os.Stderr, "claude-sessions: cannot persist device registry: %v\n", err)
+	}
 }
 
 // save writes atomically (temp file + rename in the same directory). It is a
@@ -134,11 +174,11 @@ func (s *DeviceStore) clockLocked() time.Time {
 // holding an older snapshot than memory — an in-memory-correct, on-disk-stale
 // split that only shows up after a restart. Contention here is irrelevant:
 // saves happen on device registration and 410 pruning, not per push.
-func (s *DeviceStore) save() {
+func (s *DeviceStore) save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.path == "" || s.readOnly {
-		return
+		return nil
 	}
 	f := deviceFile{Devices: make([]Device, 0, len(s.devices))}
 	for _, d := range s.devices {
@@ -148,28 +188,28 @@ func (s *DeviceStore) save() {
 
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return
+		return err
 	}
 	tmp, err := os.CreateTemp(dir, "devices-*.json")
 	if err != nil {
-		return
+		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
 		tmp.Close()
-		return
+		return err
 	}
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
-		return
+		return err
 	}
 	if err := tmp.Close(); err != nil {
-		return
+		return err
 	}
-	_ = os.Rename(tmpName, s.path)
+	return os.Rename(tmpName, s.path)
 }

@@ -67,6 +67,12 @@ const missedTicksBeforeClear = 2
 type waitTracker struct {
 	entries   map[string]*waitEntry
 	baselined bool
+	// nextGen is a monotonic counter across the tracker's whole life, not a
+	// per-entry one. An entry evicted after two missed ticks would otherwise
+	// restart at 1, so a session that waits, disappears, and waits again would
+	// reuse an event_id — and a stale notification for the first wait would pass
+	// the freshness check on the second.
+	nextGen int
 }
 
 func newWaitTracker() *waitTracker {
@@ -101,6 +107,13 @@ func (t *waitTracker) Tick(sessions []Session) []notifyEvent {
 			e = &waitEntry{}
 			t.entries[s.SessionID] = e
 		}
+		// A resumed or migrated session keeps its SessionID but gets a new PID.
+		// That is a different process and a different wait: start it over rather
+		// than letting it inherit phaseAlerted and never notify again.
+		if e.pid != 0 && e.pid != s.PID {
+			e.phase = phaseIdle
+			e.waitingFor = ""
+		}
 		e.missed = 0
 		e.pid, e.cwd, e.name = s.PID, s.CWD, s.Name
 
@@ -117,7 +130,7 @@ func (t *waitTracker) Tick(sessions []Session) []notifyEvent {
 			// Already waiting at startup: adopt the state without notifying.
 			e.phase = phaseAlerted
 			e.waitingFor = s.WaitingFor
-			e.generation++
+			e.generation = t.bumpGeneration()
 			continue
 		}
 
@@ -128,14 +141,14 @@ func (t *waitTracker) Tick(sessions []Session) []notifyEvent {
 		case phasePending:
 			e.phase = phaseAlerted
 			e.waitingFor = s.WaitingFor
-			e.generation++
+			e.generation = t.bumpGeneration()
 			events = append(events, t.event(notifyAlert, s, e))
 		case phaseAlerted:
 			// A different prompt without an intervening non-waiting tick is a
 			// new thing to notify about.
 			if e.waitingFor != s.WaitingFor {
 				e.waitingFor = s.WaitingFor
-				e.generation++
+				e.generation = t.bumpGeneration()
 				events = append(events, t.event(notifyAlert, s, e))
 			}
 		}
@@ -166,6 +179,13 @@ func (t *waitTracker) Tick(sessions []Session) []notifyEvent {
 	t.baselined = true
 	sort.Slice(events, func(i, j int) bool { return events[i].SessionID < events[j].SessionID })
 	return events
+}
+
+// bumpGeneration hands out the next wait generation. Monotonic across the
+// tracker, so an id is never reused after an entry is evicted.
+func (t *waitTracker) bumpGeneration() int {
+	t.nextGen++
+	return t.nextGen
 }
 
 func (t *waitTracker) event(kind notifyEventKind, s Session, e *waitEntry) notifyEvent {

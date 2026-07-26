@@ -71,10 +71,16 @@ func parseAPNsYAML(input string) APNsConfig {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		// Strip a trailing comment before unquoting, so `production # or sandbox`
-		// yields "production" rather than the whole tail.
-		if i := strings.Index(val, " #"); i >= 0 {
-			val = val[:i]
+		val = strings.TrimSpace(val)
+		// Strip a trailing comment, so `production # or sandbox` yields
+		// "production" rather than the whole tail — but only on unquoted values.
+		// A quoted value may legitimately contain a '#', and truncating it would
+		// silently produce a wrong credential that Validate cannot catch, since
+		// it only checks for emptiness.
+		if !strings.HasPrefix(val, `"`) && !strings.HasPrefix(val, "'") {
+			if i := strings.Index(val, " #"); i >= 0 {
+				val = val[:i]
+			}
 		}
 		val = trimYAMLValue(val)
 		switch key {
@@ -131,10 +137,8 @@ func LoadHostID() string {
 		return ""
 	}
 	path := filepath.Join(dir, "host-id")
-	if data, err := os.ReadFile(path); err == nil {
-		if id := strings.TrimSpace(string(data)); len(id) == hostIDLen {
-			return id
-		}
+	if id := readHostID(path); id != "" {
+		return id
 	}
 	buf := make([]byte, hostIDLen/2)
 	if _, err := rand.Read(buf); err != nil {
@@ -149,8 +153,47 @@ func LoadHostID() string {
 		fmt.Fprintf(os.Stderr, "claude-sessions: cannot persist host id (%v) — it will change on restart\n", err)
 		return id
 	}
-	if err := os.WriteFile(path, []byte(id+"\n"), 0o600); err != nil {
+	// O_EXCL, so two processes reaching first-use together do not each write a
+	// different id and disagree about this host's identity. The loser reads the
+	// winner's value instead of its own.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if os.IsExist(err) {
+		// Either another process just won the race, or the file holds something
+		// that is not an id. Prefer theirs; otherwise overwrite the garbage,
+		// because leaving it would regenerate a different id on every call —
+		// unstable in exactly the way this function exists to prevent.
+		if existing := readHostID(path); existing != "" {
+			return existing
+		}
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "claude-sessions: cannot persist host id (%v) — it will change on restart\n", err)
+		return id
+	}
+	if _, err := f.WriteString(id + "\n"); err != nil {
+		fmt.Fprintf(os.Stderr, "claude-sessions: cannot persist host id (%v) — it will change on restart\n", err)
+	}
+	if err := f.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "claude-sessions: cannot persist host id (%v) — it will change on restart\n", err)
+	}
+	return id
+}
+
+// readHostID returns a persisted host id, or "" if the file is missing or holds
+// something that is not a host id. Length alone is not enough: a truncated or
+// hand-edited file can be the right size and still be garbage.
+func readHostID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(data))
+	if len(id) != hostIDLen {
+		return ""
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		return ""
 	}
 	return id
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,18 +182,39 @@ func TestLoadHostIDIsStable(t *testing.T) {
 }
 
 // A truncated or hand-mangled host-id file must be replaced, not returned.
+// Length alone is not enough of a check: 32 non-hex characters are the right
+// size and still not an id.
 func TestLoadHostIDReplacesGarbage(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".config", "claude-sessions")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	for _, garbage := range []string{"nope", strings.Repeat("z", 32), ""} {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".config", "claude-sessions")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "host-id"), []byte(garbage+"\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		got := LoadHostID()
+		if len(got) != 32 {
+			t.Fatalf("host id for %q = %q, want a regenerated 32-char id", garbage, got)
+		}
+		if _, err := hex.DecodeString(got); err != nil {
+			t.Fatalf("host id %q is not hex", got)
+		}
+		// The garbage must be replaced, not merely ignored: leaving it would
+		// hand out a different id on every call.
+		if again := LoadHostID(); again != got {
+			t.Fatalf("host id unstable after replacing %q: %q then %q", garbage, got, again)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "host-id"), []byte("nope\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got := LoadHostID()
-	if len(got) != 32 {
-		t.Fatalf("host id = %q, want a regenerated 32-char id", got)
+}
+
+// A quoted value may legitimately contain a '#'. Truncating it would produce a
+// wrong credential that Validate cannot catch, since it only tests emptiness.
+func TestParseAPNsYAMLKeepsHashInsideQuotes(t *testing.T) {
+	got := parseAPNsYAML(`key_id: "AB # CD"` + "\n")
+	if got.KeyID != "AB # CD" {
+		t.Fatalf("KeyID = %q, want %q", got.KeyID, "AB # CD")
 	}
 }
