@@ -366,7 +366,7 @@ func TestNotifyHubPushesAlertsToEveryDevice(t *testing.T) {
 	h := newNotifyHub(notifyHubOptions{
 		HostName: "myserver",
 		HostID:   "9f2c",
-		BundleID: "com.avisoma.claude-sessions",
+		BundleID: "com.skerla.claude-sessions",
 		Devices:  devices,
 		Sender:   sender,
 		Collect:  snapshotCollector(nil, waiting, waiting),
@@ -384,7 +384,7 @@ func TestNotifyHubPushesAlertsToEveryDevice(t *testing.T) {
 	if got[0].CollapseID != "9f2c:abc-123" {
 		t.Fatalf("collapse id = %q, want %q", got[0].CollapseID, "9f2c:abc-123")
 	}
-	if got[0].Topic != "com.avisoma.claude-sessions" {
+	if got[0].Topic != "com.skerla.claude-sessions" {
 		t.Fatalf("topic = %q", got[0].Topic)
 	}
 	if got[0].PushType != "alert" || got[0].Priority != "10" {

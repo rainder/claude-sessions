@@ -14,7 +14,7 @@ func TestParseAPNsYAML(t *testing.T) {
 key_file: ~/.config/claude-sessions/AuthKey_ABC123.p8
 key_id: "ABC123DEFG"
 team_id: XYZ9876543
-bundle_id: com.avisoma.claude-sessions
+bundle_id: com.skerla.claude-sessions
 environment: sandbox
 `
 	got := parseAPNsYAML(in)
@@ -24,8 +24,8 @@ environment: sandbox
 	if got.TeamID != "XYZ9876543" {
 		t.Fatalf("TeamID = %q, want %q", got.TeamID, "XYZ9876543")
 	}
-	if got.BundleID != "com.avisoma.claude-sessions" {
-		t.Fatalf("BundleID = %q, want %q", got.BundleID, "com.avisoma.claude-sessions")
+	if got.BundleID != "com.skerla.claude-sessions" {
+		t.Fatalf("BundleID = %q, want %q", got.BundleID, "com.skerla.claude-sessions")
 	}
 	if got.Environment != "sandbox" {
 		t.Fatalf("Environment = %q, want %q", got.Environment, "sandbox")

@@ -49,6 +49,13 @@ type Session struct {
 
 	Home string `json:"home,omitempty"` // collector's home, used for local/remote ~ collapse
 	Host string `json:"-"`              // client-only remote host label
+
+	// GitRoot is the top-level directory of the git repo containing CWD (found
+	// by walking up looking for ".git"), or "" if CWD isn't inside a git repo.
+	// Computed at collection time so remote rows render from the JSON as-is;
+	// render.go uses it to decide between the short "<repo-name>" DIR display
+	// and the full squashed-home path for non-git working directories.
+	GitRoot string `json:"gitRoot,omitempty"`
 }
 
 // StatusDisplay returns the status label including the waitingFor suffix
@@ -186,6 +193,7 @@ func CollectLocal() ([]Session, error) {
 			s.TmuxAttached = pane.Attached
 		}
 		s.Home = home
+		s.GitRoot = gitRootFor(s.CWD)
 		if p := findTranscript(home, s.SessionID); p != "" {
 			m := cachedMeta(p)
 			s.Model = m.Model

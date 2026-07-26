@@ -243,7 +243,7 @@ Create `~/.config/claude-sessions/apns.yaml`:
 key_file: ~/.config/claude-sessions/AuthKey_ABC123.p8
 key_id: ABC123DEFG
 team_id: XYZ9876543
-bundle_id: com.avisoma.claude-sessions
+bundle_id: com.skerla.claude-sessions
 environment: production   # default for devices that don't declare one
 ```
 
@@ -274,14 +274,14 @@ restart is something you do at the keyboard, and an alert burst there is noise.
 The server is a foreground process. A watchdog that dies silently is
 indistinguishable from a quiet week, so supervise it.
 
-macOS — `~/Library/LaunchAgents/com.avisoma.claude-sessions.plist`:
+macOS — `~/Library/LaunchAgents/com.skerla.claude-sessions.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.avisoma.claude-sessions</string>
+  <key>Label</key><string>com.skerla.claude-sessions</string>
   <key>ProgramArguments</key>
   <array>
     <string>/Users/YOU/.local/bin/claude-sessions</string>
@@ -296,7 +296,7 @@ macOS — `~/Library/LaunchAgents/com.avisoma.claude-sessions.plist`:
 </plist>
 ```
 
-`launchctl load ~/Library/LaunchAgents/com.avisoma.claude-sessions.plist`
+`launchctl load ~/Library/LaunchAgents/com.skerla.claude-sessions.plist`
 
 Linux — `~/.config/systemd/user/claude-sessions.service`:
 

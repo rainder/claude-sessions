@@ -50,6 +50,24 @@ func isGitWorktree(root string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// gitRootFor walks up from cwd looking for a ".git" entry (directory for a
+// main checkout, file for a linked worktree) and returns the directory it's
+// in, or "" if cwd isn't inside a git repo. Used at collection time so
+// render.go can show a bare repo name instead of a squashed home path.
+func gitRootFor(cwd string) string {
+	dir := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
 // worktreeSurvivors returns the sessions that would still be running in
 // target's worktree after target is killed. Empty means the kill empties the
 // worktree.

@@ -17,7 +17,7 @@ const (
 	ansiBold       = "\033[1m"
 	ansiDim        = "\033[2m"
 	ansiInvert     = "\033[7m"
-	ansiSelectedBG = "\033[48;5;236m"
+	ansiSelectedBG = "\033[48;5;8m"
 	// ansiPreviewBar makes the inspector footer unmistakable (black on white):
 	// a preview looks exactly like an attached session otherwise.
 	ansiPreviewBar = "\033[30;47m"
@@ -48,29 +48,6 @@ func colorize(code, s string) string {
 
 func bold(s string) string { return ansiBold + s + ansiReset }
 func dim(s string) string  { return ansiDim + s + ansiReset }
-
-func tmuxViewerSymbol(s Session) (symbol, sgr string) {
-	if s.Tmux == "" {
-		return " ", ""
-	}
-	if s.TmuxAttached == nil || *s.TmuxAttached < 0 {
-		return "·", "2"
-	}
-	attached := *s.TmuxAttached
-	if attached == 0 {
-		return " ", ""
-	}
-	return "▶", "1;32"
-}
-
-func tmuxViewerPrefix(s Session, plain bool) string {
-	symbol, sgr := tmuxViewerSymbol(s)
-	prefix := symbol + " "
-	if plain || sgr == "" {
-		return prefix
-	}
-	return colorize(sgr, prefix)
-}
 
 func highlightSelectedRow(row string, selected bool) string {
 	if !selected {
@@ -104,19 +81,18 @@ var groupSGR = map[int]string{
 // active group filter (zero value = no filter), the free-text query (empty =
 // no text filter), and the per-frame first-column slot reservations. The group
 // filter and the query compose (AND) in filterSessionRows / filterRemoteResults.
-// showViewer, showBadge and showRail each gate one 2-char indicator slot (tmux
-// viewer, group badge, disabled rail), and are set by BuildTableFrame once it
-// knows which slots at least one visible session needs. A slot is present on
-// every row of the frame (headers included) or on none. The zero value applies
-// no filter and hides all three slots — rendering exactly as before groups,
-// the text filter, and conditional slots existed.
+// showBadge and showRail each gate one 2-char indicator slot (group badge,
+// disabled rail), and are set by BuildTableFrame once it knows which slots at
+// least one visible session needs. A slot is present on every row of the frame
+// (headers included) or on none. The zero value applies no filter and hides
+// both slots — rendering exactly as before groups, the text filter, and
+// conditional slots existed.
 type groupView struct {
-	groups     map[string]int
-	filter     groupFilter
-	query      string
-	showViewer bool
-	showBadge  bool
-	showRail   bool
+	groups    map[string]int
+	filter    groupFilter
+	query     string
+	showBadge bool
+	showRail  bool
 }
 
 // groupOf returns the group assigned to s (1..9), or 0 for an ungrouped session
@@ -228,14 +204,10 @@ func (gv groupView) badge(s Session, style badgeStyle) string {
 }
 
 func decorateSessionRow(session Session, selected bool, body string, gv groupView) string {
-	plain := sessionRowPlain(session, selected)
-	// Each slot reserves its 2 cells only when this frame reserves it, otherwise
-	// it collapses to nothing (byte-empty, never spaces) so the row body sits
-	// flush. The badge already self-gates on gv.showBadge inside gv.badge.
-	viewer := ""
-	if gv.showViewer {
-		viewer = tmuxViewerPrefix(session, plain)
-	}
+	// The rail slot reserves its 2 cells only when this frame reserves it,
+	// otherwise it collapses to nothing (byte-empty, never spaces) so the row
+	// body sits flush. The badge already self-gates on gv.showBadge inside
+	// gv.badge.
 	rail := ""
 	if gv.showRail {
 		rail = disabledRail(session, selected)
@@ -244,13 +216,13 @@ func decorateSessionRow(session Session, selected bool, body string, gv groupVie
 	var row string
 	switch {
 	case selected:
-		row = viewer + gv.badge(session, badgeColored) + rail + body
+		row = gv.badge(session, badgeColored) + rail + body
 	case session.Disabled:
-		row = dim(viewer) + gv.badge(session, badgeDim) + rail + dim(body)
+		row = gv.badge(session, badgeDim) + rail + dim(body)
 	case session.Headless():
-		row = dim(viewer + gv.badge(session, badgePlain) + rail + body)
+		row = dim(gv.badge(session, badgePlain) + rail + body)
 	default:
-		row = viewer + gv.badge(session, badgeColored) + rail + body
+		row = gv.badge(session, badgeColored) + rail + body
 	}
 	return highlightSelectedRow(row, selected)
 }
@@ -453,6 +425,23 @@ func lineBarW(label string, segs []usageSeg, cols int) int {
 	if cols <= 0 || len(segs) == 0 {
 		return usageBarMax
 	}
+	fixed := usageLineFixedWidth(label, segs)
+	barW := usageBarMax
+	if b := (cols - fixed) / len(segs); b < barW {
+		barW = b
+	}
+	if barW < usageBarMin {
+		barW = usageBarMin
+	}
+	return barW
+}
+
+// usageLineFixedWidth is everything on a header usage line except the bars
+// themselves: the padded label prefix, each segment's label/percent/trailer,
+// and the inter-segment separators. Shared by lineBarW (sizing the bars) and
+// writeUsageHeader's label-hiding check (does the line fit at all, even at
+// usageBarMin, with the label kept).
+func usageLineFixedWidth(label string, segs []usageSeg) int {
 	prefixW := 0
 	if label != "" {
 		prefixW = len(label) + 1
@@ -464,14 +453,7 @@ func lineBarW(label string, segs []usageSeg, cols int) int {
 			fixed += 1 + tw // separator + (possibly padded) trailer
 		}
 	}
-	barW := usageBarMax
-	if b := (cols - fixed) / len(segs); b < barW {
-		barW = b
-	}
-	if barW < usageBarMin {
-		barW = usageBarMin
-	}
-	return barW
+	return fixed
 }
 
 // renderUsageSegs writes one header usage line: an optional dim label prefix
@@ -694,6 +676,24 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 				if col < len(e.segs) {
 					e.segs[col].trailerW = tw
 				}
+			}
+		}
+	}
+	// Drop the label column entirely when it's what's forcing bars below
+	// usageBarMin: a line with a label whose fixed width (at the smallest bar)
+	// still overflows cols is unreadable either way, so free the label's width
+	// for the bars/percent/trailer instead of clipping. Checked against the
+	// padded labelW (every entry pays for the widest label) since that's the
+	// width writeUsageHeader actually renders.
+	if cols > 0 && labelW > 0 {
+		pad := strings.Repeat(" ", labelW)
+		for _, e := range entries {
+			if fixed := usageLineFixedWidth(pad, e.segs); fixed+len(e.segs)*usageBarMin > cols {
+				labelW = 0
+				for i := range entries {
+					entries[i].label = ""
+				}
+				break
 			}
 		}
 	}
@@ -1004,19 +1004,32 @@ func displayCWD(cwd, home string) string {
 	return cwd
 }
 
-// collapseWorktreePath rewrites a cwd under .claude/worktrees/<name> to
-// "<squashed-project-root>:<name>", dropping the ".claude/worktrees" nesting
-// so the DIR column reads like a branch suffix instead of two extra path
-// segments. The root goes through squashPath same as any other path (so
-// "Developer" abbreviates to "D" but the project dir itself stays full).
-// Returns cwd unchanged when cwd isn't a worktree path.
-func collapseWorktreePath(cwd string) string {
-	name := worktreeName(cwd)
-	if name == "" {
-		return cwd
+// repoDirName returns the short "<repo-name>" or "<repo-name>:<worktree-name>"
+// form for a git-tracked cwd, and false when cwd isn't inside a git repo at
+// all (GitRoot empty) — the caller then falls back to its own non-git
+// display. A worktree checkout takes precedence over GitRoot: a worktree's
+// own ".git" is a file (see isGitWorktree), so GitRoot would otherwise
+// resolve to the worktree checkout itself rather than the main repo.
+func repoDirName(cwd, gitRoot string) (string, bool) {
+	if name := worktreeName(cwd); name != "" {
+		return filepath.Base(worktreeRepoRoot(cwd)) + ":" + name, true
 	}
-	i := strings.Index(cwd, "/.claude/worktrees/")
-	return squashPath(cwd[:i]) + ":" + name
+	if gitRoot != "" {
+		return filepath.Base(gitRoot), true
+	}
+	return "", false
+}
+
+// dirDisplay computes the full/intermediate view's DIR-column text for a
+// session's cwd: the short repoDirName form for any git-tracked cwd, or a
+// full squashed-home path when cwd isn't inside a git repo (GitRoot empty,
+// e.g. scratch dirs or plain folders) — there, ancestry is the only way to
+// tell dirs apart.
+func dirDisplay(cwd, home, gitRoot string) string {
+	if name, ok := repoDirName(cwd, gitRoot); ok {
+		return name
+	}
+	return squashPath(displayCWD(cwd, home))
 }
 
 // section is one rendering block. host is the stable selection/action key
@@ -1308,7 +1321,7 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	// Reserve each first-column slot only when at least one visible (post-filter)
 	// session needs it, so a frame with none of a given indicator stays
 	// byte-identical to the layout from before that slot existed.
-	gv.showViewer, gv.showBadge, gv.showRail = sectionSlotReservations(sections, gv)
+	gv.showBadge, gv.showRail = sectionSlotReservations(sections, gv)
 	// Pair each provider's local snapshot with every remote's, dedupe by account,
 	// and carry the resolved lines through the header so each distinct account
 	// shows once. The two providers dedupe independently.
@@ -1342,23 +1355,20 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 }
 
 // sectionSlotReservations scans the already-filtered sections once and reports
-// which of the three first-column indicator slots the frame must reserve:
-// viewer (any row whose tmux viewer symbol isn't blank), badge (any grouped
-// row), rail (any disabled row). A slot is reserved for every row of the frame
-// or for none, so one visible row needing it settles the whole frame.
-func sectionSlotReservations(sections []section, gv groupView) (viewer, badge, rail bool) {
+// which of the two first-column indicator slots the frame must reserve: badge
+// (any grouped row), rail (any disabled row). A slot is reserved for every row
+// of the frame or for none, so one visible row needing it settles the whole
+// frame.
+func sectionSlotReservations(sections []section, gv groupView) (badge, rail bool) {
 	for _, sec := range sections {
 		for _, s := range sec.rows {
-			if sym, _ := tmuxViewerSymbol(s); sym != " " {
-				viewer = true
-			}
 			if gv.groupOf(s) != 0 {
 				badge = true
 			}
 			if s.Disabled {
 				rail = true
 			}
-			if viewer && badge && rail {
+			if badge && rail {
 				return
 			}
 		}
@@ -1451,22 +1461,17 @@ type drowFull struct {
 }
 
 func deriveFull(s Session, now time.Time, sortMode string) drowFull {
-	cwd := displayCWD(s.CWD, s.Home)
 	sid := s.SessionID
 	if len(sid) > 8 {
 		sid = sid[:8]
 	}
 	name, nameDim := s.DisplayName()
-	cwdStr := squashPath(cwd)
-	if wt := collapseWorktreePath(cwd); wt != cwd {
-		cwdStr = wt
-	}
 	return drowFull{
 		s:         s,
 		nameStr:   name,
 		nameDim:   nameDim,
 		statusStr: s.StatusDisplay(),
-		cwdStr:    cwdStr,
+		cwdStr:    dirDisplay(s.CWD, s.Home, s.GitRoot),
 		modelStr:  shortModel(s.Model),
 		ctxStr:    formatTokens(s.ContextTokens),
 		costStr:   formatCost(s.CostUSD, s.CostSubagentsUSD),
@@ -1490,14 +1495,11 @@ func modelCell(model string, width int, plain bool) string {
 }
 
 // rowIndent is the leading indent for the column-header and separator lines. It
-// reserves 2 cells per active first-column slot (viewer + badge + rail) so the
-// column labels stay aligned above the row bodies. With no slot active the
-// indent is empty and the labels sit flush left, aligned with the row bodies.
+// reserves 2 cells per active first-column slot (badge + rail) so the column
+// labels stay aligned above the row bodies. With no slot active the indent is
+// empty and the labels sit flush left, aligned with the row bodies.
 func rowIndent(gv groupView) string {
 	n := 0
-	if gv.showViewer {
-		n++
-	}
 	if gv.showBadge {
 		n++
 	}
@@ -1737,17 +1739,20 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 
 type drowMinimal struct {
 	s       Session
-	dir     string // cwd basename
+	dir     string // repo name (+ ":worktree") for a git cwd, else cwd basename
 	display string // resolved NAME label (name → tmux → worktree → "-")
 	nameDim bool   // true when display is auto-derived, not user-set
 	ageStr  string
 }
 
 func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
-	cwd := displayCWD(s.CWD, s.Home)
-	dir := filepath.Base(strings.TrimRight(cwd, "/"))
-	if dir == "" {
-		dir = cwd
+	dir, ok := repoDirName(s.CWD, s.GitRoot)
+	if !ok {
+		cwd := displayCWD(s.CWD, s.Home)
+		dir = filepath.Base(strings.TrimRight(cwd, "/"))
+		if dir == "" {
+			dir = cwd
+		}
 	}
 	disp, dimName := s.DisplayName()
 	return drowMinimal{

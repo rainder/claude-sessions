@@ -52,41 +52,6 @@ func TestWriteUsageNil(t *testing.T) {
 	}
 }
 
-func TestTmuxViewerPrefix(t *testing.T) {
-	zero := 0
-	one := 1
-	nine := 9
-	ten := 10
-	negative := -1
-	cases := []struct {
-		name  string
-		s     Session
-		plain bool
-		want  string
-	}{
-		{"no tmux", Session{}, false, "  "},
-		{"unknown", Session{Tmux: "dev:0.0"}, false, dim("· ")},
-		{"detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, false, "  "},
-		{"one", Session{Tmux: "dev:0.0", TmuxAttached: &one}, false, colorize("1;32", "▶ ")},
-		{"nine", Session{Tmux: "dev:0.0", TmuxAttached: &nine}, false, colorize("1;32", "▶ ")},
-		{"ten", Session{Tmux: "dev:0.0", TmuxAttached: &ten}, false, colorize("1;32", "▶ ")},
-		{"negative unknown", Session{Tmux: "dev:0.0", TmuxAttached: &negative}, false, dim("· ")},
-		{"plain unknown", Session{Tmux: "dev:0.0"}, true, "· "},
-		{"plain detached", Session{Tmux: "dev:0.0", TmuxAttached: &zero}, true, "  "},
-		{"plain positive", Session{Tmux: "dev:0.0", TmuxAttached: &one}, true, "▶ "},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tmuxViewerPrefix(tc.s, tc.plain); got != tc.want {
-				t.Errorf("tmuxViewerPrefix() = %q, want %q", got, tc.want)
-			}
-			if got := visualLen(tmuxViewerPrefix(tc.s, tc.plain)); got != 2 {
-				t.Errorf("tmuxViewerPrefix() visual width = %d, want 2", got)
-			}
-		})
-	}
-}
-
 func TestHighlightSelectedRow(t *testing.T) {
 	if got := highlightSelectedRow("2 row", false); got != "2 row" {
 		t.Errorf("unselected row = %q, want unchanged", got)
@@ -245,69 +210,15 @@ func TestIntermediateStatusPrecedesModel(t *testing.T) {
 	}
 }
 
-func TestTmuxViewerPrefixesAcrossModes(t *testing.T) {
-	now := time.Now().UnixMilli()
-	zero := 0
-	one := 1
-	nine := 9
-	ten := 10
-	cases := []struct {
-		name     string
-		tmux     string
-		attached *int
-		want     string
-	}{
-		{"plain", "", nil, "  "},
-		{"unknown", "unknown:0.0", nil, dim("· ")},
-		{"detached", "detached:0.0", &zero, "  "},
-		{"one", "one:0.0", &one, colorize("1;32", "▶ ")},
-		{"nine", "nine:0.0", &nine, colorize("1;32", "▶ ")},
-		{"ten", "ten:0.0", &ten, colorize("1;32", "▶ ")},
-	}
-	// The viewer slot is reserved per-frame, so a lone blank-symbol session would
-	// collapse it away. Co-render a tmux-attached anchor to keep the slot reserved
-	// in every frame; the target row's viewer prefix is then what we assert.
-	anchor := Session{
-		PID: 200, Name: "anchor", NameSource: "user", CWD: "/work/anchor",
-		Status: "idle", Entrypoint: "cli", UpdatedAt: now,
-		Tmux: "anchor:0.0", TmuxAttached: &one,
-	}
-	for _, mode := range []string{"1", "2", "3"} {
-		for i, tc := range cases {
-			t.Run(mode+"/"+tc.name, func(t *testing.T) {
-				s := Session{
-					PID:          100 + i,
-					Name:         tc.name,
-					NameSource:   "user",
-					CWD:          "/work/" + tc.name,
-					Status:       "idle",
-					Entrypoint:   "cli",
-					UpdatedAt:    now,
-					Tmux:         tc.tmux,
-					TmuxAttached: tc.attached,
-				}
-				var b strings.Builder
-				RenderAll(&b, mode, testLocalHost(s, anchor), nil, "", nil, 0, 0, "dir")
-				row := findRow(t, b.String(), tc.name)
-				if !strings.HasPrefix(row, tc.want) {
-					t.Errorf("mode %s row prefix = %q, want %q in row %q", mode, row[:len(tc.want)], tc.want, row)
-				}
-			})
-		}
-	}
-}
-
 func TestSelectedSessionRowsHighlightWholeRow(t *testing.T) {
 	now := time.Now().UnixMilli()
-	attached := 2
 	for _, mode := range []string{"1", "2", "3"} {
 		s := Session{
 			PID: 42, Name: "selected", NameSource: "user", CWD: "/work/selected",
 			Status: "busy", Entrypoint: "cli", UpdatedAt: now,
-			Tmux: "selected:0.0", TmuxAttached: &attached,
 		}
 		selectedRow := renderSessionRowForTest(t, mode, s, true)
-		assertWholeRowSelected(t, selectedRow, "▶ ")
+		assertWholeRowSelected(t, selectedRow, "")
 
 		unselectedRow := renderSessionRowForTest(t, mode, s, false)
 		if visualLen(selectedRow) != visualLen(unselectedRow) {
@@ -332,15 +243,13 @@ func TestSelectedSessionRowPreservesStatusColor(t *testing.T) {
 
 func TestSelectedHeadlessRowsSuppressDim(t *testing.T) {
 	now := time.Now().UnixMilli()
-	attached := 1
 	for _, mode := range []string{"1", "2", "3"} {
 		s := Session{
 			PID: 77, Name: "headless", NameSource: "user", CWD: "/work/headless",
 			Status: "busy", Entrypoint: "sdk-cli", StartedAt: now,
-			Tmux: "headless:0.0", TmuxAttached: &attached,
 		}
 		row := renderSessionRowForTest(t, mode, s, true)
-		assertWholeRowSelected(t, row, "▶ ")
+		assertWholeRowSelected(t, row, "")
 		inner := strings.TrimSuffix(strings.TrimPrefix(row, ansiSelectedBG), ansiReset)
 		if strings.Contains(inner, ansiDim) {
 			t.Errorf("mode %s selected headless row contains dim wrapper: %q", mode, row)
@@ -348,46 +257,12 @@ func TestSelectedHeadlessRowsSuppressDim(t *testing.T) {
 	}
 }
 
-func TestTmuxViewerPrefixPreservesWidth(t *testing.T) {
-	now := time.Now().UnixMilli()
-	attached := 3
-	for _, mode := range []string{"1", "2", "3"} {
-		unknown := Session{
-			PID: 88, Name: "width", NameSource: "user", CWD: "/work/width",
-			Status: "idle", Entrypoint: "cli", UpdatedAt: now, Tmux: "width:0.0",
-		}
-		known := unknown
-		known.TmuxAttached = &attached
-
-		var unknownOut, knownOut strings.Builder
-		RenderAll(&unknownOut, mode, testLocalHost(unknown), nil, "", nil, 0, 0, "dir")
-		RenderAll(&knownOut, mode, testLocalHost(known), nil, "", nil, 0, 0, "dir")
-		unknownRow := findRow(t, unknownOut.String(), unknown.Name)
-		knownRow := findRow(t, knownOut.String(), known.Name)
-		if visualLen(unknownRow) != visualLen(knownRow) {
-			t.Errorf("mode %s unknown width = %d, known width = %d", mode, visualLen(unknownRow), visualLen(knownRow))
-		}
-
-		headerNeedle := "PID"
-		if mode != "1" {
-			headerNeedle = "DIR"
-		}
-		unknownHeader := findRow(t, unknownOut.String(), headerNeedle)
-		knownHeader := findRow(t, knownOut.String(), headerNeedle)
-		if unknownHeader != knownHeader {
-			t.Errorf("mode %s header changed with viewer count:\nunknown: %q\nknown:   %q", mode, unknownHeader, knownHeader)
-		}
-	}
-}
-
 func TestHeadlessRowsDimmed(t *testing.T) {
 	now := time.Now().UnixMilli()
-	attached := 1
 	normal := Session{PID: 11111, Name: "my-task", CWD: "/tmp/normaldir",
 		Status: "busy", Entrypoint: "cli", UpdatedAt: now}
 	ghost := Session{PID: 99901, CWD: "/tmp/ghostdir",
-		Entrypoint: "sdk-cli", StartedAt: now,
-		Tmux: "ghost:0.0", TmuxAttached: &attached}
+		Entrypoint: "sdk-cli", StartedAt: now}
 
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
@@ -395,8 +270,8 @@ func TestHeadlessRowsDimmed(t *testing.T) {
 		out := b.String()
 
 		ghostRow := findRow(t, out, "ghostdir")
-		if !strings.HasPrefix(ghostRow, ansiDim+"▶ ") {
-			t.Errorf("mode %s: headless row and viewer prefix not dimmed: %q", mode, ghostRow)
+		if !strings.HasPrefix(ghostRow, ansiDim) {
+			t.Errorf("mode %s: headless row not dimmed: %q", mode, ghostRow)
 		}
 		// A reset before the end would cancel the dim mid-row.
 		if inner := strings.TrimSuffix(strings.TrimPrefix(ghostRow, ansiDim), ansiReset); strings.Contains(inner, ansiReset) {
@@ -946,6 +821,31 @@ func TestRenderHeaderCodexSingleAccountLabeled(t *testing.T) {
 	}
 }
 
+func TestRenderHeaderNarrowColsHidesLabels(t *testing.T) {
+	// Two Claude accounts (so a label column is in play) squeezed into a
+	// terminal too narrow to show both a label and a usageBarMin-wide bar per
+	// line: the label is dropped entirely rather than clipping the line.
+	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+		[]RemoteResult{{Name: "pi", Usage: &AccountUsage{Account: "dev@example.com", Info: claude}}},
+		"", &LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: claude}}, 20, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 2 {
+		t.Fatalf("want 2 usage lines, got %d: %#v", len(usage), usage)
+	}
+	for _, line := range usage {
+		plain := stripANSI(line)
+		if strings.HasPrefix(plain, "andy") || strings.HasPrefix(plain, "dev") {
+			t.Errorf("label should be hidden on a narrow terminal: %q", line)
+		}
+		if !strings.Contains(plain, "5h") {
+			t.Errorf("bar content should still render: %q", line)
+		}
+	}
+}
+
 func TestRenderHeaderMixedBlocksLabelsPadEqual(t *testing.T) {
 	// Sole (mine) Claude + sole (mine) Codex: "claude" and "codex" pad to one
 	// shared width, so the first segment starts in the same column on both lines.
@@ -1369,30 +1269,67 @@ func TestDisplayCWD(t *testing.T) {
 	}
 }
 
-func TestCollapseWorktreePath(t *testing.T) {
-	cases := []struct{ cwd, want string }{
-		{"~/Developer/project-name/.claude/worktrees/some-feature", "~/D/project-name:some-feature"},
-		{"/repo/.claude/worktrees/DR-860/sub/dir", "/repo:DR-860"},
-		{"/repo/not-a-worktree", "/repo/not-a-worktree"},
-		{"/repo/.claude/worktrees/", "/repo/.claude/worktrees/"},
+func TestDirDisplay(t *testing.T) {
+	cases := []struct {
+		name, cwd, home, gitRoot, want string
+	}{
+		{"worktree", "/repo/.claude/worktrees/DR-860/sub/dir", "", "", "repo:DR-860"},
+		{"git repo, no worktree", "/home/andy/Developer/project-name/src", "/home/andy", "/home/andy/Developer/project-name", "project-name"},
+		{"non-git dir squashes home path", "/home/andy/Developer/scratch/dir", "/home/andy", "", "~/D/s/dir"},
 	}
 	for _, tc := range cases {
-		if got := collapseWorktreePath(tc.cwd); got != tc.want {
-			t.Errorf("collapseWorktreePath(%q) = %q, want %q", tc.cwd, got, tc.want)
+		if got := dirDisplay(tc.cwd, tc.home, tc.gitRoot); got != tc.want {
+			t.Errorf("%s: dirDisplay(%q, %q, %q) = %q, want %q", tc.name, tc.cwd, tc.home, tc.gitRoot, got, tc.want)
 		}
 	}
 }
 
-func TestDeriveFullCollapsesWorktreePath(t *testing.T) {
+func TestDeriveFullWorktreePath(t *testing.T) {
 	now := time.Unix(100, 0)
 	s := Session{
-		CWD:  "/home/andy/Developer/project-name/.claude/worktrees/some-feature",
-		Home: "/home/andy",
+		CWD:     "/home/andy/Developer/project-name/.claude/worktrees/some-feature",
+		Home:    "/home/andy",
+		GitRoot: "/home/andy/Developer/project-name/.claude/worktrees/some-feature",
 	}
 	row := deriveFull(s, now, "dir")
-	want := "~/D/project-name:some-feature"
+	want := "project-name:some-feature"
 	if row.cwdStr != want {
 		t.Errorf("cwdStr = %q, want %q", row.cwdStr, want)
+	}
+}
+
+func TestDeriveMinimalUsesRepoDirName(t *testing.T) {
+	now := time.Unix(100, 0)
+	cases := []struct {
+		name string
+		s    Session
+		want string
+	}{
+		{
+			"git repo subdirectory shows repo name, not basename",
+			Session{CWD: "/home/andy/project/src", Home: "/home/andy", GitRoot: "/home/andy/project"},
+			"project",
+		},
+		{
+			"worktree shows repo:worktree",
+			Session{
+				CWD:     "/home/andy/project/.claude/worktrees/some-feature/sub",
+				Home:    "/home/andy",
+				GitRoot: "/home/andy/project/.claude/worktrees/some-feature",
+			},
+			"project:some-feature",
+		},
+		{
+			"non-git cwd falls back to basename",
+			Session{CWD: "/home/andy/scratch/dir", Home: "/home/andy"},
+			"dir",
+		},
+	}
+	for _, tc := range cases {
+		row := deriveMinimal(tc.s, now, "dir")
+		if row.dir != tc.want {
+			t.Errorf("%s: dir = %q, want %q", tc.name, row.dir, tc.want)
+		}
 	}
 }
 
@@ -1403,8 +1340,9 @@ func TestDeriveFullUsesSessionHome(t *testing.T) {
 		s    Session
 		want string
 	}{
-		{"local", Session{CWD: "/home/andy/project", Home: "/home/andy"}, "~/project"},
-		{"remote", Session{CWD: "/home/rue/service", Home: "/home/rue", Host: "beluga"}, "~/service"},
+		{"local, non-git", Session{CWD: "/home/andy/project", Home: "/home/andy"}, "~/project"},
+		{"remote, non-git", Session{CWD: "/home/rue/service", Home: "/home/rue", Host: "beluga"}, "~/service"},
+		{"local, git repo", Session{CWD: "/home/andy/project", Home: "/home/andy", GitRoot: "/home/andy/project"}, "project"},
 		// No Home (older server): no tilde collapse. cwdStr is post-squashPath,
 		// which abbreviates every non-tail component of the absolute path.
 		{"old remote", Session{CWD: "/home/rue/service", Host: "beluga"}, "/h/r/service"},
@@ -1833,18 +1771,15 @@ func TestRenderAllMatchesBuildTableFrame(t *testing.T) {
 
 func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 	now := time.Now().UnixMilli()
-	attached := 2
 	enabled := Session{
 		PID: 41, SessionID: "enabled", Name: "enabled", NameSource: "user",
 		CWD: "/work/enabled", Status: "busy", Entrypoint: "cli", UpdatedAt: now,
-		Tmux: "enabled:0.0", TmuxAttached: &attached,
 	}
 	disabled := enabled
 	disabled.PID = 42
 	disabled.SessionID = "disable"
 	disabled.Name = "disable"
 	disabled.CWD = "/work/disable"
-	disabled.Tmux = "disable:0.0"
 	disabled.Disabled = true
 
 	for _, mode := range []string{"1", "2", "3"} {
@@ -1857,7 +1792,7 @@ func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 			enabledRow := findRow(t, b.String(), enabled.Name)
 			disabledRow := findRow(t, b.String(), disabled.Name)
 
-			if !strings.HasPrefix(stripANSI(disabledRow), "▶ – ") {
+			if !strings.HasPrefix(stripANSI(disabledRow), "– ") {
 				t.Fatalf("mode %s disabled visible prefix = %q", mode, stripANSI(disabledRow))
 			}
 			if !strings.Contains(
@@ -1865,9 +1800,6 @@ func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 				colorize("33", "–")+" "+ansiDim,
 			) {
 				t.Fatalf("mode %s rail is not outside muted body: %q", mode, disabledRow)
-			}
-			if !strings.HasPrefix(disabledRow, ansiDim+"▶ "+ansiReset) {
-				t.Fatalf("mode %s viewer prefix is not muted: %q", mode, disabledRow)
 			}
 			if strings.Contains(enabledRow, "–") {
 				t.Fatalf("mode %s enabled row contains rail: %q", mode, enabledRow)
@@ -1978,18 +1910,17 @@ func TestHeadlessDisabledRowKeepsAmberRail(t *testing.T) {
 
 func TestSelectedDisabledRowsKeepBackgroundColorsAndAmberRail(t *testing.T) {
 	now := time.Now().UnixMilli()
-	attached := 2
 	for _, mode := range []string{"1", "2", "3"} {
 		session := Session{
 			PID: 42, SessionID: "disabled", Name: "disabled",
 			NameSource: "user", CWD: "/work/disabled",
 			Model: "claude-opus-4-8", Status: "busy", Entrypoint: "cli",
-			UpdatedAt: now, Tmux: "disabled:0.0", TmuxAttached: &attached,
-			Version: "1.2.3", CostUSD: 0.25, ContextTokens: 1000,
+			UpdatedAt: now,
+			Version:   "1.2.3", CostUSD: 0.25, ContextTokens: 1000,
 			Disabled: true,
 		}
 		row := renderSessionRowForTest(t, mode, session, true)
-		assertWholeRowSelected(t, row, "▶ – ")
+		assertWholeRowSelected(t, row, "– ")
 		if !strings.Contains(row, "\033[33m–\033[39m ") {
 			t.Fatalf(
 				"mode %s selected disabled row lacks amber rail: %q",
@@ -2011,31 +1942,6 @@ func TestSelectedDisabledRowsKeepBackgroundColorsAndAmberRail(t *testing.T) {
 				row,
 			)
 		}
-	}
-}
-
-// TestDisabledRailPreservesViewerPrefixWidth locks the two-slot case: a frame
-// whose session is both tmux-visible and disabled reserves the viewer AND rail
-// slots together, so the rail never displaces the viewer symbol. The row body
-// shows both (▶ then –, 4 cells) and the header indents by the same 4 cells to
-// stay aligned above it.
-func TestDisabledRailPreservesViewerPrefixWidth(t *testing.T) {
-	attached := 3
-	session := Session{
-		PID: 7, SessionID: "both", Name: "both", NameSource: "user",
-		CWD: "/work/both", Status: "idle",
-		Tmux: "dev:0.0", TmuxAttached: &attached, Disabled: true,
-	}
-	var out strings.Builder
-	RenderAll(&out, "1", testLocalHost(session), nil, "", nil, 0, 0, "dir")
-
-	row := findRow(t, out.String(), "both")
-	if !strings.HasPrefix(stripANSI(row), "▶ – ") {
-		t.Fatalf("disabled+visible row prefix = %q, want %q", stripANSI(row), "▶ – ")
-	}
-	header := findRow(t, out.String(), "PID")
-	if !strings.HasPrefix(header, "    PID") || strings.HasPrefix(header, "     PID") {
-		t.Fatalf("two-slot header indent not 4 cols: %q", header)
 	}
 }
 
@@ -2094,36 +2000,6 @@ func TestDisabledSessionReservesRailForAllRows(t *testing.T) {
 	}
 	if hdr := findRow(t, out, "PID"); !strings.HasPrefix(hdr, "  PID") {
 		t.Fatalf("header not indented by the rail slot: %q", hdr)
-	}
-}
-
-// TestAttachedTmuxSessionReservesViewerForAllRows covers a frame with one
-// tmux-visible session among non-tmux ones: the viewer slot is reserved for
-// every row, so a session with no tmux carries two blank viewer cells and stays
-// width-aligned with the ▶ row. No group or disabled session, so the viewer is
-// the only slot and the header indents by exactly it.
-func TestAttachedTmuxSessionReservesViewerForAllRows(t *testing.T) {
-	attached := 2
-	local := testLocalHost(
-		Session{PID: 1, SessionID: "vis", Name: "visible", NameSource: "user",
-			CWD: "/w/vis", Status: "idle", Entrypoint: "cli",
-			Tmux: "vis:0.0", TmuxAttached: &attached},
-		Session{PID: 2, SessionID: "pln", Name: "plainsesh", NameSource: "user",
-			CWD: "/w/pln", Status: "idle", Entrypoint: "cli"},
-	)
-	out := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{}))
-
-	visRow := findRow(t, out, "visible")
-	plainRow := findRow(t, out, "plainsesh")
-	if !strings.HasPrefix(stripANSI(visRow), "▶ ") {
-		t.Fatalf("tmux-visible row missing viewer symbol: %q", stripANSI(visRow))
-	}
-	if visualLen(visRow) != visualLen(plainRow) {
-		t.Fatalf("viewer slot not reserved uniformly: visible=%d plain=%d",
-			visualLen(visRow), visualLen(plainRow))
-	}
-	if hdr := findRow(t, out, "PID"); !strings.HasPrefix(hdr, "  PID") {
-		t.Fatalf("header not indented by the viewer slot: %q", hdr)
 	}
 }
 

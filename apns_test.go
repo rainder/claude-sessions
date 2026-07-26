@@ -43,7 +43,7 @@ func newTestAPNsClient(t *testing.T, handler http.Handler) (*apnsClient, *ecdsa.
 
 	c, err := newAPNsClientFromPEM(APNsConfig{
 		KeyID: "KEYID12345", TeamID: "TEAMID6789",
-		BundleID: "com.avisoma.claude-sessions", Environment: "production",
+		BundleID: "com.skerla.claude-sessions", Environment: "production",
 	}, pemBytes)
 	if err != nil {
 		t.Fatalf("newAPNsClientFromPEM: %v", err)
@@ -69,7 +69,7 @@ func TestAPNsSendSetsHeadersAndPath(t *testing.T) {
 
 	err := c.Send(context.Background(), pushRequest{
 		DeviceToken: "devtok",
-		Topic:       "com.avisoma.claude-sessions",
+		Topic:       "com.skerla.claude-sessions",
 		CollapseID:  "host:sess",
 		PushType:    "alert",
 		Priority:    "10",
@@ -81,7 +81,7 @@ func TestAPNsSendSetsHeadersAndPath(t *testing.T) {
 	if gotPath != "/3/device/devtok" {
 		t.Fatalf("path = %q, want %q", gotPath, "/3/device/devtok")
 	}
-	if gotTopic != "com.avisoma.claude-sessions" {
+	if gotTopic != "com.skerla.claude-sessions" {
 		t.Fatalf("apns-topic = %q", gotTopic)
 	}
 	if gotType != "alert" || gotPriority != "10" || gotCollapse != "host:sess" {
