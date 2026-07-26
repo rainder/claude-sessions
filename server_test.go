@@ -1412,3 +1412,145 @@ func TestSessionsResponseMatchesGolden(t *testing.T) {
 		}
 	}
 }
+
+func TestRegisterDeviceStoresToken(t *testing.T) {
+	store := loadDeviceStore("", fixedClock(time.Now()))
+	s := &server{token: "secret", devices: store}
+
+	body := strings.NewReader(`{"device_token":"abc123","environment":"sandbox","platform":"ios"}`)
+	req := httptest.NewRequest(http.MethodPost, "/devices", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.registerDevice(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	got := store.List()
+	if len(got) != 1 || got[0].Token != "abc123" {
+		t.Fatalf("devices = %+v, want one token abc123", got)
+	}
+	if got[0].Environment != "sandbox" {
+		t.Fatalf("Environment = %q, want %q", got[0].Environment, "sandbox")
+	}
+}
+
+// Re-registering the same token is the normal path: the app registers on every
+// launch because APNs tokens change on restore, reinstall, and some upgrades.
+func TestRegisterDeviceIsIdempotent(t *testing.T) {
+	store := loadDeviceStore("", fixedClock(time.Now()))
+	s := &server{token: "secret", devices: store}
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/devices",
+			strings.NewReader(`{"device_token":"abc123","environment":"production"}`))
+		req.Header.Set("Authorization", "Bearer secret")
+		rec := httptest.NewRecorder()
+		s.registerDevice(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d on attempt %d", rec.Code, i)
+		}
+	}
+	if got := store.List(); len(got) != 1 {
+		t.Fatalf("devices = %+v, want one after repeated registration", got)
+	}
+}
+
+func TestRegisterDeviceRejectsBadInput(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"empty token", `{"device_token":""}`},
+		{"bad environment", `{"device_token":"abc","environment":"staging"}`},
+		{"not json", `nope`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := loadDeviceStore("", fixedClock(time.Now()))
+			s := &server{token: "secret", devices: store}
+			req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+
+			s.registerDevice(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+			if got := store.List(); len(got) != 0 {
+				t.Fatalf("stored a device from bad input: %+v", got)
+			}
+		})
+	}
+}
+
+func TestRegisterDeviceUnauthorized(t *testing.T) {
+	store := loadDeviceStore("", fixedClock(time.Now()))
+	s := &server{token: "secret", devices: store}
+	req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(`{"device_token":"abc"}`))
+	rec := httptest.NewRecorder()
+
+	s.registerDevice(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if got := store.List(); len(got) != 0 {
+		t.Fatalf("stored a device without auth: %+v", got)
+	}
+}
+
+func TestUnregisterDeviceRemovesToken(t *testing.T) {
+	store := loadDeviceStore("", fixedClock(time.Now()))
+	store.Upsert(Device{Token: "abc123"})
+	s := &server{token: "secret", devices: store}
+
+	req := httptest.NewRequest(http.MethodDelete, "/devices/abc123", nil)
+	req.SetPathValue("token", "abc123")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.unregisterDevice(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if got := store.List(); len(got) != 0 {
+		t.Fatalf("devices = %+v, want empty", got)
+	}
+}
+
+func TestUnregisterDeviceUnauthorized(t *testing.T) {
+	store := loadDeviceStore("", fixedClock(time.Now()))
+	store.Upsert(Device{Token: "abc123"})
+	s := &server{token: "secret", devices: store}
+
+	req := httptest.NewRequest(http.MethodDelete, "/devices/abc123", nil)
+	req.SetPathValue("token", "abc123")
+	rec := httptest.NewRecorder()
+
+	s.unregisterDevice(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if got := store.List(); len(got) != 1 {
+		t.Fatalf("unauthenticated delete removed a device: %+v", got)
+	}
+}
+
+// A server built without notification support must not panic on these routes.
+func TestDeviceRoutesWithoutRegistry(t *testing.T) {
+	s := &server{token: "secret"}
+	req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(`{"device_token":"abc"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.registerDevice(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}

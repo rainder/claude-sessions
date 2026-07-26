@@ -93,6 +93,11 @@ type server struct {
 	// so tests exercise the handler without a real git repo.
 	removeTree func(string) error
 
+	// devices is the push registry; nil when this server was built without
+	// notification support, in which case the /devices routes report 503 rather
+	// than panicking.
+	devices *DeviceStore
+
 	sessionCache sessionCache
 
 	// paste is the remote-image-paste broker (see paste.go); pb() lazily
@@ -568,6 +573,63 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, actionResult{OK: true, Tmux: tname})
 }
 
+// registerDevice records an APNs device token for push delivery.
+// POST /devices {"device_token": "...", "environment": "...", "platform": "..."}
+//
+// Upsert-by-token, so the app can (and should) re-register on every launch:
+// APNs tokens change on restore, reinstall, and some OS upgrades, and a
+// registration treated as permanent becomes a phone that silently stops
+// receiving alerts.
+func (s *server) registerDevice(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.devices == nil {
+		http.Error(w, "notifications not configured on this host", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		DeviceToken string `json:"device_token"`
+		Platform    string `json:"platform"`
+		Environment string `json:"environment"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if body.DeviceToken == "" || len(body.DeviceToken) > 200 {
+		http.Error(w, "device_token required", http.StatusBadRequest)
+		return
+	}
+	switch body.Environment {
+	case "", "production", "sandbox":
+	default:
+		http.Error(w, "environment must be production or sandbox", http.StatusBadRequest)
+		return
+	}
+	s.devices.Upsert(Device{
+		Token:       body.DeviceToken,
+		Platform:    body.Platform,
+		Environment: body.Environment,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// unregisterDevice drops a device token. DELETE /devices/{token}
+func (s *server) unregisterDevice(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.devices == nil {
+		http.Error(w, "notifications not configured on this host", http.StatusServiceUnavailable)
+		return
+	}
+	s.devices.Remove(r.PathValue("token"))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // serverTokenPath is the on-disk location of the shared bearer token, or "" if
 // there's no home directory.
 func serverTokenPath() string {
@@ -759,6 +821,7 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 		hostSnapshot:       hostUsageHub.Snapshot,
 		usageSnapshot:      usageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
+		devices:            LoadDeviceStore(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
@@ -772,6 +835,8 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 	mux.HandleFunc("POST /sessions/{pid}/migrate", s.migrate)
 	mux.HandleFunc("POST /sessions/new", s.newSession)
 	mux.HandleFunc("POST /worktree/remove", s.removeWorktree)
+	mux.HandleFunc("POST /devices", s.registerDevice)
+	mux.HandleFunc("DELETE /devices/{token}", s.unregisterDevice)
 	mux.HandleFunc("GET /paste-wait", s.pasteWait)
 	mux.HandleFunc("POST /paste-request", s.pasteRequest)
 	mux.HandleFunc("POST /paste", s.pasteUpload)
