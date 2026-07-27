@@ -2394,6 +2394,40 @@ func TestTextFilterComposition(t *testing.T) {
 	}
 }
 
+func TestHideDisabledFilterComposition(t *testing.T) {
+	rows := []Session{
+		{PID: 1, Name: "api", CWD: "/w", SessionID: "sid-a", Disabled: false},
+		{PID: 2, Name: "web", CWD: "/w", SessionID: "sid-b", Disabled: true},
+		{PID: 3, Name: "db", CWD: "/w", SessionID: "sid-c", Disabled: true},
+	}
+
+	// hideDisabled alone drops the two disabled rows.
+	got := filterSessionRows(rows, groupView{hideDisabled: true})
+	if len(got) != 1 || got[0].PID != 1 {
+		t.Fatalf("hideDisabled should keep only the enabled row, got %+v", got)
+	}
+
+	// hideDisabled composes (AND) with the text query.
+	gv := groupView{hideDisabled: true, query: "db"}
+	got = filterSessionRows(rows, gv)
+	if len(got) != 0 {
+		t.Fatalf("hideDisabled AND text query should drop the disabled match, got %+v", got)
+	}
+
+	// hideDisabled false (default) leaves disabled rows in.
+	all := filterSessionRows(rows, groupView{})
+	if len(all) != len(rows) || &all[0] != &rows[0] {
+		t.Fatalf("hideDisabled=false should return rows unchanged (same backing array)")
+	}
+
+	// filterRemoteResults threads hideDisabled through per-host Sessions too.
+	remotes := []RemoteResult{{Name: "host1", Sessions: rows}}
+	gotRemote := filterRemoteResults(remotes, groupView{hideDisabled: true})
+	if len(gotRemote) != 1 || len(gotRemote[0].Sessions) != 1 || gotRemote[0].Sessions[0].PID != 1 {
+		t.Fatalf("filterRemoteResults should apply hideDisabled per host, got %+v", gotRemote)
+	}
+}
+
 func TestTextFilterHeaderIndicator(t *testing.T) {
 	local := testLocalHost(Session{PID: 1, Name: "n", CWD: "/w", SessionID: "s"})
 

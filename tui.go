@@ -101,10 +101,13 @@ func RunTUI(interval time.Duration) error {
 	// '/'-driven free-text filter (also runtime-only); its effective query
 	// composes with groupFilterState (AND). groups is a per-settle snapshot of the
 	// store's assignments, reused for badge rendering and the filter predicate.
+	// hideDisabled is the 'd' toggle (also runtime-only) that composes (AND) with
+	// the group filter and text query.
 	store := LoadSessionStore()
 	var groupFilterState groupFilter
 	var pendingHide bool
 	var textFilter textFilterState
+	var hideDisabled bool
 	var groups map[string]int
 	var lastStateTouch time.Time
 	var local []Session
@@ -213,7 +216,7 @@ func RunTUI(interval time.Duration) error {
 		// Targets mirror exactly what the frame renders: filtered by the active
 		// group and text query so a filtered-out selection falls back via
 		// validateTargetSel.
-		gv := groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery()}
+		gv := groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled}
 		targets = buildSelectionTargets(
 			filterSessionRows(local, gv),
 			filterRemoteResults(remotes, gv),
@@ -290,7 +293,7 @@ func RunTUI(interval time.Duration) error {
 		}, remotes, state.sel, &LocalUsage{
 			Claude: usageHub.Snapshot(),
 			Codex:  codexUsageHub.Snapshot(),
-		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery()})
+		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if rows > 0 {
@@ -562,6 +565,11 @@ func RunTUI(interval time.Duration) error {
 					state.requestSelectionAnchor()
 					render()
 				}
+			case "d", "D":
+				hideDisabled = !hideDisabled
+				settleRows()
+				state.requestSelectionAnchor()
+				render()
 			case "!", "@", "#", "$", "%", "^", "&", "*", "(":
 				// Shift+1..9 assign the selected session's group (single membership;
 				// same group again ungroups). Sessions with no SessionID are ignored.
@@ -955,7 +963,7 @@ func visibleSessionIDs(local []Session, remotes []RemoteResult) []string {
 }
 
 func sessionFooter() string {
-	return dim("-/+ disable/enable  ·  1-9 only  ·  h1-9 hide  ·  ⇧1-9 group  ·  / search  ·  ? help")
+	return dim("-/+ disable/enable  ·  d hide disabled  ·  1-9 only  ·  h1-9 hide  ·  ⇧1-9 group  ·  / search  ·  ? help")
 }
 
 func sessionBottomRow(toast string, toastActive bool) string {
@@ -996,6 +1004,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    m            cycle mode (full → intermediate → minimal)  ·  persisted")
 	fmt.Fprintln(&b, "    1..9         show only group (same digit or 0 shows all)")
 	fmt.Fprintln(&b, "    h then 1..9  hide group(s) (repeat to add/remove · last one shows all)")
+	fmt.Fprintln(&b, "    d            hide/show disabled sessions")
 	fmt.Fprintln(&b, "    /            filter rows by text (type to narrow · Enter commits · Esc clears)")
 	fmt.Fprintln(&b, "    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
 	fmt.Fprintln(&b, "                 current sort: "+sortMode)

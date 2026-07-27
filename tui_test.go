@@ -54,7 +54,7 @@ func TestSortDescStatus(t *testing.T) {
 
 func TestSessionDisableFooterAndHelp(t *testing.T) {
 	footer := sessionFooter()
-	for _, want := range []string{"-/+ disable/enable", "1-9 only", "h1-9 hide", "⇧1-9 group", "/ search"} {
+	for _, want := range []string{"-/+ disable/enable", "d hide disabled", "1-9 only", "h1-9 hide", "⇧1-9 group", "/ search"} {
 		if !strings.Contains(footer, want) {
 			t.Fatalf("footer %q missing %q", footer, want)
 		}
@@ -73,6 +73,7 @@ func TestSessionDisableFooterAndHelp(t *testing.T) {
 		"- / +        disable / enable session",
 		"1..9         show only group (same digit or 0 shows all)",
 		"h then 1..9  hide group(s) (repeat to add/remove · last one shows all)",
+		"d            hide/show disabled sessions",
 		"/            filter rows by text (type to narrow · Enter commits · Esc clears)",
 		"claude-sessions preview PID",
 		"claude-sessions tmux-info PID",

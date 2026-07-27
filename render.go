@@ -98,8 +98,9 @@ var groupSGR = map[int]string{
 // groupView carries the client-side view state threaded through the render
 // path: the sessionID→group map (for badges and the filter predicate), the
 // active group filter (zero value = no filter), the free-text query (empty =
-// no text filter), and the per-frame first-column slot reservations. The group
-// filter and the query compose (AND) in filterSessionRows / filterRemoteResults.
+// no text filter), the hideDisabled toggle, and the per-frame first-column
+// slot reservations. The group filter, the query, and hideDisabled all
+// compose (AND) in filterSessionRows / filterRemoteResults.
 // showBadge, showRail and showNoTmux each gate one 2-char indicator slot
 // (group badge, disabled rail, not-in-tmux marker), and are set by
 // BuildTableFrame once it knows which slots at least one visible session
@@ -110,12 +111,13 @@ var groupSGR = map[int]string{
 // view already spells out tmux state in its own TMUX column, so it never
 // reserves this slot.
 type groupView struct {
-	groups     map[string]int
-	filter     groupFilter
-	query      string
-	showBadge  bool
-	showRail   bool
-	showNoTmux bool
+	groups       map[string]int
+	filter       groupFilter
+	query        string
+	hideDisabled bool
+	showBadge    bool
+	showRail     bool
+	showNoTmux   bool
 }
 
 // groupOf returns the group assigned to s (1..9), or 0 for an ungrouped session
@@ -1078,12 +1080,12 @@ type section struct {
 // text filter can match the host name. With neither filter active, rows are
 // returned unchanged (same backing array).
 func filterSessionRows(rows []Session, gv groupView) []Session {
-	if gv.filter.mode == filterNone && gv.query == "" {
+	if gv.filter.mode == filterNone && gv.query == "" && !gv.hideDisabled {
 		return rows
 	}
 	out := make([]Session, 0, len(rows))
 	for _, s := range rows {
-		if passesGroupFilter(s, gv.groups, gv.filter) && matchesTextFilter(s, s.Host, gv.query) {
+		if passesGroupFilter(s, gv.groups, gv.filter) && matchesTextFilter(s, s.Host, gv.query) && (!gv.hideDisabled || !s.Disabled) {
 			out = append(out, s)
 		}
 	}
@@ -1096,7 +1098,7 @@ func filterSessionRows(rows []Session, gv groupView) []Session {
 // their heading + the empty-host row. With neither filter active the input is
 // returned unchanged.
 func filterRemoteResults(remotes []RemoteResult, gv groupView) []RemoteResult {
-	if gv.filter.mode == filterNone && gv.query == "" {
+	if gv.filter.mode == filterNone && gv.query == "" && !gv.hideDisabled {
 		return remotes
 	}
 	out := make([]RemoteResult, len(remotes))
