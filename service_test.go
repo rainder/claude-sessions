@@ -1208,6 +1208,30 @@ func TestPortInUseSkipsUnresolvableBind(t *testing.T) {
 	}
 }
 
+// An IPv6 literal is a real address whether or not the user bracketed it, so
+// the pre-flight must actually run for both spellings. Using a bare ParseIP
+// here instead of unbracket would silently skip the check for `[::]` — a bind
+// cmdServer itself accepts, via the same helpers this now shares with it.
+func TestPortInUseRunsForBracketedIPv6(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback on this host: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	for _, bind := range []string{"::1", "[::1]"} {
+		occupied, err := portInUse(bind, port)
+		if err != nil {
+			t.Errorf("portInUse(%q, %d) error = %v, want nil", bind, port, err)
+			continue
+		}
+		if !occupied {
+			t.Errorf("portInUse(%q, %d) = false, want true — the pre-flight skipped a real address", bind, port)
+		}
+	}
+}
+
 // portOccupied's classification: only a real EADDRINUSE means "occupied".
 // EACCES (privileged port, non-root) and EADDRNOTAVAIL (--bind address not on
 // this host) describe no listener to stop at all, and folding them into

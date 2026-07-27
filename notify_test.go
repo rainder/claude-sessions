@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -284,10 +286,114 @@ func (f *fakeSender) Send(ctx context.Context, req pushRequest) error {
 	return f.err
 }
 
+// requests returns what was sent, sorted by device token. Arrival order is not
+// meaningful now the fan-out is concurrent, and sorting here is the cheap fix —
+// the alternative is serialising production code to keep an assertion happy.
 func (f *fakeSender) requests() []pushRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	out := append([]pushRequest(nil), f.sent...)
+	sort.Slice(out, func(i, j int) bool { return out[i].DeviceToken < out[j].DeviceToken })
+	return out
+}
+
+// inOrder returns what was sent, in the order it was sent.
+//
+// Only meaningful with a single device — the fan-out across devices is
+// concurrent and its order is not — but "the clear followed the alert it
+// retracts" is exactly a one-device question, and requests() sorts that answer
+// away.
+func (f *fakeSender) inOrder() []pushRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return append([]pushRequest(nil), f.sent...)
+}
+
+// stallingSender never answers for the nominated tokens and answers every other
+// one immediately.
+//
+// It models the real transport in the way that matters here: once the context
+// is done, c.http.Do fails at once (apns.go:193-195), so a device dispatched
+// behind an exhausted budget never reaches Apple at all.
+type stallingSender struct {
+	stalls map[string]bool
+
+	mu       sync.Mutex
+	accepted []string
+}
+
+func newStallingSender(tokens ...string) *stallingSender {
+	s := &stallingSender{stalls: map[string]bool{}}
+	for _, t := range tokens {
+		s.stalls[t] = true
+	}
+	return s
+}
+
+func (s *stallingSender) Send(ctx context.Context, req pushRequest) error {
+	// Block outside the lock. Holding it across the wait would serialise every
+	// goroutine and make a correct concurrent fan-out look broken.
+	if s.stalls[req.DeviceToken] {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accepted = append(s.accepted, req.DeviceToken)
+	return nil
+}
+
+// acceptedTokens returns the tokens that actually got a push, sorted.
+func (s *stallingSender) acceptedTokens() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]string(nil), s.accepted...)
+	sort.Strings(out)
+	return out
+}
+
+// recordingStaller records every arrival and the budget it was handed, then
+// blocks until that budget runs out. Nothing ever succeeds, so what it measures
+// is purely what each device was given to work with.
+type recordingStaller struct {
+	mu           sync.Mutex
+	arrived      []string
+	expired      []string
+	minRemaining time.Duration
+	seen         bool
+}
+
+func (s *recordingStaller) Send(ctx context.Context, req pushRequest) error {
+	remaining := time.Duration(0)
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining = time.Until(deadline)
+	}
+	s.mu.Lock()
+	s.arrived = append(s.arrived, req.DeviceToken)
+	if ctx.Err() != nil {
+		s.expired = append(s.expired, req.DeviceToken)
+	}
+	if !s.seen || remaining < s.minRemaining {
+		s.seen, s.minRemaining = true, remaining
+	}
+	s.mu.Unlock()
+
+	// Block outside the lock, or every goroutine serialises here.
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (s *recordingStaller) result() (arrived, expired []string, minRemaining time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := append([]string(nil), s.arrived...)
+	e := append([]string(nil), s.expired...)
+	sort.Strings(a)
+	sort.Strings(e)
+	return a, e, s.minRemaining
 }
 
 // snapshotCollector replays a fixed sequence of snapshots, repeating the last.
@@ -396,6 +502,250 @@ func TestNotifyHubPushesAlertsToEveryDevice(t *testing.T) {
 	}
 }
 
+// One device that never answers must not cost every device behind it its push.
+//
+// The tracker moves the session to phaseAlerted the moment the event is
+// produced, and only a change of waitingFor produces another alert, so a push
+// lost here is never retried: a starved device does not learn about that wait
+// late, it never learns about it at all.
+func TestNotifyHubStalledDeviceDoesNotStarveTheRest(t *testing.T) {
+	// A serial fan-out can fit only tickBudget/sendBudget sends into one tick,
+	// so this many stalled devices exhausts it and every device behind them
+	// fails on an already-expired context. Concurrently they cost one budget
+	// between them. Keep the total inside maxConcurrentSends so the assertion is
+	// about starvation and not about queueing.
+	stalled := tickBudgetTicks/sendBudgetTicks + 1
+	healthy := []string{"zz-a", "zz-b", "zz-c"}
+
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	var stallTokens []string
+	for i := 0; i < stalled; i++ {
+		// DeviceStore.List sorts by token, so "aa-" lands ahead of "zz-": the
+		// stallers go first, which is the worst case and the one that repeats
+		// identically every tick because tokens never change.
+		tok := fmt.Sprintf("aa-stall-%d", i)
+		stallTokens = append(stallTokens, tok)
+		devices.Upsert(Device{Token: tok, Environment: "sandbox"})
+	}
+	for _, tok := range healthy {
+		devices.Upsert(Device{Token: tok, Environment: "sandbox"})
+	}
+	if total := stalled + len(healthy); total > maxConcurrentSends {
+		t.Fatalf("test needs %d concurrent slots, pool has %d", total, maxConcurrentSends)
+	}
+	sender := newStallingSender(stallTokens...)
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "i", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect:  snapshotCollector(nil, waiting, waiting),
+		Interval: 20 * time.Millisecond,
+	})
+	defer h.Shutdown()
+
+	// Baseline, debounce, alert — under the same per-tick budget run() uses.
+	for n := 0; n < 3; n++ {
+		ctx, cancel := context.WithTimeout(context.Background(), h.tickBudget())
+		h.tickOnce(ctx)
+		cancel()
+	}
+
+	got := strings.Join(sender.acceptedTokens(), ",")
+	if want := strings.Join(healthy, ","); got != want {
+		t.Fatalf("devices that received a push = %q, want %q — stalled devices starved the rest", got, want)
+	}
+	// A timeout is not evidence a token is dead, so nothing is pruned.
+	if n := len(devices.List()); n != stalled+len(healthy) {
+		t.Fatalf("registry has %d devices, want %d — a stalled device must not be pruned", n, stalled+len(healthy))
+	}
+}
+
+// The invariant has to hold at the registry cap, not just for a handful of
+// phones. Every registered device stalls, and every one of them must still get
+// a send attempt on a context that has not already run out.
+//
+// context.WithTimeout takes the EARLIER of the parent's deadline and the new
+// one, so a device that queues behind a full worker pool inherits the remains
+// of the tick budget rather than its own. The only thing that makes the
+// per-device budget real is every device starting in the first round — which is
+// why maxConcurrentSends covers the whole registry.
+func TestNotifyHubGivesEveryDeviceInAFullRegistryALiveBudget(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	for i := 0; i < maxRegisteredDevices; i++ {
+		devices.Upsert(Device{Token: fmt.Sprintf("dev-%02d", i), Environment: "sandbox"})
+	}
+	sender := &recordingStaller{}
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "i", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect:  snapshotCollector(nil, waiting, waiting),
+		Interval: 50 * time.Millisecond,
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 3; n++ {
+		ctx, cancel := context.WithTimeout(context.Background(), h.tickBudget())
+		h.tickOnce(ctx)
+		cancel()
+	}
+
+	arrived, expired, minRemaining := sender.result()
+	if len(arrived) != maxRegisteredDevices {
+		t.Fatalf("%d of %d devices got a send attempt — the tail starved waiting for a worker slot",
+			len(arrived), maxRegisteredDevices)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("%d devices were handed an already-expired context: %v", len(expired), expired)
+	}
+	// Not the full budget to the nanosecond — 32 goroutines take a moment to
+	// get going — but nowhere near the truncated remainder a second round gets.
+	if floor := h.sendBudget() / 2; minRemaining < floor {
+		t.Fatalf("thinnest budget handed to a device = %v, want at least %v of a %v budget",
+			minRemaining, floor, h.sendBudget())
+	}
+}
+
+// barrierSender answers only once every device has arrived, so it can complete
+// at all only if the sends genuinely overlap. A serial fan-out wedges on the
+// first device until the tick budget runs out.
+type barrierSender struct {
+	want    int
+	release chan struct{}
+
+	mu       sync.Mutex
+	inflight int
+	peak     int
+	sent     []string
+}
+
+func newBarrierSender(want int) *barrierSender {
+	return &barrierSender{want: want, release: make(chan struct{})}
+}
+
+func (s *barrierSender) Send(ctx context.Context, req pushRequest) error {
+	s.mu.Lock()
+	s.inflight++
+	if s.inflight > s.peak {
+		s.peak = s.inflight
+	}
+	if s.inflight == s.want {
+		close(s.release)
+	}
+	s.mu.Unlock()
+
+	// Wait outside the lock. Waiting inside it would serialise every goroutine
+	// and guarantee the deadlock this test exists to rule out.
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		s.mu.Lock()
+		s.inflight--
+		s.mu.Unlock()
+		return ctx.Err()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inflight--
+	s.sent = append(s.sent, req.DeviceToken)
+	return nil
+}
+
+func (s *barrierSender) result() (peak int, sent int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peak, len(s.sent)
+}
+
+// The fan-out must actually overlap. APNs is HTTP/2 to one host and net/http
+// multiplexes the streams, so this is the shape the protocol wants — and it is
+// what makes one device's stall stop mattering to the others.
+func TestNotifyHubSendsToDevicesConcurrently(t *testing.T) {
+	const n = 4
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	for i := 0; i < n; i++ {
+		devices.Upsert(Device{Token: fmt.Sprintf("dev-%d", i), Environment: "sandbox"})
+	}
+	sender := newBarrierSender(n)
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "i", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect:  snapshotCollector(nil, waiting, waiting),
+		Interval: 50 * time.Millisecond,
+	})
+	defer h.Shutdown()
+
+	for k := 0; k < 3; k++ {
+		ctx, cancel := context.WithTimeout(context.Background(), h.tickBudget())
+		h.tickOnce(ctx)
+		cancel()
+	}
+
+	peak, sent := sender.result()
+	if sent != n {
+		t.Fatalf("%d of %d devices completed — the sends did not overlap", sent, n)
+	}
+	if peak != n {
+		t.Fatalf("peak concurrent sends = %d, want %d", peak, n)
+	}
+}
+
+// DeviceStore.List sorts by token and tokens are stable, so a fan-out that
+// always walks it in order puts the same device last on every tick of every
+// day. The sort is load-bearing for devices.json determinism, so the rotation
+// lives here instead.
+func TestNotifyHubRotatesDispatchOrder(t *testing.T) {
+	h := newNotifyHub(notifyHubOptions{
+		Devices: loadDeviceStore("", fixedClock(time.Now())),
+		Sender:  &fakeSender{},
+		Collect: func() ([]Session, error) { return nil, nil },
+	})
+	defer h.Shutdown()
+
+	sorted := []Device{{Token: "a"}, {Token: "b"}, {Token: "c"}}
+	var leaders []string
+	for n := 0; n < len(sorted); n++ {
+		got := h.rotated(sorted)
+		seen := map[string]bool{}
+		for _, d := range got {
+			seen[d.Token] = true
+		}
+		if len(got) != len(sorted) || len(seen) != len(sorted) {
+			t.Fatalf("rotation %d = %+v, want the same three devices", n, got)
+		}
+		leaders = append(leaders, got[0].Token)
+	}
+	if got, want := strings.Join(leaders, ","), "a,b,c"; got != want {
+		t.Fatalf("leading device across rotations = %q, want %q", got, want)
+	}
+	if sorted[0].Token != "a" {
+		t.Fatalf("rotation mutated its input: %+v", sorted)
+	}
+}
+
+// The per-device timeout used to be a bare 10s constant inside an 8s parent
+// context, so it could never fire — the deadline meant to contain a stall was
+// decorative, and that is the specific lie that hid the starvation. Both bounds
+// now come from the interval, and the smaller one must stay smaller.
+func TestNotifyHubSendBudgetIsReachableInsideTheTickBudget(t *testing.T) {
+	for _, interval := range []time.Duration{0, 20 * time.Millisecond, notifyTickInterval, time.Minute} {
+		h := newNotifyHub(notifyHubOptions{
+			Interval: interval,
+			Devices:  loadDeviceStore("", fixedClock(time.Now())),
+			Sender:   &fakeSender{},
+			Collect:  func() ([]Session, error) { return nil, nil },
+		})
+		if send, tick := h.sendBudget(), h.tickBudget(); send >= tick {
+			t.Fatalf("interval %v: per-device budget %v is not reachable inside the tick budget %v", interval, send, tick)
+		}
+	}
+}
+
 func TestNotifyHubPrunesGoneDevices(t *testing.T) {
 	devices := loadDeviceStore("", fixedClock(time.Now()))
 	devices.Upsert(Device{Token: "dead"})
@@ -475,17 +825,21 @@ func TestNotifyHubShutdownIsIdempotent(t *testing.T) {
 	h.Shutdown()
 }
 
-// Clear events have no consumer until Live Activities land. The hub must not
-// try to push them as alerts in the meantime.
-func TestNotifyHubDoesNotPushClears(t *testing.T) {
+// Answering a prompt at the keyboard has to take the card off the phone, and the
+// only thing that knows the prompt was answered is this hub.
+//
+// The clear must name the wait that was alerted, not a new one: the app removes
+// exactly the delivered notification carrying that event_id, so a re-derived
+// generation would match nothing and the card would sit there forever.
+func TestNotifyHubPushesAClearWhenAWaitEnds(t *testing.T) {
 	devices := loadDeviceStore("", fixedClock(time.Now()))
-	devices.Upsert(Device{Token: "dev"})
+	devices.Upsert(Device{Token: "dev", Environment: "sandbox"})
 	sender := &fakeSender{}
 
 	waiting := []Session{waitingSession("abc-123", "permission prompt")}
 	idle := []Session{idleSession("abc-123")}
 	h := newNotifyHub(notifyHubOptions{
-		HostName: "h", HostID: "i", BundleID: "b",
+		HostName: "myserver", HostID: "9f2c", BundleID: "com.skerla.claude-sessions",
 		Devices: devices, Sender: sender,
 		Collect: snapshotCollector(nil, waiting, waiting, idle),
 	})
@@ -495,9 +849,199 @@ func TestNotifyHubDoesNotPushClears(t *testing.T) {
 		h.tickOnce(context.Background())
 	}
 
-	if got := sender.requests(); len(got) != 1 {
-		t.Fatalf("sent %d pushes, want only the alert: %+v", len(got), got)
+	got := sender.inOrder()
+	if len(got) != 2 {
+		t.Fatalf("sent %d pushes, want an alert then a clear: %+v", len(got), got)
 	}
+	alert, clear := got[0], got[1]
+
+	if alert.PushType != "alert" || alert.Priority != "10" {
+		t.Fatalf("alert push type/priority = %q/%q, want alert/10", alert.PushType, alert.Priority)
+	}
+	// APNs rejects a background push sent at priority 10 outright, which
+	// produces a clear that silently never arrives.
+	if clear.PushType != "background" || clear.Priority != "5" {
+		t.Fatalf("clear push type/priority = %q/%q, want background/5", clear.PushType, clear.Priority)
+	}
+	if clear.Environment != "sandbox" {
+		t.Fatalf("clear environment = %q, want the device's own", clear.Environment)
+	}
+	if clear.Topic != "com.skerla.claude-sessions" {
+		t.Fatalf("clear topic = %q", clear.Topic)
+	}
+	// Identical, so a clear replaces an undelivered alert for that session in
+	// APNs's queue rather than queueing behind it.
+	if alert.CollapseID != clear.CollapseID {
+		t.Fatalf("collapse ids differ: alert %q, clear %q", alert.CollapseID, clear.CollapseID)
+	}
+	if eventIDOf(t, alert) != eventIDOf(t, clear) {
+		t.Fatalf("event ids differ: alert %q, clear %q", eventIDOf(t, alert), eventIDOf(t, clear))
+	}
+	if eventIDOf(t, clear) != "9f2c:abc-123:1" {
+		t.Fatalf("clear event_id = %q, want the alerted generation", eventIDOf(t, clear))
+	}
+}
+
+// The generation the clear carries is the one that was alerted, not the one the
+// tracker happens to be on. A session re-alerted for a different prompt has two
+// live generations, and clearing the first would leave the second card on screen
+// with nothing left to remove it.
+func TestNotifyHubClearCarriesTheGenerationThatWasAlerted(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{}
+
+	first := []Session{waitingSession("abc-123", "permission prompt")}
+	second := []Session{waitingSession("abc-123", "a different prompt")}
+	idle := []Session{idleSession("abc-123")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "9f2c", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: snapshotCollector(nil, first, first, second, idle),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 5; n++ {
+		h.tickOnce(context.Background())
+	}
+
+	got := sender.inOrder()
+	if len(got) != 3 {
+		t.Fatalf("sent %d pushes, want two alerts and a clear: %+v", len(got), got)
+	}
+	if want := "9f2c:abc-123:2"; eventIDOf(t, got[2]) != want {
+		t.Fatalf("clear event_id = %q, want %q (the second wait)", eventIDOf(t, got[2]), want)
+	}
+}
+
+// A session that exits while it is waiting never stops waiting — it just stops
+// being there. Its card has to go too.
+func TestNotifyHubPushesAClearWhenASessionDisappears(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{}
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "9f2c", BundleID: "b",
+		Devices: devices, Sender: sender,
+		// Two absent ticks: one absence is indistinguishable from a
+		// half-written session file.
+		Collect: snapshotCollector(nil, waiting, waiting, nil, nil),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 4; n++ {
+		h.tickOnce(context.Background())
+	}
+	if got := sender.inOrder(); len(got) != 1 {
+		t.Fatalf("one missed tick already cleared: %+v", got)
+	}
+	h.tickOnce(context.Background())
+
+	got := sender.inOrder()
+	if len(got) != 2 {
+		t.Fatalf("sent %d pushes, want the alert and a clear: %+v", len(got), got)
+	}
+	if got[1].PushType != "background" || got[1].Priority != "5" {
+		t.Fatalf("clear push type/priority = %q/%q", got[1].PushType, got[1].Priority)
+	}
+	if want := "9f2c:abc-123:1"; eventIDOf(t, got[1]) != want {
+		t.Fatalf("clear event_id = %q, want %q", eventIDOf(t, got[1]), want)
+	}
+}
+
+// A background push carrying an alert is not a background push: iOS shows it,
+// and the user gets a blank notification every time they answer a prompt.
+func TestBuildClearPayloadShape(t *testing.T) {
+	raw := buildClearPayload("9f2c", notifyEvent{
+		Kind: notifyClear, SessionID: "abc-123", PID: 41234,
+		CWD: "/Users/x/trecs-brain", Name: "trecs-brain",
+		WaitingFor: "permission prompt", Generation: 6,
+	})
+
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v — %s", err, raw)
+	}
+	aps, ok := got["aps"].(map[string]any)
+	if !ok {
+		t.Fatalf("no aps dictionary in %s", raw)
+	}
+	if aps["content-available"] != float64(1) {
+		t.Fatalf("content-available = %v, want 1", aps["content-available"])
+	}
+	if len(aps) != 1 {
+		t.Fatalf("aps = %v, want content-available and nothing else", aps)
+	}
+	if got["event_id"] != "9f2c:abc-123:6" {
+		t.Fatalf("event_id = %v", got["event_id"])
+	}
+	if got["cleared"] != true {
+		t.Fatalf("cleared = %v, want true", got["cleared"])
+	}
+	if got["host_id"] != "9f2c" || got["session_id"] != "abc-123" {
+		t.Fatalf("identity fields = %v", got)
+	}
+	// The prompt text is what the alert said; repeating it in a push nobody
+	// sees is payload spent on nothing.
+	if _, ok := got["waiting_for"]; ok {
+		t.Fatalf("clear carries waiting_for: %s", raw)
+	}
+}
+
+// The alert and the clear for one wait are matched by the app on event_id and by
+// APNs on collapse id. A realistic pair — a 32-hex host id and a UUID session id
+// — is 69 characters, which is over the 64 APNs allows, so both are truncated
+// today. That is fine only while they truncate to the same bytes.
+func TestAlertAndClearShareACollapseIDEvenWhenTruncated(t *testing.T) {
+	hostID := strings.Repeat("a", 32)
+	sessionID := "6f1d2c3b-4a59-4e6f-8b0c-1d2e3f4a5b6c"
+
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{}
+
+	waiting := []Session{waitingSession(sessionID, "permission prompt")}
+	idle := []Session{idleSession(sessionID)}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: hostID, BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: snapshotCollector(nil, waiting, waiting, idle),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 4; n++ {
+		h.tickOnce(context.Background())
+	}
+
+	got := sender.inOrder()
+	if len(got) != 2 {
+		t.Fatalf("sent %d pushes, want an alert and a clear: %+v", len(got), got)
+	}
+	// The premise of this test: without it, equal-and-short would pass and say
+	// nothing about the case that actually happens.
+	if len(got[0].CollapseID) <= apnsCollapseIDMax {
+		t.Fatalf("collapse id is %d characters, so this test is not exercising truncation",
+			len(got[0].CollapseID))
+	}
+	if got[0].CollapseID[:apnsCollapseIDMax] != got[1].CollapseID[:apnsCollapseIDMax] {
+		t.Fatalf("truncated collapse ids differ: alert %q, clear %q",
+			got[0].CollapseID[:apnsCollapseIDMax], got[1].CollapseID[:apnsCollapseIDMax])
+	}
+}
+
+// eventIDOf pulls event_id back out of a rendered payload, so a test asserts on
+// what a device would actually receive rather than on what was passed in.
+func eventIDOf(t *testing.T, req pushRequest) string {
+	t.Helper()
+	var body struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.Unmarshal(req.Payload, &body); err != nil {
+		t.Fatalf("unmarshal payload: %v — %s", err, req.Payload)
+	}
+	return body.EventID
 }
 
 // Session names and prompts are arbitrary text. An oversized payload is

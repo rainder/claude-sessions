@@ -903,11 +903,15 @@ func yesNo(b bool) string {
 // those are returned as errors so the caller reports them for what they
 // actually are instead of "something is already listening ... stop it
 // first", which names a process that does not exist.
+// The bind value is interpreted through the same unbracket/hostPort helpers
+// cmdServer uses, so `--bind [::]` and `--bind ::` mean here exactly what they
+// will mean when the unit starts. Reimplementing the parse would drift, and the
+// drift is silent: a bind the server accepts would skip the pre-flight.
 func portInUse(bind string, port int) (bool, error) {
-	if net.ParseIP(bind) == nil && bind != "localhost" {
+	if net.ParseIP(unbracket(bind)) == nil && bind != "localhost" {
 		return false, nil
 	}
-	ln, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
+	ln, err := net.Listen("tcp", hostPort(bind, port))
 	if err != nil {
 		if portOccupied(err) {
 			return true, nil

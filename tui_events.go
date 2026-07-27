@@ -322,7 +322,8 @@ func (d *inputDecoder) PendingTimeout(now time.Time) (time.Duration, bool) {
 // wakeKind identifies which background source woke a pollEvents call. It is
 // a bitmask: a single select can be woken by more than one source at once
 // (e.g. the remote hub and the resize pipe both firing in the same tick), so
-// callers OR-test with & rather than switching on an exact value.
+// callers OR-test with & rather than switching on an exact value. A completed
+// kill-dialog preview fetch (wakePreview) is one such source.
 type wakeKind uint8
 
 const (
@@ -330,6 +331,7 @@ const (
 	wakeRemote wakeKind = 1 << iota
 	wakeInspector
 	wakeResize
+	wakePreview
 )
 
 // wakeFD pairs a wake pipe's read-end descriptor with the kind reported when

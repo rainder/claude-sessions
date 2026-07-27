@@ -50,8 +50,8 @@ func (s ServerConfig) EffectiveSSHTarget() string {
 // CommandPreset is one entry under `commands:` — a named launch command
 // offered when spawning a new session.
 type CommandPreset struct {
-	Name    string
-	Command string
+	Name    string `json:"name"`
+	Command string `json:"command"`
 }
 
 // appConfig is the fully parsed contents of servers.yaml.

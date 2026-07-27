@@ -93,7 +93,7 @@ func TestPresetsRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestPresetsReturnsNamesOnly(t *testing.T) {
+func TestPresetsReturnsNamesAndCommands(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeCommandConfig(t, home)
@@ -108,17 +108,14 @@ func TestPresetsReturnsNamesOnly(t *testing.T) {
 	}
 	body := rec.Body.String()
 	var got struct {
-		Presets []string `json:"presets"`
+		Presets []CommandPreset `json:"presets"`
 	}
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"Claude", "Fable"}
+	want := []CommandPreset{{Name: "Claude", Command: "claude"}, {Name: "Fable", Command: "claude --model fable"}}
 	if len(got.Presets) != len(want) || got.Presets[0] != want[0] || got.Presets[1] != want[1] {
 		t.Fatalf("presets = %#v, want %#v", got.Presets, want)
-	}
-	if strings.Contains(body, "claude --model fable") {
-		t.Fatal("response leaked command text, want names only")
 	}
 }
 
@@ -368,7 +365,7 @@ func TestFetchRemotePresets(t *testing.T) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		_, _ = w.Write([]byte(`{"presets":["Claude","Fable"]}`))
+		_, _ = w.Write([]byte(`{"presets":[{"name":"Claude","command":"claude"},{"name":"Fable","command":"claude --model fable"}]}`))
 	}))
 	defer backend.Close()
 
@@ -381,7 +378,7 @@ func TestFetchRemotePresets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	want := []string{"Claude", "Fable"}
+	want := []CommandPreset{{Name: "Claude", Command: "claude"}, {Name: "Fable", Command: "claude --model fable"}}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("presets = %#v, want %#v", got, want)
 	}
@@ -1595,5 +1592,28 @@ func TestRegisterDeviceEnforcesCap(t *testing.T) {
 func TestShortHostnameIsNeverEmpty(t *testing.T) {
 	if got := shortHostname(); got == "" {
 		t.Fatalf("shortHostname() = %q, want a non-empty label", got)
+	}
+}
+
+// hostPort must bracket an IPv6 literal. Plain "%s:%d" concatenation turned
+// `--bind ::` into ":::8765", which is not the address the user asked for.
+func TestHostPortBracketsIPv6(t *testing.T) {
+	tests := []struct {
+		host string
+		want string
+	}{
+		{"127.0.0.1", "127.0.0.1:8765"},
+		{"100.80.11.125", "100.80.11.125:8765"},
+		{"0.0.0.0", "0.0.0.0:8765"},
+		{"localhost", "localhost:8765"},
+		{"::", "[::]:8765"},
+		{"[::]", "[::]:8765"},
+		{"::1", "[::1]:8765"},
+		{"", ":8765"},
+	}
+	for _, tt := range tests {
+		if got := hostPort(tt.host, 8765); got != tt.want {
+			t.Errorf("hostPort(%q, 8765) = %q, want %q", tt.host, got, tt.want)
+		}
 	}
 }

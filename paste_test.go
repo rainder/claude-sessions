@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -27,6 +28,76 @@ func TestValidPaneID(t *testing.T) {
 	for _, tt := range tests {
 		if got := validPaneID(tt.in); got != tt.want {
 			t.Errorf("validPaneID(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestLoopbackPasteAddr: a concrete non-wildcard bind needs the extra loopback
+// listener; a bind that already answers on loopback must not ask for one (the
+// second Listen would collide with the primary on the same port).
+func TestLoopbackPasteAddr(t *testing.T) {
+	tests := []struct {
+		bind string
+		want string
+	}{
+		{"100.80.11.125", "127.0.0.1:8765"}, // --bind tailscale, the live case
+		{"192.168.1.5", "127.0.0.1:8765"},   // explicit interface
+		{"0.0.0.0", ""},                     // wildcard already covers loopback
+		{"::", ""},
+		{"[::]", ""},
+		{"127.0.0.1", ""},
+		{"localhost", ""},
+		{"::1", ""},
+		{"[::1]", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := loopbackPasteAddr(tt.bind, 8765); got != tt.want {
+			t.Errorf("loopbackPasteAddr(%q, 8765) = %q, want %q", tt.bind, got, tt.want)
+		}
+	}
+}
+
+// TestListenLoopbackPasteScope: the loopback listener answers /paste-request
+// with the route's own bearer check intact, and serves nothing else — the full
+// mux carries an unauthenticated /pair/exchange that must not become locally
+// reachable through this listener.
+func TestListenLoopbackPasteScope(t *testing.T) {
+	s := &server{token: "secret"}
+	ln, err := listenLoopbackPaste("127.0.0.1:0", s)
+	if err != nil {
+		t.Fatalf("listenLoopbackPaste: %v", err)
+	}
+	defer ln.Close()
+	base := "http://" + ln.Addr().String()
+
+	do := func(method, url, auth string) int {
+		req, err := http.NewRequest(method, url, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, url, err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// With no waiter connected the broker passes the keystroke through, which
+	// is a 200 — the tmux send-keys it attempts is a no-op we don't assert on.
+	if got := do("POST", base+"/paste-request?pane_id=%251", "Bearer secret"); got != http.StatusOK {
+		t.Errorf("authed /paste-request = %d, want %d", got, http.StatusOK)
+	}
+	if got := do("POST", base+"/paste-request?pane_id=%251", ""); got != http.StatusUnauthorized {
+		t.Errorf("unauthed /paste-request = %d, want %d", got, http.StatusUnauthorized)
+	}
+	for _, path := range []string{"/sessions", "/pair/exchange", "/paste-wait", "/paste"} {
+		if got := do("POST", base+path, "Bearer secret"); got != http.StatusNotFound {
+			t.Errorf("%s on loopback paste listener = %d, want %d", path, got, http.StatusNotFound)
 		}
 	}
 }

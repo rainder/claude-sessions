@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -286,13 +287,9 @@ func (s *server) presets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	names := make([]string, len(presets))
-	for i, p := range presets {
-		names[i] = p.Name
-	}
 	writeJSON(w, http.StatusOK, struct {
-		Presets []string `json:"presets"`
-	}{Presets: names})
+		Presets []CommandPreset `json:"presets"`
+	}{Presets: presets})
 }
 
 // resumable returns this host's resumable (past, ended) sessions, collected
@@ -790,6 +787,19 @@ func parseServerFlags(args []string) (serverFlags, error) {
 	return f, nil
 }
 
+// unbracket strips one layer of IPv6 literal brackets, so `::` and `[::]` are
+// the same host to everything downstream.
+func unbracket(host string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+}
+
+// hostPort joins a bind host and port into a listen address. Plain
+// concatenation turns `--bind ::` into `:::8765`, which is not the address the
+// user asked for; net.JoinHostPort brackets the literal properly.
+func hostPort(host string, port int) string {
+	return net.JoinHostPort(unbracket(host), strconv.Itoa(port))
+}
+
 // cmdServer is the -s subcommand: starts the HTTP server in the foreground.
 //
 // Default bind is 127.0.0.1 (safe). For remote access:
@@ -932,7 +942,19 @@ add to client's ~/.config/claude-sessions/servers.yaml:
 		}()
 	}
 
-	addr := fmt.Sprintf("%s:%d", bind, port)
+	// A non-loopback bind leaves clip-request's same-host POST with nothing to
+	// dial, so serve /paste-request on loopback as well. Best-effort: a failure
+	// here costs remote image paste, not the server.
+	if lb := loopbackPasteAddr(bind, port); lb != "" {
+		if ln, err := listenLoopbackPaste(lb, s); err != nil {
+			fmt.Fprintf(os.Stderr, "remote image paste disabled (%s: %v)\n", lb, err)
+		} else {
+			defer ln.Close()
+			fmt.Fprintf(os.Stderr, "paste requests also on %s\n", lb)
+		}
+	}
+
+	addr := hostPort(bind, port)
 	fmt.Fprintf(os.Stderr, "listening on %s\n", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintln(os.Stderr, "server:", err)

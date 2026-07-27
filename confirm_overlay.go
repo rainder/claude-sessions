@@ -10,6 +10,38 @@ import (
 // confirmHint is the fixed hint row drawn below the question inside the box.
 const confirmHint = "[y] yes    [n] no"
 
+// previewBoxMinInner is the inner width the box widens to when it carries a
+// preview block, so pane output is legible rather than shredded by clipping.
+const previewBoxMinInner = 72
+
+// previewBoxMargin is how many rows of terminal the box deliberately leaves
+// unused, so the dialog reads as an overlay rather than a full-screen takeover.
+const previewBoxMargin = 4
+
+// previewBoxChrome is every box row that is not a preview content row: the two
+// borders, the block's title and its two dividers, the blank separator and the
+// hint. The question is counted separately since it can be multi-line.
+const previewBoxChrome = 7
+
+// previewContentRows is how many pane lines fit, given the terminal height and
+// how many lines the question occupies.
+//
+// There is no fixed ceiling — a taller terminal simply shows more. The viewport
+// is the cap, and qLines is part of the arithmetic rather than assumed to be 1:
+// a multi-line question eats into the preview instead of pushing the box off
+// the bottom of the screen. rows <= 0 means an unknown terminal size, which is
+// treated as "no room" so the plain box renders.
+func previewContentRows(rows, qLines int) int {
+	if rows <= 0 {
+		return 0
+	}
+	n := rows - qLines - previewBoxChrome - previewBoxMargin
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 // Box-drawing characters for the confirm overlay, matching the square-corner
 // style preview.go already uses for its "┌─" / "│" transcript framing.
 const (
@@ -43,18 +75,37 @@ func (confirmState) handle(key string) (confirmed, done bool) {
 }
 
 // renderConfirmOverlay draws a bordered box centered in a cols x rows
-// terminal: the question (one line per '\n' in question), a blank separator,
-// then the dimmed "[y] yes   [n] no" hint. On a narrow terminal the box
-// shrinks to fit and each line is clipped rather than wrapped. When cols or
-// rows is unknown (<=0) the box is emitted unpositioned at the top-left,
-// mirroring renderNewPicker's fallback for an unknown terminal size.
-func renderConfirmOverlay(question string, cols, rows int) string {
+// terminal: an optional preview block (title, divider, content rows, divider),
+// the question (one line per '\n' in question), a blank separator, then the
+// dimmed "[y] yes   [n] no" hint. On a narrow terminal the box shrinks to fit
+// and each line is clipped rather than wrapped. When cols or rows is unknown
+// (<=0) the box is emitted unpositioned at the top-left, mirroring
+// renderNewPicker's fallback for an unknown terminal size. prev may be nil, in
+// which case no preview block is drawn and the box matches its pre-preview
+// appearance byte-for-byte.
+//
+// The preview grows to fill the terminal rather than stopping at a fixed
+// ceiling: the taller the window, the more pane output you get to judge the
+// kill by. What bounds it is the viewport itself — see previewContentRows.
+func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int) string {
 	qLines := strings.Split(question, "\n")
+
+	contentRows := 0
+	if prev != nil {
+		contentRows = previewContentRows(rows, len(qLines))
+	}
+	hasPreview := prev != nil && contentRows > 0
+
 	innerWidth := visualLen(confirmHint)
 	for _, l := range qLines {
 		if w := visualLen(l); w > innerWidth {
 			innerWidth = w
 		}
+	}
+	// A preview block needs room to be legible; the floor applies only when one
+	// actually renders, so the callers that pass nil keep today's narrow box.
+	if hasPreview && innerWidth < previewBoxMinInner {
+		innerWidth = previewBoxMinInner
 	}
 	if cols > 0 {
 		max := cols - 4 // border + 1 space of padding on each side
@@ -71,8 +122,13 @@ func renderConfirmOverlay(question string, cols, rows int) string {
 		return confirmBoxV + " " + s + strings.Repeat(" ", innerWidth-visualLen(s)) + " " + confirmBoxV
 	}
 
-	box := make([]string, 0, len(qLines)+4)
+	block := previewBlock(prev, innerWidth, contentRows)
+
+	box := make([]string, 0, len(qLines)+len(block)+4)
 	box = append(box, confirmBoxTL+strings.Repeat(confirmBoxH, innerWidth+2)+confirmBoxTR)
+	for _, l := range block {
+		box = append(box, pad(l))
+	}
 	for _, l := range qLines {
 		box = append(box, pad(l))
 	}
@@ -106,24 +162,63 @@ func renderConfirmOverlay(question string, cols, rows int) string {
 	return strings.Join(lines, "\n")
 }
 
+// modalWakesWith returns wakes plus the pane's wake source, copying rather
+// than appending in place: modalWakes is built once in RunTUI (tui.go:333) and
+// shared by every modal, so an in-place append would corrupt it for the next
+// dialog.
+func modalWakesWith(wakes []wakeFD, p *previewPane) []wakeFD {
+	w := p.wake()
+	if w.fd < 0 {
+		// Returned as-is: this aliases the caller's (possibly shared) backing
+		// array. Safe today because the result only flows into
+		// readModalEvents -> pollEvents, which reads it without appending —
+		// do not append to this return value.
+		return wakes
+	}
+	out := make([]wakeFD, len(wakes), len(wakes)+1)
+	copy(out, wakes)
+	return append(out, w)
+}
+
 // confirmOverlay drives a blocking y/n dialog rendered as a centered overlay
 // box, mirroring pickNewSession's read/handle loop shape. Must be called in
 // raw mode; it never leaves raw or the alt-screen, so the caller's next
 // render() paints over it. wakes lets the caller pass modal wake sources
 // (e.g. resize) so the box stays correctly positioned across a live resize.
 func confirmOverlay(question string, wakes []wakeFD) bool {
+	return confirmOverlayPreview(question, nil, wakes)
+}
+
+// confirmOverlayPreview is confirmOverlay with an optional preview block. The
+// pane fetches in the background and wakes the loop when it lands, so a slow
+// or unreachable remote host never delays the dialog appearing. A nil pane
+// renders exactly what confirmOverlay renders.
+//
+// Invariant: wake() is called exactly once, before the loop, and this
+// function never closes p. The single-threaded contract that makes wake()'s
+// bare-int fd safe (see previewPane.wake) only holds if the same goroutine
+// that runs this loop is the only one that can close the pane, and only
+// after the loop returns — so close() is the caller's responsibility, not
+// this function's.
+func confirmOverlayPreview(question string, p *previewPane, wakes []wakeFD) bool {
 	state := confirmState{}
 	renderer := newScreenRenderer(os.Stdout)
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
+	modalWakes := modalWakesWith(wakes, p)
 
 	for {
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
 			cols, rows = 0, 0
 		}
-		_ = renderer.Draw(renderConfirmOverlay(question, cols, rows), cols, rows)
-		keys, _ := readModalEvents(decoder, wakes)
+		var prev *overlayPreview
+		if p != nil {
+			snap := p.snapshot()
+			prev = &snap
+		}
+		_ = renderer.Draw(renderConfirmOverlay(question, prev, cols, rows), cols, rows)
+		keys, _ := readModalEvents(decoder, modalWakes)
 		for _, key := range keys {
 			confirmed, done := state.handle(key)
 			if done {

@@ -215,9 +215,35 @@ func (t *waitTracker) event(kind notifyEventKind, s Session, e *waitEntry) notif
 // roughly four seconds from prompt to push.
 const notifyTickInterval = 2 * time.Second
 
-// perDeviceSendTimeout bounds one push. Each device gets its own, so one slow
-// or unreachable device cannot consume the whole tick's budget.
-const perDeviceSendTimeout = 10 * time.Second
+// tickBudgetTicks and sendBudgetTicks express both push deadlines as multiples
+// of the tick interval, so the two can never drift apart.
+//
+// They used to be unrelated: a per-tick context of Interval*4 and a bare 10s
+// per-device constant. The per-device deadline was therefore unreachable — the
+// parent expired first, always — which made it look as though each device had
+// its own budget when in truth they all shared one. sendBudgetTicks must stay
+// below tickBudgetTicks for the per-device deadline to mean anything.
+const (
+	tickBudgetTicks = 4
+	sendBudgetTicks = 2
+)
+
+// maxConcurrentSends bounds the fan-out. It is the registry cap, deliberately,
+// and must not be lowered below it.
+//
+// A device that waits for a worker slot does NOT get its own budget:
+// context.WithTimeout takes the earlier of the parent's deadline and the new
+// one, so a device starting in a later round inherits whatever is left of the
+// tick instead. Sized at 8 against a full registry that meant two rounds of
+// eight and then nothing — the last sixteen devices never got a send attempt at
+// all. That is the same starvation this file exists to prevent, relocated from
+// device two to device seventeen.
+//
+// Covering the whole registry puts every device in the first round, which is
+// what makes the per-device budget real. APNs is HTTP/2 to a single host and
+// net/http multiplexes every send over the one connection apnsClient already
+// holds; 32 concurrent streams is unremarkable for both.
+const maxConcurrentSends = maxRegisteredDevices
 
 // apnsPayloadMax is Apple's limit for a standard remote notification. A larger
 // body is rejected with PayloadTooLarge, which would look exactly like a
@@ -260,10 +286,34 @@ type notifyHub struct {
 	// collectFailing tracks whether the previous tick's collection failed, so a
 	// persistent failure logs once rather than every interval.
 	collectFailing bool
-	stop           chan struct{}
-	stopOnce       sync.Once
-	done           chan struct{}
+	// dispatchTurn rotates the starting point of the device fan-out. Touched
+	// only from the ticker goroutine, via dispatch.
+	dispatchTurn int
+	stop         chan struct{}
+	stopOnce     sync.Once
+	done         chan struct{}
 }
+
+// interval is the tick period, defaulted for a hub that was handed none.
+func (h *notifyHub) interval() time.Duration {
+	if h.opts.Interval <= 0 {
+		return notifyTickInterval
+	}
+	return h.opts.Interval
+}
+
+// tickBudget bounds the pushes one tick produces, so a wedged fan-out cannot
+// outlive the tick that started it.
+//
+// It is not a bound on the whole tick. h.opts.Collect takes no context and
+// nothing selects on ctx while it runs, so a slow collection is unbounded and
+// spends this budget before the first push is even built.
+func (h *notifyHub) tickBudget() time.Duration { return h.interval() * tickBudgetTicks }
+
+// sendBudget bounds one push to one device. Half the tick budget, so it is a
+// deadline that can actually fire, and so a hung connection is reclaimed rather
+// than pinned until the tick's own backstop expires.
+func (h *notifyHub) sendBudget() time.Duration { return h.interval() * sendBudgetTicks }
 
 func newNotifyHub(opts notifyHubOptions) *notifyHub {
 	if opts.Interval == 0 {
@@ -290,7 +340,12 @@ func (h *notifyHub) run() {
 	// Take the baseline immediately rather than waiting out the first tick.
 	// Otherwise a session that starts waiting inside the startup window is
 	// absorbed by the silent-baseline rule and never alerts at all.
-	h.tickOnce(context.Background())
+	//
+	// The baseline rule means this tick emits no events and so never dispatches,
+	// but it gets the same budget as every other tick regardless: relying on a
+	// rule elsewhere in the file to keep an unbounded context harmless is a trap
+	// for whoever changes that rule.
+	h.tickWithBudget()
 	t := time.NewTicker(h.opts.Interval)
 	defer t.Stop()
 	for {
@@ -298,11 +353,19 @@ func (h *notifyHub) run() {
 		case <-h.stop:
 			return
 		case <-t.C:
-			ctx, cancel := context.WithTimeout(context.Background(), h.opts.Interval*4)
-			h.tickOnce(ctx)
-			cancel()
+			h.tickWithBudget()
 		}
 	}
+}
+
+// tickWithBudget runs one tick under the per-tick deadline. The deadline reins
+// in the fan-out only — collection runs before anything consults ctx — so a
+// wedged push cannot stop the hub sampling sessions, but a wedged collection
+// still can.
+func (h *notifyHub) tickWithBudget() {
+	ctx, cancel := context.WithTimeout(context.Background(), h.tickBudget())
+	defer cancel()
+	h.tickOnce(ctx)
 }
 
 // Shutdown stops the poll loop. Safe to call more than once — cmdServer defers
@@ -332,46 +395,192 @@ func (h *notifyHub) tickOnce(ctx context.Context) {
 		fmt.Fprintln(os.Stderr, "claude-sessions: sessions readable again, notifications resumed")
 	}
 	for _, e := range h.tracker.Tick(sessions) {
-		if e.Kind != notifyAlert {
-			// Clear events end a Live Activity, which needs the per-activity
-			// token model Apple requires. Nothing to send until that lands.
-			continue
-		}
 		h.dispatch(ctx, e)
 	}
 }
 
-func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
-	payload := buildAlertPayload(h.opts.HostName, h.opts.HostID, e)
-	collapse := h.opts.HostID + ":" + e.SessionID
-	for _, d := range h.opts.Devices.List() {
-		// One deadline per device. A shared per-tick context lets a single slow
-		// device burn the budget and fail every device behind it.
-		sendCtx, cancel := context.WithTimeout(ctx, perDeviceSendTimeout)
-		err := h.opts.Sender.Send(sendCtx, pushRequest{
-			DeviceToken: d.Token,
-			Topic:       h.opts.BundleID,
-			CollapseID:  collapse,
-			PushType:    "alert",
-			Priority:    "10",
-			Environment: d.Environment,
-			Payload:     payload,
-		})
-		cancel()
-		switch {
-		case err == nil:
-		case errors.Is(err, errDeviceGone):
-			// Worth a line: a wrong production/sandbox environment reads as a
-			// dead token, and a silently emptied registry looks identical to a
-			// quiet week.
-			fmt.Fprintf(os.Stderr, "claude-sessions: dropping device %s: %v\n", shortToken(d.Token), err)
-			h.opts.Devices.Remove(d.Token)
-		default:
-			// Transient: keep the device. A network blip is not a reason to stop
-			// notifying a phone forever.
-			fmt.Fprintf(os.Stderr, "claude-sessions: push to %s failed: %v\n", shortToken(d.Token), err)
-		}
+// pushSpec is everything about one push that depends on the event rather than on
+// the device it is going to.
+//
+// It exists so an alert and the clear that retracts it cannot drift: the
+// collapse id is built once, before the two kinds diverge, which is what makes
+// them byte-identical after apnsClient truncates them.
+type pushSpec struct {
+	CollapseID string
+	PushType   string
+	Priority   string
+	Payload    []byte
+}
+
+// specFor renders one event into the push it becomes.
+//
+// A clear is a background push, and that is not cosmetic: **APNs rejects a
+// background push sent at priority 10**, so a clear built with the alert's
+// headers is a clear that silently never arrives. Nor may it carry an alert, a
+// sound or an interruption-level — a background push carrying an alert is not a
+// background push, it is a blank notification every time a prompt is answered.
+//
+// A clear still does not end a Live Activity. That needs the per-activity token
+// model Apple requires, which is not built, and will still need it when it is.
+// What a clear also is, and what this file used to miss, is "remove the card you
+// already delivered" — which needs none of that machinery.
+//
+// **The collapse id is shared with the alert deliberately, and it turns out to do
+// more than intended.** Measured on iOS 26.5 against a real device token: the
+// phone was never woken for the background push at all — no app code ran — and
+// the delivered card still disappeared, because APNs collapse-id replacement
+// swaps the shown alert for a push that displays nothing. Rebuilding this with a
+// distinct collapse id for the clear, and changing nothing else, leaves the card
+// on screen. So on that runtime the removal is entirely the system's doing.
+//
+// That is the outcome we want, and it is also generation-blind, which the app's
+// exact-match rule is not: the collapse id is host+session with no generation in
+// it, so a clear for generation 5 that were delivered *after* generation 6's
+// alert would take generation 6's card down with it. The server never emits them
+// in that order — a clear precedes the next alert by at least two ticks — so it
+// needs APNs to reorder across four seconds. Left as the task specifies rather
+// than quietly changed here, because narrowing the collapse id also gives up the
+// "a clear replaces an undelivered alert in APNs's queue" behaviour, and that is
+// a trade to make deliberately.
+func (h *notifyHub) specFor(e notifyEvent) (pushSpec, bool) {
+	spec := pushSpec{CollapseID: h.opts.HostID + ":" + e.SessionID}
+	switch e.Kind {
+	case notifyAlert:
+		spec.PushType, spec.Priority = "alert", "10"
+		spec.Payload = buildAlertPayload(h.opts.HostName, h.opts.HostID, e)
+	case notifyClear:
+		spec.PushType, spec.Priority = "background", "5"
+		spec.Payload = buildClearPayload(h.opts.HostID, e)
+	default:
+		return pushSpec{}, false
 	}
+	return spec, true
+}
+
+// dispatch pushes one alert to every registered device, concurrently.
+//
+// Sends overlap, up to maxConcurrentSends at a time. That is the whole fix: a
+// serial loop shares one tick's budget between every device, so a device that
+// never answers spends the budget and every device behind it fails on an
+// already-expired context — and because the tracker has already moved that
+// session to phaseAlerted, nothing ever retries. Overlapping the sends means
+// every device starts with its own full sendBudget, so no device's stall can
+// deny another device its push.
+//
+// Concurrency is also what makes dispatch order stop mattering, which is the
+// other half of the problem: DeviceStore.List sorts by token and tokens are
+// stable, so a serial loop starved the same device every tick forever. The
+// rotation below is belt and braces for that, since maxConcurrentSends now
+// covers the whole registry and nobody queues in the first place.
+//
+// Known limit, deliberately left: events are dispatched one after another
+// within a tick, so several sessions entering a wait in the same tick share one
+// tick budget and the later events' fan-outs get less of it. Carrying undelivered
+// pushes over to the next tick is a different design — a pending queue with its
+// own duplicate-notification questions — and is not attempted here.
+func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
+	spec, ok := h.specFor(e)
+	if !ok {
+		return
+	}
+
+	// Snapshot the registry once, outside the fan-out: no lock is held across
+	// any send, and a 410 arriving mid-dispatch removes a device without
+	// disturbing the sends already in flight.
+	devices := h.rotated(h.opts.Devices.List())
+
+	slots := make(chan struct{}, maxConcurrentSends)
+	var wg sync.WaitGroup
+dispatchLoop:
+	for _, d := range devices {
+		// Check before the select. A select whose cases are both ready picks at
+		// random, so a spent tick would otherwise still launch sends on an
+		// already-expired context — work that cannot succeed and only logs.
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			// The tick is over. Stop rather than log a line per remaining device.
+			break dispatchLoop
+		}
+		wg.Add(1)
+		go func(d Device) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			h.send(ctx, d, spec)
+		}(d)
+	}
+	wg.Wait()
+}
+
+// send pushes one payload to one device and acts on the outcome.
+//
+// What the deadline below actually is: the earlier of the tick's remaining
+// budget and sendBudget. context.WithTimeout never extends a parent, so this
+// cannot hand a device more time than the tick has left. It equals a full
+// sendBudget only because maxConcurrentSends covers the whole registry, so
+// every device starts in the first round with the tick budget barely touched.
+// Shrink that pool and this stops being true for whoever starts in round two.
+func (h *notifyHub) send(ctx context.Context, d Device, spec pushSpec) {
+	sendCtx, cancel := context.WithTimeout(ctx, h.sendBudget())
+	defer cancel()
+	err := h.opts.Sender.Send(sendCtx, pushRequest{
+		DeviceToken: d.Token,
+		Topic:       h.opts.BundleID,
+		CollapseID:  spec.CollapseID,
+		PushType:    spec.PushType,
+		Priority:    spec.Priority,
+		Environment: d.Environment,
+		Payload:     spec.Payload,
+	})
+	// Each branch logs in a single Fprintf. Goroutines that build a line in two
+	// calls interleave, and they do it in exactly the situation where the log is
+	// the only thing you have.
+	switch {
+	case err == nil:
+	case errors.Is(err, errDeviceGone):
+		// Worth a line: a wrong production/sandbox environment reads as a
+		// dead token, and a silently emptied registry looks identical to a
+		// quiet week.
+		fmt.Fprintf(os.Stderr, "claude-sessions: dropping device %s: %v\n", shortToken(d.Token), err)
+		h.opts.Devices.Remove(d.Token)
+	default:
+		// Keep the device, and do not back off from it either.
+		//
+		// Pruning is out: a timeout is not evidence a token is dead. The usual
+		// cause is this host's own network, and pruning on it would empty the
+		// registry of every working device at once — precisely the failure
+		// DeviceStore was written to avoid. Only Apple saying 410,
+		// BadDeviceToken or Unregistered drops a device (apns.go:204-209).
+		//
+		// A per-device back-off is out too, and that is the less obvious call.
+		// It would have earned its keep when the fan-out was serial, because a
+		// known-slow device cost every other device its push. Concurrently it
+		// costs one of maxConcurrentSends worker slots for at most sendBudget,
+		// which is not worth a counter map that has to reset on first success
+		// and be pruned whenever a token is removed, and which would suppress a
+		// device that had recovered.
+		fmt.Fprintf(os.Stderr, "claude-sessions: push to %s failed: %v\n", shortToken(d.Token), err)
+	}
+}
+
+// rotated returns devices starting one place further along on each call, so a
+// bounded fan-out cannot put the same device at the back of the queue forever.
+//
+// DeviceStore.List sorts by token and tokens never change, so without this the
+// last device is last on every tick of every day. That sort is load-bearing —
+// tests and the on-disk determinism of devices.json depend on it — so the
+// rotation happens here rather than in List.
+func (h *notifyHub) rotated(devices []Device) []Device {
+	if len(devices) < 2 {
+		return devices
+	}
+	off := h.dispatchTurn % len(devices)
+	h.dispatchTurn++
+	out := make([]Device, 0, len(devices))
+	return append(append(out, devices[off:]...), devices[:off]...)
 }
 
 // shortToken trims a device token for log lines — they are 64 hex characters
@@ -381,6 +590,63 @@ func shortToken(token string) string {
 		return token
 	}
 	return token[:8] + "…"
+}
+
+// eventID names one specific wait: <host_id>:<session_id>:<generation>.
+//
+// One function rather than two format strings because the app matches a
+// delivered notification to a clear by this exact string. An alert and the clear
+// that retracts it must render identical bytes here, and two call sites that
+// merely happen to agree are two call sites that can stop agreeing.
+func eventID(hostID string, e notifyEvent) string {
+	return fmt.Sprintf("%s:%s:%d", hostID, e.SessionID, e.Generation)
+}
+
+// buildClearPayload renders the APNs body for a wait that has ended.
+//
+// A background push: `content-available` and nothing else under `aps`. iOS wakes
+// the app, which removes exactly the delivered notification carrying this
+// event_id — not the session's other notifications, and not by prefix, so a
+// stale clear for generation 5 arriving after generation 6's alert matches
+// nothing and does no harm.
+//
+// The generation comes from the event and is never re-derived. Both paths that
+// produce a clear already carry the generation that was alerted: the
+// leaving-waiting path builds the event before resetting the entry, and the
+// two-missed-ticks path copies e.generation explicitly. Deriving it here from
+// the tracker's current state would name a wait that was never pushed.
+//
+// **Generation reuse across a restart**, reasoned through and deliberately left
+// as is: newWaitTracker starts nextGen at zero while host_id is persisted and
+// session ids survive, so "H:S:1" can genuinely be issued twice in one device's
+// lifetime. That is benign because the id is host- and session-qualified, so a
+// collision is confined to the same session on the same host, where "no longer
+// waiting" means the same thing on both sides of the restart. The specific case
+// worth naming: a session already waiting when the server restarts is adopted as
+// phaseAlerted with a fresh generation and no push, so the pre-restart card
+// stays on screen — and when the user answers, this clear carries a generation
+// that was never pushed and removes that card. That is the outcome we want.
+// Persisting nextGen is a change with its own consequences and is not made here.
+//
+// No waiting_for, no pid, no host name: nobody reads this payload except the
+// code that matches event_id, and text in a push nobody sees is payload spent on
+// nothing.
+func buildClearPayload(hostID string, e notifyEvent) []byte {
+	payload := map[string]any{
+		"aps":        map[string]any{"content-available": 1},
+		"host_id":    hostID,
+		"session_id": e.SessionID,
+		"event_id":   eventID(hostID, e),
+		"cleared":    true,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		// Deliberately still a well-formed background push. A clear that cannot
+		// name its event removes nothing, which is the same as not sending it —
+		// but sending something malformed would be worse than either.
+		return []byte(`{"aps":{"content-available":1}}`)
+	}
+	return data
 }
 
 // buildAlertPayload renders the APNs body for one waiting session.
@@ -409,7 +675,7 @@ func buildAlertPayload(hostName, hostID string, e notifyEvent) []byte {
 		"host_id":     hostID,
 		"pid":         e.PID,
 		"session_id":  e.SessionID,
-		"event_id":    fmt.Sprintf("%s:%s:%d", hostID, e.SessionID, e.Generation),
+		"event_id":    eventID(hostID, e),
 		"waiting_for": e.WaitingFor,
 	}
 	data, err := json.Marshal(payload)
