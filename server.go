@@ -718,10 +718,56 @@ func tailscaleIPv4() string {
 	return tailscaleIPv4Context(context.Background())
 }
 
+// tailscaleBundledPaths are places the CLI lives when it is not on PATH.
+//
+// The macOS GUI builds (App Store and standalone) ship the binary inside the
+// app bundle and install no symlink, so a Mac can be fully authenticated to a
+// tailnet with nothing named `tailscale` on any PATH. Without this the failure
+// is indistinguishable from "Tailscale is down", and under a supervisor it is a
+// permanent restart loop rather than one confusing line.
+var tailscaleBundledPaths = []string{
+	"/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+	"/usr/local/bin/tailscale",
+	"/opt/homebrew/bin/tailscale",
+}
+
+// tailscaleBinary returns a runnable tailscale CLI path, or "" if there is
+// none. PATH wins; the bundled locations are the fallback.
+func tailscaleBinary() string {
+	if p, err := exec.LookPath("tailscale"); err == nil {
+		return p
+	}
+	for _, p := range tailscaleBundledPaths {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
+}
+
+// tailscaleBindFailure explains why `--bind tailscale` could not resolve. The
+// two causes need different fixes and used to share one message: "is tailscaled
+// running and authenticated?" sends you to check a daemon that is often running
+// fine, when the real problem is that nothing named `tailscale` is executable.
+func tailscaleBindFailure() string {
+	if tailscaleBinary() == "" {
+		return "--bind tailscale requested but no tailscale command was found\n" +
+			"        it is not on PATH, and not at any of: " + strings.Join(tailscaleBundledPaths, ", ") + "\n" +
+			"        the macOS app ships it inside the bundle — symlink it onto PATH,\n" +
+			"        or pass the address directly: --bind <your-tailscale-ip>"
+	}
+	return "--bind tailscale requested but " + tailscaleBinary() + " reported no IPv4\n" +
+		"        is tailscaled running and authenticated?"
+}
+
 // tailscaleIPv4Context is the context-bounded variant used by local client
 // fallback, so address resolution cannot outlive its total operation deadline.
 func tailscaleIPv4Context(ctx context.Context) string {
-	out, err := exec.CommandContext(ctx, "tailscale", "ip", "-4").Output()
+	bin := tailscaleBinary()
+	if bin == "" {
+		return ""
+	}
+	out, err := exec.CommandContext(ctx, bin, "ip", "-4").Output()
 	if err != nil {
 		return ""
 	}
@@ -850,8 +896,7 @@ func cmdServer(args []string) int {
 	if bind == "tailscale" {
 		ts := tailscaleIPv4()
 		if ts == "" {
-			fmt.Fprintln(os.Stderr, "server: --bind tailscale requested but no Tailscale IPv4 found")
-			fmt.Fprintln(os.Stderr, "        is tailscaled running and authenticated?")
+			fmt.Fprintln(os.Stderr, "server: "+tailscaleBindFailure())
 			return 1
 		}
 		bind = ts

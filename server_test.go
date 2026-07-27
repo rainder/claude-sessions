@@ -1645,3 +1645,94 @@ func TestServerBannerWithdrawsTokenOffTerminal(t *testing.T) {
 		}
 	}
 }
+
+// The macOS GUI builds ship the CLI inside the app bundle with no symlink, so
+// a fully-authenticated Mac can have nothing named `tailscale` on PATH. These
+// pin that the fallback exists and that PATH still wins.
+func TestTailscaleBinaryFallsBackToBundledPath(t *testing.T) {
+	writeExe := func(dir, name string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		return p
+	}
+
+	t.Run("PATH wins over the bundle", func(t *testing.T) {
+		pathDir := t.TempDir()
+		onPath := writeExe(pathDir, "tailscale")
+		bundled := writeExe(t.TempDir(), "Tailscale")
+		t.Setenv("PATH", pathDir)
+		defer swapBundledPaths(t, []string{bundled})()
+
+		if got := tailscaleBinary(); got != onPath {
+			t.Errorf("tailscaleBinary() = %q, want the PATH copy %q", got, onPath)
+		}
+	})
+
+	t.Run("bundle used when PATH has none", func(t *testing.T) {
+		bundled := writeExe(t.TempDir(), "Tailscale")
+		t.Setenv("PATH", t.TempDir())
+		defer swapBundledPaths(t, []string{bundled})()
+
+		if got := tailscaleBinary(); got != bundled {
+			t.Errorf("tailscaleBinary() = %q, want the bundled copy %q", got, bundled)
+		}
+	})
+
+	t.Run("non-executable and missing entries are skipped", func(t *testing.T) {
+		dir := t.TempDir()
+		notExec := filepath.Join(dir, "tailscale")
+		if err := os.WriteFile(notExec, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", t.TempDir())
+		defer swapBundledPaths(t, []string{filepath.Join(dir, "absent"), dir, notExec})()
+
+		if got := tailscaleBinary(); got != "" {
+			t.Errorf("tailscaleBinary() = %q, want \"\" — nothing runnable", got)
+		}
+	})
+}
+
+func swapBundledPaths(t *testing.T, paths []string) func() {
+	t.Helper()
+	orig := tailscaleBundledPaths
+	tailscaleBundledPaths = paths
+	return func() { tailscaleBundledPaths = orig }
+}
+
+// The two causes need different fixes, and conflating them sent users to check
+// a daemon that was running fine.
+func TestTailscaleBindFailureNamesTheActualCause(t *testing.T) {
+	t.Run("no command found", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		defer swapBundledPaths(t, nil)()
+
+		msg := tailscaleBindFailure()
+		if !strings.Contains(msg, "no tailscale command was found") {
+			t.Errorf("message does not name the missing command:\n%s", msg)
+		}
+		if strings.Contains(msg, "is tailscaled running") {
+			t.Errorf("message blames the daemon when the command is missing:\n%s", msg)
+		}
+	})
+
+	t.Run("command present but no address", func(t *testing.T) {
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "tailscale")
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir)
+		defer swapBundledPaths(t, nil)()
+
+		msg := tailscaleBindFailure()
+		if !strings.Contains(msg, "is tailscaled running") {
+			t.Errorf("message does not point at the daemon:\n%s", msg)
+		}
+		if !strings.Contains(msg, bin) {
+			t.Errorf("message does not name which binary it ran (%s):\n%s", bin, msg)
+		}
+	})
+}

@@ -25,6 +25,18 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   startup; stderr, which carries the "listening on" and notification lines, is
   what gets logged.
 
+### Fixed
+
+- `--bind tailscale` now finds the CLI when it is not on `PATH`. The macOS GUI
+  builds ship it inside the app bundle and install no symlink, so a Mac fully
+  authenticated to a tailnet had nothing named `tailscale` to run and reported
+  "no Tailscale IPv4 found — is tailscaled running and authenticated?", which
+  is the wrong thing to go and check. `/Applications/Tailscale.app` and the two
+  common install prefixes are tried after `PATH`, and the two causes now get
+  different messages: one names the missing command and how to fix it, the
+  other names the binary it actually ran. Under `service install` this was a
+  permanent restart loop rather than a single confusing line.
+
 ### Changed
 
 - `-s` prints the bearer token only when stdout is a terminal. Redirected or
