@@ -215,9 +215,27 @@ func (t *waitTracker) event(kind notifyEventKind, s Session, e *waitEntry) notif
 // roughly four seconds from prompt to push.
 const notifyTickInterval = 2 * time.Second
 
-// perDeviceSendTimeout bounds one push. Each device gets its own, so one slow
-// or unreachable device cannot consume the whole tick's budget.
-const perDeviceSendTimeout = 10 * time.Second
+// tickBudgetTicks and sendBudgetTicks express both push deadlines as multiples
+// of the tick interval, so the two can never drift apart.
+//
+// They used to be unrelated: a per-tick context of Interval*4 and a bare 10s
+// per-device constant. The per-device deadline was therefore unreachable — the
+// parent expired first, always — which made it look as though each device had
+// its own budget when in truth they all shared one. sendBudgetTicks must stay
+// below tickBudgetTicks for the per-device deadline to mean anything.
+const (
+	tickBudgetTicks = 4
+	sendBudgetTicks = 2
+)
+
+// maxConcurrentSends bounds the fan-out.
+//
+// APNs is HTTP/2 to a single host and net/http multiplexes every send over one
+// connection, so parallel sends are the shape the protocol was designed for
+// rather than a workaround for a slow device. Eight is well past the handful of
+// phones a host really has and well short of maxRegisteredDevices, so a full
+// registry cannot open 32 streams at once.
+const maxConcurrentSends = 8
 
 // apnsPayloadMax is Apple's limit for a standard remote notification. A larger
 // body is rejected with PayloadTooLarge, which would look exactly like a
@@ -260,10 +278,30 @@ type notifyHub struct {
 	// collectFailing tracks whether the previous tick's collection failed, so a
 	// persistent failure logs once rather than every interval.
 	collectFailing bool
-	stop           chan struct{}
-	stopOnce       sync.Once
-	done           chan struct{}
+	// dispatchTurn rotates the starting point of the device fan-out. Touched
+	// only from the ticker goroutine, via dispatch.
+	dispatchTurn int
+	stop         chan struct{}
+	stopOnce     sync.Once
+	done         chan struct{}
 }
+
+// interval is the tick period, defaulted for a hub that was handed none.
+func (h *notifyHub) interval() time.Duration {
+	if h.opts.Interval <= 0 {
+		return notifyTickInterval
+	}
+	return h.opts.Interval
+}
+
+// tickBudget bounds one whole tick — collection plus every push it produces.
+// It exists so a wedged tick cannot stop the hub sampling sessions forever.
+func (h *notifyHub) tickBudget() time.Duration { return h.interval() * tickBudgetTicks }
+
+// sendBudget bounds one push to one device. Half the tick budget, so it is a
+// deadline that can actually fire, and so a hung connection is reclaimed rather
+// than pinned until the tick's own backstop expires.
+func (h *notifyHub) sendBudget() time.Duration { return h.interval() * sendBudgetTicks }
 
 func newNotifyHub(opts notifyHubOptions) *notifyHub {
 	if opts.Interval == 0 {
@@ -290,7 +328,12 @@ func (h *notifyHub) run() {
 	// Take the baseline immediately rather than waiting out the first tick.
 	// Otherwise a session that starts waiting inside the startup window is
 	// absorbed by the silent-baseline rule and never alerts at all.
-	h.tickOnce(context.Background())
+	//
+	// The baseline rule means this tick emits no events and so never dispatches,
+	// but it gets the same budget as every other tick regardless: relying on a
+	// rule elsewhere in the file to keep an unbounded context harmless is a trap
+	// for whoever changes that rule.
+	h.tickWithBudget()
 	t := time.NewTicker(h.opts.Interval)
 	defer t.Stop()
 	for {
@@ -298,11 +341,18 @@ func (h *notifyHub) run() {
 		case <-h.stop:
 			return
 		case <-t.C:
-			ctx, cancel := context.WithTimeout(context.Background(), h.opts.Interval*4)
-			h.tickOnce(ctx)
-			cancel()
+			h.tickWithBudget()
 		}
 	}
+}
+
+// tickWithBudget runs one tick under the per-tick deadline. The deadline bounds
+// how long collection plus its pushes can block the poll loop, so a wedged tick
+// cannot stop the hub sampling sessions.
+func (h *notifyHub) tickWithBudget() {
+	ctx, cancel := context.WithTimeout(context.Background(), h.tickBudget())
+	defer cancel()
+	h.tickOnce(ctx)
 }
 
 // Shutdown stops the poll loop. Safe to call more than once — cmdServer defers
@@ -341,37 +391,114 @@ func (h *notifyHub) tickOnce(ctx context.Context) {
 	}
 }
 
+// dispatch pushes one alert to every registered device, concurrently.
+//
+// Sends overlap, up to maxConcurrentSends at a time. That is the whole fix: a
+// serial loop shares one tick's budget between every device, so a device that
+// never answers spends the budget and every device behind it fails on an
+// already-expired context — and because the tracker has already moved that
+// session to phaseAlerted, nothing ever retries. Overlapping the sends means
+// every device starts with its own full sendBudget, so no device's stall can
+// deny another device its push.
+//
+// Concurrency is also what makes dispatch order stop mattering, which is the
+// other half of the problem: DeviceStore.List sorts by token and tokens are
+// stable, so a serial loop starved the same device every tick forever. The
+// rotation below covers the residue — with more devices than workers, someone
+// still goes second.
 func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
 	payload := buildAlertPayload(h.opts.HostName, h.opts.HostID, e)
 	collapse := h.opts.HostID + ":" + e.SessionID
-	for _, d := range h.opts.Devices.List() {
-		// One deadline per device. A shared per-tick context lets a single slow
-		// device burn the budget and fail every device behind it.
-		sendCtx, cancel := context.WithTimeout(ctx, perDeviceSendTimeout)
-		err := h.opts.Sender.Send(sendCtx, pushRequest{
-			DeviceToken: d.Token,
-			Topic:       h.opts.BundleID,
-			CollapseID:  collapse,
-			PushType:    "alert",
-			Priority:    "10",
-			Environment: d.Environment,
-			Payload:     payload,
-		})
-		cancel()
-		switch {
-		case err == nil:
-		case errors.Is(err, errDeviceGone):
-			// Worth a line: a wrong production/sandbox environment reads as a
-			// dead token, and a silently emptied registry looks identical to a
-			// quiet week.
-			fmt.Fprintf(os.Stderr, "claude-sessions: dropping device %s: %v\n", shortToken(d.Token), err)
-			h.opts.Devices.Remove(d.Token)
-		default:
-			// Transient: keep the device. A network blip is not a reason to stop
-			// notifying a phone forever.
-			fmt.Fprintf(os.Stderr, "claude-sessions: push to %s failed: %v\n", shortToken(d.Token), err)
+
+	// Snapshot the registry once, outside the fan-out: no lock is held across
+	// any send, and a 410 arriving mid-dispatch removes a device without
+	// disturbing the sends already in flight.
+	devices := h.rotated(h.opts.Devices.List())
+
+	slots := make(chan struct{}, maxConcurrentSends)
+	var wg sync.WaitGroup
+	for _, d := range devices {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			// The tick is over. Anything not yet started would only fail on an
+			// expired context; stop rather than log a line per remaining device.
+			wg.Wait()
+			return
 		}
+		wg.Add(1)
+		go func(d Device) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			h.send(ctx, d, collapse, payload)
+		}(d)
 	}
+	wg.Wait()
+}
+
+// send pushes one payload to one device and acts on the outcome.
+//
+// The deadline is taken here rather than in dispatch so a device that waited
+// for a worker slot still gets its own full budget rather than the remains of
+// somebody else's.
+func (h *notifyHub) send(ctx context.Context, d Device, collapse string, payload []byte) {
+	sendCtx, cancel := context.WithTimeout(ctx, h.sendBudget())
+	defer cancel()
+	err := h.opts.Sender.Send(sendCtx, pushRequest{
+		DeviceToken: d.Token,
+		Topic:       h.opts.BundleID,
+		CollapseID:  collapse,
+		PushType:    "alert",
+		Priority:    "10",
+		Environment: d.Environment,
+		Payload:     payload,
+	})
+	// Each branch logs in a single Fprintf. Goroutines that build a line in two
+	// calls interleave, and they do it in exactly the situation where the log is
+	// the only thing you have.
+	switch {
+	case err == nil:
+	case errors.Is(err, errDeviceGone):
+		// Worth a line: a wrong production/sandbox environment reads as a
+		// dead token, and a silently emptied registry looks identical to a
+		// quiet week.
+		fmt.Fprintf(os.Stderr, "claude-sessions: dropping device %s: %v\n", shortToken(d.Token), err)
+		h.opts.Devices.Remove(d.Token)
+	default:
+		// Keep the device, and do not back off from it either.
+		//
+		// Pruning is out: a timeout is not evidence a token is dead. The usual
+		// cause is this host's own network, and pruning on it would empty the
+		// registry of every working device at once — precisely the failure
+		// DeviceStore was written to avoid. Only Apple saying 410,
+		// BadDeviceToken or Unregistered drops a device (apns.go:204-209).
+		//
+		// A per-device back-off is out too, and that is the less obvious call.
+		// It would have earned its keep when the fan-out was serial, because a
+		// known-slow device cost every other device its push. Concurrently it
+		// costs one of maxConcurrentSends worker slots for at most sendBudget,
+		// which is not worth a counter map that has to reset on first success
+		// and be pruned whenever a token is removed, and which would suppress a
+		// device that had recovered.
+		fmt.Fprintf(os.Stderr, "claude-sessions: push to %s failed: %v\n", shortToken(d.Token), err)
+	}
+}
+
+// rotated returns devices starting one place further along on each call, so a
+// bounded fan-out cannot put the same device at the back of the queue forever.
+//
+// DeviceStore.List sorts by token and tokens never change, so without this the
+// last device is last on every tick of every day. That sort is load-bearing —
+// tests and the on-disk determinism of devices.json depend on it — so the
+// rotation happens here rather than in List.
+func (h *notifyHub) rotated(devices []Device) []Device {
+	if len(devices) < 2 {
+		return devices
+	}
+	off := h.dispatchTurn % len(devices)
+	h.dispatchTurn++
+	out := make([]Device, 0, len(devices))
+	return append(append(out, devices[off:]...), devices[:off]...)
 }
 
 // shortToken trims a device token for log lines — they are 64 hex characters
