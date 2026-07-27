@@ -395,13 +395,66 @@ func (h *notifyHub) tickOnce(ctx context.Context) {
 		fmt.Fprintln(os.Stderr, "claude-sessions: sessions readable again, notifications resumed")
 	}
 	for _, e := range h.tracker.Tick(sessions) {
-		if e.Kind != notifyAlert {
-			// Clear events end a Live Activity, which needs the per-activity
-			// token model Apple requires. Nothing to send until that lands.
-			continue
-		}
 		h.dispatch(ctx, e)
 	}
+}
+
+// pushSpec is everything about one push that depends on the event rather than on
+// the device it is going to.
+//
+// It exists so an alert and the clear that retracts it cannot drift: the
+// collapse id is built once, before the two kinds diverge, which is what makes
+// them byte-identical after apnsClient truncates them.
+type pushSpec struct {
+	CollapseID string
+	PushType   string
+	Priority   string
+	Payload    []byte
+}
+
+// specFor renders one event into the push it becomes.
+//
+// A clear is a background push, and that is not cosmetic: **APNs rejects a
+// background push sent at priority 10**, so a clear built with the alert's
+// headers is a clear that silently never arrives. Nor may it carry an alert, a
+// sound or an interruption-level — a background push carrying an alert is not a
+// background push, it is a blank notification every time a prompt is answered.
+//
+// A clear still does not end a Live Activity. That needs the per-activity token
+// model Apple requires, which is not built, and will still need it when it is.
+// What a clear also is, and what this file used to miss, is "remove the card you
+// already delivered" — which needs none of that machinery.
+//
+// **The collapse id is shared with the alert deliberately, and it turns out to do
+// more than intended.** Measured on iOS 26.5 against a real device token: the
+// phone was never woken for the background push at all — no app code ran — and
+// the delivered card still disappeared, because APNs collapse-id replacement
+// swaps the shown alert for a push that displays nothing. Rebuilding this with a
+// distinct collapse id for the clear, and changing nothing else, leaves the card
+// on screen. So on that runtime the removal is entirely the system's doing.
+//
+// That is the outcome we want, and it is also generation-blind, which the app's
+// exact-match rule is not: the collapse id is host+session with no generation in
+// it, so a clear for generation 5 that were delivered *after* generation 6's
+// alert would take generation 6's card down with it. The server never emits them
+// in that order — a clear precedes the next alert by at least two ticks — so it
+// needs APNs to reorder across four seconds. Left as the task specifies rather
+// than quietly changed here, because narrowing the collapse id also gives up the
+// "a clear replaces an undelivered alert in APNs's queue" behaviour, and that is
+// a trade to make deliberately.
+func (h *notifyHub) specFor(e notifyEvent) (pushSpec, bool) {
+	spec := pushSpec{CollapseID: h.opts.HostID + ":" + e.SessionID}
+	switch e.Kind {
+	case notifyAlert:
+		spec.PushType, spec.Priority = "alert", "10"
+		spec.Payload = buildAlertPayload(h.opts.HostName, h.opts.HostID, e)
+	case notifyClear:
+		spec.PushType, spec.Priority = "background", "5"
+		spec.Payload = buildClearPayload(h.opts.HostID, e)
+	default:
+		return pushSpec{}, false
+	}
+	return spec, true
 }
 
 // dispatch pushes one alert to every registered device, concurrently.
@@ -426,8 +479,10 @@ func (h *notifyHub) tickOnce(ctx context.Context) {
 // pushes over to the next tick is a different design — a pending queue with its
 // own duplicate-notification questions — and is not attempted here.
 func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
-	payload := buildAlertPayload(h.opts.HostName, h.opts.HostID, e)
-	collapse := h.opts.HostID + ":" + e.SessionID
+	spec, ok := h.specFor(e)
+	if !ok {
+		return
+	}
 
 	// Snapshot the registry once, outside the fan-out: no lock is held across
 	// any send, and a 410 arriving mid-dispatch removes a device without
@@ -454,7 +509,7 @@ dispatchLoop:
 		go func(d Device) {
 			defer wg.Done()
 			defer func() { <-slots }()
-			h.send(ctx, d, collapse, payload)
+			h.send(ctx, d, spec)
 		}(d)
 	}
 	wg.Wait()
@@ -468,17 +523,17 @@ dispatchLoop:
 // sendBudget only because maxConcurrentSends covers the whole registry, so
 // every device starts in the first round with the tick budget barely touched.
 // Shrink that pool and this stops being true for whoever starts in round two.
-func (h *notifyHub) send(ctx context.Context, d Device, collapse string, payload []byte) {
+func (h *notifyHub) send(ctx context.Context, d Device, spec pushSpec) {
 	sendCtx, cancel := context.WithTimeout(ctx, h.sendBudget())
 	defer cancel()
 	err := h.opts.Sender.Send(sendCtx, pushRequest{
 		DeviceToken: d.Token,
 		Topic:       h.opts.BundleID,
-		CollapseID:  collapse,
-		PushType:    "alert",
-		Priority:    "10",
+		CollapseID:  spec.CollapseID,
+		PushType:    spec.PushType,
+		Priority:    spec.Priority,
 		Environment: d.Environment,
-		Payload:     payload,
+		Payload:     spec.Payload,
 	})
 	// Each branch logs in a single Fprintf. Goroutines that build a line in two
 	// calls interleave, and they do it in exactly the situation where the log is
@@ -537,6 +592,63 @@ func shortToken(token string) string {
 	return token[:8] + "…"
 }
 
+// eventID names one specific wait: <host_id>:<session_id>:<generation>.
+//
+// One function rather than two format strings because the app matches a
+// delivered notification to a clear by this exact string. An alert and the clear
+// that retracts it must render identical bytes here, and two call sites that
+// merely happen to agree are two call sites that can stop agreeing.
+func eventID(hostID string, e notifyEvent) string {
+	return fmt.Sprintf("%s:%s:%d", hostID, e.SessionID, e.Generation)
+}
+
+// buildClearPayload renders the APNs body for a wait that has ended.
+//
+// A background push: `content-available` and nothing else under `aps`. iOS wakes
+// the app, which removes exactly the delivered notification carrying this
+// event_id — not the session's other notifications, and not by prefix, so a
+// stale clear for generation 5 arriving after generation 6's alert matches
+// nothing and does no harm.
+//
+// The generation comes from the event and is never re-derived. Both paths that
+// produce a clear already carry the generation that was alerted: the
+// leaving-waiting path builds the event before resetting the entry, and the
+// two-missed-ticks path copies e.generation explicitly. Deriving it here from
+// the tracker's current state would name a wait that was never pushed.
+//
+// **Generation reuse across a restart**, reasoned through and deliberately left
+// as is: newWaitTracker starts nextGen at zero while host_id is persisted and
+// session ids survive, so "H:S:1" can genuinely be issued twice in one device's
+// lifetime. That is benign because the id is host- and session-qualified, so a
+// collision is confined to the same session on the same host, where "no longer
+// waiting" means the same thing on both sides of the restart. The specific case
+// worth naming: a session already waiting when the server restarts is adopted as
+// phaseAlerted with a fresh generation and no push, so the pre-restart card
+// stays on screen — and when the user answers, this clear carries a generation
+// that was never pushed and removes that card. That is the outcome we want.
+// Persisting nextGen is a change with its own consequences and is not made here.
+//
+// No waiting_for, no pid, no host name: nobody reads this payload except the
+// code that matches event_id, and text in a push nobody sees is payload spent on
+// nothing.
+func buildClearPayload(hostID string, e notifyEvent) []byte {
+	payload := map[string]any{
+		"aps":        map[string]any{"content-available": 1},
+		"host_id":    hostID,
+		"session_id": e.SessionID,
+		"event_id":   eventID(hostID, e),
+		"cleared":    true,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		// Deliberately still a well-formed background push. A clear that cannot
+		// name its event removes nothing, which is the same as not sending it —
+		// but sending something malformed would be worse than either.
+		return []byte(`{"aps":{"content-available":1}}`)
+	}
+	return data
+}
+
 // buildAlertPayload renders the APNs body for one waiting session.
 func buildAlertPayload(hostName, hostID string, e notifyEvent) []byte {
 	label := e.Name
@@ -563,7 +675,7 @@ func buildAlertPayload(hostName, hostID string, e notifyEvent) []byte {
 		"host_id":     hostID,
 		"pid":         e.PID,
 		"session_id":  e.SessionID,
-		"event_id":    fmt.Sprintf("%s:%s:%d", hostID, e.SessionID, e.Generation),
+		"event_id":    eventID(hostID, e),
 		"waiting_for": e.WaitingFor,
 	}
 	data, err := json.Marshal(payload)

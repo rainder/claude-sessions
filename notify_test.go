@@ -297,6 +297,18 @@ func (f *fakeSender) requests() []pushRequest {
 	return out
 }
 
+// inOrder returns what was sent, in the order it was sent.
+//
+// Only meaningful with a single device — the fan-out across devices is
+// concurrent and its order is not — but "the clear followed the alert it
+// retracts" is exactly a one-device question, and requests() sorts that answer
+// away.
+func (f *fakeSender) inOrder() []pushRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]pushRequest(nil), f.sent...)
+}
+
 // stallingSender never answers for the nominated tokens and answers every other
 // one immediately.
 //
@@ -813,17 +825,21 @@ func TestNotifyHubShutdownIsIdempotent(t *testing.T) {
 	h.Shutdown()
 }
 
-// Clear events have no consumer until Live Activities land. The hub must not
-// try to push them as alerts in the meantime.
-func TestNotifyHubDoesNotPushClears(t *testing.T) {
+// Answering a prompt at the keyboard has to take the card off the phone, and the
+// only thing that knows the prompt was answered is this hub.
+//
+// The clear must name the wait that was alerted, not a new one: the app removes
+// exactly the delivered notification carrying that event_id, so a re-derived
+// generation would match nothing and the card would sit there forever.
+func TestNotifyHubPushesAClearWhenAWaitEnds(t *testing.T) {
 	devices := loadDeviceStore("", fixedClock(time.Now()))
-	devices.Upsert(Device{Token: "dev"})
+	devices.Upsert(Device{Token: "dev", Environment: "sandbox"})
 	sender := &fakeSender{}
 
 	waiting := []Session{waitingSession("abc-123", "permission prompt")}
 	idle := []Session{idleSession("abc-123")}
 	h := newNotifyHub(notifyHubOptions{
-		HostName: "h", HostID: "i", BundleID: "b",
+		HostName: "myserver", HostID: "9f2c", BundleID: "com.skerla.claude-sessions",
 		Devices: devices, Sender: sender,
 		Collect: snapshotCollector(nil, waiting, waiting, idle),
 	})
@@ -833,9 +849,199 @@ func TestNotifyHubDoesNotPushClears(t *testing.T) {
 		h.tickOnce(context.Background())
 	}
 
-	if got := sender.requests(); len(got) != 1 {
-		t.Fatalf("sent %d pushes, want only the alert: %+v", len(got), got)
+	got := sender.inOrder()
+	if len(got) != 2 {
+		t.Fatalf("sent %d pushes, want an alert then a clear: %+v", len(got), got)
 	}
+	alert, clear := got[0], got[1]
+
+	if alert.PushType != "alert" || alert.Priority != "10" {
+		t.Fatalf("alert push type/priority = %q/%q, want alert/10", alert.PushType, alert.Priority)
+	}
+	// APNs rejects a background push sent at priority 10 outright, which
+	// produces a clear that silently never arrives.
+	if clear.PushType != "background" || clear.Priority != "5" {
+		t.Fatalf("clear push type/priority = %q/%q, want background/5", clear.PushType, clear.Priority)
+	}
+	if clear.Environment != "sandbox" {
+		t.Fatalf("clear environment = %q, want the device's own", clear.Environment)
+	}
+	if clear.Topic != "com.skerla.claude-sessions" {
+		t.Fatalf("clear topic = %q", clear.Topic)
+	}
+	// Identical, so a clear replaces an undelivered alert for that session in
+	// APNs's queue rather than queueing behind it.
+	if alert.CollapseID != clear.CollapseID {
+		t.Fatalf("collapse ids differ: alert %q, clear %q", alert.CollapseID, clear.CollapseID)
+	}
+	if eventIDOf(t, alert) != eventIDOf(t, clear) {
+		t.Fatalf("event ids differ: alert %q, clear %q", eventIDOf(t, alert), eventIDOf(t, clear))
+	}
+	if eventIDOf(t, clear) != "9f2c:abc-123:1" {
+		t.Fatalf("clear event_id = %q, want the alerted generation", eventIDOf(t, clear))
+	}
+}
+
+// The generation the clear carries is the one that was alerted, not the one the
+// tracker happens to be on. A session re-alerted for a different prompt has two
+// live generations, and clearing the first would leave the second card on screen
+// with nothing left to remove it.
+func TestNotifyHubClearCarriesTheGenerationThatWasAlerted(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{}
+
+	first := []Session{waitingSession("abc-123", "permission prompt")}
+	second := []Session{waitingSession("abc-123", "a different prompt")}
+	idle := []Session{idleSession("abc-123")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "9f2c", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: snapshotCollector(nil, first, first, second, idle),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 5; n++ {
+		h.tickOnce(context.Background())
+	}
+
+	got := sender.inOrder()
+	if len(got) != 3 {
+		t.Fatalf("sent %d pushes, want two alerts and a clear: %+v", len(got), got)
+	}
+	if want := "9f2c:abc-123:2"; eventIDOf(t, got[2]) != want {
+		t.Fatalf("clear event_id = %q, want %q (the second wait)", eventIDOf(t, got[2]), want)
+	}
+}
+
+// A session that exits while it is waiting never stops waiting — it just stops
+// being there. Its card has to go too.
+func TestNotifyHubPushesAClearWhenASessionDisappears(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{}
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "9f2c", BundleID: "b",
+		Devices: devices, Sender: sender,
+		// Two absent ticks: one absence is indistinguishable from a
+		// half-written session file.
+		Collect: snapshotCollector(nil, waiting, waiting, nil, nil),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 4; n++ {
+		h.tickOnce(context.Background())
+	}
+	if got := sender.inOrder(); len(got) != 1 {
+		t.Fatalf("one missed tick already cleared: %+v", got)
+	}
+	h.tickOnce(context.Background())
+
+	got := sender.inOrder()
+	if len(got) != 2 {
+		t.Fatalf("sent %d pushes, want the alert and a clear: %+v", len(got), got)
+	}
+	if got[1].PushType != "background" || got[1].Priority != "5" {
+		t.Fatalf("clear push type/priority = %q/%q", got[1].PushType, got[1].Priority)
+	}
+	if want := "9f2c:abc-123:1"; eventIDOf(t, got[1]) != want {
+		t.Fatalf("clear event_id = %q, want %q", eventIDOf(t, got[1]), want)
+	}
+}
+
+// A background push carrying an alert is not a background push: iOS shows it,
+// and the user gets a blank notification every time they answer a prompt.
+func TestBuildClearPayloadShape(t *testing.T) {
+	raw := buildClearPayload("9f2c", notifyEvent{
+		Kind: notifyClear, SessionID: "abc-123", PID: 41234,
+		CWD: "/Users/x/trecs-brain", Name: "trecs-brain",
+		WaitingFor: "permission prompt", Generation: 6,
+	})
+
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v — %s", err, raw)
+	}
+	aps, ok := got["aps"].(map[string]any)
+	if !ok {
+		t.Fatalf("no aps dictionary in %s", raw)
+	}
+	if aps["content-available"] != float64(1) {
+		t.Fatalf("content-available = %v, want 1", aps["content-available"])
+	}
+	if len(aps) != 1 {
+		t.Fatalf("aps = %v, want content-available and nothing else", aps)
+	}
+	if got["event_id"] != "9f2c:abc-123:6" {
+		t.Fatalf("event_id = %v", got["event_id"])
+	}
+	if got["cleared"] != true {
+		t.Fatalf("cleared = %v, want true", got["cleared"])
+	}
+	if got["host_id"] != "9f2c" || got["session_id"] != "abc-123" {
+		t.Fatalf("identity fields = %v", got)
+	}
+	// The prompt text is what the alert said; repeating it in a push nobody
+	// sees is payload spent on nothing.
+	if _, ok := got["waiting_for"]; ok {
+		t.Fatalf("clear carries waiting_for: %s", raw)
+	}
+}
+
+// The alert and the clear for one wait are matched by the app on event_id and by
+// APNs on collapse id. A realistic pair — a 32-hex host id and a UUID session id
+// — is 69 characters, which is over the 64 APNs allows, so both are truncated
+// today. That is fine only while they truncate to the same bytes.
+func TestAlertAndClearShareACollapseIDEvenWhenTruncated(t *testing.T) {
+	hostID := strings.Repeat("a", 32)
+	sessionID := "6f1d2c3b-4a59-4e6f-8b0c-1d2e3f4a5b6c"
+
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &fakeSender{}
+
+	waiting := []Session{waitingSession(sessionID, "permission prompt")}
+	idle := []Session{idleSession(sessionID)}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: hostID, BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: snapshotCollector(nil, waiting, waiting, idle),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 4; n++ {
+		h.tickOnce(context.Background())
+	}
+
+	got := sender.inOrder()
+	if len(got) != 2 {
+		t.Fatalf("sent %d pushes, want an alert and a clear: %+v", len(got), got)
+	}
+	// The premise of this test: without it, equal-and-short would pass and say
+	// nothing about the case that actually happens.
+	if len(got[0].CollapseID) <= apnsCollapseIDMax {
+		t.Fatalf("collapse id is %d characters, so this test is not exercising truncation",
+			len(got[0].CollapseID))
+	}
+	if got[0].CollapseID[:apnsCollapseIDMax] != got[1].CollapseID[:apnsCollapseIDMax] {
+		t.Fatalf("truncated collapse ids differ: alert %q, clear %q",
+			got[0].CollapseID[:apnsCollapseIDMax], got[1].CollapseID[:apnsCollapseIDMax])
+	}
+}
+
+// eventIDOf pulls event_id back out of a rendered payload, so a test asserts on
+// what a device would actually receive rather than on what was passed in.
+func eventIDOf(t *testing.T, req pushRequest) string {
+	t.Helper()
+	var body struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.Unmarshal(req.Payload, &body); err != nil {
+		t.Fatalf("unmarshal payload: %v — %s", err, req.Payload)
+	}
+	return body.EventID
 }
 
 // Session names and prompts are arbitrary text. An oversized payload is
