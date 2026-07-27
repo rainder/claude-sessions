@@ -163,12 +163,23 @@ func TestRenderConfirmOverlayUnknownSizeDropsPreview(t *testing.T) {
 }
 
 func TestRenderConfirmOverlayPreviewNeverWidensBox(t *testing.T) {
+	// A wide terminal (cols=120, cap 116) so the cols-4 clamp can't mask a
+	// contaminated width: if preview lines ever leaked into the innerWidth
+	// max, the 400-char line would push the box to 116+4=120 cols, well past
+	// the 76 the 72-column floor dictates. Asserting the exact top-border
+	// width (not just "under the terminal width") is what actually catches
+	// preview content driving the box wider than its floor.
 	prev := &overlayPreview{Title: "t", Loaded: true, Lines: []string{strings.Repeat("x", 400)}}
-	out := renderConfirmOverlay("hi", prev, 100, 40)
+	out := renderConfirmOverlay("hi", prev, 120, 40)
+	var top string
 	for _, ln := range strings.Split(out, "\n") {
-		if visibleWidth(ln) > 100 {
-			t.Fatalf("line exceeds terminal width: %d cols", visibleWidth(ln))
+		if strings.Contains(ln, confirmBoxTL) {
+			top = strings.TrimLeft(ln, " ")
+			break
 		}
+	}
+	if got := visibleWidth(top); got != 76 { // 72 inner + 4 border/padding
+		t.Fatalf("box width = %d, want 76: %q", got, top)
 	}
 }
 
