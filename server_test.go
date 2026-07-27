@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,8 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1615,5 +1618,1579 @@ func TestHostPortBracketsIPv6(t *testing.T) {
 		if got := hostPort(tt.host, 8765); got != tt.want {
 			t.Errorf("hostPort(%q, 8765) = %q, want %q", tt.host, got, tt.want)
 		}
+	}
+}
+
+// --- TASK6: session_id preconditions on kill/migrate -----------------------
+
+// killRequest builds an authed kill request for pid with the given raw body.
+// A nil body reproduces the eight pre-existing callers (and `curl -X POST`
+// with no -d), which must keep meaning "no precondition".
+func killRequest(t *testing.T, pid int, body string) *http.Request {
+	t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/sessions/%d/kill", pid), nil)
+	} else {
+		req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/sessions/%d/kill", pid), strings.NewReader(body))
+	}
+	req.SetPathValue("pid", strconv.Itoa(pid))
+	req.Header.Set("Authorization", "Bearer secret")
+	return req
+}
+
+func decodeAction(t *testing.T, rec *httptest.ResponseRecorder) actionResult {
+	t.Helper()
+	var got actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+	}
+	return got
+}
+
+// TestKillHandlerMatchingSessionIDTerminates: a precondition naming the session
+// the server itself resolved for that PID proceeds exactly as an unconditional
+// kill does.
+func TestKillHandlerMatchingSessionIDTerminates(t *testing.T) {
+	live := Session{PID: 55, SessionID: "aaaa-1111", Tmux: "work:1.0"}
+	var got Session
+	s := &server{
+		token:     "secret",
+		collect:   func() ([]Session, error) { return []Session{live}, nil },
+		attest:    func(int) (Session, bool) { return Session{PID: 55, SessionID: "aaaa-1111"}, true },
+		terminate: func(target Session) error { got = target; return nil },
+	}
+	rec := httptest.NewRecorder()
+	s.kill(rec, killRequest(t, 55, `{"session_id":"aaaa-1111"}`))
+
+	if got != live {
+		t.Fatalf("terminated %#v, want %#v", got, live)
+	}
+	if r := decodeAction(t, rec); !r.OK || r.Code != "" {
+		t.Fatalf("result = %#v, want ok with no code", r)
+	}
+}
+
+// TestKillHandlerRecycledPIDRefuses is the case D14 describes and the reason
+// this precondition exists: the session the phone was looking at exited, the
+// pane was recycled, and PID 55 now belongs to somebody else. The kill must
+// refuse rather than terminate the innocent occupant.
+func TestKillHandlerRecycledPIDRefuses(t *testing.T) {
+	occupant := Session{PID: 55, SessionID: "bbbb-2222", Tmux: "someone-else:0.0"}
+	terminated := false
+	s := &server{
+		token:     "secret",
+		collect:   func() ([]Session, error) { return []Session{occupant}, nil },
+		terminate: func(Session) error { terminated = true; return nil },
+	}
+	rec := httptest.NewRecorder()
+	// The id the phone last saw at this PID, ten minutes ago.
+	s.kill(rec, killRequest(t, 55, `{"session_id":"aaaa-1111"}`))
+
+	if terminated {
+		t.Fatal("terminate called for a recycled PID")
+	}
+	r := decodeAction(t, rec)
+	if r.OK {
+		t.Fatalf("result = %#v, want refusal", r)
+	}
+	if r.Code != codeSessionMismatch {
+		t.Fatalf("code = %q, want %q", r.Code, codeSessionMismatch)
+	}
+	if r.Error == "" {
+		t.Fatal("refusal carries no human-readable error")
+	}
+	// The refusal must not leak the occupant's identity back to a client that
+	// guessed at it — the client learns only that its target is gone.
+	if strings.Contains(r.Error, occupant.SessionID) {
+		t.Fatalf("error %q leaks the occupant session id", r.Error)
+	}
+}
+
+// TestKillHandlerSessionIDForDeadPIDRefuses: a precondition against a PID that
+// holds no live session at all is `not_live`, not a mismatch.
+func TestKillHandlerSessionIDForDeadPIDRefuses(t *testing.T) {
+	terminated := false
+	s := &server{
+		token:     "secret",
+		collect:   func() ([]Session, error) { return nil, nil },
+		terminate: func(Session) error { terminated = true; return nil },
+	}
+	rec := httptest.NewRecorder()
+	s.kill(rec, killRequest(t, 55, `{"session_id":"aaaa-1111"}`))
+
+	if terminated {
+		t.Fatal("terminate called for a PID with no live session")
+	}
+	r := decodeAction(t, rec)
+	if r.OK || r.Code != codeNotLive {
+		t.Fatalf("result = %#v, want refusal with code %q", r, codeNotLive)
+	}
+	if r.Error != "PID 55 is not a live Claude session" {
+		t.Fatalf("error = %q, want the pre-existing not-live wording", r.Error)
+	}
+}
+
+// TestKillHandlerEmptyPreconditionKeepsLegacyBehaviour: the desktop sends `{}`
+// and scripted callers send nothing at all. Both must still mean "kill whatever
+// is at this PID", byte-compatibly with the pre-TASK6 server.
+func TestKillHandlerEmptyPreconditionKeepsLegacyBehaviour(t *testing.T) {
+	for _, body := range []string{"", "{}", `{"session_id":""}`, "   ", "\n"} {
+		t.Run(fmt.Sprintf("body=%q", body), func(t *testing.T) {
+			live := Session{PID: 55, SessionID: "aaaa-1111"}
+			var got Session
+			s := &server{
+				token:     "secret",
+				collect:   func() ([]Session, error) { return []Session{live}, nil },
+				terminate: func(target Session) error { got = target; return nil },
+			}
+			rec := httptest.NewRecorder()
+			s.kill(rec, killRequest(t, 55, body))
+
+			if got != live {
+				t.Fatalf("terminated %#v, want %#v", got, live)
+			}
+			if r := decodeAction(t, rec); !r.OK || r.Code != "" {
+				t.Fatalf("result = %#v, want a plain ok", r)
+			}
+		})
+	}
+}
+
+// TestKillHandlerMalformedPreconditionIsBadRequest: an empty body is "no
+// precondition", but non-empty junk is a client bug and gets the same 400 the
+// other handlers give it. Terminate is never reached.
+func TestKillHandlerMalformedPreconditionIsBadRequest(t *testing.T) {
+	for _, body := range []string{"not json", `{"session_id":`, `{"session_id":42}`, "[]"} {
+		t.Run(body, func(t *testing.T) {
+			terminated := false
+			collected := false
+			s := &server{
+				token:     "secret",
+				collect:   func() ([]Session, error) { collected = true; return nil, nil },
+				terminate: func(Session) error { terminated = true; return nil },
+			}
+			rec := httptest.NewRecorder()
+			s.kill(rec, killRequest(t, 55, body))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+			if collected || terminated {
+				t.Fatalf("malformed body reached the session list (collected=%v terminated=%v)", collected, terminated)
+			}
+		})
+	}
+}
+
+// TestKillHandlerPreconditionCheckedBeforeWorktree: the mismatch refusal
+// happens before worktreeCleanupTarget is consulted, so a refused kill never
+// invites the client to remove a worktree that is still in use.
+func TestKillHandlerPreconditionCheckedBeforeWorktree(t *testing.T) {
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 55, SessionID: "bbbb-2222", CWD: "/tmp/wt"}}, nil
+		},
+		terminate: func(Session) error { return nil },
+	}
+	rec := httptest.NewRecorder()
+	s.kill(rec, killRequest(t, 55, `{"session_id":"aaaa-1111"}`))
+
+	r := decodeAction(t, rec)
+	if r.Worktree != nil {
+		t.Fatalf("refused kill offered a worktree: %#v", r.Worktree)
+	}
+}
+
+// migrateRequest builds an authed migrate request for pid with a raw body.
+func migrateRequest(t *testing.T, pid int, body string) *http.Request {
+	t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/sessions/%d/migrate", pid), nil)
+	} else {
+		req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/sessions/%d/migrate", pid), strings.NewReader(body))
+	}
+	req.SetPathValue("pid", strconv.Itoa(pid))
+	req.Header.Set("Authorization", "Bearer secret")
+	return req
+}
+
+// TestMigrateHandlerWithoutPreconditionDoesNotCollect: the desktop path costs
+// exactly what it cost before — no session list is collected when no
+// precondition was supplied.
+func TestMigrateHandlerWithoutPreconditionDoesNotCollect(t *testing.T) {
+	for _, body := range []string{"", "{}", `{"session_id":""}`} {
+		t.Run(fmt.Sprintf("body=%q", body), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir()) // no session file: MigrateLocal fails fast
+			collected := false
+			s := &server{
+				token:   "secret",
+				collect: func() ([]Session, error) { collected = true; return nil, nil },
+			}
+			rec := httptest.NewRecorder()
+			s.migrate(rec, migrateRequest(t, 999999, body))
+
+			if collected {
+				t.Fatal("collect called for a migrate with no precondition")
+			}
+			r := decodeAction(t, rec)
+			if r.Error != "no session file for PID 999999" {
+				t.Fatalf("error = %q, want MigrateLocal's own error", r.Error)
+			}
+			if r.Code != "" {
+				t.Fatalf("code = %q, want empty for a MigrateLocal failure", r.Code)
+			}
+		})
+	}
+}
+
+// TestMigrateHandlerMatchingPreconditionReachesMigrate: a matching precondition
+// falls through to MigrateLocal, proved by MigrateLocal's own error surfacing.
+func TestMigrateHandlerMatchingPreconditionReachesMigrate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 999999, SessionID: "aaaa-1111"}}, nil
+		},
+	}
+	rec := httptest.NewRecorder()
+	s.migrate(rec, migrateRequest(t, 999999, `{"session_id":"aaaa-1111"}`))
+
+	r := decodeAction(t, rec)
+	if r.Error != "no session file for PID 999999" {
+		t.Fatalf("error = %q, want to have reached MigrateLocal", r.Error)
+	}
+}
+
+// TestMigrateHandlerRecycledPIDRefuses: the same recycled-pane case as kill.
+// MigrateLocal is never reached — proved by its distinctive error being absent,
+// and by the tmux stub never being invoked.
+func TestMigrateHandlerRecycledPIDRefuses(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	logPath := installFakeTmux(t)
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 999999, SessionID: "bbbb-2222"}}, nil
+		},
+	}
+	rec := httptest.NewRecorder()
+	s.migrate(rec, migrateRequest(t, 999999, `{"session_id":"aaaa-1111"}`))
+
+	r := decodeAction(t, rec)
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("result = %#v, want refusal with code %q", r, codeSessionMismatch)
+	}
+	if strings.Contains(r.Error, "no session file") {
+		t.Fatalf("error = %q: MigrateLocal was reached", r.Error)
+	}
+	if _, err := os.Stat(logPath); err == nil {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("refused migrate invoked tmux:\n%s", data)
+	}
+}
+
+// TestMigrateHandlerPreconditionForDeadPIDRefuses: `not_live`, and MigrateLocal
+// is never reached even though it would have produced its own error.
+func TestMigrateHandlerPreconditionForDeadPIDRefuses(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{
+		token:   "secret",
+		collect: func() ([]Session, error) { return nil, nil },
+	}
+	rec := httptest.NewRecorder()
+	s.migrate(rec, migrateRequest(t, 999999, `{"session_id":"aaaa-1111"}`))
+
+	r := decodeAction(t, rec)
+	if r.OK || r.Code != codeNotLive {
+		t.Fatalf("result = %#v, want refusal with code %q", r, codeNotLive)
+	}
+	if strings.Contains(r.Error, "no session file") {
+		t.Fatalf("error = %q: MigrateLocal was reached", r.Error)
+	}
+}
+
+// TestMigrateHandlerMalformedPreconditionIsBadRequest mirrors kill's.
+func TestMigrateHandlerMalformedPreconditionIsBadRequest(t *testing.T) {
+	collected := false
+	s := &server{
+		token:   "secret",
+		collect: func() ([]Session, error) { collected = true; return nil, nil },
+	}
+	rec := httptest.NewRecorder()
+	s.migrate(rec, migrateRequest(t, 999999, "not json"))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if collected {
+		t.Fatal("malformed body reached the session list")
+	}
+}
+
+// TestMigrateHandlerCollectionErrorDoesNotMigrate: a collection failure with a
+// precondition supplied refuses rather than falling through unchecked.
+func TestMigrateHandlerCollectionErrorDoesNotMigrate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{
+		token:   "secret",
+		collect: func() ([]Session, error) { return nil, errors.New("collect boom") },
+	}
+	rec := httptest.NewRecorder()
+	s.migrate(rec, migrateRequest(t, 999999, `{"session_id":"aaaa-1111"}`))
+
+	r := decodeAction(t, rec)
+	if r.OK || r.Error != "collect boom" {
+		t.Fatalf("result = %#v, want the collection error", r)
+	}
+	if strings.Contains(r.Error, "no session file") {
+		t.Fatal("MigrateLocal was reached despite an unverifiable precondition")
+	}
+}
+
+// --- TASK6: request_id makes spawn idempotent ------------------------------
+
+// newRequest builds an authed /sessions/new request from a body map.
+func newSessionRequest(t *testing.T, body map[string]string) *http.Request {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sessions/new", strings.NewReader(string(data)))
+	req.Header.Set("Authorization", "Bearer secret")
+	return req
+}
+
+// spawnRecorder is a server whose spawn seam counts calls and answers from a
+// script, so the dedupe can be exercised without starting tmux.
+func spawnRecorder(t *testing.T, result func(n int) (string, error)) (*server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	calls := 0
+	s := &server{
+		token: "secret",
+		spawn: func(cwd, name, command, suffix string) (string, error) {
+			mu.Lock()
+			calls++
+			n := calls
+			mu.Unlock()
+			return result(n)
+		},
+	}
+	return s, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}
+}
+
+// TestNewSessionSameRequestIDSpawnsOnce: the phone gave up and tapped again.
+// The replayed response is byte-identical and nothing new was created.
+func TestNewSessionSameRequestIDSpawnsOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, calls := spawnRecorder(t, func(int) (string, error) { return "work-abc123", nil })
+
+	body := map[string]string{"cwd": home, "request_id": "task6-verify-001"}
+	first := httptest.NewRecorder()
+	s.newSession(first, newSessionRequest(t, body))
+	second := httptest.NewRecorder()
+	s.newSession(second, newSessionRequest(t, body))
+
+	if got := calls(); got != 1 {
+		t.Fatalf("spawn called %d times, want 1", got)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replay differs:\nfirst  %s\nsecond %s", first.Body.String(), second.Body.String())
+	}
+	if r := decodeAction(t, first); !r.OK || r.Tmux != "work-abc123" {
+		t.Fatalf("result = %#v", r)
+	}
+}
+
+// TestNewSessionSameRequestIDConcurrentlySpawnsOnce is the racing interleaving:
+// two requests arriving close enough together that the first has not finished.
+// The second must join the first's flight, not start a second spawn.
+func TestNewSessionSameRequestIDConcurrentlySpawnsOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 8)
+	var mu sync.Mutex
+	calls := 0
+	s := &server{
+		token: "secret",
+		spawn: func(string, string, string, string) (string, error) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			entered <- struct{}{}
+			<-release // hold the flight open until every caller has arrived
+			return "work-abc123", nil
+		},
+	}
+
+	const racers = 8
+	body := map[string]string{"cwd": home, "request_id": "task6-concurrent"}
+	bodies := make([]string, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			s.newSession(rec, newSessionRequest(t, body))
+			bodies[i] = rec.Body.String()
+		}(i)
+	}
+	<-entered // the winner is inside SpawnNew; the rest are joining or about to
+	// Give the losers time to reach the dedupe before letting the winner finish,
+	// so this exercises the join rather than the post-completion replay.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("spawn called %d times, want 1", got)
+	}
+	for i, b := range bodies {
+		if b != bodies[0] {
+			t.Fatalf("racer %d got %s, racer 0 got %s", i, b, bodies[0])
+		}
+	}
+	var r actionResult
+	if err := json.Unmarshal([]byte(bodies[0]), &r); err != nil {
+		t.Fatal(err)
+	}
+	if !r.OK || r.Tmux != "work-abc123" {
+		t.Fatalf("result = %#v", r)
+	}
+}
+
+// TestNewSessionConcurrentFailureStillSpawnsOnce: the in-flight join covers
+// failures too. Both callers see the same failure and SpawnNew ran once —
+// otherwise a retry storm against a broken tmux multiplies the damage.
+func TestNewSessionConcurrentFailureStillSpawnsOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 4)
+	var mu sync.Mutex
+	calls := 0
+	s := &server{
+		token: "secret",
+		spawn: func(string, string, string, string) (string, error) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			entered <- struct{}{}
+			<-release
+			return "", errors.New("tmux new-session: exit status 1")
+		},
+	}
+
+	body := map[string]string{"cwd": home, "request_id": "task6-concurrent-fail"}
+	bodies := make([]string, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			s.newSession(rec, newSessionRequest(t, body))
+			bodies[i] = rec.Body.String()
+		}(i)
+	}
+	<-entered
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("spawn called %d times, want 1", got)
+	}
+	if bodies[0] != bodies[1] {
+		t.Fatalf("joined failure differs: %s vs %s", bodies[0], bodies[1])
+	}
+	var r actionResult
+	if err := json.Unmarshal([]byte(bodies[0]), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.OK || !strings.Contains(r.Error, "tmux new-session") {
+		t.Fatalf("result = %#v, want the spawn failure", r)
+	}
+}
+
+// TestNewSessionFailedSpawnIsNotRemembered: nothing was created, so a retry
+// must genuinely re-run. Caching a transient failure for ten minutes would
+// leave the user unable to retry a spawn that would now work.
+func TestNewSessionFailedSpawnIsNotRemembered(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, calls := spawnRecorder(t, func(n int) (string, error) {
+		if n == 1 {
+			return "", errors.New("tmux new-session: exit status 1")
+		}
+		return "work-abc123", nil
+	})
+
+	body := map[string]string{"cwd": home, "request_id": "task6-retry"}
+	first := httptest.NewRecorder()
+	s.newSession(first, newSessionRequest(t, body))
+	second := httptest.NewRecorder()
+	s.newSession(second, newSessionRequest(t, body))
+
+	if got := calls(); got != 2 {
+		t.Fatalf("spawn called %d times, want 2", got)
+	}
+	if r := decodeAction(t, first); r.OK {
+		t.Fatalf("first result = %#v, want failure", r)
+	}
+	if r := decodeAction(t, second); !r.OK || r.Tmux != "work-abc123" {
+		t.Fatalf("second result = %#v, want the retry to succeed", r)
+	}
+}
+
+// TestNewSessionDifferentRequestIDsSpawnTwice: dedupe is per id, not global.
+func TestNewSessionDifferentRequestIDsSpawnTwice(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, calls := spawnRecorder(t, func(n int) (string, error) {
+		return fmt.Sprintf("work-%06d", n), nil
+	})
+
+	for _, id := range []string{"task6-aaaa", "task6-bbbb"} {
+		rec := httptest.NewRecorder()
+		s.newSession(rec, newSessionRequest(t, map[string]string{"cwd": home, "request_id": id}))
+		if r := decodeAction(t, rec); !r.OK {
+			t.Fatalf("id %q: %#v", id, r)
+		}
+	}
+	if got := calls(); got != 2 {
+		t.Fatalf("spawn called %d times, want 2", got)
+	}
+}
+
+// TestNewSessionWithoutRequestIDNeverDedupes: the pre-TASK6 caller sends no id
+// and every call must still create a session.
+func TestNewSessionWithoutRequestIDNeverDedupes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, calls := spawnRecorder(t, func(n int) (string, error) {
+		return fmt.Sprintf("work-%06d", n), nil
+	})
+
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		s.newSession(rec, newSessionRequest(t, map[string]string{"cwd": home}))
+		if r := decodeAction(t, rec); !r.OK {
+			t.Fatalf("call %d: %#v", i, r)
+		}
+	}
+	if got := calls(); got != 3 {
+		t.Fatalf("spawn called %d times, want 3", got)
+	}
+}
+
+// TestNewSessionRequestIDBounds sits on both edges of the accepted length and
+// character set: 8 and 128 are in, 7 and 129 are out, and anything outside
+// [A-Za-z0-9_-] is out because this value becomes a long-lived map key.
+func TestNewSessionRequestIDBounds(t *testing.T) {
+	home := t.TempDir()
+	tests := []struct {
+		name string
+		id   string
+		want int
+	}{
+		{"seven chars", strings.Repeat("a", 7), http.StatusBadRequest},
+		{"eight chars", strings.Repeat("a", 8), http.StatusOK},
+		{"128 chars", strings.Repeat("a", 128), http.StatusOK},
+		{"129 chars", strings.Repeat("a", 129), http.StatusBadRequest},
+		{"four chars", "abcd", http.StatusBadRequest},
+		{"slash", "task6/verify", http.StatusBadRequest},
+		{"dot", "task6.verify", http.StatusBadRequest},
+		{"space", "task6 verify", http.StatusBadRequest},
+		{"newline", "task6\nverify", http.StatusBadRequest},
+		{"underscore and dash", "task6_verify-001", http.StatusOK},
+		{"unicode", "task6-vérify", http.StatusBadRequest},
+		{"nul", "task6\x00verify", http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			s, calls := spawnRecorder(t, func(int) (string, error) { return "work-abc123", nil })
+			rec := httptest.NewRecorder()
+			s.newSession(rec, newSessionRequest(t, map[string]string{"cwd": home, "request_id": tt.id}))
+
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d (body %q)", rec.Code, tt.want, rec.Body.String())
+			}
+			if tt.want == http.StatusBadRequest {
+				if strings.TrimSpace(rec.Body.String()) != "bad request_id" {
+					t.Fatalf("body = %q, want %q", rec.Body.String(), "bad request_id")
+				}
+				if got := calls(); got != 0 {
+					t.Fatalf("spawn called %d times for a rejected request_id", got)
+				}
+			}
+		})
+	}
+}
+
+// TestNewSessionRequestIDMissingIsNotMalformed: an absent id is not a short id.
+// The empty string must read as "no idempotency", never as a 400.
+func TestNewSessionRequestIDMissingIsNotMalformed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, calls := spawnRecorder(t, func(int) (string, error) { return "work-abc123", nil })
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRequest(t, map[string]string{"cwd": home, "request_id": ""}))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := calls(); got != 1 {
+		t.Fatalf("spawn called %d times, want 1", got)
+	}
+}
+
+// TestNewSessionReplayDoesNotInvalidateTwice: the replay returns the stored
+// result without re-running the spawn's side effects, of which the session-cache
+// invalidation is the observable one.
+func TestNewSessionReplayDoesNotInvalidateTwice(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, _ := spawnRecorder(t, func(int) (string, error) { return "work-abc123", nil })
+
+	body := map[string]string{"cwd": home, "request_id": "task6-invalidate"}
+	s.newSession(httptest.NewRecorder(), newSessionRequest(t, body))
+	before := s.sessionCache.generation
+	s.newSession(httptest.NewRecorder(), newSessionRequest(t, body))
+
+	if after := s.sessionCache.generation; after != before {
+		t.Fatalf("cache generation moved on replay: %d -> %d", before, after)
+	}
+}
+
+// TestNewSessionDedupeExpiresAtTTL sits on the TTL edge: a replay one
+// nanosecond inside ten minutes still replays, and one nanosecond past it
+// spawns again.
+func TestNewSessionDedupeExpiresAtTTL(t *testing.T) {
+	home := t.TempDir()
+	tests := []struct {
+		name  string
+		after time.Duration
+		want  int
+	}{
+		{"just inside the TTL", spawnDedupeTTL - time.Nanosecond, 1},
+		{"exactly at the TTL", spawnDedupeTTL, 2},
+		{"past the TTL", spawnDedupeTTL + time.Nanosecond, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			base := time.Unix(1700000000, 0)
+			now := base
+			s, calls := spawnRecorder(t, func(n int) (string, error) {
+				return fmt.Sprintf("work-%06d", n), nil
+			})
+			s.spawns.now = func() time.Time { return now }
+
+			body := map[string]string{"cwd": home, "request_id": "task6-ttl-edge"}
+			s.newSession(httptest.NewRecorder(), newSessionRequest(t, body))
+			now = base.Add(tt.after)
+			s.newSession(httptest.NewRecorder(), newSessionRequest(t, body))
+
+			if got := calls(); got != tt.want {
+				t.Fatalf("spawn called %d times, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewSessionDedupeIsBounded sits on the cap: the most recent
+// spawnDedupeMax ids are remembered and the oldest is forgotten, so a
+// long-running server cannot accumulate request ids without limit.
+func TestNewSessionDedupeIsBounded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	now := time.Unix(1700000000, 0)
+	s, calls := spawnRecorder(t, func(n int) (string, error) {
+		return fmt.Sprintf("work-%06d", n), nil
+	})
+	s.spawns.now = func() time.Time { return now }
+
+	fire := func(id string) {
+		s.newSession(httptest.NewRecorder(), newSessionRequest(t,
+			map[string]string{"cwd": home, "request_id": id}))
+	}
+
+	// Fill exactly to the cap, one second apart so eviction order is defined.
+	for i := 0; i < spawnDedupeMax; i++ {
+		fire(fmt.Sprintf("task6-cap-%04d", i))
+		now = now.Add(time.Second)
+	}
+	if got := calls(); got != spawnDedupeMax {
+		t.Fatalf("spawn called %d times filling the cap, want %d", got, spawnDedupeMax)
+	}
+	if n := s.spawns.len(); n > spawnDedupeMax {
+		t.Fatalf("dedupe holds %d entries, cap is %d", n, spawnDedupeMax)
+	}
+	// The newest is still remembered.
+	fire(fmt.Sprintf("task6-cap-%04d", spawnDedupeMax-1))
+	if got := calls(); got != spawnDedupeMax {
+		t.Fatalf("spawn called %d times, want the newest id to replay", got)
+	}
+	// One more distinct id must evict something rather than grow the map.
+	fire("task6-cap-overflow")
+	if n := s.spawns.len(); n > spawnDedupeMax {
+		t.Fatalf("dedupe grew to %d entries past the cap of %d", n, spawnDedupeMax)
+	}
+	// And what it evicted is the oldest, which therefore spawns again.
+	before := calls()
+	fire("task6-cap-0000")
+	if got := calls(); got != before+1 {
+		t.Fatalf("oldest id replayed instead of being evicted (calls %d -> %d)", before, got)
+	}
+}
+
+// TestNewSessionDedupeNeverEvictsAnInflightSpawn: eviction pressure must not
+// drop the entry a joiner is waiting on, or the join degrades into a second
+// spawn of the same user action — the exact thing request_id exists to stop.
+func TestNewSessionDedupeNeverEvictsAnInflightSpawn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var mu sync.Mutex
+	calls := map[string]int{}
+	s := &server{
+		token: "secret",
+		spawn: func(cwd, name, command, suffix string) (string, error) {
+			mu.Lock()
+			calls[name]++
+			held := name == "held"
+			mu.Unlock()
+			if held {
+				entered <- struct{}{}
+				<-release
+			}
+			return "work-" + name, nil
+		},
+	}
+
+	// Start a spawn and hold it open inside SpawnNew.
+	go s.newSession(httptest.NewRecorder(), newSessionRequest(t,
+		map[string]string{"cwd": home, "name": "held", "request_id": "task6-inflight-hold"}))
+	<-entered
+
+	// Push far past the cap with completed spawns while the first is in flight.
+	for i := 0; i < spawnDedupeMax*2; i++ {
+		s.newSession(httptest.NewRecorder(), newSessionRequest(t, map[string]string{
+			"cwd": home, "name": fmt.Sprintf("filler-%d", i),
+			"request_id": fmt.Sprintf("task6-inflight-%04d", i),
+		}))
+	}
+
+	// A joiner on the held id must still join, not start a second spawn.
+	joined := make(chan string, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		s.newSession(rec, newSessionRequest(t,
+			map[string]string{"cwd": home, "name": "held", "request_id": "task6-inflight-hold"}))
+		joined <- rec.Body.String()
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	body := <-joined
+	mu.Lock()
+	held := calls["held"]
+	mu.Unlock()
+	if held != 1 {
+		t.Fatalf("held spawn ran %d times, want 1 — eviction dropped an in-flight entry", held)
+	}
+	var r actionResult
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		t.Fatal(err)
+	}
+	if !r.OK || r.Tmux != "work-held" {
+		t.Fatalf("joined result = %#v", r)
+	}
+}
+
+// TestNewSessionDedupeDoesNotReplayAcrossDifferentRequests: the id is the whole
+// key, so a caller reusing an id for a different directory gets the first
+// result. That is the documented contract; this pins it so a future change to
+// key on the body is a deliberate one.
+func TestNewSessionSameRequestIDIgnoresBodyChanges(t *testing.T) {
+	home := t.TempDir()
+	other := t.TempDir()
+	t.Setenv("HOME", home)
+	s, calls := spawnRecorder(t, func(n int) (string, error) {
+		return fmt.Sprintf("work-%06d", n), nil
+	})
+
+	id := "task6-same-id"
+	s.newSession(httptest.NewRecorder(), newSessionRequest(t, map[string]string{"cwd": home, "request_id": id}))
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRequest(t, map[string]string{"cwd": other, "request_id": id}))
+
+	if got := calls(); got != 1 {
+		t.Fatalf("spawn called %d times, want 1", got)
+	}
+	if r := decodeAction(t, rec); r.Tmux != "work-000001" {
+		t.Fatalf("result = %#v, want the first spawn replayed", r)
+	}
+}
+
+// TestSpawnSeamFallsBackToSpawnNew: a nil seam is production, matching the
+// collect/terminate/removeTree pattern. Proved through the fake tmux on PATH
+// rather than by really starting a session.
+func TestSpawnSeamFallsBackToSpawnNew(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCommandConfig(t, home)
+	logPath := installFakeTmux(t)
+
+	rec := httptest.NewRecorder()
+	(&server{token: "secret"}).newSession(rec, newSessionRequest(t,
+		map[string]string{"cwd": home, "request_id": "task6-realspawn"}))
+
+	if r := decodeAction(t, rec); !r.OK || r.Tmux == "" {
+		t.Fatalf("result = %#v", r)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "<new-session>") {
+		t.Fatalf("tmux argv:\n%s", data)
+	}
+}
+
+// --- TASK6 review: strict precondition decoding (finding D) -----------------
+
+// TestKillPreconditionRejectsFailOpenBodies: every one of these decodes today
+// to an empty session id, which the handler reads as "no precondition" and acts
+// on unconditionally. The camelCase one is not hypothetical — `sessionId` is
+// exactly the spelling the iOS Session model uses, so one typo in a client turns
+// a guarded kill into a blind one.
+func TestKillPreconditionRejectsFailOpenBodies(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"explicit null", `{"session_id":null}`},
+		{"camelCase typo", `{"sessionId":"aaaa-1111"}`},
+		{"unknown field", `{"session":"aaaa-1111"}`},
+		{"unknown field alongside", `{"session_id":"aaaa-1111","oops":1}`},
+		{"trailing object", `{"session_id":"aaaa-1111"}{"session_id":"bbbb"}`},
+		{"trailing junk", `{"session_id":"aaaa-1111"}garbage`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			terminated := false
+			collected := false
+			s := &server{
+				token:     "secret",
+				collect:   func() ([]Session, error) { collected = true; return nil, nil },
+				terminate: func(Session) error { terminated = true; return nil },
+			}
+			rec := httptest.NewRecorder()
+			s.kill(rec, killRequest(t, 55, tt.body))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+			if collected || terminated {
+				t.Fatalf("fail-open body acted (collected=%v terminated=%v)", collected, terminated)
+			}
+		})
+	}
+}
+
+// TestMigratePreconditionRejectsFailOpenBodies mirrors it.
+func TestMigratePreconditionRejectsFailOpenBodies(t *testing.T) {
+	for _, body := range []string{`{"session_id":null}`, `{"sessionId":"a"}`, `{"session_id":"a"}junk`} {
+		t.Run(body, func(t *testing.T) {
+			collected := false
+			s := &server{token: "secret", collect: func() ([]Session, error) { collected = true; return nil, nil }}
+			rec := httptest.NewRecorder()
+			s.migrate(rec, migrateRequest(t, 999999, body))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+			if collected {
+				t.Fatal("fail-open body reached the session list")
+			}
+		})
+	}
+}
+
+// --- TASK6 review: re-attestation before the syscall (finding A) ------------
+
+// attestingServer wires both seams: collect answers the precondition check,
+// attest answers the re-read immediately before the destructive act.
+func attestingServer(collected []Session, attested map[int]Session, terminated *[]Session) *server {
+	return &server{
+		token:   "secret",
+		collect: func() ([]Session, error) { return collected, nil },
+		attest: func(pid int) (Session, bool) {
+			sess, ok := attested[pid]
+			return sess, ok
+		},
+		terminate: func(target Session) error {
+			*terminated = append(*terminated, target)
+			return nil
+		},
+	}
+}
+
+// TestKillReattestsImmediatelyBeforeTerminating is the substitution race the
+// precondition alone cannot catch: the check passes against a snapshot that
+// CollectLocal spent real I/O building (git root, transcript scan, cost and
+// agent scans per row), and by the time the handler reaches the syscall the PID
+// belongs to someone else. The re-read closes everything except the syscall
+// itself.
+func TestKillReattestsImmediatelyBeforeTerminating(t *testing.T) {
+	var terminated []Session
+	s := attestingServer(
+		[]Session{{PID: 55, SessionID: "aaaa-1111", Tmux: "work:1.0"}},
+		// The world moved on while the snapshot was being enriched.
+		map[int]Session{55: {PID: 55, SessionID: "bbbb-2222"}},
+		&terminated)
+
+	rec := httptest.NewRecorder()
+	s.kill(rec, killRequest(t, 55, `{"session_id":"aaaa-1111"}`))
+
+	if len(terminated) != 0 {
+		t.Fatalf("terminated %#v after the target was substituted", terminated)
+	}
+	r := decodeAction(t, rec)
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("result = %#v, want a mismatch refusal", r)
+	}
+}
+
+// TestKillReattestsAgainstADisappearedSession: the session file is gone by the
+// time we are about to signal, so there is nothing left to attest to.
+func TestKillReattestsAgainstADisappearedSession(t *testing.T) {
+	var terminated []Session
+	s := attestingServer(
+		[]Session{{PID: 55, SessionID: "aaaa-1111"}},
+		map[int]Session{}, // vanished between check and act
+		&terminated)
+
+	rec := httptest.NewRecorder()
+	s.kill(rec, killRequest(t, 55, `{"session_id":"aaaa-1111"}`))
+
+	if len(terminated) != 0 {
+		t.Fatalf("terminated %#v after the session vanished", terminated)
+	}
+	if r := decodeAction(t, rec); r.OK || r.Code != codeNotLive {
+		t.Fatalf("result = %#v, want not_live", r)
+	}
+}
+
+// TestKillReattestationAgreeingStillTerminates: the happy path still kills, and
+// still kills the fully-enriched server-collected row (tmux metadata included),
+// not the bare row the re-read returns.
+func TestKillReattestationAgreeingStillTerminates(t *testing.T) {
+	var terminated []Session
+	collected := Session{PID: 55, SessionID: "aaaa-1111", Tmux: "work:1.0"}
+	s := attestingServer(
+		[]Session{collected},
+		map[int]Session{55: {PID: 55, SessionID: "aaaa-1111"}},
+		&terminated)
+
+	rec := httptest.NewRecorder()
+	s.kill(rec, killRequest(t, 55, `{"session_id":"aaaa-1111"}`))
+
+	if len(terminated) != 1 || terminated[0] != collected {
+		t.Fatalf("terminated %#v, want the enriched row %#v", terminated, collected)
+	}
+	if r := decodeAction(t, rec); !r.OK {
+		t.Fatalf("result = %#v", r)
+	}
+}
+
+// TestKillWithoutPreconditionDoesNotReattest: there is nothing to attest
+// against, so the unconditional path must not acquire a new way to fail.
+func TestKillWithoutPreconditionDoesNotReattest(t *testing.T) {
+	var terminated []Session
+	attestCalls := 0
+	s := &server{
+		token:   "secret",
+		collect: func() ([]Session, error) { return []Session{{PID: 55, SessionID: "aaaa-1111"}}, nil },
+		attest: func(int) (Session, bool) {
+			attestCalls++
+			return Session{}, false
+		},
+		terminate: func(target Session) error { terminated = append(terminated, target); return nil },
+	}
+	rec := httptest.NewRecorder()
+	s.kill(rec, killRequest(t, 55, "{}"))
+
+	if attestCalls != 0 {
+		t.Fatalf("attest called %d times without a precondition", attestCalls)
+	}
+	if len(terminated) != 1 {
+		t.Fatalf("terminated %#v, want the unconditional kill to proceed", terminated)
+	}
+}
+
+// --- TASK6 review: migrate threads the attested id (finding B) --------------
+
+// TestMigrateLocalRefusesWhenTheRereadDisagrees: MigrateLocal re-reads the PID's
+// session file and used to adopt whatever it said. A substitution between the
+// handler's check and that re-read migrated the wrong session — it would kill
+// the new occupant and resume the new occupant's transcript.
+func TestMigrateLocalRefusesWhenTheRereadDisagrees(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	writeMigrateSession(t, home, 999999, "bbbb-2222")
+
+	_, err := MigrateLocalAttested(999999, "aaaa-1111")
+
+	if err == nil {
+		t.Fatal("migrated a session the re-read said was somebody else")
+	}
+	if !errors.Is(err, errMigrateSessionMismatch) {
+		t.Fatalf("err = %v, want errMigrateSessionMismatch", err)
+	}
+	if _, statErr := os.Stat(logPath); statErr == nil {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("refused migrate still invoked tmux:\n%s", data)
+	}
+}
+
+// TestMigrateLocalProceedsWhenTheRereadAgrees, and an empty attestation keeps
+// the pre-existing unconditional behaviour the TUI relies on.
+func TestMigrateLocalAttestationAgreementCases(t *testing.T) {
+	for _, tt := range []struct{ name, want string }{
+		{"matching id", "aaaa-1111"},
+		{"no attestation", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			logPath := installFakeTmux(t)
+			writeMigrateSession(t, home, 999999, "aaaa-1111")
+
+			tname, err := MigrateLocalAttested(999999, tt.want)
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if tname == "" {
+				t.Fatal("no tmux name")
+			}
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "<new-session>") {
+				t.Fatalf("tmux argv:\n%s", data)
+			}
+		})
+	}
+}
+
+// TestMigrateLocalFailsWhenTheProcessSurvives: the kill step discarded its
+// errors and never confirmed the process had actually gone before creating the
+// new tmux session. Two live processes on the same transcript is worse than a
+// failed migrate.
+func TestMigrateLocalFailsWhenTheProcessSurvives(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	writeMigrateSession(t, home, 999999, "aaaa-1111")
+
+	restore := stubMigrateKill(t, func(int, syscall.Signal) error { return nil }, func(int) bool { return true })
+	defer restore()
+
+	_, err := MigrateLocalAttested(999999, "aaaa-1111")
+
+	if err == nil {
+		t.Fatal("migrated while the old process was still running")
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("err = %v, want a liveness failure", err)
+	}
+	if _, statErr := os.Stat(logPath); statErr == nil {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("migrate created a tmux session anyway:\n%s", data)
+	}
+}
+
+// --- TASK6 review: spawn partial commit and joiner safety (finding C) -------
+
+// TestSpawnNewCleansUpWhenSendKeysFails: SpawnNew creates the tmux session and
+// only then sends the command. A send-keys failure used to leave the session
+// behind while reporting failure — and because failures are deliberately not
+// remembered, the retry then made a second one. Cleanup is what makes "failures
+// are not remembered" safe.
+func TestSpawnNewCleansUpWhenSendKeysFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmuxFailing(t, "send-keys")
+
+	_, err := SpawnNew(home, "test", "claude")
+
+	if err == nil {
+		t.Fatal("expected send-keys to fail")
+	}
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(data), "<kill-session>") {
+		t.Fatalf("orphaned tmux session left behind; argv:\n%s", data)
+	}
+}
+
+// TestNewSessionPanicDoesNotStrandJoiners: a joiner blocks on the flight's done
+// channel. If the owner panics without publishing, every joiner blocks forever
+// and those connections never return.
+func TestNewSessionPanicDoesNotStrandJoiners(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	s := &server{
+		token: "secret",
+		spawn: func(string, string, string, string) (string, error) {
+			entered <- struct{}{}
+			// Held open so the joiner below is provably parked on the flight
+			// before the owner dies — otherwise the owner panics first, the
+			// ledger forgets the failure, and the "joiner" is really just the
+			// next owner.
+			<-release
+			panic("tmux exploded")
+		},
+	}
+	body := map[string]string{"cwd": home, "request_id": "task6-panic-01"}
+
+	go func() {
+		defer func() { _ = recover() }()
+		s.newSession(httptest.NewRecorder(), newSessionRequest(t, body))
+	}()
+	<-entered
+
+	joined := make(chan string, 1)
+	go func() {
+		defer func() { _ = recover() }()
+		rec := httptest.NewRecorder()
+		s.newSession(rec, newSessionRequest(t, body))
+		joined <- rec.Body.String()
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	select {
+	case got := <-joined:
+		var r actionResult
+		if err := json.Unmarshal([]byte(got), &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.OK {
+			t.Fatalf("a panicked spawn reported success: %s", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("joiner stranded by a panicking spawn")
+	}
+}
+
+// TestNewSessionJoinerGivesUpWithItsRequest: a hung spawn must not hold every
+// joiner's connection open for as long as it hangs.
+func TestNewSessionJoinerReleasesOnClientDisconnect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	release := make(chan struct{})
+	defer close(release)
+	entered := make(chan struct{}, 1)
+	s := &server{
+		token: "secret",
+		spawn: func(string, string, string, string) (string, error) {
+			entered <- struct{}{}
+			<-release
+			return "work-abc123", nil
+		},
+	}
+	body := map[string]string{"cwd": home, "request_id": "task6-hang-01"}
+	go s.newSession(httptest.NewRecorder(), newSessionRequest(t, body))
+	<-entered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan struct{})
+	go func() {
+		s.newSession(httptest.NewRecorder(), newSessionRequest(t, body).WithContext(ctx))
+		close(returned)
+	}()
+	cancel()
+
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("joiner ignored its own request being cancelled")
+	}
+}
+
+// --- TASK6 review: the cap cannot be honoured by eviction (finding E) -------
+
+// TestNewSessionRefusesBeyondTheInflightCap: with every slot held by a running
+// spawn there is nothing safe to evict — dropping an in-flight entry would turn
+// its joiners into duplicate spawns, which is the whole point of the ledger. So
+// a new id is refused with a retryable 503 rather than admitted past the bound.
+func TestNewSessionRefusesBeyondTheInflightCap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	release := make(chan struct{})
+	entered := make(chan struct{}, spawnDedupeMax)
+	var mu sync.Mutex
+	calls := 0
+	s := &server{
+		token: "secret",
+		spawn: func(string, string, string, string) (string, error) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			entered <- struct{}{}
+			<-release
+			return "work-abc123", nil
+		},
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < spawnDedupeMax; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s.newSession(httptest.NewRecorder(), newSessionRequest(t, map[string]string{
+				"cwd": home, "request_id": fmt.Sprintf("task6-inflight-cap-%04d", i)}))
+		}(i)
+	}
+	for i := 0; i < spawnDedupeMax; i++ {
+		<-entered
+	}
+
+	// The 33rd distinct id arrives with every slot occupied.
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRequest(t, map[string]string{
+		"cwd": home, "request_id": "task6-inflight-cap-overflow"}))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %q)", rec.Code, rec.Body.String())
+	}
+	if n := s.spawns.len(); n > spawnDedupeMax {
+		t.Fatalf("dedupe grew to %d past the cap of %d", n, spawnDedupeMax)
+	}
+	if got := decodeAction(t, rec); got.OK || got.Error == "" {
+		t.Fatalf("refusal = %#v, want a retryable message", got)
+	}
+
+	close(release)
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	// The refusal must not have started a spawn, and none of the 32 held slots
+	// may have been evicted into a second one.
+	if calls != spawnDedupeMax {
+		t.Fatalf("spawn called %d times, want %d", calls, spawnDedupeMax)
+	}
+}
+
+// TestInflightEntriesAreNeverEvictedForCapacity: the refusal above is only
+// correct if eviction genuinely declines to touch a running spawn.
+func TestInflightEntriesAreNeverEvictedForCapacity(t *testing.T) {
+	d := &spawnDedupe{now: func() time.Time { return time.Unix(1700000000, 0) }}
+	for i := 0; i < spawnDedupeMax; i++ {
+		if _, claim := d.begin(fmt.Sprintf("task6-held-%04d", i)); claim != spawnClaimed {
+			t.Fatalf("id %d: claim = %v, want claimed", i, claim)
+		}
+	}
+	if _, claim := d.begin("task6-held-overflow"); claim != spawnClaimRefused {
+		t.Fatalf("claim = %v, want refused at the cap", claim)
+	}
+	if n := d.len(); n != spawnDedupeMax {
+		t.Fatalf("len = %d, want exactly the cap", n)
+	}
+}
+
+// --- helpers for the review tests ------------------------------------------
+
+// writeMigrateSession plants the ~/.claude/sessions/<pid>.json MigrateLocal's
+// own re-read looks for, on top of resume_test.go's writeSessionFile.
+func writeMigrateSession(t *testing.T, home string, pid int, sessionID string) {
+	t.Helper()
+	writeSessionFile(t, home, strconv.Itoa(pid), fmt.Sprintf(
+		`{"pid":%d,"sessionId":%q,"cwd":%q,"status":"busy","waitingFor":"","entrypoint":"cli"}`,
+		pid, sessionID, home))
+}
+
+// installFakeTmuxFailing is installFakeTmux with one subcommand rigged to fail,
+// so a partial commit (session created, command never sent) can be reproduced
+// without breaking a real tmux.
+func installFakeTmuxFailing(t *testing.T, failOn string) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	script := filepath.Join(dir, "tmux")
+	body := "#!/bin/sh\nfor arg in \"$@\"; do printf '<%s>' \"$arg\"; done >> \"$TMUX_LOG\"\n" +
+		"printf '\\n' >> \"$TMUX_LOG\"\n" +
+		"[ \"$1\" = \"" + failOn + "\" ] && exit 1\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX_LOG", logPath)
+	return logPath
+}
+
+// stubMigrateKill swaps MigrateLocal's signalling side effects, and makes its
+// waits instant so the liveness path costs no wall clock.
+func stubMigrateKill(t *testing.T, signal func(int, syscall.Signal) error, alive func(int) bool) func() {
+	t.Helper()
+	oldSignal, oldAlive, oldSleep := migrateSignal, migrateAlive, migrateSleep
+	migrateSignal, migrateAlive, migrateSleep = signal, alive, func(time.Duration) {}
+	return func() { migrateSignal, migrateAlive, migrateSleep = oldSignal, oldAlive, oldSleep }
+}
+
+// TestMigrateRereadMismatchCarriesTheCode: the substitution can be caught by
+// either of migrate's two identity checks, and a client must not have to tell
+// them apart by matching on prose.
+func TestMigrateRereadMismatchCarriesTheCode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installFakeTmux(t)
+	writeMigrateSession(t, home, 999999, "bbbb-2222")
+	s := &server{
+		token: "secret",
+		// The first check agrees: this is the stale snapshot the handler built.
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 999999, SessionID: "aaaa-1111"}}, nil
+		},
+	}
+	rec := httptest.NewRecorder()
+	s.migrate(rec, migrateRequest(t, 999999, `{"session_id":"aaaa-1111"}`))
+
+	r := decodeAction(t, rec)
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("result = %#v, want the mismatch code from the re-read", r)
+	}
+}
+
+// --- TASK6 final round --------------------------------------------------
+
+// TestKillPreconditionRejectsABareNullBody: decoding a top-level `null` into a
+// struct is a silent no-op in Go, so the precondition came back empty and the
+// handler read that as "no precondition" — a bare `null` disarmed the guard
+// exactly like the other fail-open forms did.
+func TestKillPreconditionRejectsABareNullBody(t *testing.T) {
+	for _, body := range []string{"null", " null ", "{\"session_id\":\"a\"}]", "{}]", "{} {}"} {
+		t.Run(body, func(t *testing.T) {
+			terminated := false
+			collected := false
+			s := &server{
+				token:     "secret",
+				collect:   func() ([]Session, error) { collected = true; return nil, nil },
+				terminate: func(Session) error { terminated = true; return nil },
+			}
+			rec := httptest.NewRecorder()
+			s.kill(rec, killRequest(t, 55, body))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+			if collected || terminated {
+				t.Fatalf("body %q acted (collected=%v terminated=%v)", body, collected, terminated)
+			}
+		})
+	}
+}
+
+// TestPidPresentTreatsEPERMAsAlive: kill(pid, 0) answering EPERM means the
+// process exists and we may not signal it — which is precisely when proceeding
+// to create a second session on the same transcript is wrong. Reading it as
+// "gone" is the dangerous direction.
+func TestPidPresentTreatsEPERMAsAlive(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"no error means alive", nil, true},
+		{"EPERM means alive but unsignalable", syscall.EPERM, true},
+		{"ESRCH means genuinely gone", syscall.ESRCH, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pidPresentErr(tt.err); got != tt.want {
+				t.Fatalf("pidPresentErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMigrateLocalFailsWhenTheProcessIsOnlyUnsignalable: the end-to-end version
+// of the above through MigrateLocal's own liveness gate.
+func TestMigrateLocalFailsWhenTheProcessIsOnlyUnsignalable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	writeMigrateSession(t, home, 999999, "aaaa-1111")
+
+	restore := stubMigrateKill(t,
+		func(int, syscall.Signal) error { return syscall.EPERM },
+		func(pid int) bool { return pidPresentErr(syscall.EPERM) })
+	defer restore()
+
+	if _, err := MigrateLocalAttested(999999, "aaaa-1111"); err == nil {
+		t.Fatal("migrated a process we could not confirm dead")
+	}
+	if _, statErr := os.Stat(logPath); statErr == nil {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("created a tmux session anyway:\n%s", data)
+	}
+}
+
+// TestSpawnTmuxNameIsDerivedFromTheRequestID: cleanup after a partial spawn can
+// itself fail, and the ledger forgets failures. A random tmux name would let the
+// retry create a duplicate beside the orphan; a name derived from the request id
+// collides with it instead, so the retry errors rather than doubling up.
+func TestSpawnTmuxNameIsDerivedFromTheRequestID(t *testing.T) {
+	a := spawnSuffix("task6-verify-001")
+	if a == "" || len(a) != 6 {
+		t.Fatalf("suffix = %q, want 6 chars", a)
+	}
+	if b := spawnSuffix("task6-verify-001"); b != a {
+		t.Fatalf("same request_id gave %q then %q", a, b)
+	}
+	if c := spawnSuffix("task6-verify-002"); c == a {
+		t.Fatalf("different request_ids collided on %q", a)
+	}
+	// No request id means no idempotency, so the name must stay random.
+	if spawnSuffix("") != "" {
+		t.Fatalf("empty request_id produced a fixed suffix")
+	}
+}
+
+// TestNewSessionRetryAfterFailedCleanupCollidesRatherThanDuplicating: the whole
+// point of the derived name. The first attempt half-creates a session and its
+// cleanup fails; the retry must hit the surviving session and error, not build a
+// second one alongside it.
+func TestNewSessionRetryAfterFailedCleanupCollidesRatherThanDuplicating(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var names []string
+	s := &server{
+		token: "secret",
+		spawn: func(cwd, name, command, suffix string) (string, error) {
+			tname := MakeTmuxName(cwd, suffix, name)
+			names = append(names, tname)
+			return "", fmt.Errorf("tmux new-session: duplicate session: %s", tname)
+		},
+	}
+	body := map[string]string{"cwd": home, "request_id": "task6-collide-01"}
+	s.newSession(httptest.NewRecorder(), newSessionRequest(t, body))
+	s.newSession(httptest.NewRecorder(), newSessionRequest(t, body))
+
+	if len(names) != 2 {
+		t.Fatalf("spawn ran %d times, want 2 (failures are not remembered)", len(names))
+	}
+	if names[0] != names[1] {
+		t.Fatalf("retry used a different tmux name: %q then %q", names[0], names[1])
+	}
+}
+
+// blockingWriter is an http.ResponseWriter whose Write parks until released, so
+// a client that is slow to read can be reproduced.
+type blockingWriter struct {
+	header  http.Header
+	release chan struct{}
+	entered chan struct{}
+}
+
+func newBlockingWriter() *blockingWriter {
+	return &blockingWriter{
+		header:  http.Header{},
+		release: make(chan struct{}),
+		entered: make(chan struct{}, 1),
+	}
+}
+
+func (b *blockingWriter) Header() http.Header { return b.header }
+func (b *blockingWriter) WriteHeader(int)     {}
+func (b *blockingWriter) Write(p []byte) (int, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return len(p), nil
+}
+
+// TestCompletedSpawnFreesItsSlotBeforeTheResponseIsWritten: publishing after
+// writeJSON means a slow client holds a finished spawn's slot open, and a later
+// request is refused for capacity that is not actually in use.
+func TestCompletedSpawnFreesItsSlotBeforeTheResponseIsWritten(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	held := make(chan struct{})
+	defer close(held)
+	entered := make(chan struct{}, spawnDedupeMax)
+	s := &server{
+		token: "secret",
+		spawn: func(cwd, name, command, suffix string) (string, error) {
+			if name == "slow-client" {
+				return "work-slow", nil // completes immediately
+			}
+			entered <- struct{}{}
+			<-held
+			return "work-held", nil
+		},
+	}
+
+	// One spawn that has finished but whose response is still being written.
+	slow := newBlockingWriter()
+	go s.newSession(slow, newSessionRequest(t, map[string]string{
+		"cwd": home, "name": "slow-client", "request_id": "task6-slowclient-01"}))
+	<-slow.entered
+	defer close(slow.release)
+
+	// Fill every remaining slot with genuinely running spawns.
+	for i := 0; i < spawnDedupeMax-1; i++ {
+		go s.newSession(httptest.NewRecorder(), newSessionRequest(t, map[string]string{
+			"cwd": home, "request_id": fmt.Sprintf("task6-slowfill-%04d", i)}))
+	}
+	for i := 0; i < spawnDedupeMax-1; i++ {
+		<-entered
+	}
+
+	// The completed-but-unwritten entry is not occupying capacity, so this fits.
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRequest(t, map[string]string{
+		"cwd": home, "name": "slow-client", "request_id": "task6-slowclient-new"}))
+
+	if rec.Code == http.StatusServiceUnavailable {
+		t.Fatal("refused for capacity held by a spawn that had already finished")
+	}
+	if r := decodeAction(t, rec); !r.OK {
+		t.Fatalf("result = %#v", r)
 	}
 }

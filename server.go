@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -38,6 +41,11 @@ type actionResult struct {
 	OK    bool   `json:"ok"`
 	Tmux  string `json:"tmux,omitempty"`  // tmux session name for migrate/new
 	Error string `json:"error,omitempty"` // human-readable failure reason
+	// Code is a machine-readable failure kind for the cases a client has to act
+	// on differently rather than just display. Omitted on success and on
+	// failures that are only worth showing, so the desktop — which decodes this
+	// same struct and ignores what it doesn't know — sees nothing new.
+	Code string `json:"code,omitempty"`
 	// Worktree is set by kill when the killed session was the last one running
 	// in a git worktree, so the client can offer to remove it. Omitted
 	// otherwise; older clients ignore it, and a new client against an old
@@ -49,6 +57,89 @@ type actionResult struct {
 type worktreeInfo struct {
 	Path string `json:"path"` // worktree checkout root
 	Name string `json:"name"` // last path element, for the prompt
+}
+
+// The two values actionResult.Code ever carries. Both mean "your row is stale,
+// refresh" and neither means "retry" — a client that retries blind on either is
+// firing at whatever now occupies the PID.
+const (
+	// codeSessionMismatch: the PID is live, but it holds a different session
+	// than the one the client named. A recycled tmux pane hands the same PID to
+	// somebody else, so a matching PID on its own proves nothing.
+	codeSessionMismatch = "session_mismatch"
+	// codeNotLive: no live Claude session at that PID at all.
+	codeNotLive = "not_live"
+)
+
+// sessionIDPrecondition reads the optional {"session_id": "..."} body that kill
+// and migrate accept. "" means no precondition, which is the pre-existing
+// behaviour: resolve the PID against this host's own list and act on whatever
+// is there.
+//
+// Two rules, and the tension between them is the whole design.
+//
+// An empty request body is "no precondition", not a malformed one. Every
+// scripted caller and every pre-existing test posts with no body at all, and
+// the desktop posts a literal `{}`; json.Decode reports both as io.EOF. That
+// one error is tolerated explicitly.
+//
+// Everything else is strict, because every loose form fails *open* — it decodes
+// to an empty id, which this function's own contract then reads as "no
+// precondition", and a guarded kill silently becomes a blind one. So an unknown
+// field is rejected rather than ignored (`sessionId` is exactly the spelling the
+// iOS model uses, and one camelCase typo in a client would otherwise disarm the
+// guard), an explicit null is rejected rather than read as absent, and trailing
+// content after the object is rejected rather than skipped. A caller that means
+// "no precondition" has two ways to say so that cost it nothing.
+//
+// Not covered: duplicate keys. Go's decoder applies last-one-wins without
+// surfacing that it saw two, and detecting it would mean parsing the body twice
+// for a case no client produces.
+func sessionIDPrecondition(w http.ResponseWriter, r *http.Request) (string, error) {
+	// Decoded through a *pointer to* the struct, because a top-level `null` is a
+	// silent no-op when decoded into a struct value: it leaves every field zero
+	// and returns no error, so `null` came back as "no precondition" and
+	// disarmed the guard exactly like an unknown field did. Into a pointer it
+	// leaves the pointer nil, which is distinguishable from `{}`.
+	//
+	// RawMessage on the field for the same reason one level down: only a raw
+	// value can tell an absent key from an explicit null.
+	var body *struct {
+		SessionID json.RawMessage `json:"session_id"`
+	}
+	// Bounded: this is parsed before anything else reads the request, and the
+	// only thing in it is a uuid.
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		return "", err
+	}
+	// Exactly one JSON value, nothing after it. Token() rather than More():
+	// More() only reports a well-formed next element, so it misses trailing
+	// garbage that is not itself valid JSON, while a clean stream is the one
+	// case where Token() reports io.EOF.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("unexpected trailing json")
+	}
+	if body == nil {
+		return "", fmt.Errorf("body must be an object")
+	}
+	if len(body.SessionID) == 0 {
+		return "", nil // key absent — `{}` — is "no precondition"
+	}
+	if string(body.SessionID) == "null" {
+		// A client that meant to send an id and computed nothing. Saying so
+		// beats silently disarming the guard.
+		return "", fmt.Errorf("session_id must be a string")
+	}
+	var id string
+	if err := json.Unmarshal(body.SessionID, &id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 type sessionFlight struct {
@@ -66,6 +157,165 @@ type sessionCache struct {
 	generation       uint64
 	flight           *sessionFlight
 	now              func() time.Time
+}
+
+// spawnDedupeMax / spawnDedupeTTL bound the request_id cache: at most this many
+// remembered spawns, forgotten this long after they finished. The cap mirrors
+// the device registry's; the TTL is generous next to the window it exists for —
+// a phone that gave up at 30s and a user who tapped again. In memory only, so a
+// restart forgets: the cost of that is one duplicate spawn inside a retry window
+// measured in seconds.
+const (
+	spawnDedupeMax = 32
+	spawnDedupeTTL = 10 * time.Minute
+)
+
+// spawnFlight is one spawn keyed by request_id: in flight until done closes,
+// then holding the result a replay serves.
+type spawnFlight struct {
+	done   chan struct{}
+	result actionResult
+	// finishedAt is zero while the spawn is still running. That is also what
+	// keeps expiry and eviction off it: dropping an entry a joiner is waiting on
+	// would turn the join into a second spawn of the same user action, which is
+	// the one thing request_id exists to prevent.
+	finishedAt time.Time
+}
+
+// spawnDedupe makes POST /sessions/new idempotent per request_id. Every other
+// mutating endpoint is naturally safe to repeat — a second kill finds nothing
+// live, a second resume is refused with 409, a second worktree remove fails
+// validation — and spawn is the one that would happily create a second tmux
+// session and a second Claude process in the same directory.
+//
+// Single-flight with a bounded memory of results, the same shape sessionCache
+// uses for /sessions.
+type spawnDedupe struct {
+	mu      sync.Mutex
+	entries map[string]*spawnFlight
+	now     func() time.Time
+}
+
+func (d *spawnDedupe) timeNow() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
+}
+
+func (d *spawnDedupe) len() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.entries)
+}
+
+// spawnClaim is what begin decided about a request_id.
+type spawnClaim int
+
+const (
+	// spawnClaimed: this caller owns the spawn and must call finish.
+	spawnClaimed spawnClaim = iota
+	// spawnJoined: someone else owns it; wait on flight.done and serve
+	// flight.result.
+	spawnJoined
+	// spawnClaimRefused: the ledger is full of spawns that are all still
+	// running. Retryable, and the caller still holds its id.
+	spawnClaimRefused
+)
+
+// begin claims id for this caller, hands back the flight already holding it, or
+// refuses because there is no room left that can be freed safely.
+func (d *spawnDedupe) begin(id string) (*spawnFlight, spawnClaim) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if existing := d.entries[id]; existing != nil {
+		// Expiry is checked here as well as in prune, because prune runs on
+		// insert and this lookup happens first.
+		if existing.finishedAt.IsZero() || d.timeNow().Before(existing.finishedAt.Add(spawnDedupeTTL)) {
+			return existing, spawnJoined
+		}
+		delete(d.entries, id)
+	}
+	d.prune()
+	// prune evicts finished entries only. If the map is still at the cap, every
+	// remaining entry is a spawn that is still running, and evicting one of those
+	// would strand its joiners into starting a second spawn of the same user
+	// action — precisely what request_id exists to prevent. Refuse the new id
+	// instead: the bound stays a bound, and the caller can retry with the same id
+	// once a slot frees.
+	if len(d.entries) >= spawnDedupeMax {
+		return nil, spawnClaimRefused
+	}
+	if d.entries == nil {
+		d.entries = make(map[string]*spawnFlight)
+	}
+	flight := &spawnFlight{done: make(chan struct{})}
+	d.entries[id] = flight
+	return flight, spawnClaimed
+}
+
+// prune drops expired entries and then evicts oldest-first until there is room
+// for one more. In-flight entries are never candidates for either. Called under
+// d.mu from begin.
+func (d *spawnDedupe) prune() {
+	now := d.timeNow()
+	for id, flight := range d.entries {
+		if !flight.finishedAt.IsZero() && !now.Before(flight.finishedAt.Add(spawnDedupeTTL)) {
+			delete(d.entries, id)
+		}
+	}
+	for len(d.entries) >= spawnDedupeMax {
+		oldestID := ""
+		var oldest time.Time
+		for id, flight := range d.entries {
+			if flight.finishedAt.IsZero() {
+				continue
+			}
+			if oldestID == "" || flight.finishedAt.Before(oldest) {
+				oldestID, oldest = id, flight.finishedAt
+			}
+		}
+		if oldestID == "" {
+			// Everything is still running. Concurrency is holding the map above
+			// the cap, not accumulation, and it drains as those spawns finish.
+			return
+		}
+		delete(d.entries, oldestID)
+	}
+}
+
+// finish publishes result to every joiner. A failure is forgotten immediately
+// instead of remembered: nothing was created, so a retry should genuinely
+// re-run — caching a transient tmux failure for ten minutes would leave the user
+// unable to retry a spawn that would now work. Joiners already holding the
+// flight still get the failure, so a concurrent pair still spawns once.
+func (d *spawnDedupe) finish(id string, flight *spawnFlight, result actionResult) {
+	d.mu.Lock()
+	flight.result = result
+	flight.finishedAt = d.timeNow()
+	if !result.OK && d.entries[id] == flight {
+		delete(d.entries, id)
+	}
+	d.mu.Unlock()
+	close(flight.done)
+}
+
+// validSpawnRequestID reports whether id is an acceptable idempotency key:
+// 8 to 128 characters of [A-Za-z0-9_-]. It becomes a map key held in memory for
+// ten minutes and reaches nothing else; bounding its length and character set is
+// what keeps it that way.
+func validSpawnRequestID(id string) bool {
+	if len(id) < 8 || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		switch c := id[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 type server struct {
@@ -93,6 +343,16 @@ type server struct {
 	// removeTree removes a worktree checkout; nil falls back to RemoveWorktree,
 	// so tests exercise the handler without a real git repo.
 	removeTree func(string) error
+	// spawn creates a new tmux session; nil falls back to SpawnNew. Same seam
+	// pattern as the three above, and the only way the request_id dedupe's
+	// concurrency can be tested without really starting tmux.
+	spawn func(cwd, name, command, suffix string) (string, error)
+	// attest re-reads one PID's own session file; nil falls back to
+	// readSessionByPID. Used for the last-moment identity check before a
+	// destructive act, and separate from collect because it must be the cheapest
+	// possible read — no tmux mapping, no transcript scan, nothing that would
+	// reintroduce the staleness it exists to close.
+	attest func(int) (Session, bool)
 
 	// devices is the push registry; nil when this server was built without
 	// notification support, in which case the /devices routes report 503 rather
@@ -105,6 +365,9 @@ type server struct {
 	pairing   *pairingCode
 
 	sessionCache sessionCache
+
+	// spawns dedupes POST /sessions/new by request_id.
+	spawns spawnDedupe
 
 	// paste is the remote-image-paste broker (see paste.go); pb() lazily
 	// initializes it so both cmdServer and tests get a working broker.
@@ -216,6 +479,106 @@ func (s *server) removeWorktreeAt(path string) error {
 		return s.removeTree(path)
 	}
 	return RemoveWorktree(path)
+}
+
+func (s *server) spawnNew(cwd, name, command, suffix string) (string, error) {
+	if s.spawn != nil {
+		return s.spawn(cwd, name, command, suffix)
+	}
+	return SpawnNewWithSuffix(cwd, name, command, suffix)
+}
+
+// spawnSuffix derives the tmux name suffix for a request_id, so the same id
+// always names the same session.
+//
+// That matters when a partial spawn's cleanup fails: the ledger deliberately
+// forgets failures so a retry re-runs, and with a random suffix the retry would
+// build a second session beside the orphan. Derived, it collides with the
+// survivor and tmux refuses — an error the user sees instead of a duplicate they
+// do not. "" (no request_id, so no idempotency asked for) keeps the random slug.
+func spawnSuffix(requestID string) string {
+	if requestID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(requestID))
+	return hex.EncodeToString(sum[:])[:6]
+}
+
+func (s *server) attestSession(pid int) (Session, bool) {
+	if s.attest != nil {
+		return s.attest(pid)
+	}
+	return readSessionByPID(pid)
+}
+
+// reattest re-checks the PID/session-id binding immediately before a
+// destructive act, and returns a refusal if anything has moved.
+//
+// resolveLivePID compares against s.collectLocal(), which walks every session
+// file, maps tmux panes, resolves git roots and scans transcripts for cost and
+// agent counts. That is real I/O, and the answer it returns describes the world
+// as it was when the walk started. Between there and the syscall a pane can be
+// recycled and hand the PID to someone else — so the guard is re-run against
+// the one file that actually establishes identity, as late as possible. The
+// residual window is then the syscall itself rather than the whole pipeline.
+//
+// Only when the client named a session: with no precondition there is nothing
+// to attest against, and the unconditional path must not acquire a new way to
+// fail.
+func (s *server) reattest(pid int, wantSession string) *actionResult {
+	if wantSession == "" {
+		return nil
+	}
+	sess, ok := s.attestSession(pid)
+	if !ok {
+		return &actionResult{
+			Error: fmt.Sprintf("PID %d is not a live Claude session", pid),
+			Code:  codeNotLive,
+		}
+	}
+	if sess.SessionID != wantSession {
+		return &actionResult{
+			Error: fmt.Sprintf("PID %d is a different session now", pid),
+			Code:  codeSessionMismatch,
+		}
+	}
+	return nil
+}
+
+// resolveLivePID finds this host's own row for pid and checks it against an
+// optional client-supplied session id. On success it returns the row plus the
+// whole collected list (kill needs it to decide the worktree); on refusal it
+// returns the envelope to write and nothing has been touched.
+//
+// The comparison target is always the server's freshly collected list, never
+// anything the client asserted about the target — the same rule the kill handler
+// has always followed, extended rather than weakened.
+func (s *server) resolveLivePID(pid int, wantSession string) (*Session, []Session, *actionResult) {
+	sessions, err := s.collectLocal()
+	if err != nil {
+		return nil, nil, &actionResult{Error: err.Error()}
+	}
+	for i := range sessions {
+		if sessions[i].PID != pid {
+			continue
+		}
+		target := &sessions[i]
+		// A phone acts on a list it may have polled minutes ago, and a recycled
+		// pane hands that PID to a different session. Refuse rather than act on
+		// the wrong one. The refusal deliberately does not name what is there
+		// now: the client learns its target is gone, not who replaced it.
+		if wantSession != "" && target.SessionID != wantSession {
+			return nil, nil, &actionResult{
+				Error: fmt.Sprintf("PID %d is a different session now", pid),
+				Code:  codeSessionMismatch,
+			}
+		}
+		return target, sessions, nil
+	}
+	return nil, nil, &actionResult{
+		Error: fmt.Sprintf("PID %d is not a live Claude session", pid),
+		Code:  codeNotLive,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, data any) {
@@ -421,28 +784,39 @@ func (s *server) kill(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad pid", http.StatusBadRequest)
 		return
 	}
-	// Trust only server-collected metadata: resolve the PID against this host's
-	// own sessions and terminate that full row. The request body carries no
-	// tmux metadata — the client cannot steer which target we signal.
-	sessions, err := s.collectLocal()
+	// session_id is an optional precondition, checked below against the row the
+	// server resolves for itself. Absent means today's behaviour: kill whatever
+	// is at this PID.
+	wantSession, err := sessionIDPrecondition(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	var target *Session
-	for i := range sessions {
-		if sessions[i].PID == pid {
-			target = &sessions[i]
-			break
-		}
-	}
-	if target == nil {
-		writeJSON(w, http.StatusOK, actionResult{Error: fmt.Sprintf("PID %d is not a live Claude session", pid)})
+	// Trust only server-collected metadata: resolve the PID against this host's
+	// own sessions and terminate that full row. The request body carries no
+	// tmux metadata — the client cannot steer which target we signal, and the
+	// session id it may supply can only ever narrow the target, never widen it.
+	target, sessions, refusal := s.resolveLivePID(pid, wantSession)
+	if refusal != nil {
+		writeJSON(w, http.StatusOK, *refusal)
 		return
 	}
 	// Whether this kill empties a worktree is decided here, from the same
-	// server-collected list: the client never gets to assert it.
+	// server-collected list: the client never gets to assert it. It is decided
+	// after the precondition, so a refused kill never invites the client to
+	// remove a worktree that is still in use.
 	worktree := worktreeCleanupTarget(*target, sessions)
+	// Last thing before the signal: confirm the PID still holds the session the
+	// client named. Everything above ran against a snapshot that cost real I/O
+	// to build.
+	if refusal := s.reattest(pid, wantSession); refusal != nil {
+		writeJSON(w, http.StatusOK, *refusal)
+		return
+	}
+	// The row handed to terminateSession stays the enriched one: its tmux
+	// metadata is what lets KillSession kill the whole pane group by name rather
+	// than signalling a bare PID, and the attestation above is what confirms that
+	// row still describes what lives at this PID.
 	if err := s.terminateSession(*target); err != nil {
 		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
 		return
@@ -505,9 +879,38 @@ func (s *server) migrate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad pid", http.StatusBadRequest)
 		return
 	}
-	tname, err := MigrateLocal(pid)
+	wantSession, err := sessionIDPrecondition(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	// Only collect when a session id was supplied, so the desktop's migrate
+	// costs exactly what it always did and this change is provably a no-op for
+	// it. When the client does name a session, resolve through collectLocal
+	// rather than readSessionByPID: it is the same trusted source kill uses, and
+	// it goes through the s.collect seam, which is the only reason this is
+	// testable without real session files on disk.
+	//
+	// MigrateLocal re-reads the session file itself, so a tiny window remains
+	// between this check and that read. Closing it is not the point — the
+	// precondition exists to stop a phone acting on ten-minute-old data, not to
+	// make the migration a transaction.
+	if wantSession != "" {
+		if _, _, refusal := s.resolveLivePID(pid, wantSession); refusal != nil {
+			writeJSON(w, http.StatusOK, *refusal)
+			return
+		}
+	}
+	tname, err := MigrateLocalAttested(pid, wantSession)
+	if err != nil {
+		result := actionResult{Error: err.Error()}
+		// The re-read inside MigrateLocalAttested is the second of the two
+		// identity checks; a client should not have to tell them apart by
+		// matching on prose.
+		if errors.Is(err, errMigrateSessionMismatch) {
+			result.Code = codeSessionMismatch
+		}
+		writeJSON(w, http.StatusOK, result)
 		return
 	}
 	s.invalidateSessions()
@@ -524,6 +927,13 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		Name    string `json:"name"`
 		Command string `json:"command"` // preset name, never raw command text
 		Prompt  string `json:"prompt"`  // free text; shell-quoted before use, never interpreted
+		// RequestID is an optional idempotency key. Absent, this endpoint keeps
+		// its old behaviour and every call spawns. Present, a repeat of the same
+		// id joins the first call if it is still running and replays its result
+		// if it already succeeded — the case that actually happens is a phone
+		// that timed out at 30s while the spawn was still going, and a user who
+		// tapped again.
+		RequestID string `json:"request_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -533,46 +943,101 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cwd required", http.StatusBadRequest)
 		return
 	}
-	body.CWD = expandTilde(body.CWD)
-	if !isDir(body.CWD) {
-		writeJSON(w, http.StatusOK, actionResult{Error: "not a directory: " + body.CWD})
+	if body.RequestID != "" && !validSpawnRequestID(body.RequestID) {
+		http.Error(w, "bad request_id", http.StatusBadRequest)
 		return
+	}
+	if body.RequestID == "" {
+		writeJSON(w, http.StatusOK, s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, ""))
+		return
+	}
+	flight, claim := s.spawns.begin(body.RequestID)
+	switch claim {
+	case spawnClaimRefused:
+		// 503 rather than the 200 envelope: this is the one failure here that is
+		// worth retrying unchanged, and a status says so to every client without
+		// needing a third code.
+		writeJSON(w, http.StatusServiceUnavailable, actionResult{
+			Error: "too many spawns in flight on this host; retry with the same request_id",
+		})
+		return
+	case spawnJoined:
+		select {
+		case <-flight.done:
+			writeJSON(w, http.StatusOK, flight.result)
+		case <-r.Context().Done():
+			// The client gave up. Its spawn is still running and still owns the
+			// id, so a retry will join or replay it — but this goroutine must not
+			// stay parked on a hung tmux for as long as it hangs.
+		}
+		return
+	}
+
+	// Published through a defer so a panic in the spawn path cannot leave every
+	// joiner parked on a channel that never closes. The zero value here is what
+	// they would receive in that case: a failure, which the ledger then forgets,
+	// so a retry genuinely re-runs.
+	result := actionResult{Error: "spawn did not complete"}
+	published := false
+	publish := func() {
+		if published {
+			return
+		}
+		published = true
+		s.spawns.finish(body.RequestID, flight, result)
+	}
+	// Deferred for the panic path, but called explicitly the moment the outcome
+	// is known: publishing after writeJSON would let a client that is slow to
+	// read hold a finished spawn's slot, and a later request would then be
+	// refused for capacity nothing is actually using.
+	defer publish()
+	result = s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, body.RequestID)
+	publish()
+	writeJSON(w, http.StatusOK, result)
+}
+
+// spawnSession is newSession's work without the HTTP or the idempotency:
+// validate the directory and the preset, spawn, and return the envelope the
+// handler writes. Split out so the request_id dedupe wraps exactly one call to
+// it, which is what keeps the side effects here — the cache invalidation and the
+// trust-prompt dismissal — from running twice for one request id.
+func (s *server) spawnSession(cwd, name, command, prompt, requestID string) actionResult {
+	cwd = expandTilde(cwd)
+	if !isDir(cwd) {
+		return actionResult{Error: "not a directory: " + cwd}
 	}
 	presets, err := LoadCommandPresets()
 	if err != nil {
-		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
-		return
+		return actionResult{Error: err.Error()}
 	}
 	// LoadCommandPresets always yields a non-empty slice (falls back to the
 	// default Claude preset), so presets[0] is a safe backward-compatible
 	// default for clients that omit command. A named command must match this
 	// server's own allowlist — raw command text is never accepted.
 	preset := presets[0]
-	if body.Command != "" {
+	if command != "" {
 		var ok bool
-		preset, ok = findCommandPreset(presets, body.Command)
+		preset, ok = findCommandPreset(presets, command)
 		if !ok {
-			writeJSON(w, http.StatusOK, actionResult{Error: "command preset not configured: " + body.Command})
-			return
+			return actionResult{Error: "command preset not configured: " + command}
 		}
 	}
-	command := preset.Command
-	if body.Prompt != "" {
-		command = command + " " + shellQuote(body.Prompt)
+	launch := preset.Command
+	if prompt != "" {
+		launch = launch + " " + shellQuote(prompt)
 	}
-	tname, err := SpawnNew(body.CWD, body.Name, command)
+	tname, err := s.spawnNew(cwd, name, launch, spawnSuffix(requestID))
 	if err != nil {
-		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
-		return
+		return actionResult{Error: err.Error()}
 	}
-	if body.Prompt != "" {
+	if prompt != "" {
 		// The client won't attach to this session, so nobody's there to accept
-		// a first-run workspace trust dialog for body.CWD — dismiss it here if
-		// it shows, without blocking the response on the poll.
+		// a first-run workspace trust dialog for cwd — dismiss it here if it
+		// shows, without blocking the response on the poll.
 		go dismissTrustPrompt(tname)
 	}
 	s.invalidateSessions()
-	writeJSON(w, http.StatusOK, actionResult{OK: true, Tmux: tname})
+	return actionResult{OK: true, Tmux: tname}
 }
 
 // registerDevice records an APNs device token for push delivery.
