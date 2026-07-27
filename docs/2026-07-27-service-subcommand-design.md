@@ -67,8 +67,8 @@ type serviceConfig struct {
 command sequence, with no real launchd or systemd involved.
 
 It returns `([]byte, error)`, not a bare `error`: `Status` has to parse
-`launchctl print` / `systemctl is-active` output to report a PID and to tell
-running from merely installed. A bare `error` cannot carry that, and discovering
+`launchctl print` / `systemctl show` output to report a PID and to tell
+running from merely loaded. A bare `error` cannot carry that, and discovering
 so during implementation would mean changing every call site.
 
 Implementations: `launchdService` (darwin), `systemdService` (linux).
