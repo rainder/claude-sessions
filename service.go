@@ -291,8 +291,12 @@ func execRunner(args ...string) ([]byte, error) {
 	return exec.Command(args[0], args[1:]...).CombinedOutput()
 }
 
-// exitCode extracts a process exit status, or -1 if err isn't an exit error.
-func exitCode(err error) int {
+// processExitCode extracts a process exit status, or -1 if err isn't an exit
+// error. Named apart from (serviceStatus).exitCode below — that one produces
+// an exit code for this process to return from `service status`; this one
+// reads an exit code off a child process's error. Opposite directions, and
+// Task 7 calls both, so a shared name would be a standing trap.
+func processExitCode(err error) int {
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		return ee.ExitCode()
@@ -366,7 +370,7 @@ func (s *launchdService) Load(run runner) error {
 }
 
 func isBootstrapRetryable(out []byte, err error) bool {
-	if exitCode(err) == darwinEALREADY {
+	if processExitCode(err) == darwinEALREADY {
 		return true
 	}
 	return strings.Contains(string(out), "EALREADY") ||
@@ -379,7 +383,7 @@ func (s *launchdService) Unload(run runner) error {
 	// a repeat uninstall. Checking the exit code as well as the string means a
 	// reworded or localized launchctl message doesn't turn idempotent
 	// uninstall into an error.
-	if err != nil && exitCode(err) != darwinESRCH && !strings.Contains(string(out), "No such process") {
+	if err != nil && processExitCode(err) != darwinESRCH && !strings.Contains(string(out), "No such process") {
 		return fmt.Errorf("launchctl bootout failed: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -470,23 +474,42 @@ type serviceManager interface {
 	Status(run runner) (serviceStatus, error)
 }
 
+var (
+	_ serviceManager = (*launchdService)(nil)
+	_ serviceManager = (*systemdService)(nil)
+)
+
+// newServiceManagerFor holds the pure GOOS switch, split out from
+// newServiceManager so the branch itself — and the exact error for an
+// unsupported platform — is testable without depending on the actual host OS
+// or a real os/user lookup.
+func newServiceManagerFor(goos, home, username string) (serviceManager, error) {
+	switch goos {
+	case "darwin":
+		return &launchdService{home: home, uid: os.Getuid()}, nil
+	case "linux":
+		return &systemdService{home: home, user: username}, nil
+	default:
+		return nil, fmt.Errorf("service management is only supported on macOS and Linux (this is %s)", goos)
+	}
+}
+
 func newServiceManager() (serviceManager, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	switch runtime.GOOS {
-	case "darwin":
-		return &launchdService{home: home, uid: os.Getuid()}, nil
-	case "linux":
+	// user.Current() is Linux-only work: it shells out to nss/cgo on some
+	// platforms and darwin doesn't need a username at all, so skip it there.
+	var username string
+	if runtime.GOOS == "linux" {
 		u, err := user.Current()
 		if err != nil {
 			return nil, fmt.Errorf("cannot determine current user: %w", err)
 		}
-		return &systemdService{home: home, user: u.Username}, nil
-	default:
-		return nil, fmt.Errorf("service management is only supported on macOS and Linux (this is %s)", runtime.GOOS)
+		username = u.Username
 	}
+	return newServiceManagerFor(runtime.GOOS, home, username)
 }
 
 var launchdPIDRe = regexp.MustCompile(`(?m)^\s*pid\s*=\s*(\d+)\s*$`)
@@ -494,9 +517,18 @@ var launchdPIDRe = regexp.MustCompile(`(?m)^\s*pid\s*=\s*(\d+)\s*$`)
 func (s *launchdService) Status(run runner) (serviceStatus, error) {
 	out, err := run("launchctl", "print", s.target())
 	if err != nil {
-		// launchctl exits non-zero when the service isn't loaded at all. That
-		// is an answer, not a failure.
-		return serviceStatus{}, nil
+		// launchctl print exits non-zero both when the service simply isn't
+		// loaded and when it couldn't answer at all — e.g. `ssh mac service
+		// status` with nobody logged in at the console says "Could not find
+		// domain for gui/501", which is Load's own GUI-session problem
+		// (service.go's launchdService.Load), not an absent service. Only the
+		// former is a clean answer; anything else must surface as an error,
+		// the same way systemdUnitAlreadyGone below distinguishes "already
+		// gone" from a real failure in Unload.
+		if strings.Contains(string(out), "Could not find service") {
+			return serviceStatus{}, nil
+		}
+		return serviceStatus{}, fmt.Errorf("launchctl print failed: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 	st := serviceStatus{Installed: true}
 	if m := launchdPIDRe.FindSubmatch(out); m != nil {
@@ -511,7 +543,7 @@ func (s *launchdService) Status(run runner) (serviceStatus, error) {
 func (s *systemdService) Status(run runner) (serviceStatus, error) {
 	// `show` rather than `is-active`: one call yields load state, active state,
 	// and the PID, and it exits zero even for a unit that doesn't exist.
-	out, _ := run("systemctl", "--user", "show", systemdUnitName,
+	out, err := run("systemctl", "--user", "show", systemdUnitName,
 		"--property=LoadState", "--property=ActiveState", "--property=MainPID")
 	fields := map[string]string{}
 	for _, line := range strings.Split(string(out), "\n") {
@@ -520,13 +552,25 @@ func (s *systemdService) Status(run runner) (serviceStatus, error) {
 			fields[k] = v
 		}
 	}
-	if fields["LoadState"] == "" || fields["LoadState"] == "not-found" {
+	loadState, parsed := fields["LoadState"]
+	if err != nil && !parsed {
+		// systemctl failed AND produced none of its usual key=value output —
+		// e.g. no user D-Bus session yet ("Failed to connect to bus: No
+		// medium found"). That is "couldn't ask", not "not installed". A
+		// parsed LoadState=not-found below, by contrast, is systemctl
+		// successfully answering "no such unit" and stays a clean absence.
+		return serviceStatus{}, fmt.Errorf("systemctl show failed: %v\n%s", err, strings.TrimSpace(string(out)))
+	}
+	if loadState == "" || loadState == "not-found" {
 		return serviceStatus{}, nil
 	}
 	st := serviceStatus{Installed: true}
 	if fields["ActiveState"] == "active" {
 		st.Running = true
-		if pid, err := strconv.Atoi(fields["MainPID"]); err == nil && pid > 0 {
+		// MainPID=0 is systemd's documented "no main process" state, not a
+		// parse failure — Running stays true and PID reports the literal 0
+		// rather than being suppressed by a pid>0 guard.
+		if pid, err := strconv.Atoi(fields["MainPID"]); err == nil && pid >= 0 {
 			st.PID = pid
 		}
 	}

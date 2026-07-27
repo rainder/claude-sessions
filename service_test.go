@@ -518,8 +518,8 @@ func (f *fakeRunner) joined() []string {
 }
 
 // fakeExitError builds a real *exec.ExitError carrying the given exit code,
-// by actually running a subprocess that exits with it. exitCode's numeric
-// branch reads ee.ExitCode() via errors.As, which only a genuine
+// by actually running a subprocess that exits with it. processExitCode's
+// numeric branch reads ee.ExitCode() via errors.As, which only a genuine
 // *exec.ExitError satisfies — a plain errors.New("exit status N") does not,
 // so tests that need to exercise that branch specifically (as opposed to the
 // output-string fallback) need the real thing.
@@ -600,11 +600,12 @@ func TestLaunchdLoadRetriesEALREADY(t *testing.T) {
 	}
 }
 
-// isBootstrapRetryable's numeric branch (exitCode(err) == darwinEALREADY)
+// isBootstrapRetryable's numeric branch (processExitCode(err) == darwinEALREADY)
 // exists because launchctl's exit code carries EALREADY even when its
 // message wording changes. Script output with none of the retry strings in
 // it at all, so only the numeric check can make this retry — deleting that
-// branch must turn this red. This is also exitCode's only direct coverage.
+// branch must turn this red. This is also processExitCode's only direct
+// coverage.
 func TestLaunchdLoadRetriesOnEALREADYExitCodeAlone(t *testing.T) {
 	f := newFakeRunner()
 	f.fail("bootstrap", "Bootstrap failed: something unrelated to any wording this code matches on", fakeExitError(t, 37))
@@ -848,17 +849,35 @@ func TestSystemdUnloadReportsOtherFailures(t *testing.T) {
 	}
 }
 
+// launchdWantCmd is the exact argv Status must send launchctl — pinning it
+// (rather than the substring "launchctl print" the fake matches on) is what
+// makes a broken s.target() (e.g. dropping the gui/<uid> domain) show up as a
+// failure instead of silently querying the wrong thing.
+var launchdWantCmd = []string{"launchctl print gui/501/com.skerla.claude-sessions"}
+
 func TestLaunchdStatus(t *testing.T) {
+	// Modeled on real `launchctl print` output, which is much larger than a
+	// bare "pid = N" line and full of near-miss keys (pid-local endpoints,
+	// per-argument "pid" mentions inside arguments, an unrelated exit-code
+	// field) that a looser regex could latch onto.
 	running := `com.skerla.claude-sessions = {
 	active count = 1
+	pid-local endpoints = {
+	}
 	pid = 4242
+	arguments = {
+		/usr/local/bin/claude-sessions
+		-s
+	}
 	state = running
+	last exit code = 0
 }`
 	tests := []struct {
-		name string
-		out  string
-		err  error
-		want serviceStatus
+		name    string
+		out     string
+		err     error
+		want    serviceStatus
+		wantErr bool
 	}{
 		{
 			name: "running reports its pid",
@@ -871,34 +890,65 @@ func TestLaunchdStatus(t *testing.T) {
 			want: serviceStatus{Installed: true},
 		},
 		{
+			name: "pid = 0 is not a running pid",
+			out:  "com.skerla.claude-sessions = {\n\tpid = 0\n\tstate = not running\n}",
+			want: serviceStatus{Installed: true},
+		},
+		{
 			name: "not loaded",
-			out:  "Could not find service \"com.skerla.claude-sessions\"",
+			out:  "Could not find service \"com.skerla.claude-sessions\" in domain for port",
 			err:  errors.New("exit status 113"),
 			want: serviceStatus{},
+		},
+		{
+			// The real-world case the fix in this round exists for: `service
+			// status` over ssh to a Mac with nobody logged in at the
+			// console. launchctl fails, but not because the service is
+			// absent — it couldn't even ask.
+			name:    "could not even ask — no GUI session",
+			out:     "Could not find domain for gui/501",
+			err:     errors.New("exit status 113"),
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFakeRunner()
-			f.fail("launchctl print", tt.out, tt.err)
+			f.fail(launchdWantCmd[0], tt.out, tt.err)
 			svc := &launchdService{home: "/Users/andy", uid: 501}
 			got, err := svc.Status(f.run)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Status() error = nil, want an error — launchctl couldn't answer at all, that is not \"not installed\"")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Status() error: %v", err)
 			}
 			if got != tt.want {
 				t.Errorf("Status() = %+v, want %+v", got, tt.want)
 			}
+			if joined := f.joined(); len(joined) != len(launchdWantCmd) || joined[0] != launchdWantCmd[0] {
+				t.Errorf("commands = %q, want %q", joined, launchdWantCmd)
+			}
 		})
 	}
 }
 
+// systemdWantCmd is the exact argv Status must send systemctl. Pinning it
+// (rather than the substring "systemctl" the fake matches on) is what makes
+// dropping --user show up as a failure instead of silently querying the
+// system manager, where a --user unit always reads LoadState=not-found.
+var systemdWantCmd = []string{"systemctl --user show claude-sessions.service --property=LoadState --property=ActiveState --property=MainPID"}
+
 func TestSystemdStatus(t *testing.T) {
 	tests := []struct {
-		name string
-		out  string
-		err  error
-		want serviceStatus
+		name    string
+		out     string
+		err     error
+		want    serviceStatus
+		wantErr bool
 	}{
 		{
 			name: "active reports its pid",
@@ -911,22 +961,47 @@ func TestSystemdStatus(t *testing.T) {
 			want: serviceStatus{Installed: true},
 		},
 		{
+			// systemd's documented "no main process yet/anymore" state.
+			// Running is still true; PID is the literal 0, not suppressed.
+			name: "active with MainPID=0 is still running",
+			out:  "LoadState=loaded\nActiveState=active\nMainPID=0\n",
+			want: serviceStatus{Installed: true, Running: true, PID: 0},
+		},
+		{
 			name: "not found",
 			out:  "LoadState=not-found\nActiveState=inactive\nMainPID=0\n",
 			want: serviceStatus{},
+		},
+		{
+			// The systemd analog of the launchd "no GUI session" case: no
+			// user D-Bus session yet, so systemctl can't even reach the
+			// manager to ask. Must not read as "not installed".
+			name:    "could not even ask — no user bus",
+			out:     "Failed to connect to bus: No medium found\n",
+			err:     errors.New("exit status 1"),
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFakeRunner()
-			f.fail("systemctl", tt.out, tt.err)
+			f.fail(systemdWantCmd[0], tt.out, tt.err)
 			svc := &systemdService{home: "/home/andy", user: "andy"}
 			got, err := svc.Status(f.run)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Status() error = nil, want an error — systemctl couldn't answer at all, that is not \"not installed\"")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Status() error: %v", err)
 			}
 			if got != tt.want {
 				t.Errorf("Status() = %+v, want %+v", got, tt.want)
+			}
+			if joined := f.joined(); len(joined) != len(systemdWantCmd) || joined[0] != systemdWantCmd[0] {
+				t.Errorf("commands = %q, want %q", joined, systemdWantCmd)
 			}
 		})
 	}
@@ -953,9 +1028,64 @@ func TestServiceStatusExitCode(t *testing.T) {
 	}
 }
 
-// Both backends must satisfy the interface on every platform — that's the
-// whole point of not using build tags here.
-func TestBothBackendsSatisfyServiceManager(t *testing.T) {
-	var _ serviceManager = &launchdService{}
-	var _ serviceManager = &systemdService{}
+// newServiceManagerFor's three branches (darwin, linux, unsupported) and the
+// home/username plumbing through them are otherwise unasserted — replacing
+// the whole function body with `return nil, nil` leaves the rest of the
+// suite green.
+func TestNewServiceManagerFor(t *testing.T) {
+	tests := []struct {
+		name    string
+		goos    string
+		home    string
+		user    string
+		wantErr bool
+	}{
+		{name: "darwin", goos: "darwin", home: "/Users/andy", user: ""},
+		{name: "linux", goos: "linux", home: "/home/andy", user: "andy"},
+		{name: "unsupported platform names both supported ones", goos: "windows", home: "/tmp", user: "andy", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := newServiceManagerFor(tt.goos, tt.home, tt.user)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("newServiceManagerFor() error = nil, want an error")
+				}
+				if !strings.Contains(err.Error(), "macOS") || !strings.Contains(err.Error(), "Linux") {
+					t.Errorf("error %q does not name both supported platforms", err)
+				}
+				if !strings.Contains(err.Error(), tt.goos) {
+					t.Errorf("error %q does not name the unsupported GOOS %q", err, tt.goos)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("newServiceManagerFor() error: %v", err)
+			}
+			switch tt.goos {
+			case "darwin":
+				svc, ok := got.(*launchdService)
+				if !ok {
+					t.Fatalf("got %T, want *launchdService", got)
+				}
+				if svc.home != tt.home {
+					t.Errorf("home = %q, want %q", svc.home, tt.home)
+				}
+				if svc.uid != os.Getuid() {
+					t.Errorf("uid = %d, want %d (this process's uid)", svc.uid, os.Getuid())
+				}
+			case "linux":
+				svc, ok := got.(*systemdService)
+				if !ok {
+					t.Fatalf("got %T, want *systemdService", got)
+				}
+				if svc.home != tt.home {
+					t.Errorf("home = %q, want %q", svc.home, tt.home)
+				}
+				if svc.user != tt.user {
+					t.Errorf("user = %q, want %q", svc.user, tt.user)
+				}
+			}
+		})
+	}
 }
