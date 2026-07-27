@@ -83,8 +83,9 @@ Implementations: `launchdService` (darwin), `systemdService` (linux).
 `bootout`/`bootstrap` replace the README's `launchctl load`. The pre-emptive
 `bootout` makes reinstall idempotent; its failure means "was not loaded", which
 is not an error. `bootout` tears down asynchronously, so an immediate
-`bootstrap` can fail with `EALREADY` (149); the loader retries the `bootstrap`
-a few times with a short backoff before giving up.
+`bootstrap` can fail with `EALREADY` (errno 37 on Darwin — launchctl prints the
+errno as its exit status); the loader retries the `bootstrap` a few times with a
+short backoff before giving up.
 
 `gui/$UID` requires a GUI login session. Installing over SSH to a Mac with no
 one logged in at the console fails, and the raw launchctl error is unhelpful.

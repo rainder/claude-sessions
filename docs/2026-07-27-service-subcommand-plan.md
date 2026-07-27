@@ -720,6 +720,15 @@ git commit -m "feat: render the systemd --user unit"
 
 The three subtlest bugs in this feature live here: `bootout` tears down asynchronously so an immediate `bootstrap` can hit `EALREADY`; `systemctl --user enable --now` only *starts*, so on a reinstall the already-running unit keeps the old flags; and `daemon-reload` fails when the user manager isn't up, which `enable-linger` is what starts.
 
+> **Correction (applied during execution).** The code below uses exit status
+> `149` for `EALREADY`. That is wrong — there is no such Darwin errno.
+> `/usr/include/sys/errno.h` gives `EINPROGRESS` 36 and `EALREADY` **37**, and
+> launchctl prints the errno as its exit status. As written, the numeric branch
+> was dead and the retry fired only on the English string match; the test did
+> not catch it because it scripted a plain `errors.New` rather than an
+> `*exec.ExitError`, so `errors.As` never matched either. The shipped code uses
+> a `darwinEALREADY = 37` constant and a test built on a real `*exec.ExitError`.
+
 **Files:**
 - Modify: `service.go`
 - Modify: `service_test.go`
