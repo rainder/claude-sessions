@@ -24,6 +24,13 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Neither unit keeps stdout, since the server prints its bearer token there at
   startup; stderr, which carries the "listening on" and notification lines, is
   what gets logged.
+
+### Changed
+
+- `-s` prints the bearer token only when stdout is a terminal. Redirected or
+  piped output gets the path to the token file instead, so `claude-sessions -s
+  > server.log` no longer copies a secret that lives `0600` on disk into
+  whatever mode the shell creates. The rest of the banner is unchanged.
 - Push notifications to a paired iPhone when a session becomes blocked on you.
   The server polls a new cheap collection path (identity and status only, no
   transcript scanning) and runs an explicit wait-generation state machine, so an

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // HTTP server mode (-s flag). Exposes this host's sessions over JSON+bearer-
@@ -800,6 +802,35 @@ func hostPort(host string, port int) string {
 	return net.JoinHostPort(unbracket(host), strconv.Itoa(port))
 }
 
+// serverBanner renders the startup banner. showToken is false when stdout is
+// not a terminal, and then the token is replaced by the path to read it from.
+//
+// The banner is the only thing this process writes to stdout, and it carries
+// the auth token. Under a supervisor stdout is a log file or the journal —
+// durable, unrotated, re-stamped on every restart, and exactly the file that
+// gets attached to a bug report. `service install` keeps stdout off both, but
+// a plain `claude-sessions -s | tee log` would still copy a token that lives
+// 0600 on disk (serverTokenPath) into whatever mode the shell creates.
+func serverBanner(host, bind string, port int, tok, bindHint string, showToken bool) string {
+	shown := tok
+	if !showToken {
+		shown = "(hidden — stdout is not a terminal; read " + serverTokenPath() + ")"
+	}
+	return fmt.Sprintf(`claude-sessions server
+  bind:     %s:%d%s
+  hostname: %s
+  token:    %s
+
+add to client's ~/.config/claude-sessions/servers.yaml:
+  servers:
+    - name: %s
+      host: %s
+      port: %d
+      token: %s
+
+`, bind, port, bindHint, host, shown, host, bind, port, shown)
+}
+
 // cmdServer is the -s subcommand: starts the HTTP server in the foreground.
 //
 // Default bind is 127.0.0.1 (safe). For remote access:
@@ -838,19 +869,7 @@ func cmdServer(args []string) int {
 		bindHint = "  " + dim("(loopback — pass --bind tailscale or --bind 0.0.0.0 for remote access)")
 	}
 
-	fmt.Printf(`claude-sessions server
-  bind:     %s:%d%s
-  hostname: %s
-  token:    %s
-
-add to client's ~/.config/claude-sessions/servers.yaml:
-  servers:
-    - name: %s
-      host: %s
-      port: %d
-      token: %s
-
-`, bind, port, bindHint, host, tok, host, bind, port, tok)
+	fmt.Print(serverBanner(host, bind, port, tok, bindHint, term.IsTerminal(int(os.Stdout.Fd()))))
 
 	hostUsageHub := NewHostUsageHub(hostUsageInterval)
 	defer hostUsageHub.Shutdown()

@@ -1617,3 +1617,31 @@ func TestHostPortBracketsIPv6(t *testing.T) {
 		}
 	}
 }
+
+// The startup banner is the only thing the server writes to stdout, and it
+// carries the auth token. Under a supervisor that stream is a log file or the
+// journal, so the token is only printed when stdout is a terminal.
+func TestServerBannerWithdrawsTokenOffTerminal(t *testing.T) {
+	const tok = "s3cr3t-token-value-not-for-logs"
+
+	onTTY := serverBanner("delta", "127.0.0.1", 8765, tok, "", true)
+	if !strings.Contains(onTTY, tok) {
+		t.Error("banner on a terminal omitted the token; it is how a user configures servers.yaml")
+	}
+
+	offTTY := serverBanner("delta", "127.0.0.1", 8765, tok, "", false)
+	if strings.Contains(offTTY, tok) {
+		t.Errorf("banner off a terminal leaked the token:\n%s", offTTY)
+	}
+	// Withdrawing it is only half the job — the user still has to be able to
+	// find it, or the redirected banner is just broken.
+	if !strings.Contains(offTTY, serverTokenPath()) {
+		t.Errorf("banner off a terminal must name where to read the token, got:\n%s", offTTY)
+	}
+	// Everything that is not the token is still worth logging.
+	for _, want := range []string{"delta", "127.0.0.1", "8765"} {
+		if !strings.Contains(offTTY, want) {
+			t.Errorf("banner off a terminal dropped %q, which is not a secret", want)
+		}
+	}
+}
