@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -440,36 +443,68 @@ func TestServiceConfigValidate(t *testing.T) {
 
 // fakeRunner records every command it is handed and replays scripted results,
 // so the load sequences can be asserted without a real launchd or systemd.
+//
+// scripts is an ordered slice, not a map: matching walks it in registration
+// order and the first substring match wins. A map here would make the
+// outcome of two overlapping scripted substrings (e.g. a test that scripts
+// both "enable" and "enable-linger") depend on Go's randomized map
+// iteration — a flake waiting for the next test that needs two rules active
+// at once.
 type fakeRunner struct {
 	calls   [][]string
-	results map[string]struct {
-		out []byte
-		err error
-	}
+	scripts []*fakeScript
+}
+
+type fakeResult struct {
+	out []byte
+	err error
+}
+
+// fakeScript is one substring rule. remain counts how many more matching
+// calls should still get result: negative means forever, zero means
+// exhausted (matches fall through — to a later script, or to success if
+// none match).
+type fakeScript struct {
+	substr string
+	result fakeResult
+	remain int
 }
 
 func newFakeRunner() *fakeRunner {
-	return &fakeRunner{results: map[string]struct {
-		out []byte
-		err error
-	}{}}
+	return &fakeRunner{}
 }
 
-// fail scripts a result for any command whose joined form contains substr.
+// fail scripts a result for any command whose joined form contains substr,
+// forever.
 func (f *fakeRunner) fail(substr string, out string, err error) {
-	f.results[substr] = struct {
-		out []byte
-		err error
-	}{[]byte(out), err}
+	f.scripts = append(f.scripts, &fakeScript{substr: substr, result: fakeResult{[]byte(out), err}, remain: -1})
+}
+
+// failN scripts a result for exactly the next n commands whose joined form
+// contains substr; calls after that succeed. This is what lets a test
+// express "bootstrap fails once with EALREADY, then the retry succeeds" —
+// the actual behavior Load's retry loop exists for.
+func (f *fakeRunner) failN(substr string, n int, out string, err error) {
+	f.scripts = append(f.scripts, &fakeScript{substr: substr, result: fakeResult{[]byte(out), err}, remain: n})
 }
 
 func (f *fakeRunner) run(args ...string) ([]byte, error) {
-	f.calls = append(f.calls, args)
+	// Copy args: the caller (e.g. systemdService.Load's steps slice) may reuse
+	// or mutate its backing array after this call returns, and recorded calls
+	// must not alias it.
+	f.calls = append(f.calls, append([]string(nil), args...))
 	joined := strings.Join(args, " ")
-	for substr, res := range f.results {
-		if strings.Contains(joined, substr) {
-			return res.out, res.err
+	for _, s := range f.scripts {
+		if !strings.Contains(joined, s.substr) {
+			continue
 		}
+		if s.remain == 0 {
+			continue // exhausted — fall through to a later script or success
+		}
+		if s.remain > 0 {
+			s.remain--
+		}
+		return s.result.out, s.result.err
 	}
 	return nil, nil
 }
@@ -480,6 +515,23 @@ func (f *fakeRunner) joined() []string {
 		out = append(out, strings.Join(c, " "))
 	}
 	return out
+}
+
+// fakeExitError builds a real *exec.ExitError carrying the given exit code,
+// by actually running a subprocess that exits with it. exitCode's numeric
+// branch reads ee.ExitCode() via errors.As, which only a genuine
+// *exec.ExitError satisfies — a plain errors.New("exit status N") does not,
+// so tests that need to exercise that branch specifically (as opposed to the
+// output-string fallback) need the real thing.
+func fakeExitError(t *testing.T, code int) *exec.ExitError {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", fmt.Sprintf("exit %d", code))
+	err := cmd.Run()
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected /bin/sh -c 'exit %d' to produce an *exec.ExitError, got %T (%v)", code, err, err)
+	}
+	return ee
 }
 
 func TestLaunchdLoadBootsOutBeforeBootstrapping(t *testing.T) {
@@ -519,10 +571,43 @@ func TestLaunchdLoadIgnoresBootoutFailure(t *testing.T) {
 
 // bootout tears down asynchronously, so an immediate bootstrap can lose the
 // race and return EALREADY. Retrying is the fix; failing is a spurious install
-// error on every reinstall.
+// error on every reinstall. This scripts EALREADY via the message text only
+// (a plain error, not an *exec.ExitError), so it exercises isBootstrapRetryable's
+// string-fallback branch specifically — see
+// TestLaunchdLoadRetriesOnEALREADYExitCodeAlone for the numeric branch.
 func TestLaunchdLoadRetriesEALREADY(t *testing.T) {
 	f := newFakeRunner()
-	f.fail("bootstrap", "Bootstrap failed: 149: Operation already in progress", errors.New("exit status 149"))
+	f.fail("bootstrap", "Bootstrap failed: 37: Operation already in progress", errors.New("exit status 37"))
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	err := svc.Load(f.run)
+	if err == nil {
+		t.Fatal("Load() = nil, want an error after retries are exhausted")
+	}
+	got := f.joined()
+	bootstraps := 0
+	for _, c := range got {
+		if strings.Contains(c, "bootstrap") {
+			bootstraps++
+		}
+	}
+	if bootstraps != bootstrapRetries {
+		t.Errorf("bootstrap attempted %d times, want %d (all retries exhausted)", bootstraps, bootstrapRetries)
+	}
+	// Exhausting retries is supposed to lead into the GUI-session probe, not
+	// just stop. Deleting that probe call must not leave this test green.
+	if len(got) == 0 || !strings.Contains(got[len(got)-1], "launchctl print gui/501") {
+		t.Errorf("Load() commands = %q, want the sequence to end with the launchctl print probe", got)
+	}
+}
+
+// isBootstrapRetryable's numeric branch (exitCode(err) == darwinEALREADY)
+// exists because launchctl's exit code carries EALREADY even when its
+// message wording changes. Script output with none of the retry strings in
+// it at all, so only the numeric check can make this retry — deleting that
+// branch must turn this red. This is also exitCode's only direct coverage.
+func TestLaunchdLoadRetriesOnEALREADYExitCodeAlone(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("bootstrap", "Bootstrap failed: something unrelated to any wording this code matches on", fakeExitError(t, 37))
 	svc := &launchdService{home: "/Users/andy", uid: 501}
 	err := svc.Load(f.run)
 	if err == nil {
@@ -534,8 +619,56 @@ func TestLaunchdLoadRetriesEALREADY(t *testing.T) {
 			bootstraps++
 		}
 	}
-	if bootstraps < 2 {
-		t.Errorf("bootstrap attempted %d times, want retries", bootstraps)
+	if bootstraps != bootstrapRetries {
+		t.Errorf("bootstrap attempted %d times, want %d (retried purely via exit code 37)", bootstraps, bootstrapRetries)
+	}
+}
+
+// The retry loop's entire reason to exist: bootstrap loses the async-bootout
+// race once, then the very next attempt succeeds. A mutation like "only ever
+// retry once" or "give up after the first failure" must turn this red.
+func TestLaunchdLoadRetriesThenSucceeds(t *testing.T) {
+	f := newFakeRunner()
+	f.failN("bootstrap", 1, "Bootstrap failed: 37: Operation already in progress", errors.New("exit status 37"))
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	if err := svc.Load(f.run); err != nil {
+		t.Fatalf("Load() error: %v, want nil — the second bootstrap attempt should succeed", err)
+	}
+	got := f.joined()
+	want := []string{
+		"launchctl bootout gui/501/com.skerla.claude-sessions",
+		"launchctl bootstrap gui/501 /Users/andy/Library/LaunchAgents/com.skerla.claude-sessions.plist",
+		"launchctl bootstrap gui/501 /Users/andy/Library/LaunchAgents/com.skerla.claude-sessions.plist",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Load() ran %d commands %q, want %d %q", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("command %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// When bootstrap is exhausted AND the GUI-session probe itself also fails,
+// the error must still carry the real bootstrap failure. The probe can fail
+// for reasons unrelated to a missing GUI session (launchctl off PATH, a
+// transient XPC error), and discarding lastErr/lastOut there hands the
+// operator a confident, wrong diagnosis with zero forensic output.
+func TestLaunchdLoadReportsBootstrapFailureWhenProbeAlsoFails(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("bootstrap", "Bootstrap failed: 5: Input/output error", errors.New("exit status 5"))
+	f.fail("print", "launchctl print: some XPC error", errors.New("exit status 1"))
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	err := svc.Load(f.run)
+	if err == nil {
+		t.Fatal("Load() = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "GUI login session") {
+		t.Errorf("Load() error = %q, want it to mention a GUI login session", err.Error())
+	}
+	if !strings.Contains(err.Error(), "Bootstrap failed: 5: Input/output error") {
+		t.Errorf("Load() error = %q, want it to still carry the original bootstrap failure output, not just the GUI hint", err.Error())
 	}
 }
 
@@ -548,6 +681,42 @@ func TestLaunchdUnload(t *testing.T) {
 	want := []string{"launchctl bootout gui/501/com.skerla.claude-sessions"}
 	if got := f.joined(); len(got) != 1 || got[0] != want[0] {
 		t.Errorf("Unload() ran %q, want %q", got, want)
+	}
+}
+
+// bootout reporting "No such process" means nothing was loaded — the normal
+// case for a repeat uninstall, or one after a half-finished install. Unload
+// must tolerate it.
+func TestLaunchdUnloadIgnoresNoSuchProcess(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("bootout", "Boot-out failed: 3: No such process", errors.New("exit status 3"))
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	if err := svc.Unload(f.run); err != nil {
+		t.Fatalf("Unload() error: %v, want nil — nothing was loaded", err)
+	}
+}
+
+// launchctl reports "nothing was loaded" as exit code 3 (ESRCH), not just the
+// English string. A reworded or localized message must still be tolerated via
+// the exit code alone, so this scripts output with none of the tolerated
+// wording in it at all.
+func TestLaunchdUnloadIgnoresESRCHExitCodeAlone(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("bootout", "some unrelated wording entirely", fakeExitError(t, 3))
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	if err := svc.Unload(f.run); err != nil {
+		t.Fatalf("Unload() error: %v, want nil — exit code 3 (ESRCH) alone should be tolerated", err)
+	}
+}
+
+// A bootout failure that is neither "No such process" nor ESRCH is a real
+// failure and must be reported, not swallowed alongside the idempotent case.
+func TestLaunchdUnloadReportsOtherFailures(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("bootout", "Boot-out failed: 1: Operation not permitted", errors.New("exit status 1"))
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	if err := svc.Unload(f.run); err == nil {
+		t.Fatal("Unload() = nil, want an error for a real bootout failure")
 	}
 }
 
@@ -578,8 +747,16 @@ func TestSystemdLoadRestartsAndOrdersLingerFirst(t *testing.T) {
 }
 
 // polkit can refuse linger on some hosts. That degrades the service to
-// dying at logout — worth a warning, not worth failing the whole install.
+// dying at logout — worth a warning, not worth failing the whole install. The
+// warning is the entire user-visible payload of this path, so this captures
+// serviceErr rather than just checking the call count: deleting both Fprintf
+// calls must turn this red too, not just silently degrade the install.
 func TestSystemdLoadSurvivesLingerRefusal(t *testing.T) {
+	var buf bytes.Buffer
+	orig := serviceErr
+	serviceErr = &buf
+	defer func() { serviceErr = orig }()
+
 	f := newFakeRunner()
 	f.fail("enable-linger", "Failed to enable linger: Access denied", errors.New("exit status 1"))
 	svc := &systemdService{home: "/home/andy", user: "andy"}
@@ -589,14 +766,28 @@ func TestSystemdLoadSurvivesLingerRefusal(t *testing.T) {
 	if len(f.calls) != 4 {
 		t.Errorf("Load() ran %q, want the remaining systemctl commands to still run", f.joined())
 	}
+	warning := buf.String()
+	if !strings.Contains(warning, "service: warning") {
+		t.Errorf("warning output = %q, want it to contain %q", warning, "service: warning")
+	}
+	if !strings.Contains(warning, "andy") {
+		t.Errorf("warning output = %q, want it to name the user %q", warning, "andy")
+	}
 }
 
 func TestSystemdLoadFailsOnRestartError(t *testing.T) {
 	f := newFakeRunner()
 	f.fail("restart", "Job for claude-sessions.service failed", errors.New("exit status 1"))
 	svc := &systemdService{home: "/home/andy", user: "andy"}
-	if err := svc.Load(f.run); err == nil {
+	err := svc.Load(f.run)
+	if err == nil {
 		t.Fatal("Load() = nil, want an error when restart fails")
+	}
+	if !strings.Contains(err.Error(), "systemctl --user restart") {
+		t.Errorf("Load() error = %q, want it to name the failing command", err.Error())
+	}
+	if !strings.Contains(err.Error(), "Job for claude-sessions.service failed") {
+		t.Errorf("Load() error = %q, want it to carry the scripted systemctl output", err.Error())
 	}
 }
 
@@ -618,5 +809,41 @@ func TestSystemdUnload(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("command %d = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// systemctl exits nonzero for "disable" when the unit is already gone —
+// e.g. a second `uninstall`, or one run after a half-finished install. That
+// must not hard-fail the way it otherwise would: launchd's Unload already
+// tolerates the equivalent "No such process" case, and systemd's isn't
+// idempotent without the same treatment.
+func TestSystemdUnloadTreatsAlreadyGoneAsSuccess(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+	}{
+		{name: "unit file missing", out: "Failed to disable unit: Unit file claude-sessions.service does not exist."},
+		{name: "unit not loaded", out: "Unit claude-sessions.service not loaded."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeRunner()
+			f.fail("disable", tt.out, errors.New("exit status 1"))
+			svc := &systemdService{home: "/home/andy", user: "andy"}
+			if err := svc.Unload(f.run); err != nil {
+				t.Fatalf("Unload() error: %v, want nil — the unit is already gone", err)
+			}
+		})
+	}
+}
+
+// A disable failure that isn't "already gone" is a real failure and must be
+// reported, not swallowed alongside the idempotent case.
+func TestSystemdUnloadReportsOtherFailures(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("disable", "Failed to disable unit: Access denied", errors.New("exit status 1"))
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	if err := svc.Unload(f.run); err == nil {
+		t.Fatal("Unload() = nil, want an error for a real disable failure")
 	}
 }

@@ -11,6 +11,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -299,6 +300,18 @@ func exitCode(err error) int {
 const (
 	bootstrapRetries = 5
 	bootstrapBackoff = 200 * time.Millisecond
+
+	// darwinEALREADY is EALREADY from /usr/include/sys/errno.h on macOS.
+	// launchctl exits with it — and also echoes the number in its own message,
+	// "Bootstrap failed: 37: Operation already in progress" — when bootstrap
+	// loses the race against an in-flight, asynchronous bootout.
+	darwinEALREADY = 37
+
+	// darwinESRCH is ESRCH from /usr/include/sys/errno.h on macOS. launchctl
+	// bootout exits with it ("Boot-out failed: 3: No such process") when there
+	// was nothing loaded to tear down — the normal case on a first install or
+	// a repeat uninstall.
+	darwinESRCH = 3
 )
 
 func (s *launchdService) domain() string { return fmt.Sprintf("gui/%d", s.uid) }
@@ -320,27 +333,37 @@ func (s *launchdService) Load(run runner) error {
 			return nil
 		}
 		lastOut, lastErr = out, err
-		// bootout tears down asynchronously; EALREADY (149) means we lost that
-		// race, so back off and try again rather than reporting a bogus failure.
+		// bootout tears down asynchronously; EALREADY means we lost that race,
+		// so back off and try again rather than reporting a bogus failure.
 		if !isBootstrapRetryable(out, err) {
 			break
 		}
-		time.Sleep(bootstrapBackoff)
+		// Don't sleep after the attempt that is about to exit the loop anyway —
+		// that would just add 200ms of dead latency to every exhausted retry.
+		if attempt < bootstrapRetries-1 {
+			time.Sleep(bootstrapBackoff)
+		}
 	}
 
 	// gui/<uid> only exists with a console login. Installing over SSH to a Mac
 	// where nobody is logged in fails here, and launchctl's own message
 	// ("Bootstrap failed: 5: Input/output error") names nothing useful.
 	if _, err := run("launchctl", "print", s.domain()); err != nil {
+		// The probe itself can fail for reasons that have nothing to do with a
+		// missing GUI domain (launchctl off PATH, a transient XPC error, a
+		// race) — append the real bootstrap failure rather than discard it, so
+		// a wrong diagnosis still comes with the evidence to correct it.
 		return fmt.Errorf("no GUI login session for uid %d — launchd user agents "+
 			"need someone logged in at the console\n"+
-			"       log in on the Mac itself, then re-run this command", s.uid)
+			"       log in on the Mac itself, then re-run this command\n"+
+			"       (bootstrap said: %v\n%s)",
+			s.uid, lastErr, strings.TrimSpace(string(lastOut)))
 	}
 	return fmt.Errorf("launchctl bootstrap failed: %v\n%s", lastErr, strings.TrimSpace(string(lastOut)))
 }
 
 func isBootstrapRetryable(out []byte, err error) bool {
-	if exitCode(err) == 149 {
+	if exitCode(err) == darwinEALREADY {
 		return true
 	}
 	return strings.Contains(string(out), "EALREADY") ||
@@ -349,11 +372,20 @@ func isBootstrapRetryable(out []byte, err error) bool {
 
 func (s *launchdService) Unload(run runner) error {
 	out, err := run("launchctl", "bootout", s.target())
-	if err != nil && !strings.Contains(string(out), "No such process") {
+	// "No such process" / ESRCH means nothing was loaded — the normal case for
+	// a repeat uninstall. Checking the exit code as well as the string means a
+	// reworded or localized launchctl message doesn't turn idempotent
+	// uninstall into an error.
+	if err != nil && exitCode(err) != darwinESRCH && !strings.Contains(string(out), "No such process") {
 		return fmt.Errorf("launchctl bootout failed: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
+
+// serviceErr is where Load's non-fatal warnings go. A package-level var
+// rather than a direct os.Stderr call so tests can capture and assert on the
+// warning text without redirecting the process's real stderr.
+var serviceErr io.Writer = os.Stderr
 
 func (s *systemdService) Load(run runner) error {
 	// Linger first: on a box where the per-user manager isn't running yet,
@@ -361,9 +393,9 @@ func (s *systemdService) Load(run runner) error {
 	// it exists. A polkit refusal only means the service dies at logout, which
 	// is worth a warning rather than aborting the install.
 	if out, err := run("loginctl", "enable-linger", s.user); err != nil {
-		fmt.Fprintf(os.Stderr, "service: warning: could not enable linger for %s: %v\n%s\n",
+		fmt.Fprintf(serviceErr, "service: warning: could not enable linger for %s: %v\n%s\n",
 			s.user, err, strings.TrimSpace(string(out)))
-		fmt.Fprintf(os.Stderr, "service: the server will stop when your last login session ends\n")
+		fmt.Fprintf(serviceErr, "service: the server will stop when your last login session ends\n")
 	}
 	steps := [][]string{
 		{"systemctl", "--user", "daemon-reload"},
@@ -383,11 +415,21 @@ func (s *systemdService) Load(run runner) error {
 }
 
 func (s *systemdService) Unload(run runner) error {
-	if out, err := run("systemctl", "--user", "disable", "--now", systemdUnitName); err != nil {
+	// A second `uninstall`, or one after a half-finished install, finds the
+	// unit already gone — systemctl exits nonzero for that, unlike launchd's
+	// bootout. Tolerate it the same way launchdService.Unload tolerates "No
+	// such process", so uninstall is idempotent on both platforms.
+	if out, err := run("systemctl", "--user", "disable", "--now", systemdUnitName); err != nil && !systemdUnitAlreadyGone(string(out)) {
 		return fmt.Errorf("systemctl disable failed: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 	if out, err := run("systemctl", "--user", "daemon-reload"); err != nil {
 		return fmt.Errorf("systemctl daemon-reload failed: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// systemdUnitAlreadyGone reports whether systemctl's failure output describes
+// a unit that was never loaded in the first place.
+func systemdUnitAlreadyGone(out string) bool {
+	return strings.Contains(out, "does not exist") || strings.Contains(out, "not loaded")
 }
