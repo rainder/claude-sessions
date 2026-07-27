@@ -182,7 +182,7 @@ The block's own rows are built with the existing `pad` closure
 ### Fetch limits
 
 ```go
-var killPreviewLimits = PreviewLimits{Lines: 60, Bytes: 32 << 10}
+var killPreviewLimits = PreviewLimits{MaxLines: 60, MaxBytes: 32 << 10}
 ```
 
 At most 12 lines are rendered; 60 gives headroom for the trailing-blank trim
