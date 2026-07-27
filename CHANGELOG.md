@@ -9,6 +9,67 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `POST /sessions/{pid}/kill` and `POST /sessions/{pid}/migrate` accept an
+  optional `{"session_id": "…"}` precondition. A PID on its own proves nothing
+  once a tmux pane has been recycled and handed that number to a different
+  process, and a phone acting on a list it polled minutes ago is far more
+  exposed to that than a desktop sitting on the same machine. When the id is
+  supplied it is checked against the session the server itself resolves for
+  that PID, then checked again from that PID's own session file immediately
+  before the signal — the first list costs real I/O to build, so a pane
+  recycled while it was being built would otherwise slip through. Either check
+  failing refuses: nothing is terminated and nothing is spawned. Omitting the
+  id, or sending an empty body (which is what `curl -X POST` with no `-d`
+  does), keeps the previous behaviour, so the desktop and every scripted
+  caller keep working.
+
+  Two deliberate differences from the old responses, both on paths that
+  previously said less than they knew: a kill against a PID with no live
+  session now carries `code: "not_live"` alongside the same `error` text it
+  always had, and a **malformed** request body is now rejected with `400`
+  before anything is collected or signalled instead of being parsed as an
+  empty one. The second is the point rather than a side effect — an unknown
+  field, an explicit `null`, a bare `null` body, or trailing content all used to
+  decode to an empty id, which this endpoint reads as "no precondition", so a client typo
+  (`sessionId`, the spelling the iOS model uses) would silently turn a guarded
+  kill into an unconditional one. An absent body and `{}` are still accepted
+  and still mean "no precondition". Duplicate keys are not detected: Go's
+  decoder applies last-one-wins without reporting it.
+- `actionResult` gained an optional `code` field so a client can tell the two
+  refusals apart without matching on prose: `session_mismatch` (that PID is
+  live, but it is a different session now) and `not_live` (no live session
+  there). Both mean "refresh, the row was stale"; neither means "retry".
+  Logical failures still answer HTTP 200 in the same `{ok, error}` envelope,
+  and `omitempty` keeps the new field invisible to clients that don't read it.
+- `POST /sessions/new` accepts an optional `request_id` (8–128 characters of
+  `[A-Za-z0-9_-]`; anything else is `400 bad request_id`) that makes spawning
+  idempotent. It is the only mutating endpoint that is not naturally safe to
+  repeat — a second kill finds nothing live, a second resume is refused with
+  409, a second worktree remove fails validation, but a second spawn creates a
+  second tmux session and a second Claude process in the same directory. A
+  repeat of the same id joins a spawn that is still running and replays one
+  that already succeeded, so the phone-timed-out-and-the-user-tapped-again case
+  costs nothing. The id is the whole key: reusing one with a different body
+  replays the first result rather than honouring the new body. Failed spawns
+  are deliberately not remembered, so a retry genuinely re-runs — and to make
+  that true, a spawn whose `send-keys` fails now tears down the tmux session it
+  had already created, which would otherwise survive as an orphan and be
+  duplicated by the retry. Bounded to 32 remembered ids for 10 minutes, in
+  memory; when all 32 are still running the host answers `503` rather than
+  growing past the bound, since evicting a running entry would strand its
+  joiners into a second spawn. Retry that with the same id. The tmux session
+  name is derived from the `request_id`, so if the post-failure cleanup itself
+  fails, a retry collides with the surviving session and errors rather than
+  quietly creating a second one beside it.
+- `POST /sessions/{pid}/migrate` now verifies the session file it re-reads
+  rather than adopting it. It always re-read the PID's file to find the
+  transcript to resume, so a pane recycled between the caller's check and that
+  read would have had the new occupant killed *and* its transcript resumed.
+  It also confirms the old process actually died before creating the new tmux
+  session — counting a `kill(pid, 0)` of `EPERM` as *alive*, since that means
+  the process exists and merely cannot be signalled — both signals discarded their errors, so a failed kill read exactly
+  like a successful one, and two live sessions on one transcript corrupt it.
+  A migrate that cannot confirm the process is gone now fails instead.
 - `claude-sessions service install|uninstall|status` runs the server as a
   supervised background service — a launchd LaunchAgent on macOS, a systemd
   `--user` unit on Linux. `install` writes the unit and loads it, so the server

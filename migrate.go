@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -49,10 +51,63 @@ func randomSlug() string {
 	return hex.EncodeToString(b)
 }
 
+// migrateSignal/migrateAlive/migrateSleep are MigrateLocal's side effects,
+// injectable so the kill-then-verify sequence can be tested without signalling a
+// real process or spending its waits in real time.
+var (
+	migrateSignal = syscall.Kill
+	migrateAlive  = pidPresent
+	migrateSleep  = time.Sleep
+)
+
+// pidPresent reports whether pid still exists, and unlike pidAlive it treats
+// EPERM as present.
+//
+// kill(pid, 0) answers EPERM when the process is there but this user may not
+// signal it. pidAlive folds that into "gone", which is the right default for
+// listing sessions — a process we cannot touch is not one of ours — and the
+// wrong one for deciding a migrate may proceed, where "gone" is the permission
+// to create a second session on the same transcript. Here the dangerous
+// direction is the optimistic one, so anything short of a definite ESRCH counts
+// as alive.
+func pidPresent(pid int) bool {
+	return pidPresentErr(syscall.Kill(pid, 0))
+}
+
+// pidPresentErr is the classification pidPresent applies, split out so it can be
+// tested without a real process in either state.
+func pidPresentErr(err error) bool {
+	if err == nil {
+		return true
+	}
+	return !errors.Is(err, syscall.ESRCH)
+}
+
+// errMigrateSessionMismatch is returned when the session file re-read no longer
+// holds the id the caller attested. The server handler maps it to the same
+// machine-readable code its own earlier check uses, so a client sees one failure
+// kind regardless of which of the two checks caught the substitution.
+var errMigrateSessionMismatch = errors.New("that PID is a different session now")
+
 // MigrateLocal stops the Claude process at pid and spawns a new tmux session
 // running `claude --resume <sessionId>` in the same cwd. Returns the tmux
 // session name on success.
 func MigrateLocal(pid int) (string, error) {
+	return MigrateLocalAttested(pid, "")
+}
+
+// MigrateLocalAttested is MigrateLocal with the session id the caller already
+// verified for this PID.
+//
+// The re-read below is not redundant with a caller's check. Whoever resolved
+// this PID did so against a list that took real I/O to build, and this function
+// then re-reads the session file and would otherwise adopt whatever it now says
+// — so a pane recycled in between would be killed *and* have its transcript
+// resumed under the caller's intent. Passing the attested id makes the re-read
+// verify rather than adopt. "" keeps the pre-existing unconditional behaviour
+// for the local TUI and CLI paths, which resolve the PID and act on it within
+// the same keystroke.
+func MigrateLocalAttested(pid int, wantSession string) (string, error) {
 	sess, ok := readSessionByPID(pid)
 	if !ok {
 		return "", fmt.Errorf("no session file for PID %d", pid)
@@ -60,28 +115,42 @@ func MigrateLocal(pid int) (string, error) {
 	if sess.SessionID == "" || sess.CWD == "" {
 		return "", fmt.Errorf("session file missing sessionId or cwd")
 	}
+	if wantSession != "" && sess.SessionID != wantSession {
+		return "", fmt.Errorf("%w: PID %d", errMigrateSessionMismatch, pid)
+	}
 
 	tname := MakeTmuxName(sess.CWD, sess.SessionID, sess.Name)
 
 	// SIGTERM, wait up to 5s, then SIGKILL fallback.
-	_ = syscall.Kill(pid, syscall.SIGTERM)
+	_ = migrateSignal(pid, syscall.SIGTERM)
 	for i := 0; i < 5; i++ {
-		time.Sleep(time.Second)
-		if !pidAlive(pid) {
+		migrateSleep(time.Second)
+		if !migrateAlive(pid) {
 			break
 		}
 	}
-	if pidAlive(pid) {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-		time.Sleep(time.Second)
+	if migrateAlive(pid) {
+		_ = migrateSignal(pid, syscall.SIGKILL)
+		migrateSleep(time.Second)
 	}
-	time.Sleep(time.Second) // let state flush to disk
+	// Confirm it actually died. Both signals above discard their errors — a
+	// permission failure or a PID that changed hands under us reads exactly like
+	// success — and proceeding here would leave the old process running while a
+	// second one resumes the same transcript. Two live sessions on one
+	// transcript corrupt it; a failed migrate does not.
+	if migrateAlive(pid) {
+		return "", fmt.Errorf("PID %d is still running; not migrating", pid)
+	}
+	migrateSleep(time.Second) // let state flush to disk
 
 	if err := exec.Command("tmux", "new-session", "-d", "-s", tname, "-c", sess.CWD).Run(); err != nil {
 		return "", fmt.Errorf("tmux new-session: %w", err)
 	}
 	if err := exec.Command("tmux", "send-keys", "-t", tname,
 		"claude --resume "+sess.SessionID, "Enter").Run(); err != nil {
+		// Same partial commit SpawnNew guards against: the session exists but
+		// was never told what to run.
+		killTmuxSession(tname)
 		return "", fmt.Errorf("tmux send-keys: %w", err)
 	}
 	return tname, nil
@@ -90,11 +159,24 @@ func MigrateLocal(pid int) (string, error) {
 // SpawnNew creates a fresh tmux session at cwd and sends command to it inside
 // the user's shell. Returns the tmux session name.
 func SpawnNew(cwd, displayName, command string) (string, error) {
-	tname := MakeTmuxName(cwd, randomSlug(), displayName)
+	return SpawnNewWithSuffix(cwd, displayName, command, "")
+}
+
+// SpawnNewWithSuffix is SpawnNew with a caller-chosen tmux name suffix, so a
+// retry of the same logical request lands on the same session name. "" keeps the
+// random slug, which is what every local caller wants.
+func SpawnNewWithSuffix(cwd, displayName, command, suffix string) (string, error) {
+	tname := MakeTmuxName(cwd, suffix, displayName)
 	if err := exec.Command("tmux", "new-session", "-d", "-s", tname, "-c", cwd).Run(); err != nil {
 		return "", fmt.Errorf("tmux new-session: %w", err)
 	}
 	if err := exec.Command("tmux", "send-keys", "-t", tname, command, "Enter").Run(); err != nil {
+		// Partial commit: the session exists but was never told what to run, and
+		// this call is about to report failure. Callers are entitled to treat a
+		// failed spawn as "nothing was created" — the request_id ledger
+		// deliberately forgets failures so a retry genuinely re-runs — so leaving
+		// this behind would make the retry create a second session. Tear it down.
+		killTmuxSession(tname)
 		return "", fmt.Errorf("tmux send-keys: %w", err)
 	}
 	// A brand-new tmux session may be what started the tmux server; (re)assert
@@ -102,6 +184,28 @@ func SpawnNew(cwd, displayName, command string) (string, error) {
 	installPasteBinding(activeServerPort)
 	return tname, nil
 }
+
+// killTmuxSession tears down a tmux session created moments ago by a spawn or
+// migrate that then failed. Best effort: the caller is already returning an
+// error and the cleanup failing does not change what it reports.
+func killTmuxSession(tname string) {
+	// Bounded: this runs on a path that is already returning an error, and a
+	// tmux that hangs here would hold the caller — and, for a spawn, the
+	// request_id slot every joiner is waiting on — open for as long as it hangs.
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCleanupTimeout)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "tmux", "kill-session", "-t", tname).Run(); err != nil {
+		// Loud on purpose. The caller reports failure and the request_id ledger
+		// forgets failures, so nothing else will ever mention this session
+		// again; the name is what a human needs to clean it up by hand. A retry
+		// of the same request_id will collide with it rather than duplicate it
+		// (see spawnSuffix), which is the safe outcome but still needs saying.
+		fmt.Fprintf(os.Stderr, "claude-sessions: could not clean up tmux session %q after a failed spawn: %v\n", tname, err)
+	}
+}
+
+// tmuxCleanupTimeout bounds the best-effort teardown above.
+var tmuxCleanupTimeout = 5 * time.Second
 
 // trustPromptMarker is unique text from Claude Code's first-run workspace
 // trust dialog ("Is this a project you created or one you trust?"). A

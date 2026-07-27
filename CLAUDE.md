@@ -204,6 +204,84 @@ response and removes via authed `POST /worktree/remove`. That endpoint takes a
 client-supplied path, so `validateWorktreePath` gates it (absolute, clean,
 worktree root, real worktree) and the handler re-checks the live session list.
 
+The worktree decision is made *after* the kill's optional `session_id`
+precondition (below), so a refused kill never offers a worktree that is still
+in use.
+
+### Action preconditions and idempotency
+
+`POST /sessions/{pid}/kill` and `POST /sessions/{pid}/migrate` accept an
+optional `{"session_id": "…"}` body. Absent or empty it means what it always
+meant — act on whatever is at that PID — and an empty request body is *not* an
+error (`sessionIDPrecondition` tolerates `io.EOF`, since the desktop posts `{}`
+and scripted callers post nothing). Everything *else* is strict, and
+deliberately so: an unknown field, an explicit `null`, or trailing content all
+decode to an empty id, which this endpoint reads as "no precondition", so each
+one fails open. `sessionId` (the iOS model's spelling) is one typo away from
+disarming the guard entirely, so all three are `400`. Duplicate keys stay
+undetected — Go's decoder applies last-one-wins silently.
+
+Supplied, the id is compared against the row `s.collectLocal()` resolves for
+that PID, and then **again** by `reattest` from that PID's own session file
+immediately before the destructive call. The second check is not redundant:
+`collectLocal` maps tmux panes, resolves git roots and scans transcripts for
+cost and agent counts, so its answer describes the world as it was when the
+walk began. Re-reading the one file that establishes identity narrows the
+window to the syscall itself. `kill` still hands `terminateSession` the
+*enriched* row — its tmux metadata is what lets `KillSession` kill the pane
+group by name instead of signalling a bare PID — and the attestation is what
+confirms that row still describes what lives there. Migrate only collects when
+an id was supplied, so the desktop path costs exactly what it did before, and
+threads the id into `MigrateLocalAttested` so the re-read that finds the
+transcript verifies rather than adopts.
+
+The body itself is parsed through a *pointer* to the struct, because a
+top-level `null` decoded into a struct value is a silent no-op that leaves
+every field zero — another fail-open form. Exactly one JSON value is accepted:
+`dec.Token()` must then report `io.EOF`, which `dec.More()` does not catch,
+since More() only reports a well-formed next element and misses trailing
+garbage that is not itself valid JSON.
+
+**Known residual windows, accepted.** The precondition narrows the race; it
+does not eliminate it. Three remain and none is closable here: a session with
+no tmux name is still killed by bare PID, since attesting a PID atomically with
+signalling it needs `pidfd` and macOS has no equivalent; the gap between
+`reattest` and the SIGTERM is still a gap; and so is the one between SIGTERM
+and the SIGKILL escalation. The guarantee is "no action on a snapshot that has
+visibly moved", not "atomic".
+
+Refusals stay in the `actionResult` envelope at HTTP 200 and carry a
+machine-readable `Code`: `session_mismatch` (that PID is live but is a
+different session now) or `not_live` (nothing live there). `omitempty` keeps
+the field invisible to clients that don't know it. Both mean "your row is
+stale, refresh" — neither means "retry".
+
+`POST /sessions/new` accepts an optional `request_id` (8–128 chars of
+`[A-Za-z0-9_-]`, else `400 bad request_id`). It is the one mutating endpoint
+that is not naturally safe to repeat — a second kill finds nothing live, a
+second resume is 409, a second worktree remove fails validation, but a second
+spawn happily creates a second tmux session. `spawnDedupe` single-flights by id
+the way `sessionCache` does for `/sessions`: a repeat joins a running spawn,
+and replays a *successful* one for `spawnDedupeTTL` (10 min, `spawnDedupeMax`
+32 entries, pruned on insert, in memory only). The id is the whole key: reusing
+one with a different body replays the first result. Failures are deliberately
+not remembered so a retry genuinely re-runs — which is only safe because
+`SpawnNew` and `MigrateLocalAttested` now tear down a tmux session they created
+but failed to send a command to, instead of leaving an orphan for the retry to
+duplicate. Publication goes through a `defer`, so a panic cannot leave joiners
+parked forever, and joiners `select` on their own request context so a hung
+tmux does not hold their connections. Completion is published the moment the
+outcome is known rather than after the response is written, so a client that is
+slow to read cannot hold a finished spawn's slot and make a later request look
+like saturation. Cleanup is bounded (`tmuxCleanupTimeout`) and logs loudly with
+the session name, since nothing else will ever mention an orphan again; and the
+tmux name is derived from the request_id (`spawnSuffix`), so if cleanup does
+fail, the retry collides with the survivor and errors instead of quietly
+building a second session next to it. Eviction never touches a running entry;
+when all `spawnDedupeMax` are in flight the handler answers **503** rather than
+growing past the bound. `s.spawn` and `s.attest` are the injectable seams
+alongside `collect`/`terminate`/`removeTree`.
+
 ### Usage polling
 
 `usage.go` polls Anthropic's OAuth usage endpoint (token from the macOS Keychain
