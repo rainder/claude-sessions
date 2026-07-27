@@ -756,8 +756,19 @@ func tailscaleBindFailure() string {
 			"        the macOS app ships it inside the bundle — symlink it onto PATH,\n" +
 			"        or pass the address directly: --bind <your-tailscale-ip>"
 	}
-	return "--bind tailscale requested but " + tailscaleBinary() + " reported no IPv4\n" +
+	bin := tailscaleBinary()
+	msg := "--bind tailscale requested but " + bin + " reported no IPv4\n" +
 		"        is tailscaled running and authenticated?"
+	// Quote what it actually said. The bundle's CLI exits 0 with an
+	// explanation on stdout — "The Tailscale GUI failed to start", which is
+	// what a launchd agent gets — and guessing at the cause from here has
+	// already sent one debugging session after the wrong thing.
+	if out, err := exec.Command(bin, "ip", "-4").CombinedOutput(); err == nil || len(out) > 0 {
+		if s := strings.TrimSpace(string(out)); s != "" {
+			msg += "\n        it said: " + s
+		}
+	}
+	return msg
 }
 
 // tailscaleIPv4Context is the context-bounded variant used by local client
@@ -771,10 +782,16 @@ func tailscaleIPv4Context(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		s := strings.TrimSpace(line)
-		if s != "" {
-			return s
+	// Every line is validated as an IPv4 rather than trusting the first
+	// non-empty one. The macOS app bundle's CLI exits 0 and prints "The
+	// Tailscale GUI failed to start: ..." on stdout when it cannot reach the
+	// GUI — which is exactly what happens under launchd. Returning that text
+	// as an address produced a bind failure whose error was a DNS lookup of
+	// the sentence.
+	for _, line := range strings.Split(string(out), "\n") {
+		ip := net.ParseIP(strings.TrimSpace(line))
+		if ip != nil && ip.To4() != nil {
+			return ip.String()
 		}
 	}
 	return ""

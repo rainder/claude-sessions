@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1721,7 +1722,7 @@ func TestTailscaleBindFailureNamesTheActualCause(t *testing.T) {
 	t.Run("command present but no address", func(t *testing.T) {
 		dir := t.TempDir()
 		bin := filepath.Join(dir, "tailscale")
-		if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\necho 'nothing useful here'\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		t.Setenv("PATH", dir)
@@ -1734,5 +1735,53 @@ func TestTailscaleBindFailureNamesTheActualCause(t *testing.T) {
 		if !strings.Contains(msg, bin) {
 			t.Errorf("message does not name which binary it ran (%s):\n%s", bin, msg)
 		}
+		// Quoting the CLI's own words is what would have shown "The Tailscale
+		// GUI failed to start" the first time instead of a guess.
+		if !strings.Contains(msg, "it said: nothing useful here") {
+			t.Errorf("message does not quote what the CLI printed:\n%s", msg)
+		}
 	})
+}
+
+// The macOS app bundle's CLI exits 0 and prints "The Tailscale GUI failed to
+// start: ..." on stdout when it cannot reach the GUI — which is what happens
+// under launchd. Trusting the first non-empty line handed that sentence back
+// as an address, and the bind failed with a DNS lookup of it.
+func TestTailscaleIPv4OnlyAcceptsAnIPv4(t *testing.T) {
+	tests := []struct {
+		name   string
+		stdout string
+		want   string
+	}{
+		{name: "plain address", stdout: "100.107.145.1\n", want: "100.107.145.1"},
+		{name: "GUI error on stdout, exit 0", stdout: "The Tailscale GUI failed to start: The operation couldn't be completed. (Tailscale.CLIError error 3.)\n"},
+		{name: "empty output", stdout: ""},
+		{name: "IPv6 only is not an IPv4 bind", stdout: "fd7a:115c:a1e0::1\n"},
+		{name: "IPv6 first, IPv4 second", stdout: "fd7a:115c:a1e0::1\n100.107.145.1\n", want: "100.107.145.1"},
+		{name: "leading blank lines", stdout: "\n\n100.64.0.9\n", want: "100.64.0.9"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// The fake cats a fixture file rather than embedding a heredoc, so
+			// nothing in the payload can be read as shell syntax. /bin/cat is
+			// absolute because PATH below is narrowed to this dir, which would
+			// otherwise make the fake exit 127 and every case return "" — the
+			// negative cases would then pass for the wrong reason.
+			payload := filepath.Join(dir, "out.txt")
+			if err := os.WriteFile(payload, []byte(tt.stdout), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			fake := filepath.Join(dir, "tailscale")
+			if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec /bin/cat "+payload+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			defer swapBundledPaths(t, nil)()
+
+			if got := tailscaleIPv4Context(context.Background()); got != tt.want {
+				t.Errorf("tailscaleIPv4Context() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }

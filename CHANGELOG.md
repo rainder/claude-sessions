@@ -34,8 +34,15 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is the wrong thing to go and check. `/Applications/Tailscale.app` and the two
   common install prefixes are tried after `PATH`, and the two causes now get
   different messages: one names the missing command and how to fix it, the
-  other names the binary it actually ran. Under `service install` this was a
-  permanent restart loop rather than a single confusing line.
+  other names the binary it actually ran and quotes what it printed. Under
+  `service install` this was a permanent restart loop rather than a single
+  confusing line.
+- `--bind tailscale` validates that the CLI actually returned an address. The
+  macOS bundled CLI exits 0 and prints "The Tailscale GUI failed to start" on
+  stdout when it has no GUI session to talk to — which is what a launchd agent
+  gets — and that sentence was being used as the bind address, failing with a
+  DNS lookup of it. Note this means `--bind tailscale` cannot work from a
+  LaunchAgent on a Mac whose only CLI is the app bundle; pass the address.
 
 ### Changed
 
