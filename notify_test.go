@@ -46,8 +46,11 @@ func TestWaitTrackerAlertsAfterTwoConsecutiveTicks(t *testing.T) {
 	if got[0].SessionID != "a" || got[0].WaitingFor != "permission prompt" {
 		t.Fatalf("alert = %+v, want session a on a permission prompt", got[0])
 	}
-	if got[0].Generation != 1 {
-		t.Fatalf("Generation = %d, want 1", got[0].Generation)
+	// A generation was assigned. Not its literal value: the counter is seeded
+	// from the clock so that two processes cannot issue the same one, so the
+	// only thing meaningful about a single generation is that it exists.
+	if got[0].Generation <= 0 {
+		t.Fatalf("Generation = %d, want a generation to have been assigned", got[0].Generation)
 	}
 	if again := tr.Tick([]Session{waitingSession("a", "permission prompt")}); len(again) != 0 {
 		t.Fatalf("third tick re-alerted: %+v", again)
@@ -82,7 +85,7 @@ func TestWaitTrackerAlertsAgainAfterClear(t *testing.T) {
 	tr := newWaitTracker()
 	tr.Tick(nil)
 	tr.Tick([]Session{waitingSession("a", "permission prompt")})
-	tr.Tick([]Session{waitingSession("a", "permission prompt")})
+	first := tr.Tick([]Session{waitingSession("a", "permission prompt")})
 	tr.Tick([]Session{idleSession("a")})
 
 	tr.Tick([]Session{waitingSession("a", "permission prompt")})
@@ -90,8 +93,12 @@ func TestWaitTrackerAlertsAgainAfterClear(t *testing.T) {
 	if len(got) != 1 || got[0].Kind != notifyAlert {
 		t.Fatalf("= %+v, want a fresh alert", got)
 	}
-	if got[0].Generation != 2 {
-		t.Fatalf("Generation = %d, want 2", got[0].Generation)
+	// A *different* wait, so a stale notification for the first one cannot pass
+	// as this one. Compared against the first rather than asserted literally:
+	// the counter is seeded from the clock, so absolute values mean nothing.
+	if got[0].Generation <= first[0].Generation {
+		t.Fatalf("Generation = %d, want it past the first wait's %d",
+			got[0].Generation, first[0].Generation)
 	}
 }
 
@@ -101,7 +108,7 @@ func TestWaitTrackerReAlertsWhenWaitingForChanges(t *testing.T) {
 	tr := newWaitTracker()
 	tr.Tick(nil)
 	tr.Tick([]Session{waitingSession("a", "permission prompt")})
-	tr.Tick([]Session{waitingSession("a", "permission prompt")})
+	first := tr.Tick([]Session{waitingSession("a", "permission prompt")})
 
 	got := tr.Tick([]Session{waitingSession("a", "user input")})
 	if len(got) != 1 || got[0].Kind != notifyAlert {
@@ -110,8 +117,9 @@ func TestWaitTrackerReAlertsWhenWaitingForChanges(t *testing.T) {
 	if got[0].WaitingFor != "user input" {
 		t.Fatalf("WaitingFor = %q, want %q", got[0].WaitingFor, "user input")
 	}
-	if got[0].Generation != 2 {
-		t.Fatalf("Generation = %d, want 2", got[0].Generation)
+	if got[0].Generation <= first[0].Generation {
+		t.Fatalf("Generation = %d, want it past the first prompt's %d",
+			got[0].Generation, first[0].Generation)
 	}
 }
 
@@ -877,8 +885,11 @@ func TestNotifyHubPushesAClearWhenAWaitEnds(t *testing.T) {
 	if eventIDOf(t, alert) != eventIDOf(t, clear) {
 		t.Fatalf("event ids differ: alert %q, clear %q", eventIDOf(t, alert), eventIDOf(t, clear))
 	}
-	if eventIDOf(t, clear) != "9f2c:abc-123:1" {
-		t.Fatalf("clear event_id = %q, want the alerted generation", eventIDOf(t, clear))
+	// Named against the alert rather than a literal: generations are seeded from
+	// the clock, and what has to hold is that the clear names the wait that was
+	// alerted.
+	if want := "9f2c:abc-123:"; !strings.HasPrefix(eventIDOf(t, clear), want) {
+		t.Fatalf("clear event_id = %q, want it to name host and session", eventIDOf(t, clear))
 	}
 }
 
@@ -909,8 +920,15 @@ func TestNotifyHubClearCarriesTheGenerationThatWasAlerted(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("sent %d pushes, want two alerts and a clear: %+v", len(got), got)
 	}
-	if want := "9f2c:abc-123:2"; eventIDOf(t, got[2]) != want {
-		t.Fatalf("clear event_id = %q, want %q (the second wait)", eventIDOf(t, got[2]), want)
+	// The second wait's, not the first's. A session re-alerted for a different
+	// prompt has two generations behind it, and clearing the older one would
+	// leave the card that is actually on screen with nothing left to remove it.
+	if eventIDOf(t, got[2]) != eventIDOf(t, got[1]) {
+		t.Fatalf("clear event_id = %q, want the second alert's %q",
+			eventIDOf(t, got[2]), eventIDOf(t, got[1]))
+	}
+	if eventIDOf(t, got[2]) == eventIDOf(t, got[0]) {
+		t.Fatalf("clear event_id = %q, which is the *first* wait's", eventIDOf(t, got[2]))
 	}
 }
 
@@ -946,8 +964,9 @@ func TestNotifyHubPushesAClearWhenASessionDisappears(t *testing.T) {
 	if got[1].PushType != "background" || got[1].Priority != "5" {
 		t.Fatalf("clear push type/priority = %q/%q", got[1].PushType, got[1].Priority)
 	}
-	if want := "9f2c:abc-123:1"; eventIDOf(t, got[1]) != want {
-		t.Fatalf("clear event_id = %q, want %q", eventIDOf(t, got[1]), want)
+	if eventIDOf(t, got[1]) != eventIDOf(t, got[0]) {
+		t.Fatalf("clear event_id = %q, want the alert's %q",
+			eventIDOf(t, got[1]), eventIDOf(t, got[0]))
 	}
 }
 
@@ -1028,6 +1047,135 @@ func TestAlertAndClearShareACollapseIDEvenWhenTruncated(t *testing.T) {
 	if got[0].CollapseID[:apnsCollapseIDMax] != got[1].CollapseID[:apnsCollapseIDMax] {
 		t.Fatalf("truncated collapse ids differ: alert %q, clear %q",
 			got[0].CollapseID[:apnsCollapseIDMax], got[1].CollapseID[:apnsCollapseIDMax])
+	}
+}
+
+// A restart is the one thing that used to make an event_id repeat.
+//
+// nextGen started at its zero value in every process, while host_id is persisted
+// and session ids survive, so "H:S:1" could genuinely be issued twice in one
+// device's lifetime. A clear for the first one, delayed across the restart, then
+// exact-matches the alert for the second and takes a live card off the screen —
+// the single failure the exact-match rule exists to prevent.
+func TestWaitTrackerGenerationsDoNotCollideAcrossARestart(t *testing.T) {
+	start := time.Now()
+	before := newWaitTrackerAt(start)
+	// A restart one second later. That is the *smallest* gap a restart can have
+	// and still be two processes; a real one is minutes.
+	after := newWaitTrackerAt(start.Add(time.Second))
+
+	issued := map[int]bool{}
+	for i := 0; i < 1000; i++ {
+		issued[before.bumpGeneration()] = true
+	}
+	for i := 0; i < 1000; i++ {
+		if g := after.bumpGeneration(); issued[g] {
+			t.Fatalf("generation %d was issued by both processes", g)
+		}
+	}
+}
+
+// And the seed must not break the property the counter already had within one
+// process.
+func TestWaitTrackerGenerationsAreStillMonotonicWithinAProcess(t *testing.T) {
+	tr := newWaitTrackerAt(time.Now())
+	first := tr.bumpGeneration()
+	second := tr.bumpGeneration()
+	if second <= first {
+		t.Fatalf("generations went %d then %d, want strictly increasing", first, second)
+	}
+}
+
+// clearStallingSender answers alerts at once and never answers a background
+// push, which is how a clear spends a tick that an alert needed.
+type clearStallingSender struct {
+	mu       sync.Mutex
+	accepted []string
+}
+
+func (s *clearStallingSender) Send(ctx context.Context, req pushRequest) error {
+	if req.PushType == "background" {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accepted = append(s.accepted, req.PushType+":"+req.CollapseID)
+	return nil
+}
+
+func (s *clearStallingSender) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accepted = nil
+}
+
+func (s *clearStallingSender) got() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.accepted...)
+}
+
+// An alert is the product; a clear is housekeeping. They share one tick budget
+// and are dispatched one after another, so ordering them by session id alone
+// lets a clear that stalls spend the budget an alert in the same tick needed —
+// and a lost alert is never retried, because the tracker has already moved that
+// session to phaseAlerted.
+//
+// Session "a" sorts before "b", so by-id ordering puts the clear first.
+func TestNotifyHubDispatchesAlertsBeforeClearsInOneTick(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	devices.Upsert(Device{Token: "dev"})
+	sender := &clearStallingSender{}
+
+	aWaiting := []Session{waitingSession("a", "permission prompt")}
+	bothWaiting := []Session{waitingSession("a", "permission prompt"), waitingSession("b", "permission prompt")}
+	aDoneBWaiting := []Session{idleSession("a"), waitingSession("b", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "9f2c", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect: snapshotCollector(nil, aWaiting, aWaiting, bothWaiting, aDoneBWaiting),
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 4; n++ {
+		h.tickOnce(context.Background())
+	}
+	sender.reset()
+
+	// A tick with almost nothing left, which is what a fan-out to a full
+	// registry leaves behind. The stalled clear will consume all of it.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	h.tickOnce(ctx)
+
+	got := sender.got()
+	if len(got) != 1 || got[0] != "alert:9f2c:b" {
+		t.Fatalf("accepted %v, want the alert for session b to have been sent", got)
+	}
+}
+
+// A session id is arbitrary text read off disk, and event_id is built from it.
+// An oversized payload is rejected by APNs outright, which is indistinguishable
+// from a clear that never arrived.
+func TestBuildClearPayloadStaysWithinAPNsLimit(t *testing.T) {
+	raw := buildClearPayload("9f2c", notifyEvent{
+		Kind: notifyClear, SessionID: strings.Repeat("s", 5000), Generation: 6,
+	})
+	if len(raw) > apnsPayloadMax {
+		t.Fatalf("payload is %d bytes, over the %d APNs accepts", len(raw), apnsPayloadMax)
+	}
+	// Still a background push, so it cannot suddenly display something.
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v — %s", err, raw)
+	}
+	aps, ok := got["aps"].(map[string]any)
+	if !ok || aps["content-available"] != float64(1) || len(aps) != 1 {
+		t.Fatalf("degraded payload is not a background push: %s", raw)
 	}
 }
 

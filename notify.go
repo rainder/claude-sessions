@@ -82,11 +82,39 @@ type waitTracker struct {
 	// restart at 1, so a session that waits, disappears, and waits again would
 	// reuse an event_id — and a stale notification for the first wait would pass
 	// the freshness check on the second.
+	//
+	// It is *seeded* rather than started at zero, which closes the same hole
+	// across process boundaries — see newWaitTrackerAt.
 	nextGen int
 }
 
-func newWaitTracker() *waitTracker {
-	return &waitTracker{entries: map[string]*waitEntry{}}
+func newWaitTracker() *waitTracker { return newWaitTrackerAt(time.Now()) }
+
+// newWaitTrackerAt builds a tracker whose generations cannot collide with those
+// of a tracker built at a different moment.
+//
+// Zero was the obvious starting value and it was wrong. host_id is persisted and
+// session ids survive a restart, so a counter that restarts at zero re-issues
+// "H:S:1" in the next process — and a clear for the *first* one, delayed across
+// the restart, exact-matches the alert for the second and takes a live card off
+// the phone. That is precisely the failure the app's exact-match rule exists to
+// prevent, arriving through the back door.
+//
+// Seeding from the clock makes the two ranges disjoint without persisting
+// anything. Nanoseconds rather than seconds so the argument is arithmetic rather
+// than probabilistic: two processes started Δ apart begin Δ×10⁹ apart in
+// generation space, and a tracker issues at most one generation per wait
+// reaching its alerted phase, so it would have to sustain a billion new waits a
+// second to catch up with a restart one second later. A seconds-resolution seed
+// would only hold while a process consumed fewer generations than its uptime in
+// seconds, which a machine with a screenful of sessions already waiting at
+// startup breaks on its very first tick — the baseline adopts each of them with
+// a generation of its own.
+//
+// The cost is nineteen digits instead of one in each event_id, against a 4 KB
+// payload budget that buildClearPayload now bounds explicitly.
+func newWaitTrackerAt(start time.Time) *waitTracker {
+	return &waitTracker{entries: map[string]*waitEntry{}, nextGen: int(start.UnixNano())}
 }
 
 // Tick folds one snapshot in and returns the events it produced, sorted by
@@ -394,8 +422,27 @@ func (h *notifyHub) tickOnce(ctx context.Context) {
 		h.collectFailing = false
 		fmt.Fprintln(os.Stderr, "claude-sessions: sessions readable again, notifications resumed")
 	}
-	for _, e := range h.tracker.Tick(sessions) {
-		h.dispatch(ctx, e)
+	// Alerts first, then clears — not the tracker's session-id order.
+	//
+	// Both kinds are dispatched one after another out of a single tick budget, so
+	// whatever goes first can spend it. An alert is the product and a clear is
+	// housekeeping: a lost alert is a prompt the user never hears about, and it
+	// is never retried, because the tracker has already moved that session to
+	// phaseAlerted. A lost clear is a card that stays a few seconds longer and is
+	// then taken by the app's own reconciliation anyway.
+	//
+	// Two passes rather than a sort, so the tracker's deterministic ordering
+	// within each kind is left exactly as it was.
+	events := h.tracker.Tick(sessions)
+	for _, e := range events {
+		if e.Kind == notifyAlert {
+			h.dispatch(ctx, e)
+		}
+	}
+	for _, e := range events {
+		if e.Kind != notifyAlert {
+			h.dispatch(ctx, e)
+		}
 	}
 }
 
@@ -438,10 +485,19 @@ type pushSpec struct {
 // it, so a clear for generation 5 that were delivered *after* generation 6's
 // alert would take generation 6's card down with it. The server never emits them
 // in that order — a clear precedes the next alert by at least two ticks — so it
-// needs APNs to reorder across four seconds. Left as the task specifies rather
-// than quietly changed here, because narrowing the collapse id also gives up the
-// "a clear replaces an undelivered alert in APNs's queue" behaviour, and that is
-// a trade to make deliberately.
+// needs APNs to reorder across four seconds.
+//
+// That window is wider than tick spacing alone suggests, and deliberately so:
+// the clear goes out at priority 5 and the alert at priority 10, which is an
+// explicit invitation for APNs to hold the clear back while the alert goes
+// straight through. Sending the clear at 10 is not the answer — APNs rejects a
+// background push at that priority outright — so the reordering latitude is the
+// price of the clear being a background push at all.
+//
+// Left as it is rather than quietly narrowed, because a distinct collapse id
+// gives up both the queue replacement *and*, measured on 26.5, the only
+// mechanism that actually removes the card. That is a trade to make
+// deliberately, not as a side effect.
 func (h *notifyHub) specFor(e notifyEvent) (pushSpec, bool) {
 	spec := pushSpec{CollapseID: h.opts.HostID + ":" + e.SessionID}
 	switch e.Kind {
@@ -644,6 +700,22 @@ func buildClearPayload(hostID string, e notifyEvent) []byte {
 		// Deliberately still a well-formed background push. A clear that cannot
 		// name its event removes nothing, which is the same as not sending it —
 		// but sending something malformed would be worse than either.
+		return []byte(`{"aps":{"content-available":1}}`)
+	}
+	if len(data) > apnsPayloadMax {
+		// The same belt and braces the alert path has, for the same reason: APNs
+		// rejects an oversized body outright and that is indistinguishable from
+		// a notification that never arrived. A session id is arbitrary text read
+		// off disk and event_id is built from it, so this is reachable without
+		// anything else going wrong.
+		//
+		// Logged, unlike the alert path's, because the degraded form of a clear
+		// is inert: with no event_id there is nothing for the app to match, so
+		// the card simply stays. Better a line saying why than a card nobody can
+		// explain.
+		fmt.Fprintf(os.Stderr,
+			"claude-sessions: clear for session %s is too large to send (%d bytes); its notification will have to wait for the app to poll\n",
+			truncateField(e.SessionID, 32), len(data))
 		return []byte(`{"aps":{"content-available":1}}`)
 	}
 	return data
