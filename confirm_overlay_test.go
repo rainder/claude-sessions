@@ -172,6 +172,28 @@ func TestRenderConfirmOverlayPreviewNeverWidensBox(t *testing.T) {
 	}
 }
 
+func TestModalWakesAppendDoesNotMutateCallerSlice(t *testing.T) {
+	// Capacity headroom is what makes a naive append() clobber the caller's
+	// backing array; modalWakes is built once in RunTUI and shared by every
+	// modal, so this must copy.
+	base := make([]wakeFD, 1, 4)
+	base[0] = wakeFD{fd: 7, kind: wakeResize}
+
+	p := startPreviewPane("t", func() (PreviewResult, error) { return PreviewResult{}, nil })
+	defer p.close()
+
+	got := modalWakesWith(base, p)
+	if len(base) != 1 || base[0].kind != wakeResize {
+		t.Fatalf("caller slice mutated: %+v", base)
+	}
+	if len(got) != 2 || got[1].kind != wakePreview {
+		t.Fatalf("modalWakesWith = %+v, want base plus the preview wake", got)
+	}
+	if nilCase := modalWakesWith(base, nil); len(nilCase) != 1 {
+		t.Fatalf("nil pane should add no wake, got %+v", nilCase)
+	}
+}
+
 func TestRenderConfirmOverlayPreviewCapsAtTwelveRows(t *testing.T) {
 	lines := make([]string, 40)
 	for i := range lines {

@@ -135,24 +135,59 @@ func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int)
 	return strings.Join(lines, "\n")
 }
 
+// modalWakesWith returns wakes plus the pane's wake source, copying rather
+// than appending in place: modalWakes is built once in RunTUI (tui.go:333) and
+// shared by every modal, so an in-place append would corrupt it for the next
+// dialog.
+func modalWakesWith(wakes []wakeFD, p *previewPane) []wakeFD {
+	w := p.wake()
+	if w.fd < 0 {
+		return wakes
+	}
+	out := make([]wakeFD, len(wakes), len(wakes)+1)
+	copy(out, wakes)
+	return append(out, w)
+}
+
 // confirmOverlay drives a blocking y/n dialog rendered as a centered overlay
 // box, mirroring pickNewSession's read/handle loop shape. Must be called in
 // raw mode; it never leaves raw or the alt-screen, so the caller's next
 // render() paints over it. wakes lets the caller pass modal wake sources
 // (e.g. resize) so the box stays correctly positioned across a live resize.
 func confirmOverlay(question string, wakes []wakeFD) bool {
+	return confirmOverlayPreview(question, nil, wakes)
+}
+
+// confirmOverlayPreview is confirmOverlay with an optional preview block. The
+// pane fetches in the background and wakes the loop when it lands, so a slow
+// or unreachable remote host never delays the dialog appearing. A nil pane
+// renders exactly what confirmOverlay renders.
+//
+// Invariant: wake() is called exactly once, before the loop, and this
+// function never closes p. The single-threaded contract that makes wake()'s
+// bare-int fd safe (see previewPane.wake) only holds if the same goroutine
+// that runs this loop is the only one that can close the pane, and only
+// after the loop returns — so close() is the caller's responsibility, not
+// this function's.
+func confirmOverlayPreview(question string, p *previewPane, wakes []wakeFD) bool {
 	state := confirmState{}
 	renderer := newScreenRenderer(os.Stdout)
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
+	modalWakes := modalWakesWith(wakes, p)
 
 	for {
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
 			cols, rows = 0, 0
 		}
-		_ = renderer.Draw(renderConfirmOverlay(question, nil, cols, rows), cols, rows)
-		keys, _ := readModalEvents(decoder, wakes)
+		var prev *overlayPreview
+		if p != nil {
+			snap := p.snapshot()
+			prev = &snap
+		}
+		_ = renderer.Draw(renderConfirmOverlay(question, prev, cols, rows), cols, rows)
+		keys, _ := readModalEvents(decoder, modalWakes)
 		for _, key := range keys {
 			confirmed, done := state.handle(key)
 			if done {
