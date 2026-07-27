@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -418,6 +419,45 @@ func gcOldPastes(now time.Time, maxAge time.Duration) {
 			_ = os.Remove(p)
 		}
 	}
+}
+
+// loopbackPasteAddr returns the address a second, paste-only listener must
+// serve so the tmux Ctrl+V binding can reach this server, or "" when the
+// primary listener already answers on loopback.
+//
+// The server binds exactly one address. A concrete non-wildcard bind (`--bind
+// tailscale`, an explicit interface address) therefore leaves nothing on
+// 127.0.0.1, and clip-request — which dials loopback, because same-host IPC
+// has no business leaving the machine — gets connection-refused and silently
+// degrades Ctrl+V to a raw passthrough. Serving loopback too is what fixes it,
+// and it fixes bindings written by older binaries as well, since those already
+// dial exactly this address.
+//
+// Wildcard and loopback binds already answer there; a second Listen on the
+// same port would only fail.
+func loopbackPasteAddr(bind string, port int) string {
+	switch unbracket(bind) {
+	case "", "0.0.0.0", "::", "127.0.0.1", "localhost", "::1":
+		return ""
+	}
+	return hostPort("127.0.0.1", port)
+}
+
+// listenLoopbackPaste starts a listener on addr serving POST /paste-request and
+// nothing else. Scoped deliberately: clip-request needs only that one route,
+// and the full mux carries /pair/exchange, the one unauthenticated endpoint,
+// which has no reason to gain local reachability. The route keeps its own
+// bearer check, so this listener grants no authority a caller didn't already
+// have. Returns the listener so callers (and tests) can address and close it.
+func listenLoopbackPaste(addr string, s *server) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /paste-request", s.pasteRequest)
+	go func() { _ = http.Serve(ln, mux) }()
+	return ln, nil
 }
 
 // installPasteBinding binds Ctrl+V in tmux's root table to invoke clip-request

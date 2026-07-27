@@ -1597,3 +1597,26 @@ func TestShortHostnameIsNeverEmpty(t *testing.T) {
 		t.Fatalf("shortHostname() = %q, want a non-empty label", got)
 	}
 }
+
+// hostPort must bracket an IPv6 literal. Plain "%s:%d" concatenation turned
+// `--bind ::` into ":::8765", which is not the address the user asked for.
+func TestHostPortBracketsIPv6(t *testing.T) {
+	tests := []struct {
+		host string
+		want string
+	}{
+		{"127.0.0.1", "127.0.0.1:8765"},
+		{"100.80.11.125", "100.80.11.125:8765"},
+		{"0.0.0.0", "0.0.0.0:8765"},
+		{"localhost", "localhost:8765"},
+		{"::", "[::]:8765"},
+		{"[::]", "[::]:8765"},
+		{"::1", "[::1]:8765"},
+		{"", ":8765"},
+	}
+	for _, tt := range tests {
+		if got := hostPort(tt.host, 8765); got != tt.want {
+			t.Errorf("hostPort(%q, 8765) = %q, want %q", tt.host, got, tt.want)
+		}
+	}
+}
