@@ -87,7 +87,7 @@ subcommands:
   preview PID                     print tmux capture or transcript tail
   tmux-info PID                   print tmux session name for a pid
   pair [--port N]                 print a pairing QR for the iOS app
-  service install [--port N] [--bind ADDR] | uninstall | status
+  service install [--port N] [--bind ADDR] | uninstall | restart | status
                                   run the server as a supervised background
                                   service (launchd on macOS, systemd --user on
                                   Linux); install also starts it

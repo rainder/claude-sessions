@@ -86,7 +86,7 @@ claude-sessions kill PID [-y] [--remove-worktree]
 claude-sessions migrate PID [-y]           # kill + resume in a new tmux session
 claude-sessions new --dir PATH [--name N] [--command PRESET] [--server S] [PROMPT...]
                                             # spawn a tmux+claude session, locally or on a server
-claude-sessions service install [--port N] [--bind ADDR] | uninstall | status
+claude-sessions service install [--port N] [--bind ADDR] | uninstall | restart | status
                                             # run the server supervised (launchd on macOS,
                                             # systemd --user on Linux); install also starts it
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
@@ -280,6 +280,7 @@ indistinguishable from a quiet week, so supervise it:
 ```sh
 claude-sessions service install --bind tailscale   # or --port N, same flags as -s
 claude-sessions service status
+claude-sessions service restart
 claude-sessions service uninstall
 ```
 
@@ -289,6 +290,11 @@ Re-run it to change `--port`/`--bind`, and after upgrading the binary: neither
 launchd nor systemd notices that the file underneath a running service was
 replaced, so the old process keeps serving until something restarts it.
 `install` is that something.
+
+`restart` reloads the already-installed unit — launchd bootout+bootstrap or
+systemd daemon-reload+enable+restart — without touching the unit file itself.
+It fails if nothing is installed yet; use `install` for that (and to pick up a
+new `--port`/`--bind` or a rebuilt binary).
 
 `status` prints the unit path, whether the file exists, whether the job is
 loaded, and the pid. It exits **0** running, **1** loaded but not running, **3**

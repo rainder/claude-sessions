@@ -654,10 +654,10 @@ func (s *launchdService) Status(run runner) (serviceStatus, error) {
 	return st, nil
 }
 
-// serviceUsage scopes the flags to `install` deliberately: serviceUninstall and
-// serviceStatusCmd reject any argument at all with exit 2.
+// serviceUsage scopes the flags to `install` deliberately: serviceUninstall,
+// serviceRestart, and serviceStatusCmd reject any argument at all with exit 2.
 const serviceUsage = `usage: claude-sessions service install [--port N] [--bind ADDR]
-       claude-sessions service <uninstall|status>`
+       claude-sessions service <uninstall|restart|status>`
 
 // serviceVerbs is the verb table cmdService dispatches through. A table rather
 // than a switch inline in cmdService so the verb can be validated *before* a
@@ -667,6 +667,7 @@ const serviceUsage = `usage: claude-sessions service install [--port N] [--bind 
 var serviceVerbs = map[string]func(mgr serviceManager, run runner, args []string) int{
 	"install":   serviceInstall,
 	"uninstall": serviceUninstall,
+	"restart":   serviceRestart,
 	"status":    serviceStatusCmd,
 }
 
@@ -847,6 +848,35 @@ func serviceUninstall(mgr serviceManager, run runner, args []string) int {
 	if lp := mgr.defaultLogPath(); lp != "" {
 		fmt.Fprintf(serviceOut, "%s\n", serviceDim("log kept at "+lp))
 	}
+	return 0
+}
+
+// serviceRestart reloads the already-installed unit — launchd bootout+
+// bootstrap or systemd daemon-reload+enable+restart, via the same mgr.Load
+// serviceInstall calls. It never re-renders the unit file: that would need
+// resolveBin/capturePath/flag parsing all over again, and a plain restart is
+// not the place to silently pick up a new --port/--bind or a rebuilt binary —
+// `service install` remains the documented way to do that (see resolveBinPath
+// and systemdService.Load's own doc comments).
+func serviceRestart(mgr serviceManager, run runner, args []string) int {
+	if len(args) > 0 {
+		fmt.Fprintf(serviceErr, "service: restart takes no flags\n%s\n", serviceUsage)
+		return 2
+	}
+	st, err := mgr.Status(run)
+	if err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
+		return 1
+	}
+	if !st.Installed {
+		fmt.Fprintln(serviceErr, "service: not installed — run `service install` first")
+		return 1
+	}
+	if err := mgr.Load(run); err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
+		return 1
+	}
+	fmt.Fprintf(serviceOut, "restarted %s\n", mgr.Label())
 	return 0
 }
 

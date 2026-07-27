@@ -509,6 +509,18 @@ type fakeScript struct {
 	remain int
 }
 
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func newFakeRunner() *fakeRunner {
 	return &fakeRunner{}
 }
@@ -1147,6 +1159,7 @@ func TestCmdServiceUsageErrors(t *testing.T) {
 		{name: "unknown verb", args: []string{"reload"}},
 		{name: "unknown flag on install", args: []string{"install", "--verbose"}},
 		{name: "flags on uninstall", args: []string{"uninstall", "--port", "1"}},
+		{name: "flags on restart", args: []string{"restart", "--port", "1"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1745,6 +1758,112 @@ func TestServiceUninstallCommandOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// serviceRestart must reload through mgr.Load — the same bootout+bootstrap or
+// daemon-reload+enable+restart sequence serviceInstall uses — without ever
+// touching the unit file. No WriteFile happens here (unlike
+// TestServiceUninstallCommandOrder, which pre-seeds a real file): if restart
+// re-rendered the unit, this test would still pass, but a nil-config render
+// would crash, and it doesn't.
+func TestServiceRestartCommandOrder(t *testing.T) {
+	t.Run("launchd", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := serviceOut
+		serviceOut = &buf
+		defer func() { serviceOut = orig }()
+
+		mgr := &launchdService{home: t.TempDir(), uid: 501}
+		want := []string{
+			"launchctl print gui/501/com.skerla.claude-sessions", // Status probe
+			"launchctl bootout gui/501/com.skerla.claude-sessions",
+			"launchctl bootstrap gui/501 " + mgr.UnitPath(),
+		}
+
+		f := newFakeRunner()
+		if rc := serviceRestart(mgr, f.run, nil); rc != 0 {
+			t.Fatalf("serviceRestart() = %d, want 0", rc)
+		}
+		if got := f.joined(); !stringSlicesEqual(got, want) {
+			t.Errorf("commands = %q, want %q", got, want)
+		}
+		if !strings.Contains(buf.String(), mgr.Label()) {
+			t.Errorf("output = %q, want it to mention %q", buf.String(), mgr.Label())
+		}
+	})
+
+	t.Run("systemd", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := serviceOut
+		serviceOut = &buf
+		defer func() { serviceOut = orig }()
+
+		mgr := &systemdService{home: t.TempDir(), user: "andy"}
+		want := []string{
+			systemdWantCmd[0], // Status probe
+			"loginctl enable-linger andy",
+			"systemctl --user daemon-reload",
+			"systemctl --user enable claude-sessions.service",
+			"systemctl --user restart claude-sessions.service",
+		}
+
+		f := newFakeRunner()
+		f.fail(systemdWantCmd[0], "LoadState=loaded\nActiveState=active\nMainPID=4242\n", nil)
+		if rc := serviceRestart(mgr, f.run, nil); rc != 0 {
+			t.Fatalf("serviceRestart() = %d, want 0", rc)
+		}
+		if got := f.joined(); !stringSlicesEqual(got, want) {
+			t.Errorf("commands = %q, want %q", got, want)
+		}
+		if !strings.Contains(buf.String(), mgr.Label()) {
+			t.Errorf("output = %q, want it to mention %q", buf.String(), mgr.Label())
+		}
+	})
+}
+
+// Restarting a service that was never installed must fail rather than
+// silently install one — that is `install`'s job, and its own doc comment on
+// serviceRestart is explicit about not re-rendering the unit.
+func TestServiceRestartFailsWhenNotInstalled(t *testing.T) {
+	t.Run("launchd", func(t *testing.T) {
+		var errBuf bytes.Buffer
+		orig := serviceErr
+		serviceErr = &errBuf
+		defer func() { serviceErr = orig }()
+
+		mgr := &launchdService{home: t.TempDir(), uid: 501}
+		f := newFakeRunner()
+		f.fail("launchctl print", "Could not find service", errors.New("exit status 1"))
+		if rc := serviceRestart(mgr, f.run, nil); rc != 1 {
+			t.Fatalf("serviceRestart() = %d, want 1", rc)
+		}
+		if len(f.joined()) != 1 {
+			t.Errorf("commands = %q, want only the Status probe — not-installed must not call Load", f.joined())
+		}
+		if !strings.Contains(errBuf.String(), "not installed") {
+			t.Errorf("stderr = %q, want it to mention \"not installed\"", errBuf.String())
+		}
+	})
+
+	t.Run("systemd", func(t *testing.T) {
+		var errBuf bytes.Buffer
+		orig := serviceErr
+		serviceErr = &errBuf
+		defer func() { serviceErr = orig }()
+
+		mgr := &systemdService{home: t.TempDir(), user: "andy"}
+		f := newFakeRunner()
+		f.fail(systemdWantCmd[0], "LoadState=not-found\nActiveState=inactive\nMainPID=0\n", nil)
+		if rc := serviceRestart(mgr, f.run, nil); rc != 1 {
+			t.Fatalf("serviceRestart() = %d, want 1", rc)
+		}
+		if len(f.joined()) != 1 {
+			t.Errorf("commands = %q, want only the Status probe — not-installed must not call Load", f.joined())
+		}
+		if !strings.Contains(errBuf.String(), "not installed") {
+			t.Errorf("stderr = %q, want it to mention \"not installed\"", errBuf.String())
+		}
+	})
 }
 
 // A failing post-remove reload leaves systemd reporting a unit that no longer
