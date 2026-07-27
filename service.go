@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -149,12 +150,17 @@ func (s *launchdService) UnitPath() string {
 	return filepath.Join(s.home, "Library", "LaunchAgents", serviceLabel+".plist")
 }
 
-// defaultLogPath is where install points StandardOutPath/StandardErrorPath.
-// ~/Library/Logs rather than /tmp: /tmp is swept periodically, so the log
-// disappears exactly when you go looking for why the service died last week.
+// defaultLogPath is where install points StandardErrorPath (see Render for
+// why StandardOutPath is deliberately never set). ~/Library/Logs rather than
+// /tmp: /tmp is swept periodically, so the log disappears exactly when you go
+// looking for why the service died last week.
 func (s *launchdService) defaultLogPath() string {
 	return filepath.Join(s.home, "Library", "Logs", "claude-sessions.log")
 }
+
+// usesLinger reports whether Unload leaves a standing grant behind that
+// serviceUninstall should mention. launchd has no such concept.
+func (s *launchdService) usesLinger() bool { return false }
 
 func (s *launchdService) Render(cfg serviceConfig) string {
 	logPath := cfg.LogPath
@@ -181,7 +187,13 @@ func (s *launchdService) Render(cfg serviceConfig) string {
 	b.WriteString("  </dict>\n")
 	b.WriteString("  <key>RunAtLoad</key><true/>\n")
 	b.WriteString("  <key>KeepAlive</key><true/>\n")
-	fmt.Fprintf(&b, "  <key>StandardOutPath</key><string>%s</string>\n", xmlEscape(logPath))
+	// StandardOutPath is deliberately never set: cmdServer prints the auth
+	// token to stdout twice at startup (the banner and the servers.yaml
+	// snippet), and launchd creates StandardOutPath 0644 with no rotation —
+	// exactly the file someone pastes into a bug report, re-stamped with the
+	// token on every KeepAlive restart. Nothing operational is lost: the
+	// "listening on" line server.go prints already goes to stderr, and
+	// bind/hostname are in this very unit file.
 	fmt.Fprintf(&b, "  <key>StandardErrorPath</key><string>%s</string>\n", xmlEscape(logPath))
 	b.WriteString("</dict>\n</plist>\n")
 	return b.String()
@@ -230,6 +242,19 @@ func (s *systemdService) UnitPath() string {
 // to name and nothing for uninstall to leave behind.
 func (s *systemdService) defaultLogPath() string { return "" }
 
+// usesLinger reports whether Unload leaves a standing grant behind that
+// serviceUninstall should mention. systemdService.Load enables linger so the
+// --user manager survives logout; disabling it isn't Unload's call to make
+// (other user services may depend on it), so uninstall only surfaces it as a
+// note. See serviceUninstall.
+func (s *systemdService) usesLinger() bool { return true }
+
+// manualLoadHint is the literal command to run by hand to load the unit
+// serviceInstall just wrote, mirroring launchdService.manualLoadHint.
+func (s *systemdService) manualLoadHint() string {
+	return fmt.Sprintf("systemctl --user daemon-reload && systemctl --user enable --now %s", systemdUnitName)
+}
+
 // systemdQuote renders one value for any systemd unit line: quote the whole
 // thing, doubling backslashes and quotes so they survive the quoting, and
 // double any % since systemd expands % specifiers everywhere in a unit file.
@@ -269,6 +294,13 @@ func (s *systemdService) Render(cfg serviceConfig) string {
 	}
 	fmt.Fprintf(&b, "ExecStart=%s\n", strings.Join(quoted, " "))
 	fmt.Fprintf(&b, "Environment=%s\n", systemdQuote("PATH="+cfg.Path))
+	// StandardOutput=null: cmdServer prints the auth token to stdout twice at
+	// startup (the banner and the servers.yaml snippet), and journald would
+	// retain it durably — readable by root and the journal group, re-stamped
+	// on every KeepAlive/Restart. StandardError keeps its default (journald),
+	// which is all server.go's own "listening on" line needs — that already
+	// goes to stderr.
+	b.WriteString("StandardOutput=null\n")
 	// Restart=always covers the boot race where this starts before tailscaled;
 	// RestartSec=5 keeps the default start limit (5 in 10s) from tripping
 	// before it converges.
@@ -326,6 +358,13 @@ func (s *launchdService) domain() string { return fmt.Sprintf("gui/%d", s.uid) }
 
 func (s *launchdService) target() string {
 	return fmt.Sprintf("%s/%s", s.domain(), serviceLabel)
+}
+
+// manualLoadHint is the literal command to run by hand to load the unit
+// serviceInstall just wrote. Named in its partial-install error message so
+// the operator doesn't have to reconstruct Load's own steps from memory.
+func (s *launchdService) manualLoadHint() string {
+	return fmt.Sprintf("launchctl bootstrap %s %s", s.domain(), s.UnitPath())
 }
 
 func (s *launchdService) Load(run runner) error {
@@ -407,6 +446,15 @@ var serviceOut io.Writer = os.Stdout
 // steps under `go test` requires overriding this.
 var resolveBin = resolveBinPath
 
+// newManager is newServiceManager, indirected the same way as resolveBin.
+// cmdService is the only caller, and every verb function below it already
+// takes its manager and runner as parameters — but cmdService itself would
+// otherwise always construct a manager tied to this process's real home
+// directory. A test exercising cmdService past its usage-error cases needs
+// to swap that out, the same way installing a real accidental service during
+// this feature's manual verification showed a hardcoded call here can bite.
+var newManager = newServiceManager
+
 func (s *systemdService) Load(run runner) error {
 	// Linger first: on a box where the per-user manager isn't running yet,
 	// this is what starts it, and every `systemctl --user` below fails until
@@ -485,6 +533,8 @@ type serviceManager interface {
 	Load(run runner) error
 	Unload(run runner) error
 	Status(run runner) (serviceStatus, error)
+	usesLinger() bool
+	manualLoadHint() string
 }
 
 var (
@@ -564,7 +614,7 @@ func cmdService(args []string) int {
 		fmt.Fprintln(serviceErr, serviceUsage)
 		return 2
 	}
-	mgr, err := newServiceManager()
+	mgr, err := newManager()
 	if err != nil {
 		fmt.Fprintln(serviceErr, "service:", err)
 		return 1
@@ -593,12 +643,29 @@ func serviceInstall(mgr serviceManager, run runner, args []string) int {
 		fmt.Fprintln(serviceErr, "service:", err)
 		return 1
 	}
-	// A foreground `-s` the user forgot about would make the new service
-	// crash-loop on bind failure. Refuse rather than install something broken.
-	if portInUse(flags.bind, flags.port) {
-		fmt.Fprintf(serviceErr, "service: something is already listening on %s:%d\n", flags.bind, flags.port)
-		fmt.Fprintf(serviceErr, "         stop it first, or pass a different --port\n")
-		return 1
+
+	// A foreign listener on the target port would make the new service
+	// crash-loop on bind failure — refuse rather than install something
+	// broken. But re-running install is the documented way to pick up a new
+	// binary (resolveBinPath's own doc comment) or change flags
+	// (systemdService.Load restarts rather than merely enabling, for exactly
+	// this reason), and on a normal box the thing already holding the port is
+	// OUR OWN previous install. Skip the check when Status says we're already
+	// running — Load is about to restart it anyway. A Status error here
+	// (couldn't even ask) is not treated as "running", so the check still
+	// runs, same as before Status was consulted here.
+	st, _ := mgr.Status(run)
+	if !st.Running {
+		occupied, err := portInUse(flags.bind, flags.port)
+		if err != nil {
+			fmt.Fprintf(serviceErr, "service: cannot check whether %s:%d is free: %v\n", flags.bind, flags.port, err)
+			return 1
+		}
+		if occupied {
+			fmt.Fprintf(serviceErr, "service: something is already listening on %s:%d\n", flags.bind, flags.port)
+			fmt.Fprintf(serviceErr, "         stop it first, or pass a different --port\n")
+			return 1
+		}
 	}
 
 	cfg := serviceConfig{
@@ -622,8 +689,11 @@ func serviceInstall(mgr serviceManager, run runner, args []string) int {
 		fmt.Fprintf(serviceErr, "service: cannot create %s: %v\n", filepath.Dir(unitPath), err)
 		return 1
 	}
-	// 0644: read by the user's own launchd/systemd, and it holds no secrets —
-	// the server's token lives elsewhere.
+	// 0644: read by the user's own launchd/systemd. The unit file itself
+	// holds no secret — the server's auth token lives in a separate 0600
+	// token file — but see launchdService.Render/systemdService.Render for
+	// why stdout (which does carry the token, via cmdServer's own startup
+	// banner) is deliberately never wired to a file this permissive.
 	if err := os.WriteFile(unitPath, []byte(mgr.Render(cfg)), 0o644); err != nil {
 		fmt.Fprintf(serviceErr, "service: cannot write %s: %v\n", unitPath, err)
 		return 1
@@ -632,9 +702,13 @@ func serviceInstall(mgr serviceManager, run runner, args []string) int {
 
 	if err := mgr.Load(run); err != nil {
 		fmt.Fprintln(serviceErr, "service:", err)
-		// The unit file stays: the usual fix is to run the loader by hand and
-		// read the real error.
-		fmt.Fprintf(serviceErr, "service: the unit file was written and left in place\n")
+		// The unit file stays at unitPath — named again here, not just in the
+		// "wrote" line above, because that line went to stdout and a script
+		// capturing only stderr never saw it. The fix is to address whatever
+		// Load reported, then load it by hand rather than repeating the whole
+		// install.
+		fmt.Fprintf(serviceErr, "service: the unit file was written to %s and left in place\n", unitPath)
+		fmt.Fprintf(serviceErr, "service: once fixed, load it by hand: %s\n", mgr.manualLoadHint())
 		return 1
 	}
 	fmt.Fprintf(serviceOut, "loaded  %s\n", mgr.Label())
@@ -663,7 +737,7 @@ func serviceUninstall(mgr serviceManager, run runner, args []string) int {
 		return 1
 	}
 	fmt.Fprintf(serviceOut, "removed  %s\n", unitPath)
-	if runtime.GOOS == "linux" {
+	if mgr.usesLinger() {
 		// Other user services may depend on linger, so removing it is not ours
 		// to decide.
 		fmt.Fprintf(serviceOut, "%s\n", dim("linger left enabled; remove with: loginctl disable-linger $USER"))
@@ -714,19 +788,42 @@ func yesNo(b bool) string {
 	return "no"
 }
 
-// portInUse reports whether something already holds bind:port. A bind value
-// that isn't an address — notably the magic "tailscale", resolved at server
-// start — can't be checked, and an unusable check must not block the install.
-func portInUse(bind string, port int) bool {
+// portInUse reports whether bind:port is already occupied by a live
+// listener. A bind value that isn't an address — notably the magic
+// "tailscale", resolved at server start — can't be checked, and an unusable
+// check must not block the install, so that case returns false, nil rather
+// than an error.
+//
+// Only EADDRINUSE (see portOccupied) counts as "occupied". net.Listen fails
+// for other reasons that describe no listener to stop at all — EACCES for a
+// privileged --port as a non-root user, EADDRNOTAVAIL for a --bind address
+// not on this host, a plain range error for an out-of-range --port — and
+// those are returned as errors so the caller reports them for what they
+// actually are instead of "something is already listening ... stop it
+// first", which names a process that does not exist.
+func portInUse(bind string, port int) (bool, error) {
 	if net.ParseIP(bind) == nil && bind != "localhost" {
-		return false
+		return false, nil
 	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
 	if err != nil {
-		return true
+		if portOccupied(err) {
+			return true, nil
+		}
+		return false, err
 	}
 	ln.Close()
-	return false
+	return false, nil
+}
+
+// portOccupied classifies a net.Listen failure as "a live listener already
+// holds this address" versus anything else. Split out as a pure function of
+// the error, rather than inlined in portInUse, so the classification is
+// testable with synthetic errno values — genuine EACCES/EADDRNOTAVAIL
+// conditions depend on privilege and interface configuration this test
+// suite can't portably control.
+func portOccupied(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
 }
 
 func (s *systemdService) Status(run runner) (serviceStatus, error) {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -133,7 +134,6 @@ func TestLaunchdRender(t *testing.T) {
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/andy/Library/Logs/claude-sessions.log</string>
   <key>StandardErrorPath</key><string>/Users/andy/Library/Logs/claude-sessions.log</string>
 </dict>
 </plist>
@@ -143,13 +143,37 @@ func TestLaunchdRender(t *testing.T) {
 	}
 }
 
+// cmdServer prints the auth token to stdout twice at startup (the banner and
+// the servers.yaml snippet). StandardOutPath would durably capture that in
+// an unrotated, 0644 file that launchd re-stamps on every KeepAlive
+// restart — exactly the file someone pastes into a bug report. This must
+// never silently reappear; StandardErrorPath alone is enough for server.go's
+// own "listening on" line, which already goes to stderr.
+func TestLaunchdRenderDoesNotRouteStdoutToDurableSink(t *testing.T) {
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	got := svc.Render(serviceConfig{
+		BinPath: "/Users/andy/.local/bin/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/usr/bin",
+		LogPath: "/Users/andy/Library/Logs/claude-sessions.log",
+	})
+	if strings.Contains(got, "StandardOutPath") {
+		t.Error("Render() sets StandardOutPath — that durably captures the auth token cmdServer prints to stdout at startup")
+	}
+	if !strings.Contains(got, "StandardErrorPath") {
+		t.Error("Render() dropped StandardErrorPath too — stderr diagnostics need somewhere to go")
+	}
+}
+
 // A path or bind value containing XML metacharacters must not produce a
 // malformed plist — launchd rejects the whole file, and the error names the
 // line, not the cause. Every interpolation site in Render gets its own
 // metacharacter here — BinPath and Bind land in ProgramArguments, Path lands
-// in the PATH dict entry, and LogPath lands in both StandardOutPath and
-// StandardErrorPath — so escaping can't be dropped from any one site without
-// this test catching it.
+// in the PATH dict entry, and LogPath lands in StandardErrorPath (the only
+// place it appears — StandardOutPath is intentionally never rendered, see
+// TestLaunchdRenderDoesNotRouteStdoutToDurableSink) — so escaping can't be
+// dropped from any one site without this test catching it.
 func TestLaunchdRenderEscapesXML(t *testing.T) {
 	svc := &launchdService{home: "/Users/andy", uid: 501}
 	got := svc.Render(serviceConfig{
@@ -183,16 +207,15 @@ func TestLaunchdRenderEscapesXML(t *testing.T) {
 	if !strings.Contains(got, "user&apos;s log") {
 		t.Error("apostrophe not escaped in log path")
 	}
-	if n := strings.Count(got, "user&apos;s log"); n != 2 {
-		t.Errorf("escaped log path appears %d times, want 2 (StandardOutPath and StandardErrorPath)", n)
+	if n := strings.Count(got, "user&apos;s log"); n != 1 {
+		t.Errorf("escaped log path appears %d times, want 1 (StandardErrorPath only)", n)
 	}
 }
 
 // LogPath is documented empty on Linux, where journald captures
-// stdout/stderr. launchd has no such fallback — an empty
-// StandardOutPath/StandardErrorPath can't be opened, so the job fails to
-// spawn. Render must substitute defaultLogPath() rather than emit an empty
-// path.
+// stdout/stderr. launchd has no such fallback — an empty StandardErrorPath
+// can't be opened, so the job fails to spawn. Render must substitute
+// defaultLogPath() rather than emit an empty path.
 func TestLaunchdRenderFallsBackToDefaultLogPath(t *testing.T) {
 	svc := &launchdService{home: "/Users/andy", uid: 501}
 	got := svc.Render(serviceConfig{
@@ -206,8 +229,8 @@ func TestLaunchdRenderFallsBackToDefaultLogPath(t *testing.T) {
 	if strings.Contains(got, "<string></string>") {
 		t.Error("Render() emitted an empty <string></string>, launchd cannot open that path")
 	}
-	if n := strings.Count(got, "<string>"+want+"</string>"); n != 2 {
-		t.Errorf("expected defaultLogPath() %q to appear twice (StandardOutPath and StandardErrorPath), got %d", want, n)
+	if n := strings.Count(got, "<string>"+want+"</string>"); n != 1 {
+		t.Errorf("expected defaultLogPath() %q to appear once (StandardErrorPath), got %d", want, n)
 	}
 }
 
@@ -241,6 +264,7 @@ Description=claude-sessions server
 [Service]
 ExecStart="/home/andy/.local/bin/claude-sessions" "-s" "--port" "8765" "--bind" "tailscale"
 Environment="PATH=/home/andy/.local/bin:/usr/bin:/bin"
+StandardOutput=null
 Restart=always
 RestartSec=5
 
@@ -249,6 +273,20 @@ WantedBy=default.target
 `
 	if got != want {
 		t.Errorf("Render() mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// Same rationale as TestLaunchdRenderDoesNotRouteStdoutToDurableSink:
+// cmdServer's startup banner prints the auth token to stdout, and journald
+// would retain it durably (readable by root and the journal group,
+// re-stamped on every Restart). StandardOutput=null keeps stdout off any
+// durable sink while StandardError keeps its default, still reaching
+// journald.
+func TestSystemdRenderDoesNotRouteStdoutToDurableSink(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{BinPath: "/bin/x", Port: 1, Bind: "127.0.0.1", Path: "/usr/bin"})
+	if !strings.Contains(got, "StandardOutput=null") {
+		t.Error("Render() does not set StandardOutput=null — stdout (which carries the auth token banner) would land in journald durably")
 	}
 }
 
@@ -1091,6 +1129,15 @@ func TestNewServiceManagerFor(t *testing.T) {
 	}
 }
 
+// Every case here must return 2 before reaching a verb body. cmdService still
+// routes through newManager()/execRunner rather than a hardcoded
+// newServiceManager() (see newManager's own comment) precisely because a
+// fifth case that got further than parseServerFlags/len(args)==0 here would
+// shell out to the real launchctl/systemctl against this process's real home
+// directory — which is exactly how this feature's manual verification
+// installed a real service the first time around. Any new case added to this
+// table must keep returning 2 before a verb body runs, or must swap
+// newManager for a test double first.
 func TestCmdServiceUsageErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1110,6 +1157,19 @@ func TestCmdServiceUsageErrors(t *testing.T) {
 	}
 }
 
+// cmdService must actually route through newManager, not merely have the var
+// exist unused — otherwise overriding it in a test (or ever needing to) would
+// have no effect, and cmdService would still touch the real platform manager.
+func TestCmdServiceUsesInjectedManager(t *testing.T) {
+	orig := newManager
+	newManager = func() (serviceManager, error) { return nil, errors.New("boom") }
+	defer func() { newManager = orig }()
+
+	if got := cmdService([]string{"status"}); got != 1 {
+		t.Errorf("cmdService([status]) = %d, want 1 when newManager fails", got)
+	}
+}
+
 // A free port must not read as occupied — otherwise install refuses for no
 // reason on a clean box.
 func TestPortInUse(t *testing.T) {
@@ -1119,11 +1179,19 @@ func TestPortInUse(t *testing.T) {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	if !portInUse("127.0.0.1", port) {
+	occupied, err := portInUse("127.0.0.1", port)
+	if err != nil {
+		t.Fatalf("portInUse(127.0.0.1, %d) error = %v, want nil while listening", port, err)
+	}
+	if !occupied {
 		t.Errorf("portInUse(127.0.0.1, %d) = false while listening, want true", port)
 	}
 	ln.Close()
-	if portInUse("127.0.0.1", port) {
+	occupied, err = portInUse("127.0.0.1", port)
+	if err != nil {
+		t.Fatalf("portInUse(127.0.0.1, %d) error = %v, want nil after close", port, err)
+	}
+	if occupied {
 		t.Errorf("portInUse(127.0.0.1, %d) = true after close, want false", port)
 	}
 }
@@ -1131,8 +1199,87 @@ func TestPortInUse(t *testing.T) {
 // "tailscale" is a magic bind value resolved at server start, not an address.
 // The pre-flight check must skip it rather than trying to listen on it.
 func TestPortInUseSkipsUnresolvableBind(t *testing.T) {
-	if portInUse("tailscale", 8765) {
+	occupied, err := portInUse("tailscale", 8765)
+	if err != nil {
+		t.Errorf("portInUse(tailscale, ...) error = %v, want nil", err)
+	}
+	if occupied {
 		t.Error("portInUse(tailscale, ...) = true, want false — the literal isn't an address")
+	}
+}
+
+// portOccupied's classification: only a real EADDRINUSE means "occupied".
+// EACCES (privileged port, non-root) and EADDRNOTAVAIL (--bind address not on
+// this host) describe no listener to stop at all, and folding them into
+// "already listening ... stop it first" would name a process that does not
+// exist. Synthetic errno values, not genuine OS conditions, because EACCES
+// and EADDRNOTAVAIL depend on privilege and interface configuration this
+// suite can't portably control — see TestPortInUseDoesNotTreatPermissionDeniedAsOccupied
+// for the one genuine-condition case that's safe to rely on everywhere.
+func TestPortOccupied(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "bare EADDRINUSE", err: syscall.EADDRINUSE, want: true},
+		{
+			name: "EADDRINUSE wrapped the way net.Listen actually wraps it",
+			err:  &net.OpError{Op: "listen", Err: &os.SyscallError{Syscall: "bind", Err: syscall.EADDRINUSE}},
+			want: true,
+		},
+		{name: "EACCES is not occupied", err: syscall.EACCES, want: false},
+		{name: "EADDRNOTAVAIL is not occupied", err: syscall.EADDRNOTAVAIL, want: false},
+		{name: "a plain non-errno error is not occupied", err: errors.New("invalid port"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := portOccupied(tt.err); got != tt.want {
+				t.Errorf("portOccupied(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// portOccupied must also classify the real error shape net.Listen hands back
+// for a genuine double bind, not just the hand-constructed *net.OpError
+// above — this is what would break silently if net's own error wrapping ever
+// changed.
+func TestPortOccupiedOnRealDoubleBind(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	_, dialErr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if dialErr == nil {
+		t.Fatal("second Listen on an already-bound port succeeded, want EADDRINUSE")
+	}
+	if !portOccupied(dialErr) {
+		t.Errorf("portOccupied(%v) = false, want true for a real double-bind error", dialErr)
+	}
+}
+
+// A privileged --port fails for a completely different reason than "already
+// listening" — this must not read as occupied, or the error message would
+// send the operator to kill a process that was never there. Binding port 1
+// needs root on both macOS and Linux, so this is a genuine EACCES condition
+// this suite CAN rely on: `go test` runs unprivileged in the normal case.
+func TestPortInUseDoesNotTreatPermissionDeniedAsOccupied(t *testing.T) {
+	ln, listenErr := net.Listen("tcp", "127.0.0.1:1")
+	if listenErr == nil {
+		ln.Close()
+		t.Skip("running with permission to bind privileged ports (root?); this check needs an unprivileged process")
+	}
+
+	occupied, err := portInUse("127.0.0.1", 1)
+	if occupied {
+		t.Error("portInUse(127.0.0.1, 1) = true, want false — EACCES is not \"occupied\"")
+	}
+	if err == nil {
+		t.Error("portInUse(127.0.0.1, 1) = nil error, want the permission error surfaced")
 	}
 }
 
@@ -1147,6 +1294,11 @@ func TestServiceInstallRejectsNewlineInBind(t *testing.T) {
 	resolveBin = func() (string, error) { return "/usr/local/bin/claude-sessions", nil }
 	defer func() { resolveBin = orig }()
 
+	var buf bytes.Buffer
+	origErr := serviceErr
+	serviceErr = &buf
+	defer func() { serviceErr = origErr }()
+
 	svc := &launchdService{home: t.TempDir(), uid: 501}
 	f := newFakeRunner()
 
@@ -1154,11 +1306,131 @@ func TestServiceInstallRejectsNewlineInBind(t *testing.T) {
 	if rc != 1 {
 		t.Fatalf("serviceInstall() = %d, want 1 (validate should reject the newline)", rc)
 	}
+	if !strings.Contains(buf.String(), "newline") {
+		t.Errorf("error output = %q, want it to mention the newline validate() rejected", buf.String())
+	}
 	if _, err := os.Stat(svc.UnitPath()); !os.IsNotExist(err) {
 		t.Fatalf("unit file exists at %s after a rejected config, want nothing written", svc.UnitPath())
 	}
-	if len(f.calls) != 0 {
-		t.Errorf("Load ran commands %q after a rejected config, want none — the unit was never even written", f.joined())
+	// serviceInstall's own pre-flight Status() call (item 1 of this round's
+	// fixes) legitimately runs before validate() rejects the config — so
+	// assert Load specifically never ran (bootout/bootstrap), not that zero
+	// commands ran at all.
+	for _, c := range f.joined() {
+		if strings.Contains(c, "bootout") || strings.Contains(c, "bootstrap") {
+			t.Errorf("Load ran %q after a rejected config, want it never called — the unit was never even written", f.joined())
+			break
+		}
+	}
+}
+
+// A default install binds 127.0.0.1:8765 and keeps running. Re-running
+// install — the documented way to pick up a new binary after `make install`
+// (resolveBinPath's own doc comment) or to change flags (systemdService.Load
+// uses `restart` rather than `enable --now` for exactly this reason) — must
+// not read its own listener as a foreign one to refuse. This proves the
+// actual conflict case: Status reporting Running:true AND a real listener
+// present on the target port, so the port pre-flight is provably skipped, not
+// merely lucky because nothing happened to be listening.
+func TestServiceInstallSkipsPortCheckWhenAlreadyRunning(t *testing.T) {
+	orig := resolveBin
+	resolveBin = func() (string, error) { return "/usr/local/bin/claude-sessions", nil }
+	defer func() { resolveBin = orig }()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	svc := &launchdService{home: t.TempDir(), uid: 501}
+	f := newFakeRunner()
+	// Scripted onto "launchctl print" specifically (the Status call), not
+	// "launchctl" generally, so it can't accidentally also answer Load's
+	// bootout/bootstrap calls.
+	f.fail("launchctl print", "com.skerla.claude-sessions = {\n\tpid = 4242\n\tstate = running\n}", nil)
+
+	rc := serviceInstall(svc, f.run, []string{"--port", strconv.Itoa(port)})
+	if rc != 0 {
+		t.Fatalf("serviceInstall() = %d, want 0 — reinstalling over our own running instance must succeed", rc)
+	}
+	if _, err := os.Stat(svc.UnitPath()); err != nil {
+		t.Errorf("unit file not written: %v", err)
+	}
+}
+
+// A bind failure that isn't EADDRINUSE (here: a privileged port, which is
+// portable to test unprivileged — see TestPortInUseDoesNotTreatPermissionDeniedAsOccupied)
+// must be reported for what it is, not folded into "already listening ...
+// stop it first", which names a process that was never there. Also confirms
+// the unit file is never written when the pre-flight itself errors.
+func TestServiceInstallReportsNonOccupiedPortErrorsVerbatim(t *testing.T) {
+	ln, listenErr := net.Listen("tcp", "127.0.0.1:1")
+	if listenErr == nil {
+		ln.Close()
+		t.Skip("running with permission to bind privileged ports (root?); this check needs an unprivileged process")
+	}
+
+	orig := resolveBin
+	resolveBin = func() (string, error) { return "/usr/local/bin/claude-sessions", nil }
+	defer func() { resolveBin = orig }()
+
+	var buf bytes.Buffer
+	origErr := serviceErr
+	serviceErr = &buf
+	defer func() { serviceErr = origErr }()
+
+	svc := &launchdService{home: t.TempDir(), uid: 501}
+	f := newFakeRunner()
+
+	rc := serviceInstall(svc, f.run, []string{"--port", "1"})
+	if rc != 1 {
+		t.Fatalf("serviceInstall() = %d, want 1", rc)
+	}
+	msg := buf.String()
+	if strings.Contains(msg, "already listening") {
+		t.Errorf("output = %q, want it NOT to claim something is already listening — this is a permission error, not a busy port", msg)
+	}
+	if _, err := os.Stat(svc.UnitPath()); !os.IsNotExist(err) {
+		t.Error("unit file was written despite the port pre-flight itself failing")
+	}
+}
+
+// A Load failure must not discard the unit file's location or the concrete
+// recovery command (manualLoadHint) — the "wrote" line naming the path went
+// to stdout, so a script capturing only stderr never saw it.
+func TestServiceInstallReportsRecoveryOnLoadFailure(t *testing.T) {
+	orig := resolveBin
+	resolveBin = func() (string, error) { return "/usr/local/bin/claude-sessions", nil }
+	defer func() { resolveBin = orig }()
+
+	var buf bytes.Buffer
+	origErr := serviceErr
+	serviceErr = &buf
+	defer func() { serviceErr = origErr }()
+
+	svc := &launchdService{home: t.TempDir(), uid: 501}
+	f := newFakeRunner()
+	f.fail("bootstrap", "Bootstrap failed: 5: Input/output error", errors.New("exit status 5"))
+	f.fail("launchctl print", "some XPC error", errors.New("exit status 1"))
+
+	// --port 0: net.Listen assigns a free ephemeral port and closes
+	// immediately, so the port pre-flight can never collide with a real
+	// service already running on this dev machine.
+	rc := serviceInstall(svc, f.run, []string{"--port", "0"})
+	if rc != 1 {
+		t.Fatalf("serviceInstall() = %d, want 1", rc)
+	}
+	msg := buf.String()
+	if !strings.Contains(msg, svc.UnitPath()) {
+		t.Errorf("error output = %q, want it to name the unit path %q", msg, svc.UnitPath())
+	}
+	if !strings.Contains(msg, svc.manualLoadHint()) {
+		t.Errorf("error output = %q, want it to contain the manual load command %q", msg, svc.manualLoadHint())
+	}
+	if _, err := os.Stat(svc.UnitPath()); err != nil {
+		t.Errorf("unit file should remain on disk after a Load failure: %v", err)
 	}
 }
 
@@ -1228,5 +1500,44 @@ func TestServiceStatusCmdOmitsPidZero(t *testing.T) {
 				t.Errorf("output = %q, want it NOT to contain %q", buf.String(), tt.wantAbsent)
 			}
 		})
+	}
+}
+
+// The linger note is a systemd-only concept and must come from the manager
+// (usesLinger), not runtime.GOOS — otherwise a *systemdService driven from a
+// macOS dev box, which is exactly what every Render/Status test in this file
+// already does, could never exercise it. Constructing a *systemdService here
+// regardless of the host this test suite happens to run on is the point.
+func TestServiceUninstallPrintsLingerNoteForSystemdRegardlessOfHostOS(t *testing.T) {
+	var buf bytes.Buffer
+	orig := serviceOut
+	serviceOut = &buf
+	defer func() { serviceOut = orig }()
+
+	svc := &systemdService{home: t.TempDir(), user: "andy"}
+	f := newFakeRunner()
+	if rc := serviceUninstall(svc, f.run, nil); rc != 0 {
+		t.Fatalf("serviceUninstall() = %d, want 0", rc)
+	}
+	if !strings.Contains(buf.String(), "linger") {
+		t.Errorf("output = %q, want it to mention linger for a systemd manager", buf.String())
+	}
+}
+
+// launchd has no linger concept; the note must not appear for it regardless
+// of the host this test runs on.
+func TestServiceUninstallOmitsLingerNoteForLaunchd(t *testing.T) {
+	var buf bytes.Buffer
+	orig := serviceOut
+	serviceOut = &buf
+	defer func() { serviceOut = orig }()
+
+	svc := &launchdService{home: t.TempDir(), uid: 501}
+	f := newFakeRunner()
+	if rc := serviceUninstall(svc, f.run, nil); rc != 0 {
+		t.Fatalf("serviceUninstall() = %d, want 0", rc)
+	}
+	if strings.Contains(buf.String(), "linger") {
+		t.Errorf("output = %q, want no linger mention for a launchd manager", buf.String())
 	}
 }
