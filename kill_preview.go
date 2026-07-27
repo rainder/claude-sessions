@@ -3,9 +3,11 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // overlayPreview is an immutable snapshot of a session's recent output, handed
@@ -100,12 +102,15 @@ type previewFetch func() (PreviewResult, error)
 
 // previewPane holds an in-flight preview fetch and the self-pipe the modal
 // loop selects on, following RemoteHub's wake-pipe pattern (remote.go:121).
-// Every method is nil-safe so callers never have to branch on a nil pane.
+// wakeR/wakeW are raw fds, not *os.File: Fd() flips a poller-registered file
+// back to blocking mode, which would hang pollEvents' drain loop on the
+// second read (see remote.go:135-139). -1 means "no pipe". Every method is
+// nil-safe so callers never have to branch on a nil pane.
 type previewPane struct {
 	mu     sync.Mutex
 	snap   overlayPreview
-	wakeR  *os.File
-	wakeW  *os.File
+	wakeR  int // read end: passed to unix.Select in the TUI loop
+	wakeW  int // write end: signaled once the fetch lands
 	closed bool
 }
 
@@ -113,9 +118,18 @@ type previewPane struct {
 // If the pipe cannot be created the pane still works — it simply never wakes
 // the modal, so the placeholder stays until the next keypress redraws.
 func startPreviewPane(title string, fetch previewFetch) *previewPane {
-	p := &previewPane{snap: overlayPreview{Title: title}}
-	if r, w, err := os.Pipe(); err == nil {
-		p.wakeR, p.wakeW = r, w
+	p := &previewPane{snap: overlayPreview{Title: title}, wakeR: -1, wakeW: -1}
+	var fds [2]int
+	if err := unix.Pipe(fds[:]); err == nil {
+		syscall.CloseOnExec(fds[0])
+		syscall.CloseOnExec(fds[1])
+		// Both ends non-blocking. Write: dropping a wake because the buffer is
+		// full can't happen here (single byte, single writer), but matching the
+		// other hubs costs nothing. Read: the TUI drains in a loop until EAGAIN;
+		// a blocking read end would hang on the second iteration.
+		_ = unix.SetNonblock(fds[0], true)
+		_ = unix.SetNonblock(fds[1], true)
+		p.wakeR, p.wakeW = fds[0], fds[1]
 	}
 	go func() {
 		res, err := fetch()
@@ -129,8 +143,8 @@ func startPreviewPane(title string, fetch previewFetch) *previewPane {
 		}
 		// The write happens under the same lock that close() takes, so the fd
 		// can never be closed and reused between the check and the write.
-		if !p.closed && p.wakeW != nil {
-			_, _ = p.wakeW.Write([]byte{1})
+		if !p.closed && p.wakeW >= 0 {
+			_, _ = unix.Write(p.wakeW, []byte{1})
 		}
 		p.mu.Unlock()
 	}()
@@ -156,10 +170,10 @@ func (p *previewPane) wake() wakeFD {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed || p.wakeR == nil {
+	if p.closed || p.wakeR < 0 {
 		return wakeFD{fd: -1, kind: wakePreview}
 	}
-	return wakeFD{fd: int(p.wakeR.Fd()), kind: wakePreview}
+	return wakeFD{fd: p.wakeR, kind: wakePreview}
 }
 
 // close releases the pipe. Idempotent, and safe to call while the fetch is
@@ -174,11 +188,11 @@ func (p *previewPane) close() {
 		return
 	}
 	p.closed = true
-	if p.wakeR != nil {
-		p.wakeR.Close()
+	if p.wakeR >= 0 {
+		_ = unix.Close(p.wakeR)
 	}
-	if p.wakeW != nil {
-		p.wakeW.Close()
+	if p.wakeW >= 0 {
+		_ = unix.Close(p.wakeW)
 	}
 }
 
@@ -199,8 +213,13 @@ func startLocalKillPreview(s Session) *previewPane {
 	})
 }
 
-// startRemoteKillPreview fetches the snapshot over HTTP. The 5s client timeout
-// in fetchRemotePreview bounds how long the goroutine can outlive the dialog.
+// startRemoteKillPreview fetches the snapshot over HTTP. The 5s client
+// timeout in fetchRemotePreview bounds how long this remote-path goroutine
+// can outlive the dialog. There is no equivalent bound on the local path
+// (startLocalKillPreview): captureTmuxPreview shells out via exec.Command
+// with no timeout, so a wedged tmux leaves that fetch goroutine running
+// indefinitely — harmless since close() only detaches the pane, but worth
+// knowing if that ever needs bounding too.
 func startRemoteKillPreview(s Session) *previewPane {
 	host, pid := s.Host, s.PID
 	return startPreviewPane(killPreviewTitle(s), func() (PreviewResult, error) {

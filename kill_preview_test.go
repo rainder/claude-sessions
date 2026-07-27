@@ -197,6 +197,28 @@ func TestPreviewPaneSnapshotBeforeFetchIsUnloaded(t *testing.T) {
 	}
 }
 
+// TestPreviewPaneWakeDrainsThroughPollEvents exercises wake()'s fd against its
+// only real consumer, pollEvents, rather than unix.Select alone: pollEvents'
+// drain loop (tui_events.go:414-421) issues a SECOND unix.Read on the fd after
+// consuming the single wake byte, expecting EAGAIN. A blocking read end (e.g.
+// an *os.File pipe whose fd was obtained via Fd(), which flips it back to
+// blocking) hangs forever on that second read instead of returning it — this
+// test is what catches that, where TestPreviewPaneWakeFiresOnCompletion does
+// not, because unix.Select alone never performs the second read.
+func TestPreviewPaneWakeDrainsThroughPollEvents(t *testing.T) {
+	p := startPreviewPane("t", func() (PreviewResult, error) {
+		return PreviewResult{Content: "x"}, nil
+	})
+	defer p.close()
+
+	waitLoaded(t, p) // the wake byte is written under the same lock, before Loaded is visible
+
+	_, woke := pollEvents(newInputDecoder(), 50*time.Millisecond, []wakeFD{p.wake()})
+	if woke&wakePreview == 0 {
+		t.Fatalf("woke = %b, want wakePreview", woke)
+	}
+}
+
 func TestPreviewPaneSnapshotAfterFetchCarriesContent(t *testing.T) {
 	p := startPreviewPane("t", func() (PreviewResult, error) {
 		return PreviewResult{Source: "tmux", Content: "alpha\nbravo"}, nil
