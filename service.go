@@ -184,3 +184,54 @@ func xmlEscape(s string) string {
 		"'", "&apos;",
 	).Replace(s)
 }
+
+// systemdService installs a --user unit. Constructed with home and user for the
+// same reason launchdService is: so its unit renders identically from any
+// machine under test.
+type systemdService struct {
+	home string
+	user string
+}
+
+func (s *systemdService) Label() string { return systemdUnitName }
+
+func (s *systemdService) UnitPath() string {
+	return filepath.Join(s.home, ".config", "systemd", "user", systemdUnitName)
+}
+
+// defaultLogPath is empty: journald owns the logs on Linux, so there is no file
+// to name and nothing for uninstall to leave behind.
+func (s *systemdService) defaultLogPath() string { return "" }
+
+// systemdQuote renders one value for a systemd unit line. systemd re-splits on
+// whitespace and expands % specifiers, so an unquoted argv element containing a
+// space becomes two arguments and a stray % is eaten. Neither value reaching
+// here is validated upstream: BinPath is whatever os.Executable() resolved, and
+// PATH is the invoking shell's, verbatim.
+func systemdQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "%", "%%")
+	return `"` + s + `"`
+}
+
+func (s *systemdService) Render(cfg serviceConfig) string {
+	var b strings.Builder
+	b.WriteString("[Unit]\nDescription=claude-sessions server\n\n")
+	b.WriteString("[Service]\n")
+	// No After=network-online.target: a --user unit isn't ordered against
+	// system targets, so it would be a no-op that reads as protection.
+	args := serviceArgs(cfg)
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = systemdQuote(arg)
+	}
+	fmt.Fprintf(&b, "ExecStart=%s\n", strings.Join(quoted, " "))
+	fmt.Fprintf(&b, "Environment=%s\n", systemdQuote("PATH="+cfg.Path))
+	// Restart=always covers the boot race where this starts before tailscaled;
+	// RestartSec=5 keeps the default start limit (5 in 10s) from tripping
+	// before it converges.
+	b.WriteString("Restart=always\nRestartSec=5\n\n")
+	b.WriteString("[Install]\nWantedBy=default.target\n")
+	return b.String()
+}

@@ -220,3 +220,125 @@ func TestLaunchdDefaultLogPath(t *testing.T) {
 		t.Errorf("defaultLogPath() = %q, want %q", got, want)
 	}
 }
+
+func TestSystemdRender(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{
+		BinPath: "/home/andy/.local/bin/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/home/andy/.local/bin:/usr/bin:/bin",
+	})
+	want := `[Unit]
+Description=claude-sessions server
+
+[Service]
+ExecStart="/home/andy/.local/bin/claude-sessions" "-s" "--port" "8765" "--bind" "tailscale"
+Environment="PATH=/home/andy/.local/bin:/usr/bin:/bin"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`
+	if got != want {
+		t.Errorf("Render() mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestSystemdUnitPath(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	want := "/home/andy/.config/systemd/user/claude-sessions.service"
+	if got := svc.UnitPath(); got != want {
+		t.Errorf("UnitPath() = %q, want %q", got, want)
+	}
+}
+
+// RestartSec=5 keeps systemd's default start limit (5 starts in 10s) from
+// tripping while tailscaled is still coming up at boot. Without it the unit
+// gives up permanently instead of converging.
+func TestSystemdRenderHasRestartBackoff(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{BinPath: "/bin/x", Port: 1, Bind: "127.0.0.1", Path: "/usr/bin"})
+	for _, want := range []string{"Restart=always", "RestartSec=5"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("unit missing %q", want)
+		}
+	}
+}
+
+// A --user unit is not ordered against system targets, so After= would be a
+// no-op that reads as protection it doesn't provide.
+func TestSystemdRenderOmitsNetworkTarget(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{BinPath: "/bin/x", Port: 1, Bind: "127.0.0.1", Path: "/usr/bin"})
+	if strings.Contains(got, "network-online.target") {
+		t.Error("unit sets After=network-online.target, a no-op in a --user manager")
+	}
+}
+
+// systemd re-splits ExecStart on whitespace. A BinPath containing a space
+// (e.g. an installer landing under "/Users/andy/My Tools/") would silently
+// produce a two-element argv unless the rendered element stays quoted as one
+// unit.
+func TestSystemdRenderQuotesPathWithSpace(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{
+		BinPath: "/home/andy/My Tools/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/usr/bin",
+	})
+	if !strings.Contains(got, `ExecStart="/home/andy/My Tools/claude-sessions" "-s" "--port" "8765" "--bind" "tailscale"`) {
+		t.Errorf("ExecStart did not quote the space-containing BinPath as one element:\n%s", got)
+	}
+}
+
+// systemd expands % specifiers in unit files, so a literal % in a captured
+// PATH must survive as %% or it is silently eaten/misinterpreted.
+func TestSystemdRenderEscapesPercent(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{
+		BinPath: "/bin/x",
+		Port:    1,
+		Bind:    "127.0.0.1",
+		Path:    "/opt/weird%dir/bin:/usr/bin",
+	})
+	if !strings.Contains(got, "/opt/weird%%dir/bin:/usr/bin") {
+		t.Errorf("Environment did not escape %% as %%%%:\n%s", got)
+	}
+	// No single unescaped % should survive: every % in the output must be
+	// part of a %% pair.
+	for i, c := range got {
+		if c != '%' {
+			continue
+		}
+		before := i > 0 && got[i-1] == '%'
+		after := i+1 < len(got) && got[i+1] == '%'
+		if !before && !after {
+			t.Errorf("unescaped %% found at byte %d:\n%s", i, got)
+		}
+	}
+}
+
+func TestSystemdQuote(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain value", in: "tailscale", want: `"tailscale"`},
+		{name: "value with a space", in: "My Tools", want: `"My Tools"`},
+		{name: "value with a quote", in: `say "hi"`, want: `"say \"hi\""`},
+		{name: "value with a backslash", in: `C:\bin`, want: `"C:\\bin"`},
+		{name: "value with a percent", in: "50%done", want: `"50%%done"`},
+		{name: "several at once", in: `\"%`, want: `"\\\"%%"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := systemdQuote(tt.in); got != tt.want {
+				t.Errorf("systemdQuote(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
