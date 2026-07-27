@@ -10,6 +10,10 @@ import (
 // confirmHint is the fixed hint row drawn below the question inside the box.
 const confirmHint = "[y] yes    [n] no"
 
+// previewBoxMinInner is the inner width the box widens to when it carries a
+// preview block, so pane output is legible rather than shredded by clipping.
+const previewBoxMinInner = 72
+
 // Box-drawing characters for the confirm overlay, matching the square-corner
 // style preview.go already uses for its "┌─" / "│" transcript framing.
 const (
@@ -43,18 +47,38 @@ func (confirmState) handle(key string) (confirmed, done bool) {
 }
 
 // renderConfirmOverlay draws a bordered box centered in a cols x rows
-// terminal: the question (one line per '\n' in question), a blank separator,
+// terminal: an optional preview block (title, divider, up to 12 content rows,
+// divider), the question (one line per '\n' in question), a blank separator,
 // then the dimmed "[y] yes   [n] no" hint. On a narrow terminal the box
 // shrinks to fit and each line is clipped rather than wrapped. When cols or
 // rows is unknown (<=0) the box is emitted unpositioned at the top-left,
-// mirroring renderNewPicker's fallback for an unknown terminal size.
-func renderConfirmOverlay(question string, cols, rows int) string {
+// mirroring renderNewPicker's fallback for an unknown terminal size. prev may
+// be nil, in which case no preview block is drawn and the box matches its
+// pre-preview appearance byte-for-byte.
+func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int) string {
+	contentRows := 0
+	if prev != nil && rows > 0 {
+		contentRows = rows - 12 // box chrome + question + blank + hint
+		if contentRows > 12 {
+			contentRows = 12
+		}
+		if contentRows < 0 {
+			contentRows = 0
+		}
+	}
+	hasPreview := prev != nil && contentRows > 0
+
 	qLines := strings.Split(question, "\n")
 	innerWidth := visualLen(confirmHint)
 	for _, l := range qLines {
 		if w := visualLen(l); w > innerWidth {
 			innerWidth = w
 		}
+	}
+	// A preview block needs room to be legible; the floor applies only when one
+	// actually renders, so the callers that pass nil keep today's narrow box.
+	if hasPreview && innerWidth < previewBoxMinInner {
+		innerWidth = previewBoxMinInner
 	}
 	if cols > 0 {
 		max := cols - 4 // border + 1 space of padding on each side
@@ -71,8 +95,13 @@ func renderConfirmOverlay(question string, cols, rows int) string {
 		return confirmBoxV + " " + s + strings.Repeat(" ", innerWidth-visualLen(s)) + " " + confirmBoxV
 	}
 
-	box := make([]string, 0, len(qLines)+4)
+	block := previewBlock(prev, innerWidth, contentRows)
+
+	box := make([]string, 0, len(qLines)+len(block)+4)
 	box = append(box, confirmBoxTL+strings.Repeat(confirmBoxH, innerWidth+2)+confirmBoxTR)
+	for _, l := range block {
+		box = append(box, pad(l))
+	}
 	for _, l := range qLines {
 		box = append(box, pad(l))
 	}
@@ -122,7 +151,7 @@ func confirmOverlay(question string, wakes []wakeFD) bool {
 		if err != nil {
 			cols, rows = 0, 0
 		}
-		_ = renderer.Draw(renderConfirmOverlay(question, cols, rows), cols, rows)
+		_ = renderer.Draw(renderConfirmOverlay(question, nil, cols, rows), cols, rows)
 		keys, _ := readModalEvents(decoder, wakes)
 		for _, key := range keys {
 			confirmed, done := state.handle(key)
