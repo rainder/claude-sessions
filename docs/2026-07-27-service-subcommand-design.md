@@ -182,12 +182,15 @@ than installing a service that will crash-loop on bind failure.
 
 ## Binary path resolution
 
-`os.Executable()` then `filepath.EvalSymlinks`, which resolves to the real
-binary rather than a symlink pointing at it. That is a deliberate trade: a unit
-pinned to the real file keeps working if the symlink is removed, but does *not*
-follow a `make install` that re-points the symlink elsewhere. Re-running
-`service install` after an upgrade is the documented answer, and it is already
-the documented answer for changing flags.
+`os.Executable()` then `filepath.EvalSymlinks`. What that buys is a normalized
+absolute path that doesn't depend on how the binary was invoked, and one that is
+comparable against an equally resolved `os.TempDir()` in the check below. It is
+not an upgrade strategy: `make install` and `install.sh` both write a regular
+file at `~/.local/bin/claude-sessions`, so the new binary lands at the same path
+the unit already names. Re-running `service install` after an upgrade is the
+documented answer because neither launchd nor systemd restarts a running service
+when the file underneath it is replaced — the same reason it is the documented
+answer for changing flags.
 
 If the resolved path is under the temp directory, `install` refuses: `go run`
 builds into `$TMPDIR` and deletes it on exit, so the unit would point at a file

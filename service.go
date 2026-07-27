@@ -69,10 +69,11 @@ func (cfg serviceConfig) validate() error {
 
 // resolveBinPath returns the absolute, symlink-resolved path to this binary.
 //
-// EvalSymlinks pins the real file rather than a symlink pointing at it, so
-// removing the symlink doesn't break the service. The trade is that a later
-// `make install` that re-points the symlink is not picked up; re-running
-// `service install` is the documented answer, as it already is for flags.
+// EvalSymlinks buys a normalized absolute path that doesn't depend on how the
+// binary was invoked, and makes the temp-directory check below comparable
+// against an equally resolved os.TempDir(). Re-running `service install` after
+// an upgrade is the documented answer regardless of paths — neither launchd nor
+// systemd restarts a running service because the file underneath it changed.
 func resolveBinPath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -603,7 +604,10 @@ func (s *launchdService) Status(run runner) (serviceStatus, error) {
 	return st, nil
 }
 
-const serviceUsage = `usage: claude-sessions service <install|uninstall|status> [--port N] [--bind ADDR]`
+// serviceUsage scopes the flags to `install` deliberately: serviceUninstall and
+// serviceStatusCmd reject any argument at all with exit 2.
+const serviceUsage = `usage: claude-sessions service install [--port N] [--bind ADDR]
+       claude-sessions service <uninstall|status>`
 
 // cmdService is the `service` subcommand's entry point — the shape main.go
 // calls. It owns picking the real platform manager and the real command

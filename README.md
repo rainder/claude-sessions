@@ -86,7 +86,7 @@ claude-sessions kill PID [-y] [--remove-worktree]
 claude-sessions migrate PID [-y]           # kill + resume in a new tmux session
 claude-sessions new --dir PATH [--name N] [--command PRESET] [--server S] [PROMPT...]
                                             # spawn a tmux+claude session, locally or on a server
-claude-sessions service install|uninstall|status [--port N] [--bind ADDR]
+claude-sessions service install [--port N] [--bind ADDR] | uninstall | status
                                             # run the server supervised (launchd on macOS,
                                             # systemd --user on Linux); install also starts it
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
@@ -285,16 +285,18 @@ claude-sessions service uninstall
 
 `install` writes a launchd LaunchAgent on macOS or a systemd `--user` unit on
 Linux and loads it, so the server is running by the time the command returns.
-Re-run it to change `--port`/`--bind`, or after upgrading the binary — the unit
-names the symlink-resolved path of whichever binary installed it, so a new
-`make install` behind the same symlink is not picked up on its own.
+Re-run it to change `--port`/`--bind`, and after upgrading the binary: neither
+launchd nor systemd notices that the file underneath a running service was
+replaced, so the old process keeps serving until something restarts it.
+`install` is that something.
 
 `status` prints the unit path, whether the file exists, whether the job is
-loaded, and the pid. It exits **0** running, **1** installed but stopped, **3**
-not installed. Exit 1 also covers "couldn't tell" — running it over ssh against
-a Mac with nobody at the console, or a Linux box with no user D-Bus session yet
-— because a failure to answer is not an answer of "not installed". **2** is a
-usage error, as everywhere else in this CLI.
+loaded, and the pid. It exits **0** running, **1** loaded but not running, **3**
+not loaded — the unit file may still be sitting on disk, which is what the
+`file` line is for. Exit 1 also covers "couldn't tell" — running it over ssh
+against a Mac with nobody at the console, or a Linux box with no user D-Bus
+session yet — because a failure to answer is not an answer of "not loaded".
+**2** is a usage error, as everywhere else in this CLI.
 
 `install` bakes the invoking shell's `PATH` into the unit. Supervisors start
 services with a near-empty `PATH`, and this binary shells out to `tmux`,
@@ -302,11 +304,11 @@ services with a near-empty `PATH`, and this binary shells out to `tmux`,
 silently finds nothing and `--bind tailscale` crash-loops.
 
 Neither unit keeps stdout: the server prints the bearer token there at startup,
-and a durable sink is the wrong home for it — launchd creates its log file 0644
-and never rotates it, journald hands it to the journal group — while the token
-file it comes from is 0600. Stderr is what gets logged, and it carries the
-operational lines: "listening on", the push-notification status. On macOS that is
-`~/Library/Logs/claude-sessions.log`; on Linux, read it with
+and a service log is durable in a way a terminal isn't. launchd never rotates
+it, `KeepAlive` re-stamps the token into it on every restart, and it is exactly
+the file you would attach to a bug report. Stderr is what gets logged, and it
+carries the operational lines: "listening on", the push-notification status. On
+macOS that is `~/Library/Logs/claude-sessions.log`; on Linux, read it with
 `journalctl --user -u claude-sessions`.
 
 On Linux, `install` also runs `loginctl enable-linger`, so the server survives
@@ -372,7 +374,8 @@ WantedBy=default.target
 ```sh
 loginctl enable-linger "$USER"
 systemctl --user daemon-reload
-systemctl --user enable --now claude-sessions
+systemctl --user enable claude-sessions
+systemctl --user restart claude-sessions   # `enable --now` won't replace a running process
 ```
 
 Every value is quoted because systemd splits `ExecStart` on whitespace before it
