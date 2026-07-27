@@ -77,6 +77,13 @@ func (s Session) StatusDisplay() string {
 // code uses this method.
 func (s Session) Waiting() bool { return s.WaitingFor != "" }
 
+// NotIdle reports whether the session has active status (busy, shell,
+// waiting) rather than idle or unknown — the signal for warning a user before
+// an action that would interrupt it (e.g. migrate-to-attach kills the pid).
+func (s Session) NotIdle() bool {
+	return s.Status != "" && s.Status != "idle"
+}
+
 // ID is the stable identifier used for selection: <pid> for local rows,
 // <host>:<pid> for remote.
 func (s Session) ID() string {

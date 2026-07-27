@@ -181,8 +181,8 @@ func actKill(c *actCtx) {
 	} else {
 		question = fmt.Sprintf("kill PID %d?", s.PID)
 	}
-	pane := startLocalKillPreview(*s)
-	confirmed := confirmOverlayPreview(question, pane, c.modalWakes)
+	pane := startLocalPreview(*s)
+	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, false)
 	// Deliberately not deferred: the pane's wake fd must be released before the
 	// kill runs and before the second, preview-less worktree dialog below —
 	// its raw fd is only safe to hold open while this modal loop owns it.
@@ -240,7 +240,13 @@ func actAttach(c *actCtx) {
 	}
 	// Not in tmux — offer migration.
 	question := fmt.Sprintf("PID %d is not in tmux. Migrate (kill + resume in tmux) first?", s.PID)
-	if !confirmOverlay(question, c.modalWakes) {
+	if s.NotIdle() {
+		question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question
+	}
+	pane := startLocalPreview(*s)
+	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())
+	pane.close()
+	if !confirmed {
 		return
 	}
 	c.prepareLineOutput()

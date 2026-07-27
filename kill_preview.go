@@ -196,9 +196,9 @@ func (p *previewPane) close() {
 	}
 }
 
-// killPreviewTitle is the identity row: the session's display label plus the
+// previewTitle is the identity row: the session's display label plus the
 // pid, host-qualified for remote rows.
-func killPreviewTitle(s Session) string {
+func previewTitle(s Session) string {
 	label, _ := s.DisplayName()
 	if s.Host != "" {
 		return fmt.Sprintf("%s · %s:%d", label, s.Host, s.PID)
@@ -206,23 +206,24 @@ func killPreviewTitle(s Session) string {
 	return fmt.Sprintf("%s · pid %d", label, s.PID)
 }
 
-// startLocalKillPreview fetches the local pane snapshot for a kill dialog.
-func startLocalKillPreview(s Session) *previewPane {
-	return startPreviewPane(killPreviewTitle(s), func() (PreviewResult, error) {
+// startLocalPreview fetches the local pane snapshot for a confirm dialog
+// (kill or attach-migrate).
+func startLocalPreview(s Session) *previewPane {
+	return startPreviewPane(previewTitle(s), func() (PreviewResult, error) {
 		return LoadPreview(s.PID, killPreviewLimits)
 	})
 }
 
-// startRemoteKillPreview fetches the snapshot over HTTP. The 5s client
+// startRemotePreview fetches the snapshot over HTTP. The 5s client
 // timeout in fetchRemotePreview bounds how long this remote-path goroutine
 // can outlive the dialog. There is no equivalent bound on the local path
-// (startLocalKillPreview): captureTmuxPreview shells out via exec.Command
+// (startLocalPreview): captureTmuxPreview shells out via exec.Command
 // with no timeout, so a wedged tmux leaves that fetch goroutine running
 // indefinitely — harmless since close() only detaches the pane, but worth
 // knowing if that ever needs bounding too.
-func startRemoteKillPreview(s Session) *previewPane {
+func startRemotePreview(s Session) *previewPane {
 	host, pid := s.Host, s.PID
-	return startPreviewPane(killPreviewTitle(s), func() (PreviewResult, error) {
+	return startPreviewPane(previewTitle(s), func() (PreviewResult, error) {
 		return fetchRemotePreview(host, pid, killPreviewLimits)
 	})
 }

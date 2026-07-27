@@ -36,8 +36,39 @@ func TestConfirmStateHandleIgnoresOtherKeys(t *testing.T) {
 	}
 }
 
+func TestConfirmStateStrictOnlyAcceptsShiftY(t *testing.T) {
+	state := confirmState{strict: true}
+	if confirmed, done := state.handle("Y"); !confirmed || !done {
+		t.Fatalf("handle(Y) = confirmed %v done %v, want true true", confirmed, done)
+	}
+	for _, key := range []string{"y", "\r", "\n", KeyEnter} {
+		state := confirmState{strict: true}
+		confirmed, done := state.handle(key)
+		if confirmed || done {
+			t.Fatalf("strict handle(%q) = confirmed %v done %v, want false false (ignored, not accepted)", key, confirmed, done)
+		}
+	}
+	for _, key := range []string{"n", "N", "q", "Q", KeyEsc, "\x03"} {
+		state := confirmState{strict: true}
+		confirmed, done := state.handle(key)
+		if confirmed || !done {
+			t.Fatalf("strict handle(%q) = confirmed %v done %v, want false true", key, confirmed, done)
+		}
+	}
+}
+
+func TestRenderConfirmOverlayStrictShowsShiftHint(t *testing.T) {
+	out := renderConfirmOverlay("migrate?", nil, 80, 24, true)
+	if !strings.Contains(out, "[Y] yes") {
+		t.Fatalf("strict overlay missing shift-Y hint:\n%s", out)
+	}
+	if strings.Contains(out, "[y] yes") {
+		t.Fatalf("strict overlay unexpectedly shows the lowercase hint:\n%s", out)
+	}
+}
+
 func TestRenderConfirmOverlayShowsQuestionAndHint(t *testing.T) {
-	out := renderConfirmOverlay("kill PID 1234?", nil, 80, 24)
+	out := renderConfirmOverlay("kill PID 1234?", nil, 80, 24, false)
 	for _, want := range []string{"kill PID 1234?", "[y] yes", "[n] no", confirmBoxTL, confirmBoxTR, confirmBoxBL, confirmBoxBR} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("renderConfirmOverlay missing %q:\n%s", want, out)
@@ -46,7 +77,7 @@ func TestRenderConfirmOverlayShowsQuestionAndHint(t *testing.T) {
 }
 
 func TestRenderConfirmOverlayMultilineQuestion(t *testing.T) {
-	out := renderConfirmOverlay("line one\nline two", nil, 80, 24)
+	out := renderConfirmOverlay("line one\nline two", nil, 80, 24, false)
 	for _, want := range []string{"line one", "line two"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("renderConfirmOverlay missing %q:\n%s", want, out)
@@ -55,7 +86,7 @@ func TestRenderConfirmOverlayMultilineQuestion(t *testing.T) {
 }
 
 func TestRenderConfirmOverlayUnknownSizeUnpositioned(t *testing.T) {
-	out := renderConfirmOverlay("kill it?", nil, 0, 0)
+	out := renderConfirmOverlay("kill it?", nil, 0, 0, false)
 	if !strings.Contains(out, "kill it?") {
 		t.Fatalf("renderConfirmOverlay missing question:\n%s", out)
 	}
@@ -74,7 +105,7 @@ func TestRenderConfirmOverlayNarrowTerminalNoPanic(t *testing.T) {
 		{cols: 0, rows: 5},
 		{cols: 5, rows: 0},
 	} {
-		out := renderConfirmOverlay("a very long question that will not fit", nil, size.cols, size.rows)
+		out := renderConfirmOverlay("a very long question that will not fit", nil, size.cols, size.rows, false)
 		if out == "" {
 			t.Fatalf("renderConfirmOverlay(%d,%d) returned empty output", size.cols, size.rows)
 		}
@@ -82,7 +113,7 @@ func TestRenderConfirmOverlayNarrowTerminalNoPanic(t *testing.T) {
 }
 
 func TestRenderConfirmOverlayCentered(t *testing.T) {
-	out := renderConfirmOverlay("hi", nil, 40, 10)
+	out := renderConfirmOverlay("hi", nil, 40, 10, false)
 	lines := strings.Split(out, "\n")
 	// The top border row should be indented (centered), not flush left.
 	found := false
@@ -105,7 +136,7 @@ func TestRenderConfirmOverlayCentered(t *testing.T) {
 }
 
 func TestRenderConfirmOverlayNilPreviewKeepsNarrowBox(t *testing.T) {
-	out := renderConfirmOverlay("hi", nil, 120, 40)
+	out := renderConfirmOverlay("hi", nil, 120, 40, false)
 	for _, ln := range strings.Split(out, "\n") {
 		if strings.Contains(ln, confirmBoxTL) && visibleWidth(strings.TrimLeft(ln, " ")) >= 72 {
 			t.Fatalf("nil preview widened the box to %d cols: %q", visibleWidth(ln), ln)
@@ -120,7 +151,7 @@ func TestRenderConfirmOverlayShowsPreviewRows(t *testing.T) {
 		Loaded: true,
 		Lines:  []string{"alpha", "bravo", "charlie"},
 	}
-	out := renderConfirmOverlay("kill PID 42?", prev, 120, 40)
+	out := renderConfirmOverlay("kill PID 42?", prev, 120, 40, false)
 	for _, want := range []string{"repo · pid 42", "alpha", "bravo", "charlie", "kill PID 42?", "[y] yes"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
@@ -130,7 +161,7 @@ func TestRenderConfirmOverlayShowsPreviewRows(t *testing.T) {
 
 func TestRenderConfirmOverlayPreviewAppliesWidthFloor(t *testing.T) {
 	prev := &overlayPreview{Title: "t", Loaded: true, Lines: []string{"x"}}
-	out := renderConfirmOverlay("hi", prev, 120, 40)
+	out := renderConfirmOverlay("hi", prev, 120, 40, false)
 	var top string
 	for _, ln := range strings.Split(out, "\n") {
 		if strings.Contains(ln, confirmBoxTL) {
@@ -145,18 +176,18 @@ func TestRenderConfirmOverlayPreviewAppliesWidthFloor(t *testing.T) {
 
 func TestRenderConfirmOverlayShortTerminalDropsPreview(t *testing.T) {
 	prev := &overlayPreview{Title: "should-not-appear", Loaded: true, Lines: []string{"nope"}}
-	out := renderConfirmOverlay("hi", prev, 120, 10)
+	out := renderConfirmOverlay("hi", prev, 120, 10, false)
 	if strings.Contains(out, "should-not-appear") || strings.Contains(out, "nope") {
 		t.Fatalf("preview rendered on a 10-row terminal:\n%s", out)
 	}
-	if plain := renderConfirmOverlay("hi", nil, 120, 10); out != plain {
+	if plain := renderConfirmOverlay("hi", nil, 120, 10, false); out != plain {
 		t.Fatalf("short-terminal output differs from the nil-preview output:\n%s\n---\n%s", out, plain)
 	}
 }
 
 func TestRenderConfirmOverlayUnknownSizeDropsPreview(t *testing.T) {
 	prev := &overlayPreview{Title: "should-not-appear", Loaded: true, Lines: []string{"nope"}}
-	out := renderConfirmOverlay("hi", prev, 0, 0)
+	out := renderConfirmOverlay("hi", prev, 0, 0, false)
 	if strings.Contains(out, "should-not-appear") {
 		t.Fatalf("preview rendered at unknown terminal size:\n%s", out)
 	}
@@ -170,7 +201,7 @@ func TestRenderConfirmOverlayPreviewNeverWidensBox(t *testing.T) {
 	// width (not just "under the terminal width") is what actually catches
 	// preview content driving the box wider than its floor.
 	prev := &overlayPreview{Title: "t", Loaded: true, Lines: []string{strings.Repeat("x", 400)}}
-	out := renderConfirmOverlay("hi", prev, 120, 40)
+	out := renderConfirmOverlay("hi", prev, 120, 40, false)
 	var top string
 	for _, ln := range strings.Split(out, "\n") {
 		if strings.Contains(ln, confirmBoxTL) {
@@ -255,7 +286,7 @@ func TestRenderConfirmOverlayPreviewGrowsWithTerminal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		prev := numberedPreview(250)
-		out := renderConfirmOverlay("hi", prev, 120, tc.rows)
+		out := renderConfirmOverlay("hi", prev, 120, tc.rows, false)
 		if got := renderedPreviewRows(out, 250); got != tc.want {
 			t.Fatalf("rows=%d rendered %d preview lines, want %d", tc.rows, got, tc.want)
 		}
@@ -265,7 +296,7 @@ func TestRenderConfirmOverlayPreviewGrowsWithTerminal(t *testing.T) {
 // The tail is what matters — the newest pane output, not the oldest.
 func TestRenderConfirmOverlayPreviewKeepsNewestLines(t *testing.T) {
 	prev := numberedPreview(100)
-	out := renderConfirmOverlay("hi", prev, 120, 25) // 13 content rows
+	out := renderConfirmOverlay("hi", prev, 120, 25, false) // 13 content rows
 	if !strings.Contains(out, "line-099") || !strings.Contains(out, "line-087") {
 		t.Fatalf("newest 13 lines not rendered:\n%s", out)
 	}
@@ -286,8 +317,8 @@ func TestRenderConfirmOverlayPreviewBoxFitsViewport(t *testing.T) {
 	for _, rows := range []int{13, 14, 20, 24, 40, 80} {
 		for _, qLines := range []int{1, 2, 6, 15} {
 			q := strings.TrimSuffix(strings.Repeat("q\n", qLines), "\n")
-			plain := len(strings.Split(renderConfirmOverlay(q, nil, 120, rows), "\n"))
-			got := len(strings.Split(renderConfirmOverlay(q, numberedPreview(250), 120, rows), "\n"))
+			plain := len(strings.Split(renderConfirmOverlay(q, nil, 120, rows, false), "\n"))
+			got := len(strings.Split(renderConfirmOverlay(q, numberedPreview(250), 120, rows, false), "\n"))
 
 			limit := rows
 			if plain > limit {

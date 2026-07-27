@@ -67,6 +67,25 @@ func disabledRail(session Session, selected bool) string {
 	return colorize("33", "–") + " "
 }
 
+// noTmuxMarker flags a session that is not running inside tmux — worth
+// surfacing in the compact views because it can't be reattached to once the
+// terminal that spawned it closes. Blank for a tmux-backed session, since
+// that's the unremarkable default; dim rather than alarm-colored, since this
+// is a note, not a warning. plain drops the marker's own color entirely, for
+// the same reason gv.badge has a badgePlain style: a self-contained dim+reset
+// pair nested inside an outer dim() (headless rows) would reset the dim
+// mid-row, and a selected row carries its distinction via background, not an
+// embedded dim.
+func noTmuxMarker(session Session, plain bool) string {
+	if session.Tmux != "" {
+		return "  "
+	}
+	if plain {
+		return "∅ "
+	}
+	return dim("∅") + " "
+}
+
 func sessionRowPlain(session Session, selected bool) bool {
 	return session.Headless() || (session.Disabled && !selected)
 }
@@ -81,18 +100,22 @@ var groupSGR = map[int]string{
 // active group filter (zero value = no filter), the free-text query (empty =
 // no text filter), and the per-frame first-column slot reservations. The group
 // filter and the query compose (AND) in filterSessionRows / filterRemoteResults.
-// showBadge and showRail each gate one 2-char indicator slot (group badge,
-// disabled rail), and are set by BuildTableFrame once it knows which slots at
-// least one visible session needs. A slot is present on every row of the frame
-// (headers included) or on none. The zero value applies no filter and hides
-// both slots — rendering exactly as before groups, the text filter, and
-// conditional slots existed.
+// showBadge, showRail and showNoTmux each gate one 2-char indicator slot
+// (group badge, disabled rail, not-in-tmux marker), and are set by
+// BuildTableFrame once it knows which slots at least one visible session
+// needs. A slot is present on every row of the frame (headers included) or on
+// none. The zero value applies no filter and hides every slot — rendering
+// exactly as before groups, the text filter, and conditional slots existed.
+// showNoTmux is only ever set for the intermediate/minimal views — the full
+// view already spells out tmux state in its own TMUX column, so it never
+// reserves this slot.
 type groupView struct {
-	groups    map[string]int
-	filter    groupFilter
-	query     string
-	showBadge bool
-	showRail  bool
+	groups     map[string]int
+	filter     groupFilter
+	query      string
+	showBadge  bool
+	showRail   bool
+	showNoTmux bool
 }
 
 // groupOf returns the group assigned to s (1..9), or 0 for an ungrouped session
@@ -204,25 +227,31 @@ func (gv groupView) badge(s Session, style badgeStyle) string {
 }
 
 func decorateSessionRow(session Session, selected bool, body string, gv groupView) string {
-	// The rail slot reserves its 2 cells only when this frame reserves it,
-	// otherwise it collapses to nothing (byte-empty, never spaces) so the row
-	// body sits flush. The badge already self-gates on gv.showBadge inside
-	// gv.badge.
+	// The rail and no-tmux slots reserve their 2 cells only when this frame
+	// reserves them, otherwise they collapse to nothing (byte-empty, never
+	// spaces) so the row body sits flush. The badge already self-gates on
+	// gv.showBadge inside gv.badge.
 	rail := ""
 	if gv.showRail {
 		rail = disabledRail(session, selected)
+	}
+	noTmuxFor := func(plain bool) string {
+		if !gv.showNoTmux {
+			return ""
+		}
+		return noTmuxMarker(session, plain)
 	}
 
 	var row string
 	switch {
 	case selected:
-		row = gv.badge(session, badgeColored) + rail + body
+		row = gv.badge(session, badgeColored) + rail + noTmuxFor(true) + body
 	case session.Disabled:
-		row = gv.badge(session, badgeDim) + rail + dim(body)
+		row = gv.badge(session, badgeDim) + rail + noTmuxFor(false) + dim(body)
 	case session.Headless():
-		row = dim(gv.badge(session, badgePlain) + rail + body)
+		row = dim(gv.badge(session, badgePlain) + rail + noTmuxFor(true) + body)
 	default:
-		row = gv.badge(session, badgeColored) + rail + body
+		row = gv.badge(session, badgeColored) + rail + noTmuxFor(false) + body
 	}
 	return highlightSelectedRow(row, selected)
 }
@@ -1321,7 +1350,13 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	// Reserve each first-column slot only when at least one visible (post-filter)
 	// session needs it, so a frame with none of a given indicator stays
 	// byte-identical to the layout from before that slot existed.
-	gv.showBadge, gv.showRail = sectionSlotReservations(sections, gv)
+	badge, rail, noTmux := sectionSlotReservations(sections, gv)
+	gv.showBadge, gv.showRail = badge, rail
+	// The full view already has its own TMUX column, so the marker slot only
+	// ever applies to the compact views.
+	if viewMode == "2" || viewMode == "3" {
+		gv.showNoTmux = noTmux
+	}
 	// Pair each provider's local snapshot with every remote's, dedupe by account,
 	// and carry the resolved lines through the header so each distinct account
 	// shows once. The two providers dedupe independently.
@@ -1355,11 +1390,13 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 }
 
 // sectionSlotReservations scans the already-filtered sections once and reports
-// which of the two first-column indicator slots the frame must reserve: badge
-// (any grouped row), rail (any disabled row). A slot is reserved for every row
-// of the frame or for none, so one visible row needing it settles the whole
-// frame.
-func sectionSlotReservations(sections []section, gv groupView) (badge, rail bool) {
+// which of the first-column indicator slots the frame must reserve: badge
+// (any grouped row), rail (any disabled row), noTmux (any row not running in
+// tmux). A slot is reserved for every row of the frame or for none, so one
+// visible row needing it settles the whole frame. Callers decide whether
+// noTmux actually applies to the view being rendered (see BuildTableFrame) —
+// this just reports whether any row would want it.
+func sectionSlotReservations(sections []section, gv groupView) (badge, rail, noTmux bool) {
 	for _, sec := range sections {
 		for _, s := range sec.rows {
 			if gv.groupOf(s) != 0 {
@@ -1368,7 +1405,10 @@ func sectionSlotReservations(sections []section, gv groupView) (badge, rail bool
 			if s.Disabled {
 				rail = true
 			}
-			if badge && rail {
+			if s.Tmux == "" {
+				noTmux = true
+			}
+			if badge && rail && noTmux {
 				return
 			}
 		}
@@ -1504,6 +1544,9 @@ func rowIndent(gv groupView) string {
 		n++
 	}
 	if gv.showRail {
+		n++
+	}
+	if gv.showNoTmux {
 		n++
 	}
 	return strings.Repeat("  ", n)

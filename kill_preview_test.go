@@ -312,11 +312,11 @@ func TestPreviewPaneNilIsSafe(t *testing.T) {
 
 func TestKillPreviewTitle(t *testing.T) {
 	local := Session{PID: 4242, Name: "my-session", NameSource: "user"}
-	if got := killPreviewTitle(local); !strings.Contains(got, "my-session") || !strings.Contains(got, "pid 4242") {
+	if got := previewTitle(local); !strings.Contains(got, "my-session") || !strings.Contains(got, "pid 4242") {
 		t.Fatalf("local title = %q", got)
 	}
 	remote := Session{PID: 99, Host: "pi", Name: "my-session", NameSource: "user"}
-	got := killPreviewTitle(remote)
+	got := previewTitle(remote)
 	if !strings.Contains(got, "pi:99") {
 		t.Fatalf("remote title = %q, want host-qualified", got)
 	}
