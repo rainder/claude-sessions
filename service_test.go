@@ -139,15 +139,19 @@ func TestLaunchdRender(t *testing.T) {
 
 // A path or bind value containing XML metacharacters must not produce a
 // malformed plist — launchd rejects the whole file, and the error names the
-// line, not the cause.
+// line, not the cause. Every interpolation site in Render gets its own
+// metacharacter here — BinPath and Bind land in ProgramArguments, Path lands
+// in the PATH dict entry, and LogPath lands in both StandardOutPath and
+// StandardErrorPath — so escaping can't be dropped from any one site without
+// this test catching it.
 func TestLaunchdRenderEscapesXML(t *testing.T) {
 	svc := &launchdService{home: "/Users/andy", uid: 501}
 	got := svc.Render(serviceConfig{
 		BinPath: "/Users/andy/bin/claude & sessions",
 		Port:    8765,
 		Bind:    "<broken>",
-		Path:    "/usr/bin",
-		LogPath: "/tmp/log",
+		Path:    `/usr/bin:"unsafe"`,
+		LogPath: "/var/log/user's log",
 	})
 	if strings.Contains(got, "claude & sessions") {
 		t.Error("raw & left unescaped in ProgramArguments")
@@ -161,6 +165,44 @@ func TestLaunchdRenderEscapesXML(t *testing.T) {
 	if !strings.Contains(got, "&lt;broken&gt;") {
 		t.Error("angle brackets not escaped")
 	}
+	if strings.Contains(got, `<string>/usr/bin:"unsafe"</string>`) {
+		t.Error("raw double quote left unescaped in PATH")
+	}
+	if !strings.Contains(got, "/usr/bin:&quot;unsafe&quot;") {
+		t.Error("double quote not escaped in PATH")
+	}
+	if strings.Contains(got, "user's log") {
+		t.Error("raw apostrophe left unescaped in log path")
+	}
+	if !strings.Contains(got, "user&apos;s log") {
+		t.Error("apostrophe not escaped in log path")
+	}
+	if n := strings.Count(got, "user&apos;s log"); n != 2 {
+		t.Errorf("escaped log path appears %d times, want 2 (StandardOutPath and StandardErrorPath)", n)
+	}
+}
+
+// LogPath is documented empty on Linux, where journald captures
+// stdout/stderr. launchd has no such fallback — an empty
+// StandardOutPath/StandardErrorPath can't be opened, so the job fails to
+// spawn. Render must substitute defaultLogPath() rather than emit an empty
+// path.
+func TestLaunchdRenderFallsBackToDefaultLogPath(t *testing.T) {
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	got := svc.Render(serviceConfig{
+		BinPath: "/Users/andy/.local/bin/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/usr/bin",
+		LogPath: "",
+	})
+	want := svc.defaultLogPath()
+	if strings.Contains(got, "<string></string>") {
+		t.Error("Render() emitted an empty <string></string>, launchd cannot open that path")
+	}
+	if n := strings.Count(got, "<string>"+want+"</string>"); n != 2 {
+		t.Errorf("expected defaultLogPath() %q to appear twice (StandardOutPath and StandardErrorPath), got %d", want, n)
+	}
 }
 
 func TestLaunchdUnitPath(t *testing.T) {
@@ -168,5 +210,13 @@ func TestLaunchdUnitPath(t *testing.T) {
 	want := "/Users/andy/Library/LaunchAgents/com.skerla.claude-sessions.plist"
 	if got := svc.UnitPath(); got != want {
 		t.Errorf("UnitPath() = %q, want %q", got, want)
+	}
+}
+
+func TestLaunchdDefaultLogPath(t *testing.T) {
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	want := "/Users/andy/Library/Logs/claude-sessions.log"
+	if got := svc.defaultLogPath(); got != want {
+		t.Errorf("defaultLogPath() = %q, want %q", got, want)
 	}
 }

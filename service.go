@@ -130,6 +130,15 @@ func (s *launchdService) defaultLogPath() string {
 }
 
 func (s *launchdService) Render(cfg serviceConfig) string {
+	logPath := cfg.LogPath
+	if logPath == "" {
+		// serviceConfig.LogPath is documented empty on Linux, where journald
+		// captures stdout/stderr instead. launchd has no such fallback: an
+		// empty StandardOutPath/StandardErrorPath can't be opened, so the job
+		// fails to spawn. Substitute this backend's own default rather than
+		// emit a path that breaks the service at load time.
+		logPath = s.defaultLogPath()
+	}
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
@@ -145,8 +154,8 @@ func (s *launchdService) Render(cfg serviceConfig) string {
 	b.WriteString("  </dict>\n")
 	b.WriteString("  <key>RunAtLoad</key><true/>\n")
 	b.WriteString("  <key>KeepAlive</key><true/>\n")
-	fmt.Fprintf(&b, "  <key>StandardOutPath</key><string>%s</string>\n", xmlEscape(cfg.LogPath))
-	fmt.Fprintf(&b, "  <key>StandardErrorPath</key><string>%s</string>\n", xmlEscape(cfg.LogPath))
+	fmt.Fprintf(&b, "  <key>StandardOutPath</key><string>%s</string>\n", xmlEscape(logPath))
+	fmt.Fprintf(&b, "  <key>StandardErrorPath</key><string>%s</string>\n", xmlEscape(logPath))
 	b.WriteString("</dict>\n</plist>\n")
 	return b.String()
 }
