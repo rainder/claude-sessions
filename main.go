@@ -36,6 +36,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "claude-sessions:", err)
 			os.Exit(1)
 		}
+	case "list-sessions":
+		os.Exit(cmdListSessions(args[1:]))
 	case "kill":
 		os.Exit(cmdKill(args[1:]))
 	case "migrate":
@@ -68,6 +70,8 @@ const usage = `usage: claude-sessions [SUBCOMMAND] [args]
 subcommands:
   (no args), list                 live auto-refreshing view (TUI)
   list --once, -1                 print local sessions and exit
+  list-sessions [--json]          print local + remote sessions in full-mode
+                                  layout (or as JSON) and exit
   -s, --server [--port N] [--bind ADDR]
                                   run HTTP server (default 127.0.0.1:8765;
                                   --bind tailscale auto-detects Tailscale IPv4)

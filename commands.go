@@ -443,3 +443,73 @@ func clipRequestRelay(paneID string, port int) bool {
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
+
+// cmdListSessions prints the equivalent of the TUI's full-mode table for
+// local + configured remote sessions and exits. --json emits the same data
+// as JSON instead, one object per host (local first, then remotes in the
+// same sorted order), shaped like the server's GET /sessions response.
+func cmdListSessions(args []string) int {
+	const usageMsg = "usage: claude-sessions list-sessions [--json]"
+	jsonOut := false
+	for _, a := range args {
+		switch a {
+		case "--json":
+			jsonOut = true
+		default:
+			fmt.Fprintf(os.Stderr, "list-sessions: unknown flag: %s\n%s\n", a, usageMsg)
+			return 2
+		}
+	}
+
+	local, err := CollectLocal()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "claude-sessions:", err)
+		return 1
+	}
+	remotes := FetchAllRemote()
+	// Disabled state is client-side; overlay it read-only so this output
+	// matches the TUI. Groups don't affect this output.
+	store := LoadSessionStore()
+	store.OverlayDisabled(local)
+	for i := range remotes {
+		store.OverlayDisabled(remotes[i].Sessions)
+	}
+	sortMode := LoadSortMode()
+	SortSessions(local, sortMode)
+	remotes = sortRemotes(remotes, sortMode)
+	hostUsage := CollectHostUsage()
+
+	if jsonOut {
+		hosts := make([]map[string]any, 0, 1+len(remotes))
+		hosts = append(hosts, map[string]any{
+			"hostname":  shortHostname(),
+			"hostUsage": hostUsage,
+			"sessions":  local,
+		})
+		for _, r := range remotes {
+			host := map[string]any{
+				"hostname":  r.Name,
+				"hostUsage": r.HostUsage,
+				"sessions":  r.Sessions,
+			}
+			if r.Error != "" {
+				host["error"] = r.Error
+			}
+			hosts = append(hosts, host)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(hosts); err != nil {
+			fmt.Fprintln(os.Stderr, "claude-sessions:", err)
+			return 1
+		}
+		return 0
+	}
+
+	RenderAll(os.Stdout, "1", LocalHost{
+		Name:      shortHostname(),
+		Sessions:  local,
+		HostUsage: hostUsage,
+	}, remotes, "", nil, 0, 0, sortMode)
+	return 0
+}
