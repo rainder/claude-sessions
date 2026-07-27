@@ -4,6 +4,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestTrimTrailingBlankDropsPaddingRows(t *testing.T) {
@@ -174,5 +177,128 @@ func TestPreviewBlockStatusRendersInsteadOfContent(t *testing.T) {
 	}
 	if !strings.Contains(got[2], "loading preview…") {
 		t.Fatalf("status row = %q", got[2])
+	}
+}
+
+func TestPreviewPaneSnapshotBeforeFetchIsUnloaded(t *testing.T) {
+	release := make(chan struct{})
+	p := startPreviewPane("t", func() (PreviewResult, error) {
+		<-release
+		return PreviewResult{Source: "tmux", Content: "done"}, nil
+	})
+	defer func() { close(release); p.close() }()
+
+	snap := p.snapshot()
+	if snap.Loaded {
+		t.Fatal("snapshot reported Loaded before the fetch returned")
+	}
+	if snap.Title != "t" {
+		t.Fatalf("Title = %q, want %q", snap.Title, "t")
+	}
+}
+
+func TestPreviewPaneSnapshotAfterFetchCarriesContent(t *testing.T) {
+	p := startPreviewPane("t", func() (PreviewResult, error) {
+		return PreviewResult{Source: "tmux", Content: "alpha\nbravo"}, nil
+	})
+	defer p.close()
+
+	snap := waitLoaded(t, p)
+	if snap.Source != "tmux" {
+		t.Fatalf("Source = %q, want tmux", snap.Source)
+	}
+	if len(snap.Lines) != 2 || snap.Lines[0] != "alpha" || snap.Lines[1] != "bravo" {
+		t.Fatalf("Lines = %q", snap.Lines)
+	}
+}
+
+func TestPreviewPaneFetchErrorIsCaptured(t *testing.T) {
+	want := errors.New("boom")
+	p := startPreviewPane("t", func() (PreviewResult, error) { return PreviewResult{}, want })
+	defer p.close()
+
+	snap := waitLoaded(t, p)
+	if !errors.Is(snap.Err, want) {
+		t.Fatalf("Err = %v, want %v", snap.Err, want)
+	}
+}
+
+func TestPreviewPaneWakeFiresOnCompletion(t *testing.T) {
+	p := startPreviewPane("t", func() (PreviewResult, error) {
+		return PreviewResult{Content: "x"}, nil
+	})
+	defer p.close()
+
+	w := p.wake()
+	if w.fd < 0 || w.kind != wakePreview {
+		t.Fatalf("wake() = %+v, want a live fd with wakePreview", w)
+	}
+	// The pipe must become readable once the fetch lands.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var set unix.FdSet
+		set.Zero()
+		set.Set(w.fd)
+		tv := unix.Timeval{Usec: 50000}
+		n, err := unix.Select(w.fd+1, &set, nil, nil, &tv)
+		if err == nil && n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("wake pipe never became readable after the fetch completed")
+		}
+	}
+}
+
+func TestPreviewPaneCloseBeforeFetchDoesNotPanic(t *testing.T) {
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	p := startPreviewPane("t", func() (PreviewResult, error) {
+		<-release
+		defer close(finished)
+		return PreviewResult{Content: "late"}, nil
+	})
+	p.close()
+	close(release)
+
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fetch goroutine leaked after close")
+	}
+}
+
+func TestPreviewPaneCloseIsIdempotent(t *testing.T) {
+	p := startPreviewPane("t", func() (PreviewResult, error) { return PreviewResult{}, nil })
+	p.close()
+	p.close()
+	if got := p.wake(); got.fd >= 0 {
+		t.Fatalf("wake() after close = %+v, want a negative fd", got)
+	}
+}
+
+func TestPreviewPaneNilIsSafe(t *testing.T) {
+	var p *previewPane
+	if snap := p.snapshot(); snap.Loaded {
+		t.Fatal("nil pane snapshot should be zero-valued")
+	}
+	if got := p.wake(); got.fd >= 0 {
+		t.Fatalf("nil pane wake = %+v, want a negative fd", got)
+	}
+	p.close() // must not panic
+}
+
+// waitLoaded polls until the pane's fetch has landed, failing the test on timeout.
+func waitLoaded(t *testing.T, p *previewPane) overlayPreview {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if snap := p.snapshot(); snap.Loaded {
+			return snap
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fetch never completed")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
