@@ -659,10 +659,6 @@ func (s *launchdService) Status(run runner) (serviceStatus, error) {
 const serviceUsage = `usage: claude-sessions service install [--port N] [--bind ADDR]
        claude-sessions service <uninstall|status>`
 
-// cmdService is the `service` subcommand's entry point — the shape main.go
-// calls. It owns picking the real platform manager and the real command
-// runner; everything below it takes both as parameters so the verbs are
-// testable without a real launchd/systemd or filesystem outside a temp dir.
 // serviceVerbs is the verb table cmdService dispatches through. A table rather
 // than a switch inline in cmdService so the verb can be validated *before* a
 // manager is constructed: newManager fails on an unsupported GOOS, and a
@@ -674,6 +670,10 @@ var serviceVerbs = map[string]func(mgr serviceManager, run runner, args []string
 	"status":    serviceStatusCmd,
 }
 
+// cmdService is the `service` subcommand's entry point — the shape main.go
+// calls. It owns picking the real platform manager and the real command
+// runner; everything below it takes both as parameters so the verbs are
+// testable without a real launchd/systemd or filesystem outside a temp dir.
 func cmdService(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(serviceErr, serviceUsage)
@@ -824,6 +824,11 @@ func serviceUninstall(mgr serviceManager, run runner, args []string) int {
 		fmt.Fprintf(serviceErr, "service: cannot remove %s: %v\n", unitPath, err)
 		return 1
 	}
+	// Reported before the cache drop below, because by this point the file is
+	// gone whether or not that succeeds — and an operator who sees only an
+	// error has no way to tell, so they retry and hit a second, unrelated
+	// failure in Unload.
+	fmt.Fprintf(serviceOut, "removed  %s\n", unitPath)
 	// Drop the unit from the manager's cache now that the file is gone. This
 	// must happen AFTER the os.Remove above: Unload's own daemon-reload ran
 	// while the file was still on disk, which re-reads the unit instead of
@@ -834,7 +839,6 @@ func serviceUninstall(mgr serviceManager, run runner, args []string) int {
 		fmt.Fprintln(serviceErr, "service:", err)
 		return 1
 	}
-	fmt.Fprintf(serviceOut, "removed  %s\n", unitPath)
 	if mgr.usesLinger() {
 		// Other user services may depend on linger, so removing it is not ours
 		// to decide.

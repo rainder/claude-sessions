@@ -39,7 +39,7 @@ renderers compiled and unit-testable on either platform, so the systemd unit
 has golden-test coverage from a macOS dev box.
 
 Unsupported `GOOS` exits 1 with a message naming the two supported platforms —
-not 2, which this repo reserves for usage errors (see "Errors"). A mistyped verb
+not 2, which this repo reserves for usage errors (see "Command output"). A mistyped verb
 is still a usage error there: `cmdService` validates the verb before it builds a
 manager, so `service typo` exits 2 on every platform.
 
