@@ -9,11 +9,14 @@ package main
 // every platform is what makes their golden tests runnable from one dev box.
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -267,4 +270,124 @@ func (s *systemdService) Render(cfg serviceConfig) string {
 	b.WriteString("Restart=always\nRestartSec=5\n\n")
 	b.WriteString("[Install]\nWantedBy=default.target\n")
 	return b.String()
+}
+
+// runner executes a command and returns its combined output. Injected rather
+// than called directly so the load sequences are assertable in tests without a
+// real launchd or systemd.
+//
+// It returns output, not just an error, because Status has to parse
+// `launchctl print` / `systemctl show` to report a PID.
+type runner func(args ...string) ([]byte, error)
+
+func execRunner(args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, errors.New("empty command")
+	}
+	return exec.Command(args[0], args[1:]...).CombinedOutput()
+}
+
+// exitCode extracts a process exit status, or -1 if err isn't an exit error.
+func exitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
+const (
+	bootstrapRetries = 5
+	bootstrapBackoff = 200 * time.Millisecond
+)
+
+func (s *launchdService) domain() string { return fmt.Sprintf("gui/%d", s.uid) }
+
+func (s *launchdService) target() string {
+	return fmt.Sprintf("%s/%s", s.domain(), serviceLabel)
+}
+
+func (s *launchdService) Load(run runner) error {
+	// A failed bootout means "wasn't loaded" — the normal first-install case.
+	// Ignoring it is what makes reinstall idempotent.
+	_, _ = run("launchctl", "bootout", s.target())
+
+	var lastOut []byte
+	var lastErr error
+	for attempt := 0; attempt < bootstrapRetries; attempt++ {
+		out, err := run("launchctl", "bootstrap", s.domain(), s.UnitPath())
+		if err == nil {
+			return nil
+		}
+		lastOut, lastErr = out, err
+		// bootout tears down asynchronously; EALREADY (149) means we lost that
+		// race, so back off and try again rather than reporting a bogus failure.
+		if !isBootstrapRetryable(out, err) {
+			break
+		}
+		time.Sleep(bootstrapBackoff)
+	}
+
+	// gui/<uid> only exists with a console login. Installing over SSH to a Mac
+	// where nobody is logged in fails here, and launchctl's own message
+	// ("Bootstrap failed: 5: Input/output error") names nothing useful.
+	if _, err := run("launchctl", "print", s.domain()); err != nil {
+		return fmt.Errorf("no GUI login session for uid %d — launchd user agents "+
+			"need someone logged in at the console\n"+
+			"       log in on the Mac itself, then re-run this command", s.uid)
+	}
+	return fmt.Errorf("launchctl bootstrap failed: %v\n%s", lastErr, strings.TrimSpace(string(lastOut)))
+}
+
+func isBootstrapRetryable(out []byte, err error) bool {
+	if exitCode(err) == 149 {
+		return true
+	}
+	return strings.Contains(string(out), "EALREADY") ||
+		strings.Contains(string(out), "Operation already in progress")
+}
+
+func (s *launchdService) Unload(run runner) error {
+	out, err := run("launchctl", "bootout", s.target())
+	if err != nil && !strings.Contains(string(out), "No such process") {
+		return fmt.Errorf("launchctl bootout failed: %v\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (s *systemdService) Load(run runner) error {
+	// Linger first: on a box where the per-user manager isn't running yet,
+	// this is what starts it, and every `systemctl --user` below fails until
+	// it exists. A polkit refusal only means the service dies at logout, which
+	// is worth a warning rather than aborting the install.
+	if out, err := run("loginctl", "enable-linger", s.user); err != nil {
+		fmt.Fprintf(os.Stderr, "service: warning: could not enable linger for %s: %v\n%s\n",
+			s.user, err, strings.TrimSpace(string(out)))
+		fmt.Fprintf(os.Stderr, "service: the server will stop when your last login session ends\n")
+	}
+	steps := [][]string{
+		{"systemctl", "--user", "daemon-reload"},
+		{"systemctl", "--user", "enable", systemdUnitName},
+		// restart, not `enable --now`: --now only *starts*, and starting an
+		// already-running unit is a no-op, so a reinstall would leave the old
+		// process serving with the old flags.
+		{"systemctl", "--user", "restart", systemdUnitName},
+	}
+	for _, step := range steps {
+		if out, err := run(step...); err != nil {
+			return fmt.Errorf("%s failed: %v\n%s",
+				strings.Join(step, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+func (s *systemdService) Unload(run runner) error {
+	if out, err := run("systemctl", "--user", "disable", "--now", systemdUnitName); err != nil {
+		return fmt.Errorf("systemctl disable failed: %v\n%s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := run("systemctl", "--user", "daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl daemon-reload failed: %v\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

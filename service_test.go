@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -433,6 +434,189 @@ func TestServiceConfigValidate(t *testing.T) {
 					t.Errorf("validate() error = %q, want it to mention %q", err.Error(), tt.errContain)
 				}
 			})
+		}
+	}
+}
+
+// fakeRunner records every command it is handed and replays scripted results,
+// so the load sequences can be asserted without a real launchd or systemd.
+type fakeRunner struct {
+	calls   [][]string
+	results map[string]struct {
+		out []byte
+		err error
+	}
+}
+
+func newFakeRunner() *fakeRunner {
+	return &fakeRunner{results: map[string]struct {
+		out []byte
+		err error
+	}{}}
+}
+
+// fail scripts a result for any command whose joined form contains substr.
+func (f *fakeRunner) fail(substr string, out string, err error) {
+	f.results[substr] = struct {
+		out []byte
+		err error
+	}{[]byte(out), err}
+}
+
+func (f *fakeRunner) run(args ...string) ([]byte, error) {
+	f.calls = append(f.calls, args)
+	joined := strings.Join(args, " ")
+	for substr, res := range f.results {
+		if strings.Contains(joined, substr) {
+			return res.out, res.err
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeRunner) joined() []string {
+	out := make([]string, 0, len(f.calls))
+	for _, c := range f.calls {
+		out = append(out, strings.Join(c, " "))
+	}
+	return out
+}
+
+func TestLaunchdLoadBootsOutBeforeBootstrapping(t *testing.T) {
+	f := newFakeRunner()
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	if err := svc.Load(f.run); err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	got := f.joined()
+	want := []string{
+		"launchctl bootout gui/501/com.skerla.claude-sessions",
+		"launchctl bootstrap gui/501 /Users/andy/Library/LaunchAgents/com.skerla.claude-sessions.plist",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Load() ran %d commands %q, want %d %q", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("command %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// bootout failing means "it wasn't loaded", which is the normal first-install
+// case, not an error.
+func TestLaunchdLoadIgnoresBootoutFailure(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("bootout", "Boot-out failed: 3: No such process", errors.New("exit status 3"))
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	if err := svc.Load(f.run); err != nil {
+		t.Fatalf("Load() error: %v, want nil — a failed bootout is not fatal", err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("Load() ran %q, want bootstrap to still have run", f.joined())
+	}
+}
+
+// bootout tears down asynchronously, so an immediate bootstrap can lose the
+// race and return EALREADY. Retrying is the fix; failing is a spurious install
+// error on every reinstall.
+func TestLaunchdLoadRetriesEALREADY(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("bootstrap", "Bootstrap failed: 149: Operation already in progress", errors.New("exit status 149"))
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	err := svc.Load(f.run)
+	if err == nil {
+		t.Fatal("Load() = nil, want an error after retries are exhausted")
+	}
+	bootstraps := 0
+	for _, c := range f.joined() {
+		if strings.Contains(c, "bootstrap") {
+			bootstraps++
+		}
+	}
+	if bootstraps < 2 {
+		t.Errorf("bootstrap attempted %d times, want retries", bootstraps)
+	}
+}
+
+func TestLaunchdUnload(t *testing.T) {
+	f := newFakeRunner()
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	if err := svc.Unload(f.run); err != nil {
+		t.Fatalf("Unload() error: %v", err)
+	}
+	want := []string{"launchctl bootout gui/501/com.skerla.claude-sessions"}
+	if got := f.joined(); len(got) != 1 || got[0] != want[0] {
+		t.Errorf("Unload() ran %q, want %q", got, want)
+	}
+}
+
+// enable --now only starts; on a reinstall the unit is already running, so the
+// old process would keep serving with the old --port/--bind. An explicit
+// restart is what makes "re-run install to change flags" actually work.
+func TestSystemdLoadRestartsAndOrdersLingerFirst(t *testing.T) {
+	f := newFakeRunner()
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	if err := svc.Load(f.run); err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	want := []string{
+		"loginctl enable-linger andy",
+		"systemctl --user daemon-reload",
+		"systemctl --user enable claude-sessions.service",
+		"systemctl --user restart claude-sessions.service",
+	}
+	got := f.joined()
+	if len(got) != len(want) {
+		t.Fatalf("Load() ran %d commands %q, want %d %q", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("command %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// polkit can refuse linger on some hosts. That degrades the service to
+// dying at logout — worth a warning, not worth failing the whole install.
+func TestSystemdLoadSurvivesLingerRefusal(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("enable-linger", "Failed to enable linger: Access denied", errors.New("exit status 1"))
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	if err := svc.Load(f.run); err != nil {
+		t.Fatalf("Load() error: %v, want nil — linger refusal is not fatal", err)
+	}
+	if len(f.calls) != 4 {
+		t.Errorf("Load() ran %q, want the remaining systemctl commands to still run", f.joined())
+	}
+}
+
+func TestSystemdLoadFailsOnRestartError(t *testing.T) {
+	f := newFakeRunner()
+	f.fail("restart", "Job for claude-sessions.service failed", errors.New("exit status 1"))
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	if err := svc.Load(f.run); err == nil {
+		t.Fatal("Load() = nil, want an error when restart fails")
+	}
+}
+
+func TestSystemdUnload(t *testing.T) {
+	f := newFakeRunner()
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	if err := svc.Unload(f.run); err != nil {
+		t.Fatalf("Unload() error: %v", err)
+	}
+	want := []string{
+		"systemctl --user disable --now claude-sessions.service",
+		"systemctl --user daemon-reload",
+	}
+	got := f.joined()
+	if len(got) != len(want) {
+		t.Fatalf("Unload() ran %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("command %d = %q, want %q", i, got[i], want[i])
 		}
 	}
 }
