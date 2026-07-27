@@ -1413,12 +1413,19 @@ func TestServiceInstallReportsRecoveryOnLoadFailure(t *testing.T) {
 	svc := &launchdService{home: t.TempDir(), uid: 501}
 	f := newFakeRunner()
 	f.fail("bootstrap", "Bootstrap failed: 5: Input/output error", errors.New("exit status 5"))
-	f.fail("launchctl print", "some XPC error", errors.New("exit status 1"))
+	// Status reports Running, which is the documented reinstall path and
+	// skips the port pre-flight by design (see
+	// TestServiceInstallSkipsPortCheckWhenAlreadyRunning). That is what keeps
+	// this test off the network entirely — it must never bind, or contend
+	// with, a port on the machine running the suite. Scripted onto "launchctl
+	// print" specifically so it can't also answer Load's bootstrap calls; the
+	// GUI-session probe Load falls back to is a `launchctl print gui/501`
+	// without a service, so it matches this rule too and reports the same
+	// running transcript, meaning Load's error stays the plain bootstrap
+	// failure rather than the GUI diagnosis.
+	f.fail("launchctl print", "com.skerla.claude-sessions = {\n\tpid = 4242\n\tstate = running\n}", nil)
 
-	// --port 0: net.Listen assigns a free ephemeral port and closes
-	// immediately, so the port pre-flight can never collide with a real
-	// service already running on this dev machine.
-	rc := serviceInstall(svc, f.run, []string{"--port", "0"})
+	rc := serviceInstall(svc, f.run, []string{"--port", "8765"})
 	if rc != 1 {
 		t.Fatalf("serviceInstall() = %d, want 1", rc)
 	}
@@ -1539,5 +1546,315 @@ func TestServiceUninstallOmitsLingerNoteForLaunchd(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "linger") {
 		t.Errorf("output = %q, want no linger mention for a launchd manager", buf.String())
+	}
+}
+
+// The range boundaries themselves, as a pure function — the exit-code and
+// no-side-effects half lives in TestServiceInstallRejectsPortOutOfRange.
+func TestValidateServicePort(t *testing.T) {
+	tests := []struct {
+		name    string
+		port    int
+		wantErr bool
+	}{
+		{name: "zero means pick any free port, useless in a unit file", port: 0, wantErr: true},
+		{name: "lowest usable port", port: 1},
+		{name: "a normal port", port: 8765},
+		{name: "highest usable port", port: 65535},
+		{name: "one past the top of the range", port: 65536, wantErr: true},
+		{name: "a typo that overflows the range", port: 87655, wantErr: true},
+		{name: "negative", port: -1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateServicePort(tt.port)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("validateServicePort(%d) = nil, want an error", tt.port)
+				}
+				if !strings.Contains(err.Error(), strconv.Itoa(tt.port)) {
+					t.Errorf("validateServicePort(%d) error = %q, want it to name the rejected value", tt.port, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("validateServicePort(%d) = %v, want nil", tt.port, err)
+			}
+		})
+	}
+}
+
+// A one-character typo (`--port 87655`) must not boot out a working service and
+// install a unit that crash-loops under KeepAlive, and `--port 0` must not
+// install a service that binds a different ephemeral port on every restart.
+// Neither is caught downstream: the portInUse pre-flight is skipped when --bind
+// isn't an address (`--bind tailscale`, the recommended setup) and again when
+// Status reports the service already running (the documented reinstall path) —
+// which is exactly the state scripted here, so a rejected port is provably
+// rejected by the range check and not by a lucky bind failure.
+//
+// Exit 2, not 1: this is a usage error, the same code main.go uses for one
+// everywhere else.
+func TestServiceInstallRejectsPortOutOfRange(t *testing.T) {
+	tests := []struct {
+		name       string
+		port       string
+		wantReject bool
+	}{
+		{name: "zero", port: "0", wantReject: true},
+		{name: "lowest usable port", port: "1"},
+		{name: "highest usable port", port: "65535"},
+		{name: "one past the top of the range", port: "65536", wantReject: true},
+		{name: "a plausible typo", port: "87655", wantReject: true},
+		{name: "negative", port: "-1", wantReject: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := resolveBin
+			resolveBin = func() (string, error) { return "/usr/local/bin/claude-sessions", nil }
+			defer func() { resolveBin = orig }()
+
+			var errBuf, outBuf bytes.Buffer
+			origErr, origOut := serviceErr, serviceOut
+			serviceErr, serviceOut = &errBuf, &outBuf
+			defer func() { serviceErr, serviceOut = origErr, origOut }()
+
+			svc := &launchdService{home: t.TempDir(), uid: 501}
+			f := newFakeRunner()
+			// Status says we're already running, so the port pre-flight is
+			// skipped by design and nothing in this test ever touches the
+			// network — an accepted port is never actually bound.
+			f.fail("launchctl print", "com.skerla.claude-sessions = {\n\tpid = 4242\n\tstate = running\n}", nil)
+
+			rc := serviceInstall(svc, f.run, []string{"--port", tt.port})
+			if !tt.wantReject {
+				if rc != 0 {
+					t.Fatalf("serviceInstall(--port %s) = %d, want 0 — %s is a usable port\nstderr: %s", tt.port, rc, tt.port, errBuf.String())
+				}
+				return
+			}
+			if rc != 2 {
+				t.Fatalf("serviceInstall(--port %s) = %d, want 2 (usage error)", tt.port, rc)
+			}
+			if msg := errBuf.String(); !strings.Contains(msg, tt.port) {
+				t.Errorf("error output = %q, want it to name the rejected port %q", msg, tt.port)
+			}
+			// The whole point is that nothing is disturbed: no unit written,
+			// and above all no bootout tearing down a service that was working
+			// a moment ago.
+			if _, err := os.Stat(svc.UnitPath()); !os.IsNotExist(err) {
+				t.Errorf("unit file exists at %s after a rejected port, want nothing written", svc.UnitPath())
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("serviceInstall ran %q, want no commands at all — the running service must not be booted out", f.joined())
+			}
+		})
+	}
+}
+
+// systemd caches a unit until a daemon-reload. Unload's own reload runs while
+// the file is still on disk, so it re-reads the unit rather than forgetting
+// it: without a second reload after the file is removed, `service status` run
+// straight after `service uninstall` prints "file no / loaded yes" and exits 1
+// instead of 3. The reload must come last, hence the exact ordering assertion
+// rather than a "contains daemon-reload" check.
+//
+// launchd needs no such hook and must not grow a spurious command — pinning
+// both backends here is what keeps the fix on the manager (afterRemove) rather
+// than in a runtime.GOOS branch inside serviceUninstall.
+func TestServiceUninstallCommandOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		mgr  serviceManager
+		want []string
+	}{
+		{
+			name: "launchd",
+			mgr:  &launchdService{home: t.TempDir(), uid: 501},
+			want: []string{"launchctl bootout gui/501/com.skerla.claude-sessions"},
+		},
+		{
+			name: "systemd",
+			mgr:  &systemdService{home: t.TempDir(), user: "andy"},
+			want: []string{
+				"systemctl --user disable --now claude-sessions.service",
+				// Unload's reload, with the unit file still present.
+				"systemctl --user daemon-reload",
+				// afterRemove's reload, with the file gone — the one that
+				// actually drops the unit from systemd's cache.
+				"systemctl --user daemon-reload",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			orig := serviceOut
+			serviceOut = &buf
+			defer func() { serviceOut = orig }()
+
+			// A real unit file on disk, so the removal this ordering is about
+			// is a removal and not a no-op.
+			unitPath := tt.mgr.UnitPath()
+			if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(unitPath, []byte("placeholder\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			f := newFakeRunner()
+			if rc := serviceUninstall(tt.mgr, f.run, nil); rc != 0 {
+				t.Fatalf("serviceUninstall() = %d, want 0", rc)
+			}
+			if _, err := os.Stat(unitPath); !os.IsNotExist(err) {
+				t.Errorf("unit file still at %s after uninstall", unitPath)
+			}
+			got := f.joined()
+			if len(got) != len(tt.want) {
+				t.Fatalf("serviceUninstall ran %d commands %q, want %d %q", len(got), got, len(tt.want), tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("command %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// A failing post-remove reload leaves systemd reporting a unit that no longer
+// exists — the exact condition afterRemove exists to prevent — so it must
+// surface, not be swallowed into a zero exit.
+func TestServiceUninstallReportsAfterRemoveFailure(t *testing.T) {
+	var outBuf, errBuf bytes.Buffer
+	origOut, origErr := serviceOut, serviceErr
+	serviceOut, serviceErr = &outBuf, &errBuf
+	defer func() { serviceOut, serviceErr = origOut, origErr }()
+
+	svc := &systemdService{home: t.TempDir(), user: "andy"}
+	f := newFakeRunner()
+	// Only the second daemon-reload (afterRemove's) fails; Unload's succeeds,
+	// so this can't pass by way of Unload's own error path.
+	f.scripts = append(f.scripts, &fakeScript{substr: "daemon-reload", result: fakeResult{nil, nil}, remain: 1})
+	f.fail("daemon-reload", "Failed to connect to bus: No medium found", errors.New("exit status 1"))
+
+	if rc := serviceUninstall(svc, f.run, nil); rc != 1 {
+		t.Fatalf("serviceUninstall() = %d, want 1 when the post-remove reload fails", rc)
+	}
+	if !strings.Contains(errBuf.String(), "daemon-reload") {
+		t.Errorf("error output = %q, want it to name the failing reload", errBuf.String())
+	}
+}
+
+// The hint is what an operator runs by hand after a failed install, so it has
+// to load the unit the same way Load does. `enable --now` does not: --now only
+// starts, and starting an already-running unit is a no-op, which leaves the
+// old process serving the old flags. Derived from Load's actual command
+// sequence rather than a hardcoded string, so the two cannot drift apart
+// again.
+func TestSystemdManualLoadHintMatchesLoad(t *testing.T) {
+	f := newFakeRunner()
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	if err := svc.Load(f.run); err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	hint := svc.manualLoadHint()
+	for _, cmd := range f.joined() {
+		// linger is a standing grant, not part of loading the unit, and Load
+		// only warns when it fails — the hint deliberately omits it.
+		if strings.HasPrefix(cmd, "loginctl") {
+			continue
+		}
+		if !strings.Contains(hint, cmd) {
+			t.Errorf("manualLoadHint() = %q, missing Load's step %q", hint, cmd)
+		}
+	}
+	if strings.Contains(hint, "--now") {
+		t.Errorf("manualLoadHint() = %q, must not recommend `enable --now` — it will not replace a running process", hint)
+	}
+}
+
+// An unsupported GOOS makes newManager fail, but a mistyped verb is a usage
+// error on every platform. Validating the verb only after the manager is built
+// reports the platform error (exit 1) for `service typo`, hiding the typo.
+func TestCmdServiceRejectsUnknownVerbBeforeBuildingManager(t *testing.T) {
+	var buf bytes.Buffer
+	origErr := serviceErr
+	serviceErr = &buf
+	defer func() { serviceErr = origErr }()
+
+	built := false
+	orig := newManager
+	newManager = func() (serviceManager, error) {
+		built = true
+		return nil, errors.New("service management is only supported on macOS and Linux (this is windows)")
+	}
+	defer func() { newManager = orig }()
+
+	if got := cmdService([]string{"typo"}); got != 2 {
+		t.Errorf("cmdService([typo]) = %d, want 2 (usage error) even where the platform is unsupported", got)
+	}
+	if built {
+		t.Error("cmdService built a manager before validating the verb")
+	}
+}
+
+// `service` is a scriptable subcommand: piped or redirected output must not
+// carry literal ESC[2m, which no other cmd* in this repo emits. serviceDim
+// gates on serviceOut being a terminal, so every one of these lines is plain
+// text whenever the tests (or a shell pipeline) capture it.
+func TestServiceOutputCarriesNoANSIWhenNotATerminal(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, mgr serviceManager, f *fakeRunner) int
+		mgr  func(home string) serviceManager
+	}{
+		{
+			name: "launchd install names the log file",
+			mgr:  func(home string) serviceManager { return &launchdService{home: home, uid: 501} },
+			run: func(t *testing.T, mgr serviceManager, f *fakeRunner) int {
+				orig := resolveBin
+				resolveBin = func() (string, error) { return "/usr/local/bin/claude-sessions", nil }
+				defer func() { resolveBin = orig }()
+				f.fail("launchctl print", "com.skerla.claude-sessions = {\n\tpid = 4242\n\tstate = running\n}", nil)
+				return serviceInstall(mgr, f.run, []string{"--port", "8765"})
+			},
+		},
+		{
+			name: "launchd uninstall keeps the log",
+			mgr:  func(home string) serviceManager { return &launchdService{home: home, uid: 501} },
+			run: func(t *testing.T, mgr serviceManager, f *fakeRunner) int {
+				return serviceUninstall(mgr, f.run, nil)
+			},
+		},
+		{
+			name: "systemd uninstall notes linger",
+			mgr:  func(home string) serviceManager { return &systemdService{home: home, user: "andy"} },
+			run: func(t *testing.T, mgr serviceManager, f *fakeRunner) int {
+				return serviceUninstall(mgr, f.run, nil)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			orig := serviceOut
+			serviceOut = &buf
+			defer func() { serviceOut = orig }()
+
+			mgr := tt.mgr(t.TempDir())
+			if rc := tt.run(t, mgr, newFakeRunner()); rc != 0 {
+				t.Fatalf("command = %d, want 0", rc)
+			}
+			if strings.Contains(buf.String(), "\x1b") {
+				t.Errorf("output contains a raw escape sequence: %q", buf.String())
+			}
+			// Guard against passing vacuously: these paths are only interesting
+			// because they print a hint that used to be dimmed.
+			if buf.Len() == 0 {
+				t.Error("no output captured at all, so nothing was actually checked")
+			}
+		})
 	}
 }

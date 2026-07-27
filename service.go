@@ -23,6 +23,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -163,6 +165,11 @@ func (s *launchdService) defaultLogPath() string {
 // serviceUninstall should mention. launchd has no such concept.
 func (s *launchdService) usesLinger() bool { return false }
 
+// afterRemove is a no-op: launchctl bootout already forgets the job, and
+// launchd keeps no cached copy of a plist that outlives the file. See
+// systemdService.afterRemove for the case this hook exists for.
+func (s *launchdService) afterRemove(run runner) error { return nil }
+
 func (s *launchdService) Render(cfg serviceConfig) string {
 	logPath := cfg.LogPath
 	if logPath == "" {
@@ -250,10 +257,35 @@ func (s *systemdService) defaultLogPath() string { return "" }
 // note. See serviceUninstall.
 func (s *systemdService) usesLinger() bool { return true }
 
+// afterRemove drops the unit from systemd's cache once serviceUninstall has
+// deleted the file.
+//
+// Unload's own daemon-reload runs while the unit file is still on disk, so it
+// re-reads the unit rather than forgetting it: systemd keeps reporting
+// LoadState=loaded, and a `service status` immediately after `service
+// uninstall` prints "file no / loaded yes" and exits 1 (loaded but stopped)
+// instead of 3 (not loaded). Only a reload with the file already gone clears
+// that. A manager method rather than a runtime.GOOS branch in
+// serviceUninstall, for the same reason usesLinger is one — a GOOS branch
+// there would be untestable from a single dev box.
+func (s *systemdService) afterRemove(run runner) error {
+	if out, err := run("systemctl", "--user", "daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl daemon-reload failed: %v\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // manualLoadHint is the literal command to run by hand to load the unit
 // serviceInstall just wrote, mirroring launchdService.manualLoadHint.
+//
+// It mirrors Load's own systemctl steps, restart included, rather than the
+// shorter `enable --now`: --now only *starts*, and starting an already-running
+// unit is a no-op, so an operator following this hint after a failed reinstall
+// would leave the old process serving the old flags and believe it worked. See
+// Load, which uses restart for exactly that reason.
 func (s *systemdService) manualLoadHint() string {
-	return fmt.Sprintf("systemctl --user daemon-reload && systemctl --user enable --now %s", systemdUnitName)
+	return fmt.Sprintf("systemctl --user daemon-reload && systemctl --user enable %s && systemctl --user restart %s",
+		systemdUnitName, systemdUnitName)
 }
 
 // systemdQuote renders one value for any systemd unit line: quote the whole
@@ -440,6 +472,23 @@ var serviceErr io.Writer = os.Stderr
 // stdout counterpart to serviceErr, for the same testability reason.
 var serviceOut io.Writer = os.Stdout
 
+// serviceDim styles a parenthetical hint, but only when serviceOut is a real
+// terminal. `service` is a scriptable subcommand and no other cmd* in this
+// repo writes escape sequences into piped output, so an unconditional dim()
+// would put a literal ESC[2m in every redirected log. Gated rather than
+// dropped outright: on a terminal these lines really are asides, and the
+// styling is what keeps them from reading as another fact.
+//
+// The check is on serviceOut's own descriptor rather than os.Stdout, so a test
+// swapping in a bytes.Buffer gets clean text without a second flag to set.
+func serviceDim(s string) string {
+	f, ok := serviceOut.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return s
+	}
+	return dim(s)
+}
+
 // resolveBin is resolveBinPath, indirected through a var so tests can swap in
 // a fixed path. resolveBinPath rejects any real `go test` binary outright
 // (Task 2's TestResolveBinPathRefusesTempDir pins that: the test binary
@@ -534,6 +583,7 @@ type serviceManager interface {
 	Load(run runner) error
 	Unload(run runner) error
 	Status(run runner) (serviceStatus, error)
+	afterRemove(run runner) error
 	usesLinger() bool
 	manualLoadHint() string
 }
@@ -613,9 +663,25 @@ const serviceUsage = `usage: claude-sessions service install [--port N] [--bind 
 // calls. It owns picking the real platform manager and the real command
 // runner; everything below it takes both as parameters so the verbs are
 // testable without a real launchd/systemd or filesystem outside a temp dir.
+// serviceVerbs is the verb table cmdService dispatches through. A table rather
+// than a switch inline in cmdService so the verb can be validated *before* a
+// manager is constructed: newManager fails on an unsupported GOOS, and a
+// typo'd verb has to stay a usage error (exit 2) there rather than being
+// reported as a platform error (exit 1).
+var serviceVerbs = map[string]func(mgr serviceManager, run runner, args []string) int{
+	"install":   serviceInstall,
+	"uninstall": serviceUninstall,
+	"status":    serviceStatusCmd,
+}
+
 func cmdService(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(serviceErr, serviceUsage)
+		return 2
+	}
+	verb, ok := serviceVerbs[args[0]]
+	if !ok {
+		fmt.Fprintf(serviceErr, "service: unknown verb %q\n%s\n", args[0], serviceUsage)
 		return 2
 	}
 	mgr, err := newManager()
@@ -623,23 +689,41 @@ func cmdService(args []string) int {
 		fmt.Fprintln(serviceErr, "service:", err)
 		return 1
 	}
-	switch args[0] {
-	case "install":
-		return serviceInstall(mgr, execRunner, args[1:])
-	case "uninstall":
-		return serviceUninstall(mgr, execRunner, args[1:])
-	case "status":
-		return serviceStatusCmd(mgr, execRunner, args[1:])
-	default:
-		fmt.Fprintf(serviceErr, "service: unknown verb %q\n%s\n", args[0], serviceUsage)
-		return 2
+	return verb(mgr, execRunner, args[1:])
+}
+
+// validateServicePort rejects a port no TCP listener could ever hold, plus 0,
+// which means "pick any free port" — legitimate for a one-off `-s`, never for
+// a unit file that is supposed to describe what is running. Split out as a
+// pure function of the value so the boundaries are table-testable without
+// driving a whole install.
+func validateServicePort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port %d is out of range: --port must be between 1 and 65535", port)
 	}
+	return nil
 }
 
 func serviceInstall(mgr serviceManager, run runner, args []string) int {
 	flags, err := parseServerFlags(args)
 	if err != nil {
 		fmt.Fprintf(serviceErr, "service: %v\n%s\n", err, serviceUsage)
+		return 2
+	}
+	// Reject an unusable port before anything is written or booted out. The
+	// check lives here rather than in parseServerFlags because `-s` accepts
+	// what it accepts today, and install is the case that needs more: it tears
+	// down the running service and installs a unit that only ever fails at
+	// bind time, which KeepAlive/Restart=always turns into a permanent crash
+	// loop. --port 0 is worse than a typo — it installs cleanly and the server
+	// then binds a different ephemeral port on every restart, so the unit no
+	// longer describes what is running. Neither the portInUse pre-flight below
+	// nor Load catches these: the pre-flight is skipped for a --bind value
+	// that isn't an address (`--bind tailscale`, the recommended setup) and
+	// again when Status says we are already running (the documented reinstall
+	// path).
+	if err := validateServicePort(flags.port); err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
 		return 2
 	}
 	bin, err := resolveBin()
@@ -717,7 +801,7 @@ func serviceInstall(mgr serviceManager, run runner, args []string) int {
 	}
 	fmt.Fprintf(serviceOut, "loaded  %s\n", mgr.Label())
 	if cfg.LogPath != "" {
-		fmt.Fprintf(serviceOut, "logs    %s  %s\n", cfg.LogPath, dim("(not rotated)"))
+		fmt.Fprintf(serviceOut, "logs    %s  %s\n", cfg.LogPath, serviceDim("(not rotated)"))
 	} else {
 		fmt.Fprintf(serviceOut, "logs    journalctl --user -u %s\n", mgr.Label())
 	}
@@ -740,14 +824,24 @@ func serviceUninstall(mgr serviceManager, run runner, args []string) int {
 		fmt.Fprintf(serviceErr, "service: cannot remove %s: %v\n", unitPath, err)
 		return 1
 	}
+	// Drop the unit from the manager's cache now that the file is gone. This
+	// must happen AFTER the os.Remove above: Unload's own daemon-reload ran
+	// while the file was still on disk, which re-reads the unit instead of
+	// forgetting it — see systemdService.afterRemove. Treated as fatal for the
+	// same reason Unload treats its own reload failure as fatal: a stale cache
+	// makes `service status` report a service that no longer exists.
+	if err := mgr.afterRemove(run); err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
+		return 1
+	}
 	fmt.Fprintf(serviceOut, "removed  %s\n", unitPath)
 	if mgr.usesLinger() {
 		// Other user services may depend on linger, so removing it is not ours
 		// to decide.
-		fmt.Fprintf(serviceOut, "%s\n", dim("linger left enabled; remove with: loginctl disable-linger $USER"))
+		fmt.Fprintf(serviceOut, "%s\n", serviceDim("linger left enabled; remove with: loginctl disable-linger $USER"))
 	}
 	if lp := mgr.defaultLogPath(); lp != "" {
-		fmt.Fprintf(serviceOut, "%s\n", dim("log kept at "+lp))
+		fmt.Fprintf(serviceOut, "%s\n", serviceDim("log kept at "+lp))
 	}
 	return 0
 }

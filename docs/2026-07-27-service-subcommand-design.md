@@ -38,7 +38,10 @@ not: both are string rendering plus `os/exec`. A runtime switch keeps both
 renderers compiled and unit-testable on either platform, so the systemd unit
 has golden-test coverage from a macOS dev box.
 
-Unsupported `GOOS` exits 2 with a message naming the two supported platforms.
+Unsupported `GOOS` exits 1 with a message naming the two supported platforms —
+not 2, which this repo reserves for usage errors (see "Errors"). A mistyped verb
+is still a usage error there: `cmdService` validates the verb before it builds a
+manager, so `service typo` exits 2 on every platform.
 
 ```go
 type runner func(args ...string) ([]byte, error)
@@ -75,10 +78,10 @@ Implementations: `launchdService` (darwin), `systemdService` (linux).
 | unit path | `~/Library/LaunchAgents/com.skerla.claude-sessions.plist` | `~/.config/systemd/user/claude-sessions.service` |
 | label | `com.skerla.claude-sessions` | `claude-sessions.service` |
 | load | `launchctl bootout gui/$UID/<label>` (error ignored), then `launchctl bootstrap gui/$UID <plist>` | `loginctl enable-linger $USER`, `systemctl --user daemon-reload`, `systemctl --user enable claude-sessions.service`, `systemctl --user restart claude-sessions.service` |
-| unload | `launchctl bootout gui/$UID/<label>` | `systemctl --user disable --now claude-sessions.service`, `daemon-reload` |
-| status | `launchctl print gui/$UID/<label>` | `systemctl --user is-active` + `is-enabled` |
+| unload | `launchctl bootout gui/$UID/<label>` | `systemctl --user disable --now claude-sessions.service`, `daemon-reload`, then a second `daemon-reload` after the unit file is deleted |
+| status | `launchctl print gui/$UID/<label>` | `systemctl --user show claude-sessions.service --property=LoadState --property=ActiveState --property=MainPID` |
 | restart policy | `KeepAlive` | `Restart=always`, `RestartSec=5` |
-| logs | `~/Library/Logs/claude-sessions.log` (both stdout and stderr) | journald |
+| logs | `~/Library/Logs/claude-sessions.log` — stderr only; stdout is deliberately routed nowhere durable, since `cmdServer` prints the auth token to it at startup | journald, stderr only (`StandardOutput=null`, same reason) |
 
 `bootout`/`bootstrap` replace the README's `launchctl load`. The pre-emptive
 `bootout` makes reinstall idempotent; its failure means "was not loaded", which
@@ -179,6 +182,16 @@ problem.
 `install` also checks whether something is already listening on the target
 port — typically a foreground `-s` the user forgot about — and refuses rather
 than installing a service that will crash-loop on bind failure.
+
+Before that, `install` rejects a `--port` outside `1..65535` outright (exit 2, a
+usage error). `-s` itself still accepts whatever `strconv.Atoi` parses; only
+`install` is strict, because only `install` boots out the running service and
+leaves behind a unit that fails at bind time forever after. The listener
+pre-flight cannot stand in for this: it is skipped when `--bind` is not an
+address (`--bind tailscale`) and again when the service is already running.
+`--port 0` is rejected for a different reason — it installs cleanly and then
+binds a fresh ephemeral port on every restart, so the unit stops describing
+what is running.
 
 ## Binary path resolution
 
