@@ -363,11 +363,17 @@ func TestSystemdRenderEscapesDollarInExecStart(t *testing.T) {
 	got := svc.Render(serviceConfig{
 		BinPath: "/home/andy/$weird/claude-sessions",
 		Port:    8765,
-		Bind:    "tailscale",
+		Bind:    "tail$scale",
 		Path:    "/usr/bin",
 	})
 	if !strings.Contains(got, `ExecStart="/home/andy/$$weird/claude-sessions"`) {
-		t.Errorf("ExecStart did not escape $ as $$:\n%s", got)
+		t.Errorf("ExecStart did not escape $ in argv[0]:\n%s", got)
+	}
+	// argv[0] is not the only element that can carry a $: --bind is a value a
+	// user actually supplies, and an implementation that only escaped BinPath
+	// would still pass a test that never puts a $ anywhere else.
+	if !strings.Contains(got, `"tail$$scale"`) {
+		t.Errorf("ExecStart did not escape $ in a non-zeroth argv element (--bind):\n%s", got)
 	}
 }
 
