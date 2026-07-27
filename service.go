@@ -19,8 +19,11 @@ const (
 	serviceLabel    = "com.skerla.claude-sessions"
 	systemdUnitName = "claude-sessions.service"
 
-	// launchd hands an agent this and nothing else, which is also the reason
-	// capturePath exists — see the PATH note below.
+	// fallbackPath is used only when the environment hands us no PATH at all
+	// (capturePath's os.Getenv("PATH") returned ""). It is not the launchd
+	// default described on capturePath below — launchd's default is
+	// /usr/bin:/bin:/usr/sbin:/sbin; this adds /usr/local/bin on top as a
+	// slightly more useful last resort.
 	fallbackPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 )
 
@@ -46,33 +49,42 @@ func resolveBinPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot determine own path: %w", err)
 	}
-	real, err := filepath.EvalSymlinks(exe)
+	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve %s: %w", exe, err)
 	}
-	// `go run` builds into $TMPDIR and deletes it on exit, so a unit pointing
-	// there would reference a file that no longer exists. Resolve the temp dir
-	// too: on macOS /tmp is a symlink to /private/tmp.
-	tmp := os.TempDir()
-	if resolved, err := filepath.EvalSymlinks(tmp); err == nil {
-		tmp = resolved
+	// `go run` builds into $GOTMPDIR if that is set and non-empty, else the OS
+	// temp dir, and deletes it on exit, so a unit pointing there would
+	// reference a file that no longer exists. Resolve each candidate too: on
+	// macOS /tmp is a symlink to /private/tmp, and a custom GOTMPDIR could
+	// equally be one.
+	tmpDirs := []string{os.TempDir()}
+	if gotmp := os.Getenv("GOTMPDIR"); gotmp != "" {
+		tmpDirs = append(tmpDirs, gotmp)
 	}
-	if pathWithin(real, tmp) {
-		return "", fmt.Errorf("running from a temporary build directory (%s)\n"+
-			"       install a real binary first: make install", real)
+	for _, tmp := range tmpDirs {
+		if t, err := filepath.EvalSymlinks(tmp); err == nil {
+			tmp = t
+		}
+		if pathWithin(resolved, tmp) {
+			return "", fmt.Errorf("running from a temporary build directory (%s)\n"+
+				"       install a real binary first: make install", resolved)
+		}
 	}
-	return real, nil
+	return resolved, nil
 }
 
 // pathWithin reports whether p is dir or sits underneath it. Uses filepath.Rel
 // rather than string prefixing so /var/tmpfoo isn't treated as being inside
-// /var/tmp.
+// /var/tmp. The prefix check is against ".."+separator, not a bare "..", so a
+// legitimate child whose first path element happens to start with ".." (e.g.
+// "/var/tmp/..foo/exe") isn't mistaken for an escape.
 func pathWithin(p, dir string) bool {
 	rel, err := filepath.Rel(dir, p)
 	if err != nil {
 		return false
 	}
-	return rel == "." || !strings.HasPrefix(rel, "..")
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // capturePath returns the PATH to bake into the unit file.
