@@ -142,6 +142,10 @@ func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int)
 func modalWakesWith(wakes []wakeFD, p *previewPane) []wakeFD {
 	w := p.wake()
 	if w.fd < 0 {
+		// Returned as-is: this aliases the caller's (possibly shared) backing
+		// array. Safe today because the result only flows into
+		// readModalEvents -> pollEvents, which reads it without appending —
+		// do not append to this return value.
 		return wakes
 	}
 	out := make([]wakeFD, len(wakes), len(wakes)+1)

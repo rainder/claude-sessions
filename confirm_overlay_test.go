@@ -173,24 +173,39 @@ func TestRenderConfirmOverlayPreviewNeverWidensBox(t *testing.T) {
 }
 
 func TestModalWakesAppendDoesNotMutateCallerSlice(t *testing.T) {
-	// Capacity headroom is what makes a naive append() clobber the caller's
-	// backing array; modalWakes is built once in RunTUI and shared by every
-	// modal, so this must copy.
-	base := make([]wakeFD, 1, 4)
+	// modalWakes is built once in RunTUI and shared by every modal. A naive
+	// append(wakes, w) that reuses spare capacity would write into the
+	// caller's backing array beyond its length — invisible to a check that
+	// only inspects base[:len(base)], since that view still looks pristine.
+	// So this seeds a sentinel in the spare slot (index 1, within cap 4 but
+	// outside the length-1 slice passed to modalWakesWith) and asserts that
+	// slot is untouched after the call — that's the only way to actually
+	// catch a naive append reusing the caller's backing array.
+	base := make([]wakeFD, 2, 4)
 	base[0] = wakeFD{fd: 7, kind: wakeResize}
+	base[1] = wakeFD{fd: 99, kind: wakeResize} // sentinel in the spare region
 
 	p := startPreviewPane("t", func() (PreviewResult, error) { return PreviewResult{}, nil })
 	defer p.close()
 
-	got := modalWakesWith(base, p)
-	if len(base) != 1 || base[0].kind != wakeResize {
+	got := modalWakesWith(base[:1], p)
+	if len(base) != 2 || base[0].kind != wakeResize {
 		t.Fatalf("caller slice mutated: %+v", base)
+	}
+	if base[1].fd != 99 {
+		t.Fatalf("modalWakesWith wrote into the caller's spare capacity: base[1] = %+v, want sentinel fd 99", base[1])
 	}
 	if len(got) != 2 || got[1].kind != wakePreview {
 		t.Fatalf("modalWakesWith = %+v, want base plus the preview wake", got)
 	}
-	if nilCase := modalWakesWith(base, nil); len(nilCase) != 1 {
+	if nilCase := modalWakesWith(base[:1], nil); len(nilCase) != 1 {
 		t.Fatalf("nil pane should add no wake, got %+v", nilCase)
+	}
+
+	closed := startPreviewPane("t", func() (PreviewResult, error) { return PreviewResult{}, nil })
+	closed.close()
+	if closedCase := modalWakesWith(base[:1], closed); len(closedCase) != 1 {
+		t.Fatalf("closed pane should add no wake, got %+v", closedCase)
 	}
 }
 
