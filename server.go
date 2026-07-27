@@ -641,10 +641,15 @@ func (s *server) cwdSuggestions(w http.ResponseWriter, r *http.Request) {
 	}{Home: home, Suggestions: collectCwdSuggestions()})
 }
 
-// presets lists this host's configured command preset names (not the command
-// text itself — that's local shell input a remote client has no business
-// seeing or replaying). Used by remote clients to validate `--command` and
-// populate the new-session picker without guessing at this host's config.
+// presets lists this host's configured command presets, command text included.
+//
+// That is a deliberate change of stance: this endpoint used to ship names only,
+// on the argument that command text is local shell input a remote client has no
+// business seeing. The new-session picker needed the real text to show what a
+// preset will actually run, and the exposure is bounded by two facts — the
+// endpoint sits behind the same bearer that already grants kill and spawn on
+// this machine, and the text is display-only: spawn matches a *name* against
+// this server's own allowlist and never accepts raw command text back.
 func (s *server) presets(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
