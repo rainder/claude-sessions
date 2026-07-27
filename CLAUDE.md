@@ -32,6 +32,25 @@ Per-developer shortcuts (e.g. a named `deploy-myserver` target) belong in
 single-arch iteration. Tests sit next to the code (`usage_test.go`,
 `render_test.go`); run `go test ./...` plus `go vet ./...`.
 
+## Workflow
+
+Always do implementation work in a git worktree (`.claude/worktrees/<name>`),
+never directly on `main` — this repo's main checkout is also the live dev
+environment, so isolating work avoids a half-done change blocking something
+else. Once the work is done and verified (`go build ./...`, `go vet ./...`,
+`go test ./...` all green):
+
+1. Merge the worktree branch into `main` locally (worktree branches are local;
+   there's no PR step for solo work here).
+2. `make install` — refresh the local binary at `~/.local/bin`.
+3. `git push origin main`.
+4. Deploy to `agent-workstation` (see the deploy memory / project notes for the
+   exact remote command — it's `git pull --ff-only && make install &&
+   systemctl restart claude-sessions` run over ssh).
+
+Then remove the worktree and its branch (`git worktree remove` /
+`git branch -d`) once merged — don't leave stale worktrees lying around.
+
 ## Architecture
 
 One Go package (`main`) split into files by concern. The three roles share a
