@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -307,17 +308,21 @@ func TestSystemdRenderEscapesPercent(t *testing.T) {
 	if !strings.Contains(got, "/opt/weird%%dir/bin:/usr/bin") {
 		t.Errorf("Environment did not escape %% as %%%%:\n%s", got)
 	}
-	// No single unescaped % should survive: every % in the output must be
-	// part of a %% pair.
-	for i, c := range got {
-		if c != '%' {
+	// Every maximal run of consecutive % characters must have even length:
+	// %% is one escaped literal, but %%% (odd) still leaves a lone specifier
+	// for systemd to expand. A "does this % have a %-neighbor" check would
+	// pass %%% since each % has at least one neighboring %, so this walks
+	// full runs instead.
+	run := 0
+	for i := 0; i <= len(got); i++ {
+		if i < len(got) && got[i] == '%' {
+			run++
 			continue
 		}
-		before := i > 0 && got[i-1] == '%'
-		after := i+1 < len(got) && got[i+1] == '%'
-		if !before && !after {
-			t.Errorf("unescaped %% found at byte %d:\n%s", i, got)
+		if run%2 != 0 {
+			t.Errorf("odd-length run of %d %% characters ending at byte %d:\n%s", run, i, got)
 		}
+		run = 0
 	}
 }
 
@@ -340,5 +345,88 @@ func TestSystemdQuote(t *testing.T) {
 				t.Errorf("systemdQuote(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSystemdDefaultLogPath(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	if got := svc.defaultLogPath(); got != "" {
+		t.Errorf("defaultLogPath() = %q, want \"\" (journald owns Linux logs)", got)
+	}
+}
+
+// systemd expands $VAR/${VAR} in ExecStart after unquoting, so a literal $ in
+// an argv element (e.g. a path component literally named "$foo") must survive
+// as $$ or it is silently substituted or erased.
+func TestSystemdRenderEscapesDollarInExecStart(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{
+		BinPath: "/home/andy/$weird/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/usr/bin",
+	})
+	if !strings.Contains(got, `ExecStart="/home/andy/$$weird/claude-sessions"`) {
+		t.Errorf("ExecStart did not escape $ as $$:\n%s", got)
+	}
+}
+
+// Environment= is NOT $-expanded by systemd, unlike ExecStart. A $ in cfg.Path
+// must stay a single $ on the Environment= line — doubling it there would bake
+// a literal "$$" into the running process's PATH instead of restoring the $.
+// This is the test that would catch someone "helpfully" applying the
+// ExecStart $-escaping everywhere.
+func TestSystemdRenderLeavesDollarInEnvironment(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{
+		BinPath: "/bin/x",
+		Port:    1,
+		Bind:    "127.0.0.1",
+		Path:    "/opt/$weird/bin:/usr/bin",
+	})
+	if !strings.Contains(got, `Environment="PATH=/opt/$weird/bin:/usr/bin"`) {
+		t.Errorf("Environment line altered a literal $ it should have left alone:\n%s", got)
+	}
+	if strings.Contains(got, "$$weird") {
+		t.Error("Environment line doubled $ as $$, but Environment= is not $-expanded")
+	}
+}
+
+func TestServiceConfigValidate(t *testing.T) {
+	clean := serviceConfig{
+		BinPath: "/home/andy/.local/bin/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/home/andy/.local/bin:/usr/bin:/bin",
+		LogPath: "/home/andy/Library/Logs/claude-sessions.log",
+	}
+	if err := clean.validate(); err != nil {
+		t.Errorf("validate() on a clean config = %v, want nil", err)
+	}
+
+	tests := []struct {
+		name       string
+		mutate     func(cfg *serviceConfig, nl string)
+		errContain string
+	}{
+		{name: "newline in BinPath", mutate: func(cfg *serviceConfig, nl string) { cfg.BinPath += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "binary path"},
+		{name: "newline in Bind", mutate: func(cfg *serviceConfig, nl string) { cfg.Bind += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "--bind value"},
+		{name: "newline in Path", mutate: func(cfg *serviceConfig, nl string) { cfg.Path += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "PATH"},
+		{name: "newline in LogPath", mutate: func(cfg *serviceConfig, nl string) { cfg.LogPath += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "log path"},
+	}
+	for _, tt := range tests {
+		for _, nl := range []string{"\n", "\r"} {
+			t.Run(tt.name+" "+strconv.QuoteRune([]rune(nl)[0]), func(t *testing.T) {
+				cfg := clean
+				tt.mutate(&cfg, nl)
+				err := cfg.validate()
+				if err == nil {
+					t.Fatalf("validate() = nil, want an error naming %q", tt.errContain)
+				}
+				if !strings.Contains(err.Error(), tt.errContain) {
+					t.Errorf("validate() error = %q, want it to mention %q", err.Error(), tt.errContain)
+				}
+			})
+		}
 	}
 }

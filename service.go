@@ -39,6 +39,25 @@ type serviceConfig struct {
 	LogPath string // empty on Linux — journald handles it
 }
 
+// validate rejects values that cannot be represented safely in a unit file.
+// A unit file is line-oriented — systemd splits lines before it unquotes — so a
+// newline in any rendered value ends the directive and turns whatever follows
+// into a fresh one. Neither input is checked upstream: Bind is stored verbatim
+// by parseServerFlags, and Path is the invoking shell's $PATH.
+func (cfg serviceConfig) validate() error {
+	for _, f := range []struct{ name, val string }{
+		{"binary path", cfg.BinPath},
+		{"--bind value", cfg.Bind},
+		{"PATH", cfg.Path},
+		{"log path", cfg.LogPath},
+	} {
+		if strings.ContainsAny(f.val, "\n\r") {
+			return fmt.Errorf("%s contains a newline, which cannot be written to a service unit file", f.name)
+		}
+	}
+	return nil
+}
+
 // resolveBinPath returns the absolute, symlink-resolved path to this binary.
 //
 // EvalSymlinks pins the real file rather than a symlink pointing at it, so
@@ -203,16 +222,30 @@ func (s *systemdService) UnitPath() string {
 // to name and nothing for uninstall to leave behind.
 func (s *systemdService) defaultLogPath() string { return "" }
 
-// systemdQuote renders one value for a systemd unit line. systemd re-splits on
-// whitespace and expands % specifiers, so an unquoted argv element containing a
-// space becomes two arguments and a stray % is eaten. Neither value reaching
-// here is validated upstream: BinPath is whatever os.Executable() resolved, and
-// PATH is the invoking shell's, verbatim.
+// systemdQuote renders one value for any systemd unit line: quote the whole
+// thing, doubling backslashes and quotes so they survive the quoting, and
+// double any % since systemd expands % specifiers everywhere in a unit file.
+// It does NOT touch $ — that expansion is ExecStart-specific, see
+// systemdQuoteExecStart. Neither value reaching here is validated upstream:
+// BinPath is whatever os.Executable() resolved, and PATH is the invoking
+// shell's, verbatim; serviceConfig.validate rejects the one thing quoting
+// cannot fix, a literal newline.
 func systemdQuote(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	s = strings.ReplaceAll(s, "%", "%%")
 	return `"` + s + `"`
+}
+
+// systemdQuoteExecStart renders one ExecStart argv element. ExecStart is the
+// one unit-file value line that undergoes $VAR / ${VAR} expansion after
+// unquoting, so a literal $ (e.g. a path component literally named "$foo")
+// must become $$ or it is silently substituted or erased. This must NOT be
+// applied to Environment= — that line is not $-expanded, so a $$ written
+// there would bake a literal "$$" into the running process's PATH instead of
+// restoring the single $ the operator intended.
+func systemdQuoteExecStart(s string) string {
+	return systemdQuote(strings.ReplaceAll(s, "$", "$$"))
 }
 
 func (s *systemdService) Render(cfg serviceConfig) string {
@@ -224,7 +257,7 @@ func (s *systemdService) Render(cfg serviceConfig) string {
 	args := serviceArgs(cfg)
 	quoted := make([]string, len(args))
 	for i, arg := range args {
-		quoted[i] = systemdQuote(arg)
+		quoted[i] = systemdQuoteExecStart(arg)
 	}
 	fmt.Fprintf(&b, "ExecStart=%s\n", strings.Join(quoted, " "))
 	fmt.Fprintf(&b, "Environment=%s\n", systemdQuote("PATH="+cfg.Path))
