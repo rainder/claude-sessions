@@ -9,6 +9,16 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `claude-sessions service install|uninstall|status` runs the server as a
+  supervised background service — a launchd LaunchAgent on macOS, a systemd
+  `--user` unit on Linux. `install` writes the unit and loads it, so the server
+  is running when the command returns; re-run it to change `--port`/`--bind` or
+  after upgrading the binary. On Linux it also enables linger so the service
+  survives logout. `status` is scriptable: exit 0 running, 1 installed but
+  stopped (or unanswerable — no console session on a Mac, no user D-Bus session
+  on Linux), 3 not installed. Neither unit keeps stdout, since the server prints
+  its bearer token there at startup; stderr, which carries the "listening on"
+  and notification lines, is what gets logged.
 - Push notifications to a paired iPhone when a session becomes blocked on you.
   The server polls a new cheap collection path (identity and status only, no
   transcript scanning) and runs an explicit wait-generation state machine, so an
@@ -52,6 +62,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Account rate-limit usage bars (5-hour + weekly, like `/usage`) in the TUI
   header, refreshed every 2 minutes in the background. Hidden when
   credentials or the endpoint are unavailable.
+
+### Fixed
+
+- Service units now carry an explicit `PATH`, and the README's hand-written
+  plist gained one too. Supervisors start services with a near-empty `PATH`, so
+  the previously documented plist left `tmux`, `tailscale`, and `claude`
+  unresolvable — tmux detection silently found nothing and `--bind tailscale`
+  crash-looped under `KeepAlive`.
 
 ## [v1.1.0] - 2026-05-28
 

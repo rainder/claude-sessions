@@ -1589,15 +1589,21 @@ Expected: PASS, and `gofmt -l .` prints nothing
 
 - [ ] **Step 6: Verify by hand on this machine**
 
+Build into the temp directory `os.TempDir()` actually reports — on macOS that is
+`$TMPDIR` (`/var/folders/...`), **not** `/tmp`. A binary built anywhere else is
+outside the guard, and `service install` will really install and load a service
+on this machine.
+
 ```bash
-go build -o /tmp/cs-check . && /tmp/cs-check service status; echo "exit=$?"
+CS_CHECK="${TMPDIR:-/tmp}/cs-check"
+go build -o "$CS_CHECK" . && "$CS_CHECK" service status; echo "exit=$?"
 ```
 Expected: reports the unit path, `file no`, `loaded no`, `running no`, `exit=3`
 
 ```bash
-/tmp/cs-check service install --port 9999
+"$CS_CHECK" service install --port 9999
 ```
-Expected: **refuses** — `/tmp/cs-check` resolves under `$TMPDIR`, so `resolveBinPath` rejects it and names `make install`. This confirms the temp-dir guard on a real binary.
+Expected: **refuses** — the binary sits under `os.TempDir()`, so `resolveBinPath` rejects it and names `make install`. This confirms the temp-dir guard on a real binary.
 
 - [ ] **Step 7: Commit**
 
