@@ -213,13 +213,12 @@ func fetchRemoteResumable(host string) ([]ResumableSession, error) {
 // a local decision rather than a hard failure.
 var errPresetsUnavailable = errors.New("presets endpoint unavailable")
 
-// fetchRemotePresets retrieves the configured command preset NAMES from the
-// named server's /presets endpoint. Names only — the server never exposes
-// its command text to remote clients. Old servers without the route (404),
-// or any response that isn't the expected JSON body, map to
-// errPresetsUnavailable so callers can degrade gracefully instead of hard
-// failing.
-func fetchRemotePresets(host string) ([]string, error) {
+// fetchRemotePresets retrieves the configured command presets (name + full
+// command text) from the named server's /presets endpoint. Old servers
+// without the route (404), or any response that isn't the expected JSON
+// body, map to errPresetsUnavailable so callers can degrade gracefully
+// instead of hard failing.
+func fetchRemotePresets(host string) ([]CommandPreset, error) {
 	srv, ok := LookupServer(host)
 	if !ok {
 		return nil, fmt.Errorf("unknown server: %s", host)
@@ -248,7 +247,7 @@ func fetchRemotePresets(host string) ([]string, error) {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	var response struct {
-		Presets []string `json:"presets"`
+		Presets []CommandPreset `json:"presets"`
 	}
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, errPresetsUnavailable
@@ -416,18 +415,13 @@ func remoteNewRows(defaultCWD string, suggestions []cwdSuggestion, home string) 
 }
 
 // remoteCommandPresetsForPicker returns the command preset choices to offer
-// when spawning on a remote host: the remote's own preset names fetched live
-// over /presets, so the picker reflects what that host actually has
-// configured rather than this one. The server never exposes command text, so
-// Command mirrors Name — pickerCommandRows' dimmed second line then shows the
-// name again instead of stale or wrong text. Falls back to this host's local
-// presets when the remote is unreachable or predates the /presets route.
+// when spawning on a remote host: the remote's own presets (name + command
+// text) fetched live over /presets, so the picker reflects what that host
+// actually has configured rather than this one. Falls back to this host's
+// local presets when the remote is unreachable or predates the /presets
+// route.
 func remoteCommandPresetsForPicker(host string) ([]CommandPreset, error) {
-	if names, err := fetchRemotePresets(host); err == nil && len(names) > 0 {
-		presets := make([]CommandPreset, len(names))
-		for i, name := range names {
-			presets[i] = CommandPreset{Name: name, Command: name}
-		}
+	if presets, err := fetchRemotePresets(host); err == nil && len(presets) > 0 {
 		return presets, nil
 	}
 	return LoadCommandPresets()

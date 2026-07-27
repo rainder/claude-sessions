@@ -287,13 +287,9 @@ func (s *server) presets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	names := make([]string, len(presets))
-	for i, p := range presets {
-		names[i] = p.Name
-	}
 	writeJSON(w, http.StatusOK, struct {
-		Presets []string `json:"presets"`
-	}{Presets: names})
+		Presets []CommandPreset `json:"presets"`
+	}{Presets: presets})
 }
 
 // resumable returns this host's resumable (past, ended) sessions, collected

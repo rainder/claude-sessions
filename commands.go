@@ -286,14 +286,15 @@ func cmdNewRemote(a newArgs) int {
 		// ahead of time; fall through and let /sessions/new validate as before.
 		if presets, err := fetchRemotePresets(a.server); err == nil {
 			found := false
-			for _, name := range presets {
-				if name == a.command {
+			names := make([]string, len(presets))
+			for i, p := range presets {
+				names[i] = p.Name
+				if p.Name == a.command {
 					found = true
-					break
 				}
 			}
 			if !found {
-				fmt.Fprintf(os.Stderr, "new: command preset not found on %s: %s (available: %s)\n", a.server, a.command, strings.Join(presets, ", "))
+				fmt.Fprintf(os.Stderr, "new: command preset not found on %s: %s (available: %s)\n", a.server, a.command, strings.Join(names, ", "))
 				return 2
 			}
 		}
