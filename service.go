@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -389,10 +390,22 @@ func (s *launchdService) Unload(run runner) error {
 	return nil
 }
 
-// serviceErr is where Load's non-fatal warnings go. A package-level var
-// rather than a direct os.Stderr call so tests can capture and assert on the
-// warning text without redirecting the process's real stderr.
+// serviceErr is where Load's non-fatal warnings, and every cmdService error,
+// go. A package-level var rather than a direct os.Stderr call so tests can
+// capture and assert on the text without redirecting the process's real
+// stderr.
 var serviceErr io.Writer = os.Stderr
+
+// serviceOut is where cmdService's success and status output goes — the
+// stdout counterpart to serviceErr, for the same testability reason.
+var serviceOut io.Writer = os.Stdout
+
+// resolveBin is resolveBinPath, indirected through a var so tests can swap in
+// a fixed path. resolveBinPath rejects any real `go test` binary outright
+// (Task 2's TestResolveBinPathRefusesTempDir pins that: the test binary
+// itself always runs from a temp dir), so exercising serviceInstall's later
+// steps under `go test` requires overriding this.
+var resolveBin = resolveBinPath
 
 func (s *systemdService) Load(run runner) error {
 	// Linger first: on a box where the per-user manager isn't running yet,
@@ -538,6 +551,182 @@ func (s *launchdService) Status(run runner) (serviceStatus, error) {
 		}
 	}
 	return st, nil
+}
+
+const serviceUsage = `usage: claude-sessions service <install|uninstall|status> [--port N] [--bind ADDR]`
+
+// cmdService is the `service` subcommand's entry point — the shape main.go
+// calls. It owns picking the real platform manager and the real command
+// runner; everything below it takes both as parameters so the verbs are
+// testable without a real launchd/systemd or filesystem outside a temp dir.
+func cmdService(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(serviceErr, serviceUsage)
+		return 2
+	}
+	mgr, err := newServiceManager()
+	if err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
+		return 1
+	}
+	switch args[0] {
+	case "install":
+		return serviceInstall(mgr, execRunner, args[1:])
+	case "uninstall":
+		return serviceUninstall(mgr, execRunner, args[1:])
+	case "status":
+		return serviceStatusCmd(mgr, execRunner, args[1:])
+	default:
+		fmt.Fprintf(serviceErr, "service: unknown verb %q\n%s\n", args[0], serviceUsage)
+		return 2
+	}
+}
+
+func serviceInstall(mgr serviceManager, run runner, args []string) int {
+	flags, err := parseServerFlags(args)
+	if err != nil {
+		fmt.Fprintf(serviceErr, "service: %v\n%s\n", err, serviceUsage)
+		return 2
+	}
+	bin, err := resolveBin()
+	if err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
+		return 1
+	}
+	// A foreground `-s` the user forgot about would make the new service
+	// crash-loop on bind failure. Refuse rather than install something broken.
+	if portInUse(flags.bind, flags.port) {
+		fmt.Fprintf(serviceErr, "service: something is already listening on %s:%d\n", flags.bind, flags.port)
+		fmt.Fprintf(serviceErr, "         stop it first, or pass a different --port\n")
+		return 1
+	}
+
+	cfg := serviceConfig{
+		BinPath: bin,
+		Port:    flags.port,
+		Bind:    flags.bind,
+		Path:    capturePath(),
+		LogPath: mgr.defaultLogPath(),
+	}
+	// Reject anything a rendered unit file can't represent safely BEFORE
+	// touching the filesystem — see serviceConfig.validate. Neither BinPath,
+	// Bind, nor Path is checked upstream: Bind is stored verbatim by
+	// parseServerFlags, and Path is the invoking shell's $PATH.
+	if err := cfg.validate(); err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
+		return 1
+	}
+
+	unitPath := mgr.UnitPath()
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		fmt.Fprintf(serviceErr, "service: cannot create %s: %v\n", filepath.Dir(unitPath), err)
+		return 1
+	}
+	// 0644: read by the user's own launchd/systemd, and it holds no secrets —
+	// the server's token lives elsewhere.
+	if err := os.WriteFile(unitPath, []byte(mgr.Render(cfg)), 0o644); err != nil {
+		fmt.Fprintf(serviceErr, "service: cannot write %s: %v\n", unitPath, err)
+		return 1
+	}
+	fmt.Fprintf(serviceOut, "wrote   %s\n", unitPath)
+
+	if err := mgr.Load(run); err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
+		// The unit file stays: the usual fix is to run the loader by hand and
+		// read the real error.
+		fmt.Fprintf(serviceErr, "service: the unit file was written and left in place\n")
+		return 1
+	}
+	fmt.Fprintf(serviceOut, "loaded  %s\n", mgr.Label())
+	if cfg.LogPath != "" {
+		fmt.Fprintf(serviceOut, "logs    %s  %s\n", cfg.LogPath, dim("(not rotated)"))
+	} else {
+		fmt.Fprintf(serviceOut, "logs    journalctl --user -u %s\n", mgr.Label())
+	}
+	return 0
+}
+
+func serviceUninstall(mgr serviceManager, run runner, args []string) int {
+	if len(args) > 0 {
+		fmt.Fprintf(serviceErr, "service: uninstall takes no flags\n%s\n", serviceUsage)
+		return 2
+	}
+	if err := mgr.Unload(run); err != nil {
+		fmt.Fprintln(serviceErr, "service:", err)
+		return 1
+	}
+	fmt.Fprintf(serviceOut, "unloaded %s\n", mgr.Label())
+
+	unitPath := mgr.UnitPath()
+	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(serviceErr, "service: cannot remove %s: %v\n", unitPath, err)
+		return 1
+	}
+	fmt.Fprintf(serviceOut, "removed  %s\n", unitPath)
+	if runtime.GOOS == "linux" {
+		// Other user services may depend on linger, so removing it is not ours
+		// to decide.
+		fmt.Fprintf(serviceOut, "%s\n", dim("linger left enabled; remove with: loginctl disable-linger $USER"))
+	}
+	if lp := mgr.defaultLogPath(); lp != "" {
+		fmt.Fprintf(serviceOut, "%s\n", dim("log kept at "+lp))
+	}
+	return 0
+}
+
+func serviceStatusCmd(mgr serviceManager, run runner, args []string) int {
+	if len(args) > 0 {
+		fmt.Fprintf(serviceErr, "service: status takes no flags\n%s\n", serviceUsage)
+		return 2
+	}
+	st, err := mgr.Status(run)
+	if err != nil {
+		// Status distinguishes "absent" (serviceStatus{}, nil) from "couldn't
+		// ask" (an error) — e.g. ssh to a Mac with no console session, or Linux
+		// with no user D-Bus session yet. Only the former is exit 3; this is a
+		// real failure to answer the question, not an answer of "not installed".
+		fmt.Fprintln(serviceErr, "service:", err)
+		return 1
+	}
+	unitPath := mgr.UnitPath()
+	_, statErr := os.Stat(unitPath)
+	fmt.Fprintf(serviceOut, "unit    %s\n", unitPath)
+	fmt.Fprintf(serviceOut, "file    %s\n", yesNo(statErr == nil))
+	fmt.Fprintf(serviceOut, "loaded  %s\n", yesNo(st.Installed))
+	switch {
+	case st.Running && st.PID != 0:
+		fmt.Fprintf(serviceOut, "running yes (pid %d)\n", st.PID)
+	case st.Running:
+		// MainPID=0 with ActiveState=active is systemd's documented "no main
+		// process" state (see systemdService.Status) — Running is genuinely
+		// true, but there is no pid worth printing.
+		fmt.Fprintf(serviceOut, "running yes\n")
+	default:
+		fmt.Fprintf(serviceOut, "running no\n")
+	}
+	return st.exitCode()
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+// portInUse reports whether something already holds bind:port. A bind value
+// that isn't an address — notably the magic "tailscale", resolved at server
+// start — can't be checked, and an unusable check must not block the install.
+func portInUse(bind string, port int) bool {
+	if net.ParseIP(bind) == nil && bind != "localhost" {
+		return false
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
+	if err != nil {
+		return true
+	}
+	ln.Close()
+	return false
 }
 
 func (s *systemdService) Status(run runner) (serviceStatus, error) {

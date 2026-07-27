@@ -54,6 +54,8 @@ func main() {
 		os.Exit(cmdNotifyTest(args[1:]))
 	case "pair":
 		os.Exit(cmdPair(args[1:]))
+	case "service":
+		os.Exit(cmdService(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -81,6 +83,10 @@ subcommands:
   preview PID                     print tmux capture or transcript tail
   tmux-info PID                   print tmux session name for a pid
   pair [--port N]                 print a pairing QR for the iOS app
+  service install|uninstall|status [--port N] [--bind ADDR]
+                                  run the server as a supervised background
+                                  service (launchd on macOS, systemd --user on
+                                  Linux); install also starts it
   notify-test                     send a test push to every registered device
   -h, --help                      this help
 

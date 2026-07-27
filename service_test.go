@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1085,6 +1086,146 @@ func TestNewServiceManagerFor(t *testing.T) {
 				if svc.user != tt.user {
 					t.Errorf("user = %q, want %q", svc.user, tt.user)
 				}
+			}
+		})
+	}
+}
+
+func TestCmdServiceUsageErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "no verb", args: nil},
+		{name: "unknown verb", args: []string{"reload"}},
+		{name: "unknown flag on install", args: []string{"install", "--verbose"}},
+		{name: "flags on uninstall", args: []string{"uninstall", "--port", "1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cmdService(tt.args); got != 2 {
+				t.Errorf("cmdService(%q) = %d, want 2 (usage error)", tt.args, got)
+			}
+		})
+	}
+}
+
+// A free port must not read as occupied — otherwise install refuses for no
+// reason on a clean box.
+func TestPortInUse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	if !portInUse("127.0.0.1", port) {
+		t.Errorf("portInUse(127.0.0.1, %d) = false while listening, want true", port)
+	}
+	ln.Close()
+	if portInUse("127.0.0.1", port) {
+		t.Errorf("portInUse(127.0.0.1, %d) = true after close, want false", port)
+	}
+}
+
+// "tailscale" is a magic bind value resolved at server start, not an address.
+// The pre-flight check must skip it rather than trying to listen on it.
+func TestPortInUseSkipsUnresolvableBind(t *testing.T) {
+	if portInUse("tailscale", 8765) {
+		t.Error("portInUse(tailscale, ...) = true, want false — the literal isn't an address")
+	}
+}
+
+// If cfg.validate() didn't run before Render/WriteFile, a newline sneaking in
+// via --bind (parseServerFlags stores it verbatim) would end the unit file's
+// directive line, and whatever follows becomes a fresh directive that
+// launchd runs at login. This proves the whole install refuses to write
+// anything — not merely that it reports an error — which is the property a
+// future refactor could silently break while still returning nonzero.
+func TestServiceInstallRejectsNewlineInBind(t *testing.T) {
+	orig := resolveBin
+	resolveBin = func() (string, error) { return "/usr/local/bin/claude-sessions", nil }
+	defer func() { resolveBin = orig }()
+
+	svc := &launchdService{home: t.TempDir(), uid: 501}
+	f := newFakeRunner()
+
+	rc := serviceInstall(svc, f.run, []string{"--bind", "127.0.0.1\nExecStartPre=/bin/sh -c evil"})
+	if rc != 1 {
+		t.Fatalf("serviceInstall() = %d, want 1 (validate should reject the newline)", rc)
+	}
+	if _, err := os.Stat(svc.UnitPath()); !os.IsNotExist(err) {
+		t.Fatalf("unit file exists at %s after a rejected config, want nothing written", svc.UnitPath())
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("Load ran commands %q after a rejected config, want none — the unit was never even written", f.joined())
+	}
+}
+
+// Task 6's Status distinguishes "the service is absent" (serviceStatus{}, nil)
+// from "I could not ask" (an error) — the latter happens over ssh to a Mac
+// with no console session. That error must surface as exit 1, not fall
+// through to the not-installed exit code 3. Uses the real launchdService
+// against a fakeRunner scripted with the actual transcript from
+// TestLaunchdStatus's "could not even ask" case, so this exercises the
+// production Status() path rather than a stand-in that just hands back an
+// error.
+func TestServiceStatusCmdSurfacesStatusError(t *testing.T) {
+	f := newFakeRunner()
+	f.fail(launchdWantCmd[0], "Could not find domain for gui/501", errors.New("exit status 113"))
+	svc := &launchdService{home: t.TempDir(), uid: 501}
+
+	rc := serviceStatusCmd(svc, f.run, nil)
+	if rc != 1 {
+		t.Errorf("serviceStatusCmd() = %d, want 1 (a Status error is not \"not installed\")", rc)
+	}
+}
+
+// systemd's MainPID=0 with ActiveState=active is a real, documented state —
+// Task 6's Status returns Running:true, PID:0 for it, not a parse failure.
+// Printing "running yes (pid 0)" reads as a strange half-alive process; the
+// pid clause must be omitted when PID is 0 and kept when it isn't. Drives
+// this through the real systemdService + fakeRunner (the same shape
+// TestSystemdStatus already covers) so it also protects Status() → command
+// wiring, not just a formatting helper in isolation.
+func TestServiceStatusCmdOmitsPidZero(t *testing.T) {
+	tests := []struct {
+		name       string
+		out        string
+		want       string
+		wantAbsent string
+	}{
+		{
+			name:       "pid zero omits the clause",
+			out:        "LoadState=loaded\nActiveState=active\nMainPID=0\n",
+			want:       "running yes\n",
+			wantAbsent: "running yes (pid 0)",
+		},
+		{
+			name: "nonzero pid still shown",
+			out:  "LoadState=loaded\nActiveState=active\nMainPID=4242\n",
+			want: "running yes (pid 4242)\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			orig := serviceOut
+			serviceOut = &buf
+			defer func() { serviceOut = orig }()
+
+			f := newFakeRunner()
+			f.fail(systemdWantCmd[0], tt.out, nil)
+			svc := &systemdService{home: t.TempDir(), user: "andy"}
+
+			if rc := serviceStatusCmd(svc, f.run, nil); rc != 0 {
+				t.Fatalf("serviceStatusCmd() = %d, want 0 (running)", rc)
+			}
+			if !strings.Contains(buf.String(), tt.want) {
+				t.Errorf("output = %q, want it to contain %q", buf.String(), tt.want)
+			}
+			if tt.wantAbsent != "" && strings.Contains(buf.String(), tt.wantAbsent) {
+				t.Errorf("output = %q, want it NOT to contain %q", buf.String(), tt.wantAbsent)
 			}
 		})
 	}
