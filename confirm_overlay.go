@@ -10,6 +10,12 @@ import (
 // confirmHint is the fixed hint row drawn below the question inside the box.
 const confirmHint = "[y] yes    [n] no"
 
+// confirmHintStrict is shown instead of confirmHint when the dialog requires
+// shift-Y — a deliberately harder-to-hit key than plain 'y' or Enter, so a
+// reflexive keypress can't confirm an action the caller flagged as
+// interrupting active work.
+const confirmHintStrict = "[Y] yes (shift)    [n] no"
+
 // previewBoxMinInner is the inner width the box widens to when it carries a
 // preview block, so pane output is legible rather than shredded by clipping.
 const previewBoxMinInner = 72
@@ -53,19 +59,28 @@ const (
 	confirmBoxV  = "│"
 )
 
-// confirmState is the pure key-handling core of the confirm overlay. It has
-// no fields — every key maps deterministically to confirm/cancel/ignore — but
-// stays a struct (mirroring newPickerState) so handle's signature never has
-// to change if it grows state later.
-type confirmState struct{}
+// confirmState is the pure key-handling core of the confirm overlay. strict
+// narrows the confirm key to shift-Y only (see confirmHintStrict); everything
+// else about the dialog is unchanged.
+type confirmState struct {
+	strict bool
+}
 
 // handle applies one key event, reporting whether the dialog is done and, if
-// so, whether the user confirmed. y/Y/Enter confirm; n/N/q/Q/Esc/Ctrl-C
-// cancel; everything else (arrows, stray printable keys, …) is ignored so the
-// loop keeps waiting.
-func (confirmState) handle(key string) (confirmed, done bool) {
+// so, whether the user confirmed. In the default (non-strict) mode y/Y/Enter
+// confirm; in strict mode only capital "Y" confirms — plain 'y' and Enter are
+// ignored rather than treated as cancel, so a mistyped lowercase 'y' just
+// waits instead of silently dismissing the dialog. n/N/q/Q/Esc/Ctrl-C cancel
+// in both modes; everything else (arrows, stray printable keys, …) is
+// ignored so the loop keeps waiting.
+func (s confirmState) handle(key string) (confirmed, done bool) {
 	switch key {
-	case "y", "Y", "\r", "\n", KeyEnter:
+	case "Y":
+		return true, true
+	case "y", "\r", "\n", KeyEnter:
+		if s.strict {
+			return false, false
+		}
 		return true, true
 	case "n", "N", "q", "Q", KeyEsc, "\x03":
 		return false, true
@@ -87,7 +102,7 @@ func (confirmState) handle(key string) (confirmed, done bool) {
 // The preview grows to fill the terminal rather than stopping at a fixed
 // ceiling: the taller the window, the more pane output you get to judge the
 // kill by. What bounds it is the viewport itself — see previewContentRows.
-func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int) string {
+func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int, strict bool) string {
 	qLines := strings.Split(question, "\n")
 
 	contentRows := 0
@@ -96,7 +111,12 @@ func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int)
 	}
 	hasPreview := prev != nil && contentRows > 0
 
-	innerWidth := visualLen(confirmHint)
+	hint := confirmHint
+	if strict {
+		hint = confirmHintStrict
+	}
+
+	innerWidth := visualLen(hint)
 	for _, l := range qLines {
 		if w := visualLen(l); w > innerWidth {
 			innerWidth = w
@@ -133,7 +153,7 @@ func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int)
 		box = append(box, pad(l))
 	}
 	box = append(box, pad(""))
-	box = append(box, pad(dim(confirmHint)))
+	box = append(box, pad(dim(hint)))
 	box = append(box, confirmBoxBL+strings.Repeat(confirmBoxH, innerWidth+2)+confirmBoxBR)
 
 	if cols <= 0 || rows <= 0 {
@@ -186,13 +206,15 @@ func modalWakesWith(wakes []wakeFD, p *previewPane) []wakeFD {
 // render() paints over it. wakes lets the caller pass modal wake sources
 // (e.g. resize) so the box stays correctly positioned across a live resize.
 func confirmOverlay(question string, wakes []wakeFD) bool {
-	return confirmOverlayPreview(question, nil, wakes)
+	return confirmOverlayPreview(question, nil, wakes, false)
 }
 
 // confirmOverlayPreview is confirmOverlay with an optional preview block. The
 // pane fetches in the background and wakes the loop when it lands, so a slow
 // or unreachable remote host never delays the dialog appearing. A nil pane
-// renders exactly what confirmOverlay renders.
+// renders exactly what confirmOverlay renders. strict requires shift-Y to
+// confirm (see confirmState.handle) — set it for actions that would
+// interrupt a non-idle session, so a reflexive 'y' or Enter can't confirm.
 //
 // Invariant: wake() is called exactly once, before the loop, and this
 // function never closes p. The single-threaded contract that makes wake()'s
@@ -200,8 +222,8 @@ func confirmOverlay(question string, wakes []wakeFD) bool {
 // that runs this loop is the only one that can close the pane, and only
 // after the loop returns — so close() is the caller's responsibility, not
 // this function's.
-func confirmOverlayPreview(question string, p *previewPane, wakes []wakeFD) bool {
-	state := confirmState{}
+func confirmOverlayPreview(question string, p *previewPane, wakes []wakeFD, strict bool) bool {
+	state := confirmState{strict: strict}
 	renderer := newScreenRenderer(os.Stdout)
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
@@ -217,7 +239,7 @@ func confirmOverlayPreview(question string, p *previewPane, wakes []wakeFD) bool
 			snap := p.snapshot()
 			prev = &snap
 		}
-		_ = renderer.Draw(renderConfirmOverlay(question, prev, cols, rows), cols, rows)
+		_ = renderer.Draw(renderConfirmOverlay(question, prev, cols, rows, strict), cols, rows)
 		keys, _ := readModalEvents(decoder, modalWakes)
 		for _, key := range keys {
 			confirmed, done := state.handle(key)

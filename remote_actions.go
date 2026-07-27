@@ -262,8 +262,8 @@ func actKillRemote(c *actCtx) {
 		return
 	}
 	host, pid := s.Host, s.PID
-	pane := startRemoteKillPreview(*s)
-	confirmed := confirmOverlayPreview(fmt.Sprintf("kill PID %d on %s?", pid, host), pane, c.modalWakes)
+	pane := startRemotePreview(*s)
+	confirmed := confirmOverlayPreview(fmt.Sprintf("kill PID %d on %s?", pid, host), pane, c.modalWakes, false)
 	// Explicit call, not a defer: this frees the wake pipe before the remote
 	// kill request and before the second (preview-less) worktree confirmOverlay
 	// further down — the pane's raw fd is only safe while this loop is live.
@@ -359,7 +359,13 @@ func actAttachRemote(c *actCtx) {
 	if tname == "" {
 		// Not in tmux — offer migration.
 		question := fmt.Sprintf("PID %d on %s is not in tmux. Migrate first?", pid, host)
-		if !confirmOverlay(question, c.modalWakes) {
+		if s.NotIdle() {
+			question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question
+		}
+		pane := startRemotePreview(*s)
+		confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())
+		pane.close()
+		if !confirmed {
 			return
 		}
 		c.prepareLineOutput()
