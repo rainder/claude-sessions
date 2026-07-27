@@ -220,17 +220,83 @@ func TestModalWakesAppendDoesNotMutateCallerSlice(t *testing.T) {
 	}
 }
 
-func TestRenderConfirmOverlayPreviewCapsAtTwelveRows(t *testing.T) {
-	lines := make([]string, 40)
+// numberedPreview builds a preview whose lines are individually identifiable,
+// so a test can count exactly how many of them the box rendered.
+func numberedPreview(n int) *overlayPreview {
+	lines := make([]string, n)
 	for i := range lines {
-		lines[i] = fmt.Sprintf("line-%02d", i)
+		lines[i] = fmt.Sprintf("line-%03d", i)
 	}
-	prev := &overlayPreview{Title: "t", Loaded: true, Lines: lines}
-	out := renderConfirmOverlay("hi", prev, 120, 200)
-	if strings.Contains(out, "line-27") {
-		t.Fatalf("more than 12 content rows rendered:\n%s", out)
+	return &overlayPreview{Title: "t", Loaded: true, Lines: lines}
+}
+
+// renderedPreviewRows counts how many of numberedPreview's lines survived into
+// the rendered box.
+func renderedPreviewRows(out string, n int) int {
+	count := 0
+	for i := 0; i < n; i++ {
+		if strings.Contains(out, fmt.Sprintf("line-%03d", i)) {
+			count++
+		}
 	}
-	if !strings.Contains(out, "line-39") || !strings.Contains(out, "line-28") {
-		t.Fatalf("last 12 rows not rendered:\n%s", out)
+	return count
+}
+
+// The preview has no fixed ceiling — it grows with the terminal. These pin the
+// exact arithmetic across the band, which was previously unguarded: mutating
+// the chrome or margin constant left the whole suite green.
+func TestRenderConfirmOverlayPreviewGrowsWithTerminal(t *testing.T) {
+	cases := []struct{ rows, want int }{
+		{12, 0},    // too short: plain box
+		{13, 1},    // first row that fits
+		{25, 13},   // mid-band
+		{50, 38},   // tall terminal keeps growing
+		{200, 188}, // no cap at any height
+	}
+	for _, tc := range cases {
+		prev := numberedPreview(250)
+		out := renderConfirmOverlay("hi", prev, 120, tc.rows)
+		if got := renderedPreviewRows(out, 250); got != tc.want {
+			t.Fatalf("rows=%d rendered %d preview lines, want %d", tc.rows, got, tc.want)
+		}
+	}
+}
+
+// The tail is what matters — the newest pane output, not the oldest.
+func TestRenderConfirmOverlayPreviewKeepsNewestLines(t *testing.T) {
+	prev := numberedPreview(100)
+	out := renderConfirmOverlay("hi", prev, 120, 25) // 13 content rows
+	if !strings.Contains(out, "line-099") || !strings.Contains(out, "line-087") {
+		t.Fatalf("newest 13 lines not rendered:\n%s", out)
+	}
+	if strings.Contains(out, "line-086") {
+		t.Fatalf("rendered more than the newest 13 lines:\n%s", out)
+	}
+}
+
+// Adding a preview must never push the box past the viewport. The reserve
+// accounts for len(qLines) rather than assuming 1, so a multi-line question
+// eats into the preview instead of overflowing the bottom of the screen — a
+// 6-line question at rows=24 used to produce a 25-row box.
+//
+// A question taller than the terminal overflows on its own, with or without a
+// preview (the plain box has always done this), so the bar is: no worse than
+// the nil-preview box, and within the viewport whenever the box fits at all.
+func TestRenderConfirmOverlayPreviewBoxFitsViewport(t *testing.T) {
+	for _, rows := range []int{13, 14, 20, 24, 40, 80} {
+		for _, qLines := range []int{1, 2, 6, 15} {
+			q := strings.TrimSuffix(strings.Repeat("q\n", qLines), "\n")
+			plain := len(strings.Split(renderConfirmOverlay(q, nil, 120, rows), "\n"))
+			got := len(strings.Split(renderConfirmOverlay(q, numberedPreview(250), 120, rows), "\n"))
+
+			limit := rows
+			if plain > limit {
+				limit = plain // question alone already overflows; not the preview's doing
+			}
+			if got > limit {
+				t.Fatalf("rows=%d qLines=%d: preview box is %d lines, want <= %d (plain box is %d)",
+					rows, qLines, got, limit, plain)
+			}
+		}
 	}
 }

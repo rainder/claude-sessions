@@ -14,6 +14,34 @@ const confirmHint = "[y] yes    [n] no"
 // preview block, so pane output is legible rather than shredded by clipping.
 const previewBoxMinInner = 72
 
+// previewBoxMargin is how many rows of terminal the box deliberately leaves
+// unused, so the dialog reads as an overlay rather than a full-screen takeover.
+const previewBoxMargin = 4
+
+// previewBoxChrome is every box row that is not a preview content row: the two
+// borders, the block's title and its two dividers, the blank separator and the
+// hint. The question is counted separately since it can be multi-line.
+const previewBoxChrome = 7
+
+// previewContentRows is how many pane lines fit, given the terminal height and
+// how many lines the question occupies.
+//
+// There is no fixed ceiling — a taller terminal simply shows more. The viewport
+// is the cap, and qLines is part of the arithmetic rather than assumed to be 1:
+// a multi-line question eats into the preview instead of pushing the box off
+// the bottom of the screen. rows <= 0 means an unknown terminal size, which is
+// treated as "no room" so the plain box renders.
+func previewContentRows(rows, qLines int) int {
+	if rows <= 0 {
+		return 0
+	}
+	n := rows - qLines - previewBoxChrome - previewBoxMargin
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 // Box-drawing characters for the confirm overlay, matching the square-corner
 // style preview.go already uses for its "┌─" / "│" transcript framing.
 const (
@@ -47,28 +75,27 @@ func (confirmState) handle(key string) (confirmed, done bool) {
 }
 
 // renderConfirmOverlay draws a bordered box centered in a cols x rows
-// terminal: an optional preview block (title, divider, up to 12 content rows,
-// divider), the question (one line per '\n' in question), a blank separator,
-// then the dimmed "[y] yes   [n] no" hint. On a narrow terminal the box
-// shrinks to fit and each line is clipped rather than wrapped. When cols or
-// rows is unknown (<=0) the box is emitted unpositioned at the top-left,
-// mirroring renderNewPicker's fallback for an unknown terminal size. prev may
-// be nil, in which case no preview block is drawn and the box matches its
-// pre-preview appearance byte-for-byte.
+// terminal: an optional preview block (title, divider, content rows, divider),
+// the question (one line per '\n' in question), a blank separator, then the
+// dimmed "[y] yes   [n] no" hint. On a narrow terminal the box shrinks to fit
+// and each line is clipped rather than wrapped. When cols or rows is unknown
+// (<=0) the box is emitted unpositioned at the top-left, mirroring
+// renderNewPicker's fallback for an unknown terminal size. prev may be nil, in
+// which case no preview block is drawn and the box matches its pre-preview
+// appearance byte-for-byte.
+//
+// The preview grows to fill the terminal rather than stopping at a fixed
+// ceiling: the taller the window, the more pane output you get to judge the
+// kill by. What bounds it is the viewport itself — see previewContentRows.
 func renderConfirmOverlay(question string, prev *overlayPreview, cols, rows int) string {
+	qLines := strings.Split(question, "\n")
+
 	contentRows := 0
-	if prev != nil && rows > 0 {
-		contentRows = rows - 12 // box chrome + question + blank + hint
-		if contentRows > 12 {
-			contentRows = 12
-		}
-		if contentRows < 0 {
-			contentRows = 0
-		}
+	if prev != nil {
+		contentRows = previewContentRows(rows, len(qLines))
 	}
 	hasPreview := prev != nil && contentRows > 0
 
-	qLines := strings.Split(question, "\n")
 	innerWidth := visualLen(confirmHint)
 	for _, l := range qLines {
 		if w := visualLen(l); w > innerWidth {
