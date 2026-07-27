@@ -138,8 +138,11 @@ currently-live session ids, zero-byte/corrupt files, scratch cwds (`/tmp`,
 `/private` — narrower than picker.go's `hiddenCwd`; worktrees stay resumable),
 and agent transcripts — any entry with `isSidechain:true` or an `entrypoint`
 other than `"cli"` (headless `claude -p` / SDK runs); a missing entrypoint
-field passes (old format). Metadata comes from a single ~30-line head scan;
-NAME is best-effort: user-set name from a lingering `~/.claude/sessions`
+field passes (old format). Metadata comes from a single scan: cwd/branch/name
+resolve within the first ~30 lines, but the scan runs up to 400 lines to
+collect up to 3 user prompts, since later prompts routinely land past line 30
+once tool_use/tool_result entries are interleaved in. NAME is best-effort:
+user-set name from a lingering `~/.claude/sessions`
 file (`nameSource != "derived"`), else the transcript's summary line, else
 `-`. Session ids arriving over HTTP are format-validated
 (`resumeSessionIDRe`) before touching the filesystem or tmux.

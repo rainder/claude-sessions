@@ -317,6 +317,70 @@ func TestReadResumableHeadCollectsPrompts(t *testing.T) {
 	}
 }
 
+// TestReadResumableHeadPromptsPastHeadWindow pins the actual bug: a real
+// second/third prompt routinely lands past resumeHeadLines (30) once a turn's
+// tool_use/tool_result entries are interleaved in, so the prompt scan must keep
+// going past that window (up to resumePromptsScanLines) instead of stopping
+// there like the cheap cwd/branch/summary fields do.
+func TestReadResumableHeadPromptsPastHeadWindow(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	filler := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}`
+
+	entries := []string{`{"type":"attachment","cwd":"/home/u/proj"}`}
+	entries = append(entries, `{"type":"user","message":{"role":"user","content":"first prompt"}}`)
+	for i := 0; i < resumeHeadLines; i++ { // pushes the 2nd prompt well past line 30
+		entries = append(entries, filler)
+	}
+	entries = append(entries, `{"type":"user","message":{"role":"user","content":"second prompt"}}`)
+	for i := 0; i < resumeHeadLines; i++ { // and the 3rd further still
+		entries = append(entries, filler)
+	}
+	entries = append(entries, `{"type":"user","message":{"role":"user","content":"third prompt"}}`)
+
+	path := writeResumableTranscript(t, home, "proj", "faraway1", now, entries...)
+	head, ok := readResumableHead(path)
+	if !ok {
+		t.Fatal("readResumableHead failed")
+	}
+	if head.cwd != "/home/u/proj" {
+		t.Errorf("cwd = %q, want the attachment's cwd", head.cwd)
+	}
+	want := []string{"first prompt", "second prompt", "third prompt"}
+	if len(head.prompts) != len(want) {
+		t.Fatalf("collected %d prompts (%q), want %d: %q", len(head.prompts), head.prompts, len(want), want)
+	}
+	for i, w := range want {
+		if head.prompts[i] != w {
+			t.Errorf("prompts[%d] = %q, want %q", i, head.prompts[i], w)
+		}
+	}
+}
+
+// TestReadResumableHeadPromptsScanCap confirms a prompt past
+// resumePromptsScanLines is dropped rather than scanning the whole file
+// unbounded — the point of the cap.
+func TestReadResumableHeadPromptsScanCap(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	filler := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}`
+
+	entries := []string{`{"type":"user","message":{"role":"user","content":"first prompt"}}`}
+	for i := 0; i < resumePromptsScanLines; i++ {
+		entries = append(entries, filler)
+	}
+	entries = append(entries, `{"type":"user","message":{"role":"user","content":"too far"}}`)
+
+	path := writeResumableTranscript(t, home, "proj", "toofar01", now, entries...)
+	head, ok := readResumableHead(path)
+	if !ok {
+		t.Fatal("readResumableHead failed")
+	}
+	if len(head.prompts) != 1 || head.prompts[0] != "first prompt" {
+		t.Fatalf("prompts = %q, want only the first prompt (second is past the scan cap)", head.prompts)
+	}
+}
+
 func TestTruncateRunes(t *testing.T) {
 	cases := []struct {
 		s    string

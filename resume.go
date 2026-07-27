@@ -34,11 +34,18 @@ const (
 	// resumableMaxCount bounds the picker list after mtime-desc sorting.
 	resumableMaxCount = 100
 	// resumeHeadLines is how many transcript lines to scan for cwd / branch /
-	// first prompt. The metadata lives in the first few entries.
+	// first prompt. That metadata lives in the first few entries.
 	resumeHeadLines = 30
+	// resumePromptsScanLines bounds how far the scan runs looking for
+	// resumePromptsMax prompts, once resumeHeadLines' cheaper fields are
+	// already found. A real second or third prompt routinely lands past line
+	// 30 — each turn's tool_use/tool_result entries push the next user line
+	// well beyond the metadata window — so collecting more than the first
+	// prompt needs a wider read.
+	resumePromptsScanLines = 400
 	// resumePromptMax is the rune budget for the first-prompt column.
 	resumePromptMax = 60
-	// resumePromptsMax is how many user prompts the head scan keeps per
+	// resumePromptsMax is how many user prompts the scan keeps per
 	// transcript, for the → detail overlay. Three is enough to tell two
 	// same-repo sessions apart without turning the scan into a full read.
 	resumePromptsMax = 3
@@ -202,13 +209,17 @@ func (h resumableHead) agentTranscript() bool {
 	return h.sidechain || (h.entrypoint != "" && h.entrypoint != "cli")
 }
 
-// readResumableHead scans up to resumeHeadLines lines of a transcript for the
-// first cwd, first gitBranch, and the first resumePromptsMax genuine user
-// prompts. It extends the head-scan approach of extractCWDFromJSONL (picker.go)
-// to several fields in one pass. ok is false only when the file can't be opened;
-// a readable file with no cwd yields ok=true with an empty cwd, and the caller
-// drops it. Corrupt lines are skipped individually rather than aborting the
-// scan.
+// readResumableHead scans a transcript for the first cwd, first gitBranch, and
+// up to resumePromptsMax genuine user prompts. cwd/gitBranch/summary/entrypoint
+// are cheap and live in the first few entries, so those stop mattering past
+// resumeHeadLines; prompts keep the scan going to resumePromptsScanLines
+// because a real second or third prompt routinely sits much further in (each
+// turn's tool_use/tool_result entries push the next user line well past the
+// metadata window). It extends the head-scan approach of extractCWDFromJSONL
+// (picker.go) to several fields in one pass. ok is false only when the file
+// can't be opened; a readable file with no cwd yields ok=true with an empty
+// cwd, and the caller drops it. Corrupt lines are skipped individually rather
+// than aborting the scan.
 func readResumableHead(path string) (resumableHead, bool) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -219,7 +230,10 @@ func readResumableHead(path string) (resumableHead, bool) {
 	var head resumableHead
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for i := 0; scanner.Scan() && i < resumeHeadLines; i++ {
+	for i := 0; scanner.Scan() && i < resumePromptsScanLines; i++ {
+		if i >= resumeHeadLines && len(head.prompts) >= resumePromptsMax {
+			break // past the metadata window and prompts are full: nothing left to gain
+		}
 		var line struct {
 			Type        string `json:"type"`
 			CWD         string `json:"cwd"`
