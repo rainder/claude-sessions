@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -624,6 +625,74 @@ func TestSessionsIncludesHostUsage(t *testing.T) {
 	}
 	assertFloatPtr(t, got.HostUsage.CPUPercent, &cpu)
 	assertFloatPtr(t, got.HostUsage.MemoryPercent, &memory)
+}
+
+func TestSessionsReportsThisHostsIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	want := LoadHostID()
+	s := &server{token: "secret", host: "devbox"}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		HostID string `json:"host_id"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.HostID) != 32 {
+		t.Fatalf("host_id = %q, want 32 hex chars", got.HostID)
+	}
+	if _, err := hex.DecodeString(got.HostID); err != nil {
+		t.Fatalf("host_id = %q, not hex: %v", got.HostID, err)
+	}
+	if got.HostID != want {
+		t.Fatalf("host_id = %q, want %q", got.HostID, want)
+	}
+}
+
+func TestSessionsReportsANewIdentityWithoutRestarting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{token: "secret", host: "devbox"}
+
+	fetchHostID := func() string {
+		req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		rec := httptest.NewRecorder()
+		s.sessions(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+		}
+		var got struct {
+			HostID string `json:"host_id"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got.HostID
+	}
+
+	first := fetchHostID()
+	hostIDPath := filepath.Join(ConfigDir(), "host-id")
+	original, err := os.ReadFile(hostIDPath)
+	if err != nil {
+		t.Fatalf("reading host-id file: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.WriteFile(hostIDPath, original, 0o644)
+	})
+	if err := os.Remove(hostIDPath); err != nil {
+		t.Fatalf("removing host-id file: %v", err)
+	}
+
+	second := fetchHostID()
+	if second == first {
+		t.Fatalf("host_id unchanged after identity file removed: %q", second)
+	}
 }
 
 func TestSessionsEmitsNestedLoadAverage(t *testing.T) {

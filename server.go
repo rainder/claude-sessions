@@ -602,8 +602,11 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 		hostUsage = s.hostSnapshot()
 	}
 	resp := map[string]any{
-		"hostname":  s.host,
-		"ts":        time.Now().Unix(),
+		"hostname": s.host,
+		"ts":       time.Now().Unix(),
+		// Uncached on purpose: LoadHostID reads the host-id file per call, so an
+		// identity change is visible on the next poll without a restart.
+		"host_id":   LoadHostID(),
 		"hostUsage": hostUsage,
 		"sessions":  sessions,
 	}
