@@ -263,7 +263,10 @@ func actKillRemote(c *actCtx) {
 		return
 	}
 	host, pid := s.Host, s.PID
-	if !confirmOverlay(fmt.Sprintf("kill PID %d on %s?", pid, host), c.modalWakes) {
+	pane := startRemoteKillPreview(*s)
+	confirmed := confirmOverlayPreview(fmt.Sprintf("kill PID %d on %s?", pid, host), pane, c.modalWakes)
+	pane.close()
+	if !confirmed {
 		return
 	}
 	c.prepareLineOutput()

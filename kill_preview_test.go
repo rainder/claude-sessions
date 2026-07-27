@@ -310,6 +310,21 @@ func TestPreviewPaneNilIsSafe(t *testing.T) {
 	p.close() // must not panic
 }
 
+func TestKillPreviewTitle(t *testing.T) {
+	local := Session{PID: 4242, Name: "my-session", NameSource: "user"}
+	if got := killPreviewTitle(local); !strings.Contains(got, "my-session") || !strings.Contains(got, "pid 4242") {
+		t.Fatalf("local title = %q", got)
+	}
+	remote := Session{PID: 99, Host: "pi", Name: "my-session", NameSource: "user"}
+	got := killPreviewTitle(remote)
+	if !strings.Contains(got, "pi:99") {
+		t.Fatalf("remote title = %q, want host-qualified", got)
+	}
+	if strings.Contains(got, "pid 99") {
+		t.Fatalf("remote title should not use the local pid form: %q", got)
+	}
+}
+
 // waitLoaded polls until the pane's fetch has landed, failing the test on timeout.
 func waitLoaded(t *testing.T, p *previewPane) overlayPreview {
 	t.Helper()

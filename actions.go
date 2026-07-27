@@ -181,7 +181,10 @@ func actKill(c *actCtx) {
 	} else {
 		question = fmt.Sprintf("kill PID %d?", s.PID)
 	}
-	if !confirmOverlay(question, c.modalWakes) {
+	pane := startLocalKillPreview(*s)
+	confirmed := confirmOverlayPreview(question, pane, c.modalWakes)
+	pane.close()
+	if !confirmed {
 		return
 	}
 	// Resolve the worktree question before the kill — afterwards the session is
