@@ -260,9 +260,9 @@ func TestSelectedHeadlessRowsSuppressDim(t *testing.T) {
 func TestHeadlessRowsDimmed(t *testing.T) {
 	now := time.Now().UnixMilli()
 	normal := Session{PID: 11111, Name: "my-task", CWD: "/tmp/normaldir",
-		Status: "busy", Entrypoint: "cli", UpdatedAt: now}
+		Status: "busy", Entrypoint: "cli", UpdatedAt: now, Tmux: "dev:0.0"}
 	ghost := Session{PID: 99901, CWD: "/tmp/ghostdir",
-		Entrypoint: "sdk-cli", StartedAt: now}
+		Entrypoint: "sdk-cli", StartedAt: now, Tmux: "dev:0.1"}
 
 	for _, mode := range []string{"1", "2", "3"} {
 		var b strings.Builder
@@ -1817,11 +1817,11 @@ func TestDisabledRowsRenderAmberRailAndMutedBodyAcrossModes(t *testing.T) {
 }
 
 func TestDisabledRailAddsFixedHeaderColumnAcrossModes(t *testing.T) {
-	// A disabled session reserves the rail slot (and only that slot: no tmux, no
-	// group), so the header indents by exactly one 2-cell slot in every mode.
+	// A disabled session reserves the rail slot (and only that slot: tmux-backed,
+	// no group), so the header indents by exactly one 2-cell slot in every mode.
 	session := Session{
 		PID: 42, SessionID: "one", Name: "one", NameSource: "user",
-		CWD: "/work/one", Status: "idle", Disabled: true,
+		CWD: "/work/one", Status: "idle", Disabled: true, Tmux: "dev:0.0",
 	}
 	cases := []struct {
 		mode       string
@@ -2068,6 +2068,113 @@ func TestGroupBadgeSlotOnlyWhenGroupVisible(t *testing.T) {
 	}
 	if !strings.HasPrefix(hdrNone, "PID") {
 		t.Fatalf("unbadged header not flush: %q", hdrNone)
+	}
+}
+
+func TestNoTmuxMarkerSurfacedOnlyInCompactViews(t *testing.T) {
+	bare := Session{PID: 1, Name: "bare", CWD: "/w"}
+	inTmux := Session{PID: 2, Name: "backed", CWD: "/w", Tmux: "dev:0.0"}
+	local := testLocalHost(bare, inTmux)
+
+	for _, mode := range []string{"2", "3"} {
+		t.Run("mode"+mode, func(t *testing.T) {
+			var b strings.Builder
+			RenderAll(&b, mode, local, nil, "", nil, 0, 0, "dir")
+			bareRow := findRow(t, b.String(), "bare")
+			backedRow := findRow(t, b.String(), "backed")
+			if !strings.Contains(bareRow, dim("∅")+" ") {
+				t.Fatalf("mode %s: no-tmux session missing marker: %q", mode, bareRow)
+			}
+			if strings.Contains(backedRow, "∅") {
+				t.Fatalf("mode %s: tmux-backed session shows marker: %q", mode, backedRow)
+			}
+			if visualLen(bareRow) != visualLen(backedRow) {
+				t.Fatalf("mode %s: rows misaligned: bare=%d backed=%d", mode, visualLen(bareRow), visualLen(backedRow))
+			}
+		})
+	}
+
+	// The full view already spells out tmux state in its own TMUX column, so
+	// it never reserves this slot or shows the marker glyph.
+	var full strings.Builder
+	RenderAll(&full, "1", local, nil, "", nil, 0, 0, "dir")
+	if strings.Contains(full.String(), "∅") {
+		t.Fatalf("full view should not show the no-tmux marker:\n%s", full.String())
+	}
+}
+
+func TestNoTmuxSlotOnlyReservedWhenNeeded(t *testing.T) {
+	allBacked := testLocalHost(
+		Session{PID: 1, Name: "sess-a", CWD: "/w", Tmux: "dev:0.0"},
+		Session{PID: 2, Name: "sess-b", CWD: "/w", Tmux: "dev:0.1"},
+	)
+	oneBare := testLocalHost(
+		Session{PID: 1, Name: "sess-a", CWD: "/w", Tmux: "dev:0.0"},
+		Session{PID: 2, Name: "sess-b", CWD: "/w"},
+	)
+
+	for _, mode := range []string{"2", "3"} {
+		none := BuildTableFrame(mode, allBacked, nil, "", nil, 0, 0, "dir", groupView{})
+		with := BuildTableFrame(mode, oneBare, nil, "", nil, 0, 0, "dir", groupView{})
+
+		aNone := findRow(t, frameText(none), "sess-a")
+		aWith := findRow(t, frameText(with), "sess-a")
+		if visualLen(aWith) != visualLen(aNone)+2 {
+			t.Fatalf("mode %s: backed row width = %d, want %d (2-col blank marker slot)\nwith: %q\nnone: %q",
+				mode, visualLen(aWith), visualLen(aNone)+2, aWith, aNone)
+		}
+
+		hdrNone := findRow(t, frameText(none), "NAME")
+		hdrWith := findRow(t, frameText(with), "NAME")
+		if strings.HasPrefix(hdrNone, "  ") {
+			t.Fatalf("mode %s: all-backed header should be flush: %q", mode, hdrNone)
+		}
+		if !strings.HasPrefix(hdrWith, "  ") {
+			t.Fatalf("mode %s: header should indent by one slot: %q", mode, hdrWith)
+		}
+	}
+}
+
+func TestNoTmuxMarkerSelectedAndHeadlessRowsSuppressDim(t *testing.T) {
+	now := time.Now().UnixMilli()
+	for _, mode := range []string{"2", "3"} {
+		// Selected + headless hits decorateSessionRow's "selected" branch (it
+		// takes priority over Headless()), where the body is never dimmed — so
+		// this is the proven zero-dim invariant from
+		// TestSelectedHeadlessRowsSuppressDim; the marker must use its plain
+		// form here too, not the self-contained dim token.
+		selectedHeadless := Session{
+			PID: 1, Name: "headless", NameSource: "user", CWD: "/w/selected",
+			Status: "busy", Entrypoint: "sdk-cli", StartedAt: now,
+		}
+		row := renderSessionRowForTest(t, mode, selectedHeadless, true)
+		inner := strings.TrimSuffix(strings.TrimPrefix(row, ansiSelectedBG), ansiReset)
+		if strings.Contains(inner, ansiDim) {
+			t.Errorf("mode %s: selected+headless no-tmux row contains dim wrapper: %q", mode, row)
+		}
+		if !strings.Contains(stripANSI(row), "∅ ") {
+			t.Errorf("mode %s: selected+headless no-tmux row missing marker: %q", mode, row)
+		}
+
+		// Unselected headless hits the "case session.Headless()" branch, which
+		// wraps badge+rail+marker+body in one outer dim(): the marker must not
+		// carry its own embedded reset, or that reset would cancel the dim
+		// mid-row (the bug this test guards against).
+		headless := Session{
+			PID: 2, CWD: "/w/ghost", Entrypoint: "sdk-cli", StartedAt: now,
+		}
+		var b strings.Builder
+		RenderAll(&b, mode, testLocalHost(headless), nil, "", nil, 0, 0, "dir")
+		headlessRow := findRow(t, b.String(), "ghost")
+		if !strings.HasPrefix(headlessRow, ansiDim) {
+			t.Fatalf("mode %s: headless no-tmux row not dimmed: %q", mode, headlessRow)
+		}
+		if inner := strings.TrimSuffix(strings.TrimPrefix(headlessRow, ansiDim), ansiReset); strings.Contains(inner, ansiReset) {
+			t.Fatalf("mode %s: headless no-tmux row has mid-row reset: %q", mode, headlessRow)
+		}
+		if !strings.Contains(stripANSI(headlessRow), "∅ ") {
+			t.Fatalf("mode %s: headless no-tmux row missing marker: %q", mode, headlessRow)
+		}
 	}
 }
 
