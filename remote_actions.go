@@ -262,8 +262,12 @@ func actKillRemote(c *actCtx) {
 		return
 	}
 	host, pid := s.Host, s.PID
+	question := fmt.Sprintf("kill PID %d on %s?", pid, host)
+	if s.NotIdle() {
+		question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — killing will interrupt it", s.StatusDisplay())) + "\n" + question
+	}
 	pane := startRemotePreview(*s)
-	confirmed := confirmOverlayPreview(fmt.Sprintf("kill PID %d on %s?", pid, host), pane, c.modalWakes, false)
+	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())
 	// Explicit call, not a defer: this frees the wake pipe before the remote
 	// kill request and before the second (preview-less) worktree confirmOverlay
 	// further down — the pane's raw fd is only safe while this loop is live.

@@ -181,8 +181,11 @@ func actKill(c *actCtx) {
 	} else {
 		question = fmt.Sprintf("kill PID %d?", s.PID)
 	}
+	if s.NotIdle() {
+		question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — killing will interrupt it", s.StatusDisplay())) + "\n" + question
+	}
 	pane := startLocalPreview(*s)
-	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, false)
+	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())
 	// Deliberately not deferred: the pane's wake fd must be released before the
 	// kill runs and before the second, preview-less worktree dialog below —
 	// its raw fd is only safe to hold open while this modal loop owns it.
