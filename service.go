@@ -14,7 +14,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -432,4 +435,100 @@ func (s *systemdService) Unload(run runner) error {
 // a unit that was never loaded in the first place.
 func systemdUnitAlreadyGone(out string) bool {
 	return strings.Contains(out, "does not exist") || strings.Contains(out, "not loaded")
+}
+
+// serviceStatus is what `service status` reports, and what its exit code
+// encodes.
+type serviceStatus struct {
+	Installed bool
+	Running   bool
+	PID       int
+}
+
+// exitCode makes `service status` scriptable. 2 is deliberately unused: this
+// repo reserves it for usage errors (main.go:60).
+func (s serviceStatus) exitCode() int {
+	switch {
+	case s.Running:
+		return 0
+	case s.Installed:
+		return 1
+	default:
+		return 3
+	}
+}
+
+// serviceManager is the platform-specific half of the feature. Both
+// implementations compile on every platform; newServiceManager picks one.
+type serviceManager interface {
+	UnitPath() string
+	Label() string
+	Render(cfg serviceConfig) string
+	defaultLogPath() string
+	Load(run runner) error
+	Unload(run runner) error
+	Status(run runner) (serviceStatus, error)
+}
+
+func newServiceManager() (serviceManager, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return &launchdService{home: home, uid: os.Getuid()}, nil
+	case "linux":
+		u, err := user.Current()
+		if err != nil {
+			return nil, fmt.Errorf("cannot determine current user: %w", err)
+		}
+		return &systemdService{home: home, user: u.Username}, nil
+	default:
+		return nil, fmt.Errorf("service management is only supported on macOS and Linux (this is %s)", runtime.GOOS)
+	}
+}
+
+var launchdPIDRe = regexp.MustCompile(`(?m)^\s*pid\s*=\s*(\d+)\s*$`)
+
+func (s *launchdService) Status(run runner) (serviceStatus, error) {
+	out, err := run("launchctl", "print", s.target())
+	if err != nil {
+		// launchctl exits non-zero when the service isn't loaded at all. That
+		// is an answer, not a failure.
+		return serviceStatus{}, nil
+	}
+	st := serviceStatus{Installed: true}
+	if m := launchdPIDRe.FindSubmatch(out); m != nil {
+		if pid, convErr := strconv.Atoi(string(m[1])); convErr == nil && pid > 0 {
+			st.PID = pid
+			st.Running = true
+		}
+	}
+	return st, nil
+}
+
+func (s *systemdService) Status(run runner) (serviceStatus, error) {
+	// `show` rather than `is-active`: one call yields load state, active state,
+	// and the PID, and it exits zero even for a unit that doesn't exist.
+	out, _ := run("systemctl", "--user", "show", systemdUnitName,
+		"--property=LoadState", "--property=ActiveState", "--property=MainPID")
+	fields := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok {
+			fields[k] = v
+		}
+	}
+	if fields["LoadState"] == "" || fields["LoadState"] == "not-found" {
+		return serviceStatus{}, nil
+	}
+	st := serviceStatus{Installed: true}
+	if fields["ActiveState"] == "active" {
+		st.Running = true
+		if pid, err := strconv.Atoi(fields["MainPID"]); err == nil && pid > 0 {
+			st.PID = pid
+		}
+	}
+	return st, nil
 }

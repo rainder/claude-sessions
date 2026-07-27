@@ -847,3 +847,115 @@ func TestSystemdUnloadReportsOtherFailures(t *testing.T) {
 		t.Fatal("Unload() = nil, want an error for a real disable failure")
 	}
 }
+
+func TestLaunchdStatus(t *testing.T) {
+	running := `com.skerla.claude-sessions = {
+	active count = 1
+	pid = 4242
+	state = running
+}`
+	tests := []struct {
+		name string
+		out  string
+		err  error
+		want serviceStatus
+	}{
+		{
+			name: "running reports its pid",
+			out:  running,
+			want: serviceStatus{Installed: true, Running: true, PID: 4242},
+		},
+		{
+			name: "loaded but not running",
+			out:  "com.skerla.claude-sessions = {\n\tstate = not running\n}",
+			want: serviceStatus{Installed: true},
+		},
+		{
+			name: "not loaded",
+			out:  "Could not find service \"com.skerla.claude-sessions\"",
+			err:  errors.New("exit status 113"),
+			want: serviceStatus{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeRunner()
+			f.fail("launchctl print", tt.out, tt.err)
+			svc := &launchdService{home: "/Users/andy", uid: 501}
+			got, err := svc.Status(f.run)
+			if err != nil {
+				t.Fatalf("Status() error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Status() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSystemdStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		err  error
+		want serviceStatus
+	}{
+		{
+			name: "active reports its pid",
+			out:  "LoadState=loaded\nActiveState=active\nMainPID=4242\n",
+			want: serviceStatus{Installed: true, Running: true, PID: 4242},
+		},
+		{
+			name: "loaded but inactive",
+			out:  "LoadState=loaded\nActiveState=inactive\nMainPID=0\n",
+			want: serviceStatus{Installed: true},
+		},
+		{
+			name: "not found",
+			out:  "LoadState=not-found\nActiveState=inactive\nMainPID=0\n",
+			want: serviceStatus{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeRunner()
+			f.fail("systemctl", tt.out, tt.err)
+			svc := &systemdService{home: "/home/andy", user: "andy"}
+			got, err := svc.Status(f.run)
+			if err != nil {
+				t.Fatalf("Status() error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Status() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// 2 is this repo's usage-error code (main.go:60). Overloading it would make a
+// typo'd flag indistinguishable from a real answer, so not-installed is 3.
+func TestServiceStatusExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		st   serviceStatus
+		want int
+	}{
+		{name: "running", st: serviceStatus{Installed: true, Running: true, PID: 1}, want: 0},
+		{name: "installed but stopped", st: serviceStatus{Installed: true}, want: 1},
+		{name: "not installed", st: serviceStatus{}, want: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.st.exitCode(); got != tt.want {
+				t.Errorf("exitCode() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// Both backends must satisfy the interface on every platform — that's the
+// whole point of not using build tags here.
+func TestBothBackendsSatisfyServiceManager(t *testing.T) {
+	var _ serviceManager = &launchdService{}
+	var _ serviceManager = &systemdService{}
+}
