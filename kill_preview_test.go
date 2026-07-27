@@ -121,10 +121,48 @@ func TestPreviewBlockClipsWideLinesToInnerWidth(t *testing.T) {
 }
 
 func TestPreviewBlockDropsSourceWhenTitleFillsWidth(t *testing.T) {
-	prev := &overlayPreview{Loaded: true, Title: strings.Repeat("t", 30), Source: "transcript"}
+	// gap = 20 - 12 - 10 = -2: too tight to share the row, so the source
+	// must be dropped entirely.
+	//
+	// A broken implementation that appends the source anyway (clamping the
+	// negative gap up instead of dropping) leaks a truncated fragment of
+	// "transcript" once clipLine cuts the row to width — e.g.
+	// "tttttttttttt transcr" for a 1-space clamp. clipLine always cuts
+	// *before* the full 10-char word can appear here (title(12) + any
+	// padding + source(10) inherently overflows a 20-col row whenever the
+	// drop condition holds), so a plain Contains(got[0], "transcript") check
+	// can never fire — verified by hand by applying exactly that mutation
+	// and confirming Contains stayed false. Comparing against the exact
+	// expected drop-only row catches any such leak, full word or fragment.
+	title := strings.Repeat("t", 12)
+	prev := &overlayPreview{Loaded: true, Title: title, Source: "transcript"}
 	got := previewBlock(prev, 20, 2)
-	if strings.Contains(got[0], "transcript") {
-		t.Fatalf("source should be dropped when it cannot fit: %q", got[0])
+	want := clipLine(title, 20) + ansiReset
+	if got[0] != want {
+		t.Fatalf("title row = %q, want %q (source must be dropped when it cannot fit)", got[0], want)
+	}
+	if visibleWidth(got[0]) > 20 {
+		t.Fatalf("title row is %d cols, want <=20: %q", visibleWidth(got[0]), got[0])
+	}
+}
+
+func TestPreviewBlockTitleRowFlushRightSource(t *testing.T) {
+	prev := &overlayPreview{
+		Loaded: true,
+		Title:  "abcde",
+		Source: "tmux",
+		Lines:  []string{"x"},
+	}
+	got := previewBlock(prev, 20, 2)
+	if visibleWidth(got[0]) != 20 {
+		t.Fatalf("title row is %d cols, want exactly 20: %q", visibleWidth(got[0]), got[0])
+	}
+	// Strip the ANSI codes previewTitleRow/previewBlock can emit around the
+	// source (dim + the trailing reset) and confirm the text itself ends
+	// with the source marker, i.e. it sits flush against the right edge.
+	cleaned := strings.NewReplacer(ansiDim, "", ansiReset, "").Replace(got[0])
+	if !strings.HasSuffix(cleaned, "tmux") {
+		t.Fatalf("source should sit flush right: %q", got[0])
 	}
 }
 
