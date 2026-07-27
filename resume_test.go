@@ -222,7 +222,7 @@ func TestCollectResumableName(t *testing.T) {
 	}
 }
 
-func TestFirstPromptText(t *testing.T) {
+func TestPromptText(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
@@ -238,21 +238,82 @@ func TestFirstPromptText(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := firstPromptText([]byte(c.raw)); got != c.want {
-				t.Fatalf("firstPromptText(%s) = %q, want %q", c.raw, got, c.want)
+			if got := promptText([]byte(c.raw)); got != c.want {
+				t.Fatalf("promptText(%s) = %q, want %q", c.raw, got, c.want)
 			}
 		})
 	}
 }
 
 func TestFirstPromptTruncation(t *testing.T) {
-	long := strings.Repeat("x", 80)
-	got := cleanPrompt(long)
-	if r := []rune(got); len(r) != resumePromptMax {
+	home := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	path := writeResumableTranscript(t, home, "proj", "longprmt", now,
+		`{"type":"attachment","cwd":"/home/u/proj"}`,
+		`{"type":"user","message":{"role":"user","content":"`+strings.Repeat("x", 80)+`"}}`,
+	)
+	head, ok := readResumableHead(path)
+	if !ok {
+		t.Fatal("readResumableHead failed")
+	}
+	if r := []rune(head.firstPrompt); len(r) != resumePromptMax {
 		t.Fatalf("truncated length = %d, want %d", len(r), resumePromptMax)
 	}
-	if !strings.HasSuffix(got, "…") {
-		t.Fatalf("truncated prompt %q missing ellipsis", got)
+	if !strings.HasSuffix(head.firstPrompt, "…") {
+		t.Fatalf("truncated prompt %q missing ellipsis", head.firstPrompt)
+	}
+	// The overlay budget is wider, so the same prompt survives whole there.
+	if len(head.prompts) != 1 || head.prompts[0] != strings.Repeat("x", 80) {
+		t.Fatalf("prompts = %q, want the untruncated 80-rune prompt", head.prompts)
+	}
+}
+
+func TestReadResumableHeadCollectsPrompts(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	huge := strings.Repeat("y", resumePromptDetailMax+40)
+	path := writeResumableTranscript(t, home, "proj", "promptsx", now,
+		`{"type":"attachment","cwd":"/home/u/proj"}`,
+		`{"type":"user","message":{"role":"user","content":"<local-command-caveat>skip me</local-command-caveat>"}}`,
+		`{"type":"user","message":{"role":"user","content":"first  prompt"}}`,
+		`{"type":"user","isMeta":true,"message":{"role":"user","content":"meta noise"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}`,
+		`{"type":"user","message":{"role":"user","content":"`+huge+`"}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"third prompt"}]}}`,
+		`{"type":"user","message":{"role":"user","content":"fourth prompt is dropped"}}`,
+	)
+
+	head, ok := readResumableHead(path)
+	if !ok {
+		t.Fatal("readResumableHead failed")
+	}
+	if len(head.prompts) != resumePromptsMax {
+		t.Fatalf("collected %d prompts (%q), want %d", len(head.prompts), head.prompts, resumePromptsMax)
+	}
+	if head.prompts[0] != "first prompt" { // whitespace collapsed, wrappers skipped
+		t.Errorf("prompts[0] = %q", head.prompts[0])
+	}
+	if head.prompts[2] != "third prompt" {
+		t.Errorf("prompts[2] = %q, want the third real prompt in order", head.prompts[2])
+	}
+	if r := []rune(head.prompts[1]); len(r) != resumePromptDetailMax || !strings.HasSuffix(head.prompts[1], "…") {
+		t.Errorf("prompts[1] length = %d, want %d with an ellipsis", len(r), resumePromptDetailMax)
+	}
+	// FirstPrompt keeps its own, narrower budget and still means "the first".
+	if head.firstPrompt != "first prompt" {
+		t.Errorf("firstPrompt = %q, want the first prompt only", head.firstPrompt)
+	}
+
+	// The collector carries the field through to the picker's rows.
+	got := collectResumableFrom(home, nil, now)
+	if len(got) != 1 {
+		t.Fatalf("collected %d sessions, want 1", len(got))
+	}
+	if len(got[0].Prompts) != resumePromptsMax || got[0].Prompts[0] != "first prompt" {
+		t.Fatalf("session prompts = %q", got[0].Prompts)
+	}
+	if got[0].FirstPrompt != "first prompt" {
+		t.Fatalf("session first prompt = %q", got[0].FirstPrompt)
 	}
 }
 
@@ -460,5 +521,203 @@ func TestResumePickerStateNavWraps(t *testing.T) {
 	state.handle(KeyDown)
 	if state.Row != 0 {
 		t.Fatalf("down from 2 = %d, want 0 (wrap)", state.Row)
+	}
+}
+
+// TestResumeRowsReflowOnWidthChange pins the behavior the picker now depends
+// on: the layout is a function of the width it is given, so re-running
+// resumeRows on a resize sheds columns instead of leaving a fully-formatted row
+// to be clipped mid-BRANCH by the renderer's right-edge crop.
+func TestResumeRowsReflowOnWidthChange(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	sessions := []ResumableSession{
+		{SessionID: "alpha001", CWD: "/home/u/alpha", GitBranch: "feat/long-branch-name", Name: "Alpha work", FirstPrompt: "do the alpha thing", MessageCount: 5, ModifiedAt: now.Add(-1 * time.Hour)},
+		{SessionID: "beta0002", CWD: "/home/u/beta", GitBranch: "develop", Name: "Beta task", FirstPrompt: "beta prompt text here", MessageCount: 12, ModifiedAt: now.Add(-2 * time.Hour)},
+	}
+
+	// resumeRowCols mirrors what the picker hands resumeRows for a terminal of
+	// this width, so the fit assertions below are the ones the picker relies on.
+	const wide, narrow = 100, 42
+	wideLines, wideHeader := resumeRows(sessions, "/home/u", "mac", resumeRowCols(wide), now)
+	narrowLines, narrowHeader := resumeRows(sessions, "/home/u", "mac", resumeRowCols(narrow), now)
+
+	if !strings.Contains(wideHeader, "BRANCH") || !strings.Contains(wideHeader, "#MSG") {
+		t.Fatalf("wide header lost columns: %q", wideHeader)
+	}
+	if strings.Contains(narrowHeader, "BRANCH") {
+		t.Fatalf("narrow header kept BRANCH: %q", narrowHeader)
+	}
+	// BRANCH is capped, never clipped: the wide row shows the whole (capped)
+	// branch rather than a value cut by the terminal edge.
+	if !strings.Contains(stripSGR(wideLines[0]), truncateRunes("feat/long-branch-name", 18)) {
+		t.Errorf("wide row lost its capped branch: %q", stripSGR(wideLines[0]))
+	}
+	// The stale-width bug in one assertion: rows built for the wide terminal
+	// overflow the narrow one, so reusing them would clip. Reflowed rows fit.
+	if w := len([]rune(stripSGR(wideLines[0]))); w <= narrow {
+		t.Fatalf("wide row width %d does not exceed narrow width %d; test can't observe the reflow", w, narrow)
+	}
+	for i, ln := range narrowLines {
+		if w := len([]rune(stripSGR(ln))) + resumeRowIndent; w > narrow {
+			t.Errorf("reflowed row %d width %d exceeds cols %d: %q", i, w, narrow, stripSGR(ln))
+		}
+	}
+	if w := len([]rune(narrowHeader)) + resumeRowIndent; w > narrow {
+		t.Errorf("reflowed header width %d exceeds cols %d: %q", w, narrow, narrowHeader)
+	}
+}
+
+func TestResumeRowCols(t *testing.T) {
+	cases := []struct{ cols, want int }{
+		{0, 0}, {-1, 0}, {1, 1}, {2, 1}, {80, 80 - resumeRowIndent},
+	}
+	for _, c := range cases {
+		if got := resumeRowCols(c.cols); got != c.want {
+			t.Errorf("resumeRowCols(%d) = %d, want %d", c.cols, got, c.want)
+		}
+	}
+}
+
+func TestRenderResumePickerHighlightsSelection(t *testing.T) {
+	lines := []string{"1h  alpha  ~/alpha", "2h  beta   ~/beta"}
+	state := resumePickerState{Row: 1, RowCount: 2}
+	out := renderResumePicker("Resume a session", "AGE  NAME   DIR", lines, state, "", 0)
+
+	if strings.Contains(out, "▶") {
+		t.Errorf("selection marker still rendered: %q", out)
+	}
+	wantSel := highlightSelectedRow(" "+lines[1], true)
+	if !strings.Contains(out, wantSel) {
+		t.Errorf("selected row not highlighted.\n got: %q\nwant substring: %q", out, wantSel)
+	}
+	if !strings.Contains(out, "\n "+lines[0]+"\n") {
+		t.Errorf("unselected row should render plain at the shared indent: %q", out)
+	}
+	// Header and rows share the same left margin now that the marker is gone.
+	if !strings.Contains(out, "\n "+dim("AGE  NAME   DIR")+"\n") {
+		t.Errorf("header indent changed: %q", out)
+	}
+}
+
+func TestResumePickerStateShowPrompts(t *testing.T) {
+	state := resumePickerState{RowCount: 3}
+	if confirm, cancel := state.handle(KeyRight); confirm || cancel {
+		t.Fatalf("KeyRight: confirm=%v cancel=%v, want both false", confirm, cancel)
+	}
+	if !state.ShowPrompts {
+		t.Fatal("KeyRight did not request the prompt overlay")
+	}
+	if state.Row != 0 || state.Filter != "" {
+		t.Fatalf("KeyRight disturbed the selection: row=%d filter=%q", state.Row, state.Filter)
+	}
+	// Nothing to show for an empty (fully filtered out) list.
+	empty := resumePickerState{RowCount: 0}
+	empty.handle(KeyRight)
+	if empty.ShowPrompts {
+		t.Fatal("KeyRight raised the overlay with no rows")
+	}
+}
+
+func TestResumePromptsClose(t *testing.T) {
+	for _, key := range []string{KeyEsc, "\x03", KeyEnter, "\r", "\n", KeyLeft, "q", "Q"} {
+		if !resumePromptsClose(key) {
+			t.Errorf("key %q should close the overlay", key)
+		}
+	}
+	for _, key := range []string{KeyUp, KeyDown, KeyRight, "a", "1", " "} {
+		if resumePromptsClose(key) {
+			t.Errorf("key %q should not close the overlay", key)
+		}
+	}
+}
+
+func TestRenderResumePromptsOverlay(t *testing.T) {
+	s := ResumableSession{
+		SessionID: "abcdef123456",
+		Name:      "Alpha work",
+		CWD:       "/home/u/alpha",
+		Host:      "srv",
+		Prompts:   []string{"first prompt", "second prompt", strings.Repeat("z", 150)},
+	}
+	out := stripSGR(renderResumePromptsOverlay(s, 100, 40))
+
+	for _, want := range []string{confirmBoxTL, confirmBoxBR, "srv:Alpha work", "/home/u/alpha", resumePromptsHint} {
+		if !strings.Contains(out, want) {
+			t.Errorf("overlay missing %q:\n%s", want, out)
+		}
+	}
+	for i, p := range []string{"1. first prompt", "2. second prompt", "3. "} {
+		if !strings.Contains(out, p) {
+			t.Errorf("prompt %d not numbered (%q missing):\n%s", i+1, p, out)
+		}
+	}
+	// The long prompt wraps inside the box instead of running past its border.
+	for _, l := range strings.Split(out, "\n") {
+		if w := len([]rune(l)); w > 100 {
+			t.Fatalf("overlay line width %d exceeds terminal: %q", w, l)
+		}
+	}
+	if strings.Count(out, strings.Repeat("z", 150)) != 0 {
+		t.Errorf("long prompt not wrapped:\n%s", out)
+	}
+
+	// No prompts (an old server, or a transcript with none) → placeholder.
+	empty := stripSGR(renderResumePromptsOverlay(ResumableSession{SessionID: "abcdef123456", CWD: "/x"}, 100, 40))
+	if !strings.Contains(empty, "no prompts recorded") {
+		t.Errorf("missing empty-state placeholder:\n%s", empty)
+	}
+	if !strings.Contains(empty, "abcdef12") { // falls back to the short id
+		t.Errorf("missing short-id title:\n%s", empty)
+	}
+}
+
+func TestRenderResumePromptsOverlayFitsShortTerminal(t *testing.T) {
+	s := ResumableSession{SessionID: "abcdef123456", CWD: "/x", Prompts: []string{
+		strings.Repeat("a ", 40), strings.Repeat("b ", 40), strings.Repeat("c ", 40),
+	}}
+	out := renderResumePromptsOverlay(s, 60, 14)
+	lines := strings.Split(out, "\n")
+	if len(lines) > 14 {
+		t.Fatalf("overlay is %d rows tall, want <= 14", len(lines))
+	}
+	if !strings.Contains(stripSGR(out), confirmBoxBL) {
+		t.Errorf("bottom border pushed off screen:\n%s", out)
+	}
+	if !strings.Contains(stripSGR(out), "…") {
+		t.Errorf("trimmed overlay does not mark the cut:\n%s", out)
+	}
+}
+
+func TestWrapRunes(t *testing.T) {
+	cases := []struct {
+		s     string
+		width int
+		want  []string
+	}{
+		{"one two three", 20, []string{"one two three"}},
+		{"one two three", 7, []string{"one two", "three"}},
+		{"aaaaaaaa", 3, []string{"aaa", "aaa", "aa"}},
+		{"hi aaaaaaaa", 3, []string{"hi", "aaa", "aaa", "aa"}},
+		{"  spaced   out  ", 6, []string{"spaced", "out"}},
+		{"", 5, []string{""}},
+		{"anything", 0, []string{"anything"}}, // too narrow to wrap into
+	}
+	for _, c := range cases {
+		got := wrapRunes(c.s, c.width)
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("wrapRunes(%q, %d) = %q, want %q", c.s, c.width, got, c.want)
+		}
+	}
+}
+
+func TestWriteResumeLoading(t *testing.T) {
+	var b strings.Builder
+	writeResumeLoading(&b)
+	got := b.String()
+	if !strings.Contains(stripSGR(got), "Loading sessions…") {
+		t.Errorf("loading line = %q", got)
+	}
+	if !strings.HasPrefix(got, "\x1b[H\x1b[2J") {
+		t.Errorf("loading line does not home + clear first: %q", got)
 	}
 }

@@ -147,6 +147,14 @@ file (`nameSource != "derived"`), else the transcript's summary line, else
 `resumeRows` autocompacts to terminal width: HOST only when a remote row
 exists; then shed order is shrink PROMPT → drop #MSG → drop BRANCH → shrink
 DIR → shrink NAME. AGE/NAME/DIR always survive; header mirrors the layout.
+`pickResumeSession` re-runs it **every frame** at the live width (minus
+`resumeRowIndent`) — a width baked in at open time leaves a resize to
+`screenRenderer`'s blind right-edge clip, which chops a column mid-value
+instead of shedding it. Selection is a background highlight
+(`highlightSelectedRow`), not a marker column, so rows align with the header.
+`→` opens a bordered overlay with the row's first three user prompts
+(`ResumableSession.Prompts`, collected by the same head scan and serialized
+over `/resumable`); Esc returns to the picker with the selection intact.
 
 ### Worktree cleanup on kill
 

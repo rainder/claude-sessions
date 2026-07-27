@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,14 @@ const (
 	resumeHeadLines = 30
 	// resumePromptMax is the rune budget for the first-prompt column.
 	resumePromptMax = 60
+	// resumePromptsMax is how many user prompts the head scan keeps per
+	// transcript, for the → detail overlay. Three is enough to tell two
+	// same-repo sessions apart without turning the scan into a full read.
+	resumePromptsMax = 3
+	// resumePromptDetailMax is the rune budget for one prompt in that overlay.
+	// Wider than the column budget: the box has most of the terminal to work
+	// with, and the whole point of the overlay is to see more than the column.
+	resumePromptDetailMax = 200
 )
 
 // ResumableSession is one past transcript the picker can resume. Host is
@@ -47,6 +56,7 @@ type ResumableSession struct {
 	GitBranch    string    `json:"git_branch,omitempty"`
 	Name         string    `json:"name,omitempty"` // best-effort session name (user-set name or summary)
 	FirstPrompt  string    `json:"first_prompt,omitempty"`
+	Prompts      []string  `json:"prompts,omitempty"` // first few user prompts, for the → overlay
 	MessageCount int       `json:"message_count"`
 	ModifiedAt   time.Time `json:"modified_at"`
 	Host         string    `json:"-"` // "" local, set client-side for remote rows
@@ -119,6 +129,7 @@ func collectResumableFrom(home string, live map[string]bool, now time.Time) []Re
 			GitBranch:    head.gitBranch,
 			Name:         name,
 			FirstPrompt:  head.firstPrompt,
+			Prompts:      head.prompts,
 			MessageCount: countFileLines(path),
 			ModifiedAt:   mtime,
 		}
@@ -174,9 +185,13 @@ type resumableHead struct {
 	cwd         string
 	gitBranch   string
 	firstPrompt string
-	summary     string // from a {"type":"summary","summary":"..."} line, if any
-	sidechain   bool   // any entry marked isSidechain — a subagent transcript
-	entrypoint  string // from the first entry carrying one: "cli" = interactive
+	// prompts are the first resumePromptsMax user prompts in the order
+	// encountered, each bounded to resumePromptDetailMax runes. prompts[0] is
+	// the same prompt as firstPrompt, only cut at the wider overlay budget.
+	prompts    []string
+	summary    string // from a {"type":"summary","summary":"..."} line, if any
+	sidechain  bool   // any entry marked isSidechain — a subagent transcript
+	entrypoint string // from the first entry carrying one: "cli" = interactive
 }
 
 // agentTranscript reports transcripts that belong to subagents or headless/SDK
@@ -188,11 +203,12 @@ func (h resumableHead) agentTranscript() bool {
 }
 
 // readResumableHead scans up to resumeHeadLines lines of a transcript for the
-// first cwd, first gitBranch, and first genuine user prompt. It extends the
-// head-scan approach of extractCWDFromJSONL (picker.go) to three fields in one
-// pass. ok is false only when the file can't be opened; a readable file with no
-// cwd yields ok=true with an empty cwd, and the caller drops it. Corrupt lines
-// are skipped individually rather than aborting the scan.
+// first cwd, first gitBranch, and the first resumePromptsMax genuine user
+// prompts. It extends the head-scan approach of extractCWDFromJSONL (picker.go)
+// to several fields in one pass. ok is false only when the file can't be opened;
+// a readable file with no cwd yields ok=true with an empty cwd, and the caller
+// drops it. Corrupt lines are skipped individually rather than aborting the
+// scan.
 func readResumableHead(path string) (resumableHead, bool) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -239,27 +255,32 @@ func readResumableHead(path string) (resumableHead, bool) {
 				head.summary = truncateRunes(s, resumePromptMax)
 			}
 		}
-		if head.firstPrompt == "" && line.Type == "user" && !line.IsMeta && line.Message != nil {
-			if text := firstPromptText(line.Message.Content); text != "" {
-				head.firstPrompt = text
+		if len(head.prompts) < resumePromptsMax && line.Type == "user" && !line.IsMeta && line.Message != nil {
+			if text := promptText(line.Message.Content); text != "" {
+				if head.firstPrompt == "" {
+					head.firstPrompt = truncateRunes(text, resumePromptMax)
+				}
+				head.prompts = append(head.prompts, truncateRunes(text, resumePromptDetailMax))
 			}
 		}
 	}
 	return head, true
 }
 
-// firstPromptText extracts display text from a user message's content, which is
+// promptText extracts display text from a user message's content, which is
 // either a JSON string or an array of content blocks. Only "text" blocks
 // contribute (tool results / images are ignored). Command and caveat wrappers
 // (leading '<', e.g. <local-command-caveat>, <command-name>) are treated as
 // non-prompts and yield "" so the caller falls through to the next user entry.
-func firstPromptText(raw json.RawMessage) string {
+// The text comes back whitespace-collapsed but untruncated: the column and the
+// overlay bound it to different budgets, so the cut belongs to the caller.
+func promptText(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var str string
 	if json.Unmarshal(raw, &str) == nil {
-		return cleanPrompt(str)
+		return cleanPromptText(str)
 	}
 	var blocks []struct {
 		Type string `json:"type"`
@@ -272,20 +293,20 @@ func firstPromptText(raw json.RawMessage) string {
 				parts = append(parts, b.Text)
 			}
 		}
-		return cleanPrompt(strings.Join(parts, " "))
+		return cleanPromptText(strings.Join(parts, " "))
 	}
 	return ""
 }
 
-// cleanPrompt whitespace-collapses s and truncates it to resumePromptMax runes.
-// It returns "" for empty text or a command/caveat wrapper (leading '<'), so the
-// caller keeps looking for a real prompt.
-func cleanPrompt(s string) string {
+// cleanPromptText whitespace-collapses s, returning "" for empty text or a
+// command/caveat wrapper (leading '<') so the caller keeps looking for a real
+// prompt.
+func cleanPromptText(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if s == "" || strings.HasPrefix(s, "<") {
 		return ""
 	}
-	return truncateRunes(s, resumePromptMax)
+	return s
 }
 
 // countFileLines returns the number of '\n' bytes in the file, the transcript's
@@ -651,16 +672,21 @@ func padLeft(s string, n int) string {
 // and letters are all literal filter text). It reuses new_picker.go's filter
 // engine (filterNewPickerLines) without the new-session picker's preset/prompt
 // axes.
+//
+// ShowPrompts is a one-shot request raised by → and cleared by the loop that
+// services it, the same shape newPickerState uses for its 'p' prompt overlay:
+// the state stays pure and testable, the loop owns the terminal.
 type resumePickerState struct {
-	Row      int
-	RowCount int
-	Filter   string
+	Row         int
+	RowCount    int
+	Filter      string
+	ShowPrompts bool
 }
 
 // handle applies one key event, reporting whether to confirm the selection or
-// cancel. Up/Down move (wrapping); Enter confirms; Esc / Ctrl+C cancel;
-// Backspace trims the filter; any printable ASCII byte extends it and resets the
-// cursor to the top match.
+// cancel. Up/Down move (wrapping); Right raises ShowPrompts for the selected
+// row; Enter confirms; Esc / Ctrl+C cancel; Backspace trims the filter; any
+// printable ASCII byte extends it and resets the cursor to the top match.
 func (s *resumePickerState) handle(key string) (confirm, cancel bool) {
 	switch key {
 	case KeyUp:
@@ -670,6 +696,10 @@ func (s *resumePickerState) handle(key string) (confirm, cancel bool) {
 	case KeyDown:
 		if s.RowCount > 0 {
 			s.Row = (s.Row + 1) % s.RowCount
+		}
+	case KeyRight:
+		if s.RowCount > 0 {
+			s.ShowPrompts = true
 		}
 	case "\r", "\n", KeyEnter:
 		return true, false
@@ -689,12 +719,44 @@ func (s *resumePickerState) handle(key string) (confirm, cancel bool) {
 	return false, false
 }
 
+// resumeRowIndent is the left margin the column header and every picker row
+// share. Rows used to sit 3 columns in behind a " ▶ " marker while the header
+// sat 1 column in; the marker is gone (selection is a background highlight now)
+// and both start at the same column. resumeRowCols hands resumeRows the width
+// that is actually left for a row, so its compaction ladder budgets for the
+// margin instead of letting screenRenderer clip the overflow.
+const resumeRowIndent = 1
+
+// resumeRowCols converts a terminal width into the width available to one
+// picker row. cols<=0 ("unknown", the full-layout signal) passes through.
+func resumeRowCols(cols int) int {
+	switch {
+	case cols <= 0:
+		return 0
+	case cols <= resumeRowIndent:
+		return 1
+	default:
+		return cols - resumeRowIndent
+	}
+}
+
 // pickResumeSession drives the resume picker in a read/handle loop until the
-// user confirms a row or cancels, returning the index into the original lines.
-// Must be called in raw mode. Mirrors pickNewSession's single-stdin-consumer
-// input path (readModalEvents on a persistent decoder).
-func pickResumeSession(title, header string, lines []string, note string, wakes []wakeFD) (int, bool) {
-	if len(lines) == 0 {
+// user confirms a row or cancels, returning the index into sessions. Must be
+// called in raw mode. Mirrors pickNewSession's single-stdin-consumer input path
+// (readModalEvents on a persistent decoder).
+//
+// Rows are formatted per frame from the raw sessions rather than once up front.
+// The loop re-reads the terminal size every iteration anyway (the viewport needs
+// the height), and resumeRows' compaction ladder is the only thing that knows
+// how to shed a column cleanly. Baking a width in at open time left a resize —
+// or a stale initial read — to screenRenderer's blind right-edge clip, which
+// chops a fully-computed column mid-value instead of dropping it.
+//
+// → opens the prompt overlay for the selected row (see resumePromptsOverlay).
+// It runs its own renderer, so the picker's is invalidated on return to force a
+// full repaint over the box.
+func pickResumeSession(title string, sessions []ResumableSession, localHome, localName, note string, wakes []wakeFD) (int, bool) {
+	if len(sessions) == 0 {
 		return 0, false
 	}
 	state := resumePickerState{}
@@ -702,6 +764,7 @@ func pickResumeSession(title, header string, lines []string, note string, wakes 
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
 
+	var lines []string
 	sync := func() (filtered []string, indices []int) {
 		filtered, indices = filterNewPickerLines(lines, state.Filter)
 		state.RowCount = len(filtered)
@@ -712,11 +775,13 @@ func pickResumeSession(title, header string, lines []string, note string, wakes 
 	}
 
 	for {
-		filtered, indices := sync()
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
 			cols, rows = 0, 0
 		}
+		var header string
+		lines, header = resumeRows(sessions, localHome, localName, resumeRowCols(cols), time.Now())
+		filtered, indices := sync()
 		_ = renderer.Draw(renderResumePicker(title, header, filtered, state, note, rows), cols, rows)
 		keys, _ := readModalEvents(decoder, wakes)
 		for _, key := range keys {
@@ -726,6 +791,14 @@ func pickResumeSession(title, header string, lines []string, note string, wakes 
 			confirm, cancel := state.handle(key)
 			if cancel {
 				return 0, false
+			}
+			if state.ShowPrompts {
+				state.ShowPrompts = false
+				if state.RowCount > 0 {
+					resumePromptsOverlay(sessions[indices[state.Row]], wakes)
+					renderer.Invalidate()
+				}
+				continue
 			}
 			if confirm {
 				if state.RowCount == 0 {
@@ -739,24 +812,23 @@ func pickResumeSession(title, header string, lines []string, note string, wakes 
 
 // renderResumePicker draws the picker: title, optional filter echo, the dimmed
 // column header, a viewport of rows windowed around the selection, an optional
-// note, and the footer.
+// note, and the footer. The selected row carries the same background highlight
+// the session list uses (highlightSelectedRow), so no glyph column is reserved
+// and rows line up with the header.
 func renderResumePicker(title, header string, lines []string, state resumePickerState, note string, rows int) string {
+	indent := strings.Repeat(" ", resumeRowIndent)
 	var b strings.Builder
 	b.WriteString("\n " + bold(title) + "\n\n")
 	if state.Filter != "" {
 		fmt.Fprintf(&b, " %s %s\n\n", dim("Filter:"), state.Filter)
 	}
-	b.WriteString(" " + dim(header) + "\n")
+	b.WriteString(indent + dim(header) + "\n")
 	if len(lines) == 0 {
-		b.WriteString("   " + dim("(no matches)") + "\n")
+		b.WriteString(indent + dim("(no matches)") + "\n")
 	}
 	start, end := resumeWindow(len(lines), state.Row, rows, state.Filter != "", note != "")
 	for i := start; i < end; i++ {
-		marker := "   "
-		if i == state.Row {
-			marker = " ▶ "
-		}
-		fmt.Fprintf(&b, "%s%s\n", marker, lines[i])
+		fmt.Fprintf(&b, "%s\n", highlightSelectedRow(indent+lines[i], i == state.Row))
 	}
 	if note != "" {
 		b.WriteString("\n " + dim(note) + "\n")
@@ -802,7 +874,224 @@ func resumeWindow(total, sel, rows int, hasFilter, hasNote bool) (start, end int
 }
 
 func resumeFooter() string {
-	return "↑/↓ move · type to filter · ⌫ edit · Enter resume · Esc cancel"
+	return "↑/↓ move · → prompts · type to filter · ⌫ edit · Enter resume · Esc cancel"
+}
+
+const (
+	// resumePromptsInner is the inner width the prompt overlay aims for. Prose
+	// needs room to stay legible — the same reasoning as previewBoxMinInner —
+	// and a narrower terminal clamps it down.
+	resumePromptsInner = 68
+	// resumePromptsHint is the fixed footer row inside the box.
+	resumePromptsHint = "Esc close"
+	// resumePromptsChrome is every box row that is not a prompt line: the two
+	// borders, the title, the cwd row, the divider, the blank separator and the
+	// hint.
+	resumePromptsChrome = 7
+	// resumePromptsMargin is how many rows of terminal the box leaves unused, so
+	// it reads as an overlay rather than a full-screen takeover (mirrors
+	// previewBoxMargin).
+	resumePromptsMargin = 2
+)
+
+// resumePromptsOverlay shows the selected session's first few user prompts in a
+// blocking bordered box, mirroring confirmOverlay's loop: it never leaves raw
+// mode or the alt-screen, and returns to the picker with the selection
+// untouched once a close key arrives. The data was collected with the list, so
+// there is nothing to fetch — wakes is passed through only so a live resize
+// re-centers the box.
+func resumePromptsOverlay(s ResumableSession, wakes []wakeFD) {
+	renderer := newScreenRenderer(os.Stdout)
+	decoder := newInputDecoder()
+	fd := int(os.Stdin.Fd())
+
+	for {
+		cols, rows, err := term.GetSize(fd)
+		if err != nil {
+			cols, rows = 0, 0
+		}
+		_ = renderer.Draw(renderResumePromptsOverlay(s, cols, rows), cols, rows)
+		keys, _ := readModalEvents(decoder, wakes)
+		for _, key := range keys {
+			if resumePromptsClose(key) {
+				return
+			}
+		}
+	}
+}
+
+// resumePromptsClose reports whether key dismisses the prompt overlay. Esc is
+// the documented key; Enter, ←, q and Ctrl-C are accepted too, since the
+// overlay has nothing else to do with them. Every other key is ignored rather
+// than closing, so a burst of filter typing can't tear through the box and land
+// in the picker.
+func resumePromptsClose(key string) bool {
+	switch key {
+	case KeyEsc, "\x03", KeyEnter, "\r", "\n", KeyLeft, "q", "Q":
+		return true
+	}
+	return false
+}
+
+// renderResumePromptsOverlay draws the prompt box centered in a cols x rows
+// terminal, reusing renderConfirmOverlay's geometry: same box glyphs, same
+// clamp-and-clip on a narrow terminal, same unpositioned top-left fallback when
+// the size is unknown (<=0). Content that outgrows the terminal height is cut
+// with a trailing "…" row rather than pushing the bottom border off-screen.
+func renderResumePromptsOverlay(s ResumableSession, cols, rows int) string {
+	innerWidth := resumePromptsInner
+	if cols > 0 {
+		max := cols - 4 // border + 1 space of padding on each side
+		if max < 1 {
+			max = 1
+		}
+		if innerWidth > max {
+			innerWidth = max
+		}
+	}
+
+	// body is freshly allocated per call, so the trim can rewrite its last row
+	// in place to mark that content was cut.
+	body := resumePromptsBody(s, innerWidth)
+	if rows > 0 {
+		capacity := rows - resumePromptsChrome - resumePromptsMargin
+		if capacity < 1 {
+			capacity = 1
+		}
+		if capacity < len(body) {
+			body = body[:capacity]
+			body[capacity-1] = dim("…")
+		}
+	}
+
+	pad := func(l string) string {
+		l = clipLine(l, innerWidth)
+		return confirmBoxV + " " + l + strings.Repeat(" ", innerWidth-visualLen(l)) + " " + confirmBoxV
+	}
+
+	box := make([]string, 0, len(body)+resumePromptsChrome)
+	box = append(box, confirmBoxTL+strings.Repeat(confirmBoxH, innerWidth+2)+confirmBoxTR)
+	box = append(box, pad(bold(resumePromptsTitle(s))), pad(dim(s.CWD)))
+	box = append(box, pad(strings.Repeat(confirmBoxH, innerWidth)))
+	for _, l := range body {
+		box = append(box, pad(l))
+	}
+	box = append(box, pad(""), pad(dim(resumePromptsHint)))
+	box = append(box, confirmBoxBL+strings.Repeat(confirmBoxH, innerWidth+2)+confirmBoxBR)
+
+	if cols <= 0 || rows <= 0 {
+		return strings.Join(box, "\n")
+	}
+
+	boxWidth := innerWidth + 4
+	left := (cols - boxWidth) / 2
+	if left < 0 {
+		left = 0
+	}
+	leftPad := strings.Repeat(" ", left)
+	for i, l := range box {
+		box[i] = leftPad + l
+	}
+
+	top := (rows - len(box)) / 2
+	if top < 0 {
+		top = 0
+	}
+	lines := make([]string, 0, top+len(box))
+	for i := 0; i < top; i++ {
+		lines = append(lines, "")
+	}
+	lines = append(lines, box...)
+	return strings.Join(lines, "\n")
+}
+
+// resumePromptsTitle identifies the session the box belongs to: its name when
+// it has one, else the short id, host-qualified for a remote row.
+func resumePromptsTitle(s ResumableSession) string {
+	title := s.Name
+	if title == "" {
+		title = shortID(s.SessionID)
+	}
+	if s.Host != "" {
+		title = s.Host + ":" + title
+	}
+	return title
+}
+
+// resumePromptsBody word-wraps the collected prompts to width, numbering each
+// and separating them with a blank row. A session with none — an old server
+// that predates the field, or a transcript whose head held no real prompt —
+// gets a dimmed placeholder instead.
+func resumePromptsBody(s ResumableSession, width int) []string {
+	if len(s.Prompts) == 0 {
+		return []string{dim("no prompts recorded for this session")}
+	}
+	const gutter = "   " // width of the "N. " marker, for continuation rows
+	out := make([]string, 0, len(s.Prompts)*3)
+	for i, p := range s.Prompts {
+		if i > 0 {
+			out = append(out, "")
+		}
+		for j, l := range wrapRunes(p, width-len(gutter)) {
+			if j == 0 {
+				out = append(out, dim(strconv.Itoa(i+1)+".")+" "+l)
+				continue
+			}
+			out = append(out, gutter+l)
+		}
+	}
+	return out
+}
+
+// wrapRunes splits s into lines of at most width runes, breaking between words
+// where it can and mid-word only for a token too long to ever fit. width<1
+// (a terminal too narrow to wrap into) returns s unsplit and leaves the clip to
+// the caller.
+func wrapRunes(s string, width int) []string {
+	if width < 1 {
+		return []string{s}
+	}
+	var lines []string
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			lines = append(lines, string(cur))
+			cur = nil
+		}
+	}
+	for _, word := range strings.Fields(s) {
+		w := []rune(word)
+		for len(w) > width {
+			flush()
+			lines = append(lines, string(w[:width]))
+			w = w[width:]
+		}
+		switch {
+		case len(cur) == 0:
+			cur = w
+		case len(cur)+1+len(w) > width:
+			flush()
+			cur = w
+		default:
+			cur = append(append(cur, ' '), w...)
+		}
+	}
+	flush()
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+// writeResumeLoading paints the one-shot status line actResume shows while it
+// blocks on gatherResumable. Raw mode is still on and the alt-screen still
+// holds the session list, so this is a bare home + erase-display write in the
+// style of writeActionOutputPosition (actions.go), not a fmt.Print into a
+// cooked terminal. Nothing clears it explicitly: whatever comes next — the
+// picker's first frame, or the TUI's repaint after a cancel — is a full redraw,
+// since both renderers start invalidated.
+func writeResumeLoading(w io.Writer) {
+	_, _ = io.WriteString(w, "\x1b[H\x1b[2J\n "+dim("Loading sessions…")+"\n")
 }
 
 // shortID abbreviates a session UUID for a status line.
@@ -819,6 +1108,10 @@ func shortID(id string) string {
 // owning host and attaches. Unlike the row-targeted actions it ignores the
 // current selection — it's a global entry point bound to 'r'.
 func actResume(c *actCtx) {
+	// gatherResumable blocks on every configured host (5s apiece before a slow
+	// or unreachable one gives up), so say something first — an unchanged TUI
+	// that stops answering keys reads as a hang.
+	writeResumeLoading(terminalOutput)
 	sessions, unreachable := gatherResumable()
 	if len(sessions) == 0 {
 		c.prepareLineOutput()
@@ -833,20 +1126,13 @@ func actResume(c *actCtx) {
 	}
 
 	home, _ := os.UserHomeDir()
-	// Size the picker rows to the terminal width once, up front. pickResumeSession
-	// re-measures height per frame for its viewport, but the row layout (which
-	// columns, how wide) is fixed here — a resize while the picker is open keeps
-	// the width it opened with, which is acceptable.
-	cols, _, err := term.GetSize(c.fd)
-	if err != nil {
-		cols = 0
-	}
-	lines, header := resumeRows(sessions, home, shortHostname(), cols, time.Now())
 	note := ""
 	if len(unreachable) > 0 {
 		note = "unreachable: " + strings.Join(unreachable, ", ")
 	}
-	idx, ok := pickResumeSession("Resume a session", header, lines, note, c.modalWakes)
+	// The rows are formatted inside the picker, per frame, so a resize relays
+	// them out through resumeRows' compaction ladder instead of being clipped.
+	idx, ok := pickResumeSession("Resume a session", sessions, home, shortHostname(), note, c.modalWakes)
 	if !ok {
 		return
 	}
