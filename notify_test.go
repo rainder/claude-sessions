@@ -343,6 +343,47 @@ func (s *stallingSender) acceptedTokens() []string {
 	return out
 }
 
+// recordingStaller records every arrival and the budget it was handed, then
+// blocks until that budget runs out. Nothing ever succeeds, so what it measures
+// is purely what each device was given to work with.
+type recordingStaller struct {
+	mu           sync.Mutex
+	arrived      []string
+	expired      []string
+	minRemaining time.Duration
+	seen         bool
+}
+
+func (s *recordingStaller) Send(ctx context.Context, req pushRequest) error {
+	remaining := time.Duration(0)
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining = time.Until(deadline)
+	}
+	s.mu.Lock()
+	s.arrived = append(s.arrived, req.DeviceToken)
+	if ctx.Err() != nil {
+		s.expired = append(s.expired, req.DeviceToken)
+	}
+	if !s.seen || remaining < s.minRemaining {
+		s.seen, s.minRemaining = true, remaining
+	}
+	s.mu.Unlock()
+
+	// Block outside the lock, or every goroutine serialises here.
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (s *recordingStaller) result() (arrived, expired []string, minRemaining time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := append([]string(nil), s.arrived...)
+	e := append([]string(nil), s.expired...)
+	sort.Strings(a)
+	sort.Strings(e)
+	return a, e, s.minRemaining
+}
+
 // snapshotCollector replays a fixed sequence of snapshots, repeating the last.
 func snapshotCollector(snapshots ...[]Session) func() ([]Session, error) {
 	i := 0
@@ -505,6 +546,53 @@ func TestNotifyHubStalledDeviceDoesNotStarveTheRest(t *testing.T) {
 	// A timeout is not evidence a token is dead, so nothing is pruned.
 	if n := len(devices.List()); n != stalled+len(healthy) {
 		t.Fatalf("registry has %d devices, want %d — a stalled device must not be pruned", n, stalled+len(healthy))
+	}
+}
+
+// The invariant has to hold at the registry cap, not just for a handful of
+// phones. Every registered device stalls, and every one of them must still get
+// a send attempt on a context that has not already run out.
+//
+// context.WithTimeout takes the EARLIER of the parent's deadline and the new
+// one, so a device that queues behind a full worker pool inherits the remains
+// of the tick budget rather than its own. The only thing that makes the
+// per-device budget real is every device starting in the first round — which is
+// why maxConcurrentSends covers the whole registry.
+func TestNotifyHubGivesEveryDeviceInAFullRegistryALiveBudget(t *testing.T) {
+	devices := loadDeviceStore("", fixedClock(time.Now()))
+	for i := 0; i < maxRegisteredDevices; i++ {
+		devices.Upsert(Device{Token: fmt.Sprintf("dev-%02d", i), Environment: "sandbox"})
+	}
+	sender := &recordingStaller{}
+
+	waiting := []Session{waitingSession("abc-123", "permission prompt")}
+	h := newNotifyHub(notifyHubOptions{
+		HostName: "h", HostID: "i", BundleID: "b",
+		Devices: devices, Sender: sender,
+		Collect:  snapshotCollector(nil, waiting, waiting),
+		Interval: 50 * time.Millisecond,
+	})
+	defer h.Shutdown()
+
+	for n := 0; n < 3; n++ {
+		ctx, cancel := context.WithTimeout(context.Background(), h.tickBudget())
+		h.tickOnce(ctx)
+		cancel()
+	}
+
+	arrived, expired, minRemaining := sender.result()
+	if len(arrived) != maxRegisteredDevices {
+		t.Fatalf("%d of %d devices got a send attempt — the tail starved waiting for a worker slot",
+			len(arrived), maxRegisteredDevices)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("%d devices were handed an already-expired context: %v", len(expired), expired)
+	}
+	// Not the full budget to the nanosecond — 32 goroutines take a moment to
+	// get going — but nowhere near the truncated remainder a second round gets.
+	if floor := h.sendBudget() / 2; minRemaining < floor {
+		t.Fatalf("thinnest budget handed to a device = %v, want at least %v of a %v budget",
+			minRemaining, floor, h.sendBudget())
 	}
 }
 

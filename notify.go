@@ -228,14 +228,22 @@ const (
 	sendBudgetTicks = 2
 )
 
-// maxConcurrentSends bounds the fan-out.
+// maxConcurrentSends bounds the fan-out. It is the registry cap, deliberately,
+// and must not be lowered below it.
 //
-// APNs is HTTP/2 to a single host and net/http multiplexes every send over one
-// connection, so parallel sends are the shape the protocol was designed for
-// rather than a workaround for a slow device. Eight is well past the handful of
-// phones a host really has and well short of maxRegisteredDevices, so a full
-// registry cannot open 32 streams at once.
-const maxConcurrentSends = 8
+// A device that waits for a worker slot does NOT get its own budget:
+// context.WithTimeout takes the earlier of the parent's deadline and the new
+// one, so a device starting in a later round inherits whatever is left of the
+// tick instead. Sized at 8 against a full registry that meant two rounds of
+// eight and then nothing — the last sixteen devices never got a send attempt at
+// all. That is the same starvation this file exists to prevent, relocated from
+// device two to device seventeen.
+//
+// Covering the whole registry puts every device in the first round, which is
+// what makes the per-device budget real. APNs is HTTP/2 to a single host and
+// net/http multiplexes every send over the one connection apnsClient already
+// holds; 32 concurrent streams is unremarkable for both.
+const maxConcurrentSends = maxRegisteredDevices
 
 // apnsPayloadMax is Apple's limit for a standard remote notification. A larger
 // body is rejected with PayloadTooLarge, which would look exactly like a
@@ -294,8 +302,12 @@ func (h *notifyHub) interval() time.Duration {
 	return h.opts.Interval
 }
 
-// tickBudget bounds one whole tick — collection plus every push it produces.
-// It exists so a wedged tick cannot stop the hub sampling sessions forever.
+// tickBudget bounds the pushes one tick produces, so a wedged fan-out cannot
+// outlive the tick that started it.
+//
+// It is not a bound on the whole tick. h.opts.Collect takes no context and
+// nothing selects on ctx while it runs, so a slow collection is unbounded and
+// spends this budget before the first push is even built.
 func (h *notifyHub) tickBudget() time.Duration { return h.interval() * tickBudgetTicks }
 
 // sendBudget bounds one push to one device. Half the tick budget, so it is a
@@ -346,9 +358,10 @@ func (h *notifyHub) run() {
 	}
 }
 
-// tickWithBudget runs one tick under the per-tick deadline. The deadline bounds
-// how long collection plus its pushes can block the poll loop, so a wedged tick
-// cannot stop the hub sampling sessions.
+// tickWithBudget runs one tick under the per-tick deadline. The deadline reins
+// in the fan-out only — collection runs before anything consults ctx — so a
+// wedged push cannot stop the hub sampling sessions, but a wedged collection
+// still can.
 func (h *notifyHub) tickWithBudget() {
 	ctx, cancel := context.WithTimeout(context.Background(), h.tickBudget())
 	defer cancel()
@@ -404,8 +417,14 @@ func (h *notifyHub) tickOnce(ctx context.Context) {
 // Concurrency is also what makes dispatch order stop mattering, which is the
 // other half of the problem: DeviceStore.List sorts by token and tokens are
 // stable, so a serial loop starved the same device every tick forever. The
-// rotation below covers the residue — with more devices than workers, someone
-// still goes second.
+// rotation below is belt and braces for that, since maxConcurrentSends now
+// covers the whole registry and nobody queues in the first place.
+//
+// Known limit, deliberately left: events are dispatched one after another
+// within a tick, so several sessions entering a wait in the same tick share one
+// tick budget and the later events' fan-outs get less of it. Carrying undelivered
+// pushes over to the next tick is a different design — a pending queue with its
+// own duplicate-notification questions — and is not attempted here.
 func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
 	payload := buildAlertPayload(h.opts.HostName, h.opts.HostID, e)
 	collapse := h.opts.HostID + ":" + e.SessionID
@@ -417,14 +436,19 @@ func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
 
 	slots := make(chan struct{}, maxConcurrentSends)
 	var wg sync.WaitGroup
+dispatchLoop:
 	for _, d := range devices {
+		// Check before the select. A select whose cases are both ready picks at
+		// random, so a spent tick would otherwise still launch sends on an
+		// already-expired context — work that cannot succeed and only logs.
+		if ctx.Err() != nil {
+			break
+		}
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
-			// The tick is over. Anything not yet started would only fail on an
-			// expired context; stop rather than log a line per remaining device.
-			wg.Wait()
-			return
+			// The tick is over. Stop rather than log a line per remaining device.
+			break dispatchLoop
 		}
 		wg.Add(1)
 		go func(d Device) {
@@ -438,9 +462,12 @@ func (h *notifyHub) dispatch(ctx context.Context, e notifyEvent) {
 
 // send pushes one payload to one device and acts on the outcome.
 //
-// The deadline is taken here rather than in dispatch so a device that waited
-// for a worker slot still gets its own full budget rather than the remains of
-// somebody else's.
+// What the deadline below actually is: the earlier of the tick's remaining
+// budget and sendBudget. context.WithTimeout never extends a parent, so this
+// cannot hand a device more time than the tick has left. It equals a full
+// sendBudget only because maxConcurrentSends covers the whole registry, so
+// every device starts in the first round with the tick budget barely touched.
+// Shrink that pool and this stops being true for whoever starts in round two.
 func (h *notifyHub) send(ctx context.Context, d Device, collapse string, payload []byte) {
 	sendCtx, cancel := context.WithTimeout(ctx, h.sendBudget())
 	defer cancel()
