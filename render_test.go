@@ -1705,11 +1705,15 @@ func TestHostUsageHeadingsAllViews(t *testing.T) {
 			RenderAll(&b, mode, local, remotes, "", nil, 0, 0, "dir")
 			out := b.String()
 			localHeading := findRow(t, out, "workstation")
-			if !strings.Contains(localHeading, "CPU  13%  MEM  50%  LOAD "+wantLocalLoad) {
+			wantLocalCPU := colorize(usageColor(12.5), usageBar(12.5, hostUsageBarWidth))
+			wantLocalMem := colorize(usageColor(50), usageBar(50, hostUsageBarWidth))
+			if !strings.Contains(localHeading, "CPU "+wantLocalCPU+"  MEM "+wantLocalMem+"  LOAD "+wantLocalLoad) {
 				t.Fatalf("local heading = %q", localHeading)
 			}
 			remoteHeading := findRow(t, out, "beluga")
-			if !strings.Contains(remoteHeading, "CPU   0%  MEM   --  LOAD "+wantRemoteLoad) {
+			wantRemoteCPU := colorize(usageColor(0), usageBar(0, hostUsageBarWidth))
+			wantRemoteMem := dim(strings.Repeat("░", hostUsageBarWidth))
+			if !strings.Contains(remoteHeading, "CPU "+wantRemoteCPU+"  MEM "+wantRemoteMem+"  LOAD "+wantRemoteLoad) {
 				t.Fatalf("remote heading = %q", remoteHeading)
 			}
 			if strings.Index(out, "workstation") > strings.Index(out, "local-dir") {

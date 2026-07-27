@@ -1172,6 +1172,23 @@ func formatHostPercent(value *float64) string {
 	return fmt.Sprintf("%.0f%%", math.Round(clamped))
 }
 
+// formatHostBar renders a whole-host usage percentage as a 5-cell block bar,
+// colored the same way the rate-limit bars are (usageColor): default below
+// 70%, yellow 70–89%, red 90%+. A nil pointer means the metric was
+// unavailable and renders as a dimmed empty track, matching formatHostPercent's
+// "--" fallback in spirit.
+func formatHostBar(value *float64) string {
+	if value == nil {
+		return dim(strings.Repeat("░", hostUsageBarWidth))
+	}
+	clamped := max(0, min(100, *value))
+	return colorize(usageColor(clamped), usageBar(clamped, hostUsageBarWidth))
+}
+
+// hostUsageBarWidth is the fixed width of the CPU/MEM bars in the host
+// heading line.
+const hostUsageBarWidth = 5
+
 // loadToken formats one load-average value right-justified to a fixed width
 // (so LOAD columns line up across hosts once combined with formatHostLoad's
 // siblings) and wraps it in exactly one SGR code: the 1-minute figure
@@ -1230,10 +1247,10 @@ func formatHostLoad(load *LoadAverage, cores int) string {
 // width count escape bytes and break the alignment.
 func renderHostHeading(w io.Writer, sec section, nameWidth int) {
 	paddedName := fmt.Sprintf("%-*s", nameWidth, sec.name)
-	fmt.Fprintf(w, "  %s  CPU %4s  MEM %4s  LOAD %s\n",
+	fmt.Fprintf(w, "  %s  CPU %s  MEM %s  LOAD %s\n",
 		bold(paddedName),
-		formatHostPercent(sec.hostUsage.CPUPercent),
-		formatHostPercent(sec.hostUsage.MemoryPercent),
+		formatHostBar(sec.hostUsage.CPUPercent),
+		formatHostBar(sec.hostUsage.MemoryPercent),
 		formatHostLoad(sec.hostUsage.Load, sec.hostUsage.NumCPU))
 }
 
