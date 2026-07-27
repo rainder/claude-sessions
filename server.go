@@ -753,6 +753,43 @@ func shortHostname() string {
 	return h
 }
 
+// serverFlags are the flags shared by `-s` and `service install`. Both parse
+// them through parseServerFlags so a flag added to one can't go missing from
+// the unit file the other writes.
+type serverFlags struct {
+	port int
+	bind string
+}
+
+// parseServerFlags reads --port/--bind. An unrecognized flag is an error rather
+// than a silent no-op, so a typo never reads as "use the default".
+func parseServerFlags(args []string) (serverFlags, error) {
+	f := serverFlags{port: defaultServerPort, bind: "127.0.0.1"}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--port":
+			if i+1 >= len(args) {
+				return f, fmt.Errorf("--port needs a value")
+			}
+			p, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return f, fmt.Errorf("bad port %q", args[i+1])
+			}
+			f.port = p
+			i++
+		case "--bind":
+			if i+1 >= len(args) {
+				return f, fmt.Errorf("--bind needs a value")
+			}
+			f.bind = args[i+1]
+			i++
+		default:
+			return f, fmt.Errorf("unknown arg %q", args[i])
+		}
+	}
+	return f, nil
+}
+
 // cmdServer is the -s subcommand: starts the HTTP server in the foreground.
 //
 // Default bind is 127.0.0.1 (safe). For remote access:
@@ -761,34 +798,12 @@ func shortHostname() string {
 //	--bind 0.0.0.0      every interface (not recommended)
 //	--bind <addr>       any explicit address
 func cmdServer(args []string) int {
-	port := defaultServerPort
-	bind := "127.0.0.1"
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--port":
-			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "server: --port needs a value")
-				return 2
-			}
-			p, err := strconv.Atoi(args[i+1])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "server: bad port %q\n", args[i+1])
-				return 2
-			}
-			port = p
-			i++
-		case "--bind":
-			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "server: --bind needs a value")
-				return 2
-			}
-			bind = args[i+1]
-			i++
-		default:
-			fmt.Fprintf(os.Stderr, "server: unknown arg %q\n", args[i])
-			return 2
-		}
+	flags, err := parseServerFlags(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server: %v\n", err)
+		return 2
 	}
+	port, bind := flags.port, flags.bind
 
 	// Magic value: resolve "tailscale" to this host's Tailscale IPv4.
 	if bind == "tailscale" {
