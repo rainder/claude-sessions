@@ -97,3 +97,76 @@ func TestResolveBinPathRefusesTempDir(t *testing.T) {
 		t.Errorf("resolveBinPath() error = %q, want it to mention the temp directory", err.Error())
 	}
 }
+
+func TestLaunchdRender(t *testing.T) {
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	got := svc.Render(serviceConfig{
+		BinPath: "/Users/andy/.local/bin/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/opt/homebrew/bin:/usr/bin:/bin",
+		LogPath: "/Users/andy/Library/Logs/claude-sessions.log",
+	})
+	want := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.skerla.claude-sessions</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/andy/.local/bin/claude-sessions</string>
+    <string>-s</string>
+    <string>--port</string>
+    <string>8765</string>
+    <string>--bind</string>
+    <string>tailscale</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/andy/Library/Logs/claude-sessions.log</string>
+  <key>StandardErrorPath</key><string>/Users/andy/Library/Logs/claude-sessions.log</string>
+</dict>
+</plist>
+`
+	if got != want {
+		t.Errorf("Render() mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// A path or bind value containing XML metacharacters must not produce a
+// malformed plist — launchd rejects the whole file, and the error names the
+// line, not the cause.
+func TestLaunchdRenderEscapesXML(t *testing.T) {
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	got := svc.Render(serviceConfig{
+		BinPath: "/Users/andy/bin/claude & sessions",
+		Port:    8765,
+		Bind:    "<broken>",
+		Path:    "/usr/bin",
+		LogPath: "/tmp/log",
+	})
+	if strings.Contains(got, "claude & sessions") {
+		t.Error("raw & left unescaped in ProgramArguments")
+	}
+	if !strings.Contains(got, "claude &amp; sessions") {
+		t.Error("& not escaped to &amp;")
+	}
+	if strings.Contains(got, "<string><broken></string>") {
+		t.Error("raw angle brackets left unescaped in bind value")
+	}
+	if !strings.Contains(got, "&lt;broken&gt;") {
+		t.Error("angle brackets not escaped")
+	}
+}
+
+func TestLaunchdUnitPath(t *testing.T) {
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	want := "/Users/andy/Library/LaunchAgents/com.skerla.claude-sessions.plist"
+	if got := svc.UnitPath(); got != want {
+		t.Errorf("UnitPath() = %q, want %q", got, want)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -105,4 +106,72 @@ func capturePath() string {
 		return p
 	}
 	return fallbackPath
+}
+
+// launchdService installs a per-user LaunchAgent. It is constructed with home
+// and uid rather than reading them itself so tests can render a plist for a
+// fixed identity from any machine.
+type launchdService struct {
+	home string
+	uid  int
+}
+
+func (s *launchdService) Label() string { return serviceLabel }
+
+func (s *launchdService) UnitPath() string {
+	return filepath.Join(s.home, "Library", "LaunchAgents", serviceLabel+".plist")
+}
+
+// defaultLogPath is where install points StandardOutPath/StandardErrorPath.
+// ~/Library/Logs rather than /tmp: /tmp is swept periodically, so the log
+// disappears exactly when you go looking for why the service died last week.
+func (s *launchdService) defaultLogPath() string {
+	return filepath.Join(s.home, "Library", "Logs", "claude-sessions.log")
+}
+
+func (s *launchdService) Render(cfg serviceConfig) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
+	b.WriteString(`<plist version="1.0">` + "\n<dict>\n")
+	fmt.Fprintf(&b, "  <key>Label</key><string>%s</string>\n", xmlEscape(serviceLabel))
+	b.WriteString("  <key>ProgramArguments</key>\n  <array>\n")
+	for _, arg := range serviceArgs(cfg) {
+		fmt.Fprintf(&b, "    <string>%s</string>\n", xmlEscape(arg))
+	}
+	b.WriteString("  </array>\n")
+	b.WriteString("  <key>EnvironmentVariables</key>\n  <dict>\n")
+	fmt.Fprintf(&b, "    <key>PATH</key><string>%s</string>\n", xmlEscape(cfg.Path))
+	b.WriteString("  </dict>\n")
+	b.WriteString("  <key>RunAtLoad</key><true/>\n")
+	b.WriteString("  <key>KeepAlive</key><true/>\n")
+	fmt.Fprintf(&b, "  <key>StandardOutPath</key><string>%s</string>\n", xmlEscape(cfg.LogPath))
+	fmt.Fprintf(&b, "  <key>StandardErrorPath</key><string>%s</string>\n", xmlEscape(cfg.LogPath))
+	b.WriteString("</dict>\n</plist>\n")
+	return b.String()
+}
+
+// serviceArgs is the argv both backends render: the binary, then exactly the
+// flags `-s` itself accepts. Shared so the plist and the systemd ExecStart can
+// never disagree about how the server is invoked.
+func serviceArgs(cfg serviceConfig) []string {
+	return []string{
+		cfg.BinPath,
+		"-s",
+		"--port", strconv.Itoa(cfg.Port),
+		"--bind", cfg.Bind,
+	}
+}
+
+// xmlEscape escapes the five XML metacharacters. encoding/xml's EscapeText
+// writes &#xA; for newlines and is aimed at a Writer; this is a plist, the
+// values are single-line, and a tiny replacer keeps the golden files readable.
+func xmlEscape(s string) string {
+	return strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&apos;",
+	).Replace(s)
 }
