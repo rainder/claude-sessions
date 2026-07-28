@@ -130,10 +130,14 @@ func TestSessionStoreLastSeenRefreshesOnlyExistingVisible(t *testing.T) {
 	s := loadSessionStore(path, func() time.Time { return clock })
 	s.SetGroup("grouped", 1, []string{"grouped", "ungrouped"})
 
-	// Advance time and save again with both sessions visible.
+	// Advance time. SetGroup toggles: calling it again with the entry's
+	// current group (1) flips it back to 0, which deletes the entry rather
+	// than no-op'ing; the following identical call then toggles it back on,
+	// recreating the entry and stamping last_seen with the advanced clock —
+	// that recreated entry is what the assertion below observes.
 	clock = t0.Add(48 * time.Hour)
-	s.SetGroup("grouped", 1, []string{"grouped", "ungrouped"})
-	s.SetGroup("grouped", 1, []string{"grouped", "ungrouped"}) // re-assign same group: no-op toggle, still saves
+	s.SetGroup("grouped", 1, []string{"grouped", "ungrouped"}) // toggles off: deletes the entry
+	s.SetGroup("grouped", 1, []string{"grouped", "ungrouped"}) // toggles back on: recreates it with the new last_seen
 
 	if e := s.entries["grouped"]; e.LastSeen != clock.Format(time.RFC3339) {
 		t.Fatalf("grouped last_seen = %q, want %q", e.LastSeen, clock.Format(time.RFC3339))

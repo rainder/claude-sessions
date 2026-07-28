@@ -94,15 +94,17 @@ func RunTUI(interval time.Duration) error {
 
 	viewMode := LoadViewMode()
 	sortMode := LoadSortMode()
-	// store holds client-side group assignments and disabled flags (state.go).
-	// groupFilterState (zero value = no filter) is runtime-only — never
-	// persisted. pendingHide arms the inverse-filter binding: 'h' sets it and the
-	// next keystroke resolves it (see groupFilterTransition). textFilter is the
-	// '/'-driven free-text filter (also runtime-only); its effective query
-	// composes with groupFilterState (AND). groups is a per-settle snapshot of the
-	// store's assignments, reused for badge rendering and the filter predicate.
-	// hideDisabled is the 'd' toggle (also runtime-only) that composes (AND) with
-	// the group filter and text query.
+	// store holds client-side group assignments only (state.go); disabled
+	// state lives in disabledStore (disabled_store.go), host-owned and
+	// persisted separately. groupFilterState (zero value = no filter) is
+	// runtime-only — never persisted. pendingHide arms the inverse-filter
+	// binding: 'h' sets it and the next keystroke resolves it (see
+	// groupFilterTransition). textFilter is the '/'-driven free-text filter
+	// (also runtime-only); its effective query composes with groupFilterState
+	// (AND). groups is a per-settle snapshot of the store's assignments,
+	// reused for badge rendering and the filter predicate. hideDisabled is the
+	// 'd' toggle (also runtime-only) that composes (AND) with the group
+	// filter and text query.
 	store := LoadSessionStore()
 	disabledStore := LoadDisabledStore()
 	var groupFilterState groupFilter
@@ -205,9 +207,11 @@ func RunTUI(interval time.Duration) error {
 		// we never race the hub goroutine that owns them.
 		snap := hub.Snapshot()
 		remotes = sortRemotes(snap, sortMode)
-		// Keep long-lived group/disabled entries alive under plain viewing:
-		// refresh their last_seen about hourly so the 30-day load-time GC never
-		// drops state for a session that's still on screen.
+		// Keep long-lived group entries alive under plain viewing: refresh
+		// their last_seen about hourly so the 30-day load-time GC never drops
+		// state for a session that's still on screen. Disabled's own
+		// keepalive is handled separately by DisabledStore.Overlay's
+		// opportunistic touch above, not by this TouchVisible call.
 		if now := time.Now(); now.Sub(lastStateTouch) >= time.Hour {
 			lastStateTouch = now
 			store.TouchVisible(visibleSessionIDs(local, remotes))
@@ -335,14 +339,12 @@ func RunTUI(interval time.Duration) error {
 	modalWakes := []wakeFD{{fd: rw.FD(), kind: wakeResize}}
 	makeCtx := func() *actCtx {
 		return &actCtx{
-			fd:                fd,
-			oldState:          oldState,
-			targets:           targets,
-			sel:               state.sel,
-			modalWakes:        modalWakes,
-			store:             store,
-			disabled:          disabledStore,
-			visibleSessionIDs: visibleSessionIDs(local, remotes),
+			fd:         fd,
+			oldState:   oldState,
+			targets:    targets,
+			sel:        state.sel,
+			modalWakes: modalWakes,
+			disabled:   disabledStore,
 			pause: func() {
 				hub.Pause()
 				usageHub.Pause()

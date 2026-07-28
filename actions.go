@@ -43,11 +43,6 @@ type actCtx struct {
 	// unattended, so the caller shows a toast instead of attaching.
 	spawnedBackground bool
 
-	// store is the client-side group state; group assignment stays
-	// per-viewer (a view can group sessions from multiple hosts). Disabled
-	// state moved to the host-owned DisabledStore below.
-	store             *SessionStore
-	visibleSessionIDs []string
 	// disabled is this host's DisabledStore, written directly for local rows
 	// (Host == ""). Remote rows never write it — they go through
 	// actToggleDisabledRemote instead. May be nil in tests that don't

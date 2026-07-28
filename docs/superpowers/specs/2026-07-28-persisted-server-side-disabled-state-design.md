@@ -50,8 +50,10 @@ cross-*process* race a single Go-level mutex cannot fix.
 
 - On-disk file: `~/.config/claude-sessions/disabled.json` (`ConfigDir()`,
   sibling to `state.json`/`servers.yaml`/`server-token`).
-- Shape: `{"sessions": {"<sessionID>": {"disabled": true, "last_seen":
-  "RFC3339"}}}` — omit zero fields, same convention as `state.json`.
+- Shape: `{"sessions": {"<sessionID>": {"last_seen": "RFC3339"}}}` —
+  presence-only: a session's key existing in the map IS the disabled flag,
+  there is no separate `disabled` bool field, mirroring `state.go`'s
+  zero-value-means-absent convention.
 - Keyed by `SessionID`, never PID — survives PID reuse, resume, migration
   (same reasoning as the original `07f6b28` design).
 - **Every mutation takes an OS file lock** (`unix.Flock`, `golang.org/x/sys`
@@ -66,10 +68,13 @@ cross-*process* race a single Go-level mutex cannot fix.
 - Reads (`Disabled(id)`, `Overlay(sessions)`) `stat` the file's mtime and
   reload only when it changed, avoiding a decode on every render tick /
   every poll while staying correct.
-- GC: 30-day retention (`stateMaxAge`, matching `state.go`), pruned at load
-  and opportunistically during mutation. Retention is judged against the
+- GC: 30-day retention (`stateMaxAge`, matching `state.go`), pruned
+  opportunistically during every mutation (there is no separate at-load GC
+  pass — `LoadDisabledStore`/`newDisabledStore` don't prune anything
+  themselves; every read-modify-write cycle through `mutateLocked` does).
+  Retention is judged against the
   **caller's own currently-observed live-session set**, never a
-  client-supplied list: whichever code path calls `Overlay`/`Touch` passes the
+  client-supplied list: whichever code path calls `Overlay` passes the
   IDs it just collected (local `CollectLocal` result, or the server's own
   `cachedSessions()` result), and any disabled entry present in that set gets
   its `last_seen` touched — throttled to at most once per hour per entry (skip
@@ -155,17 +160,18 @@ poll already in flight can still show stale data briefly).
 - Malformed/trailing body → `400`.
 - Failed remote writes leave the row unchanged; error surfaces via
   `showActionError`.
-- Local `DisabledStore` failure (unwritable config dir) is best-effort,
-  matching `SessionStore.save`'s existing silent-failure convention. A failed
-  save must still update the in-memory cache (not just attempt the write and
-  give up), and the mtime-based reload check compares against this instance's
-  own last-*successfully-observed* mtime — since a failed save leaves the file
-  (and thus its mtime) unchanged, the next `Disabled()`/`Overlay()` call sees
-  no mtime change and keeps serving the in-memory value rather than reloading
-  and silently reverting the toggle within the same process's lifetime. Only
-  a config directory that's unwritable for the process's entire lifetime loses
-  the flag on restart — an accepted trade-off, not new error-surfacing
-  plumbing.
+- Local `DisabledStore` failure (unwritable config dir, or any step of the
+  locked read-modify-write cycle) fails closed: `mutateLocked` returns before
+  applying the change or updating the in-memory cache at all, so the toggle
+  is a complete no-op for that call, matching `SessionStore.save`'s existing
+  silent-failure convention. This supersedes an earlier draft of this section
+  that called for an in-memory-only fallback on save failure — that would
+  have been misleading in practice, since every read (local or via
+  `GET /sessions`) always re-derives its answer from a fresh disk read under
+  lock, so an in-memory-only value would just be silently dropped by the next
+  successful mutation from any process, including this one. Only a config
+  directory that's unwritable for the process's entire lifetime loses the
+  flag — an accepted trade-off, not new error-surfacing plumbing.
 
 ## Test Plan
 

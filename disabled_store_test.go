@@ -166,6 +166,46 @@ func TestDisabledStoreCrossInstanceSerialization(t *testing.T) {
 	}
 }
 
+// TestDisabledStoreWarmCacheReloadsAfterExternalWrite proves the mtime-based
+// reload path, not just the cold-load path every other cross-instance test
+// exercises: instance A reads once (warming its cache with a real, non-zero
+// loadedModTime), instance B writes, and A's NEXT call must see the change —
+// this is the core promise ("visible to every client polling that host")
+// under repeated polling, not just on first load.
+//
+// A's first read has to observe an *existing* file for this to warm a real
+// mtime: reloadIfStaleLocked early-returns on os.Stat's ENOENT for a
+// not-yet-created file, which would leave loadedModTime at its zero value
+// and silently collapse this into the same cold-load path every other
+// cross-instance test already covers. So B seeds the file first, and the
+// warm.IsZero() assertion below is load-bearing — it's what stops this test
+// from regressing back to the cold path unnoticed.
+func TestDisabledStoreWarmCacheReloadsAfterExternalWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "disabled.json")
+	a := newDisabledStore(path, fixedClock(time.Now()))
+	b := newDisabledStore(path, fixedClock(time.Now()))
+
+	// Seed the file so A's first read warms its cache against a real mtime.
+	b.SetDisabled("seed", true)
+
+	if a.Disabled("alpha") {
+		t.Fatal("alpha unexpectedly disabled before any write")
+	}
+	a.mu.Lock()
+	warm := a.loadedModTime
+	a.mu.Unlock()
+	if warm.IsZero() {
+		t.Fatal("A cached a zero mtime — this test would only exercise the cold-load path")
+	}
+
+	b.SetDisabled("alpha", true)
+
+	if !a.Disabled("alpha") {
+		t.Fatal("A's warm cache did not reload after B's external write")
+	}
+}
+
 func TestDisabledStoreEmptyPathDisablesPersistence(t *testing.T) {
 	d := newDisabledStore("", fixedClock(time.Now()))
 	d.SetDisabled("x", true) // must not panic
