@@ -356,6 +356,13 @@ type server struct {
 	// reintroduce the staleness it exists to close.
 	attest func(int) (Session, bool)
 
+	// disabled is this host's persisted disabled-session flag store (see
+	// disabled_store.go). Nil only in tests that don't exercise it — Overlay
+	// on a nil pointer would panic, so callers below guard for that case only
+	// where a test constructs a bare &server{} without one; production always
+	// sets it in cmdServer.
+	disabled *DisabledStore
+
 	// devices is the push registry; nil when this server was built without
 	// notification support, in which case the /devices routes report 503 rather
 	// than panicking.
@@ -388,9 +395,10 @@ func (s *server) collectLocalRaw() ([]Session, error) {
 	return CollectLocal()
 }
 
-// collectLocal returns this host's live sessions. Disabled state is entirely
-// client-side now (see state.go / the TUI overlay), so the server no longer
-// annotates it — every session it reports has Disabled=false.
+// collectLocal returns this host's live sessions, exactly as collected — it
+// never carries Disabled state. That's overlaid separately in the `sessions`
+// HTTP handler from this host's DisabledStore, so collectLocal's result stays
+// the same trusted-metadata source resolveLivePID and friends already use.
 func (s *server) collectLocal() ([]Session, error) {
 	return s.collectLocalRaw()
 }
@@ -598,6 +606,12 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Copy before overlaying: sessions is the shared cache slice, and another
+	// concurrent request encoding it must never see a partially-overlaid row.
+	sessions = append([]Session(nil), sessions...)
+	if s.disabled != nil {
+		s.disabled.Overlay(sessions)
 	}
 	hostUsage := HostUsage{}
 	if s.hostSnapshot != nil {
@@ -1427,6 +1441,7 @@ func cmdServer(args []string) int {
 	// The registry is shared: the /devices handlers write it and the push hub
 	// reads it, so they must be the same store, not two views of one file.
 	devices := LoadDeviceStore()
+	disabledStore := LoadDisabledStore()
 
 	s := &server{
 		token:              tok,
@@ -1435,6 +1450,7 @@ func cmdServer(args []string) int {
 		usageSnapshot:      usageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
 		devices:            devices,
+		disabled:           disabledStore,
 	}
 
 	// Push notifications are optional. Every failure here logs one line and

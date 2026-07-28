@@ -627,6 +627,61 @@ func TestSessionsIncludesHostUsage(t *testing.T) {
 	assertFloatPtr(t, got.HostUsage.MemoryPercent, &memory)
 }
 
+// TestSessionsHandlerOverlaysDisabledState proves GET /sessions no longer
+// hardcodes Disabled=false: it reflects the host's own DisabledStore, and
+// does not mutate the shared session cache in the process.
+func TestSessionsHandlerOverlaysDisabledState(t *testing.T) {
+	dir := t.TempDir()
+	disabled := newDisabledStore(filepath.Join(dir, "disabled.json"), fixedClock(time.Now()))
+	disabled.SetDisabled("dis-1", true)
+
+	s := &server{
+		token:    "secret",
+		disabled: disabled,
+		collect: func() ([]Session, error) {
+			return []Session{
+				{PID: 1, SessionID: "dis-1"},
+				{PID: 2, SessionID: "dis-2"},
+			}, nil
+		},
+	}
+	req := httptest.NewRequest("GET", "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.sessions(rec, req)
+
+	var resp struct {
+		Sessions []Session `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Sessions) != 2 {
+		t.Fatalf("got %d sessions, want 2", len(resp.Sessions))
+	}
+	if !resp.Sessions[0].Disabled {
+		t.Fatal("dis-1 not reported disabled")
+	}
+	if resp.Sessions[1].Disabled {
+		t.Fatal("dis-2 reported disabled with no entry")
+	}
+
+	// A second call must see the same result — proves the first call didn't
+	// mutate the cached slice in place.
+	rec2 := httptest.NewRecorder()
+	s.sessions(rec2, req)
+	var resp2 struct {
+		Sessions []Session `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if !resp2.Sessions[0].Disabled || resp2.Sessions[1].Disabled {
+		t.Fatalf("second call diverged: %#v", resp2.Sessions)
+	}
+}
+
 func TestSessionsReportsThisHostsIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	want := LoadHostID()
