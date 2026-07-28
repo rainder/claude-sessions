@@ -199,6 +199,54 @@ func TestRemoveWorktreeSurfacesGitRefusal(t *testing.T) {
 	}
 }
 
+func TestRemoveWorktreeUnlocksAndRetries(t *testing.T) {
+	lockedRefusal := "fatal: cannot remove a locked working tree\nuse 'remove -f -f' to override or unlock first"
+	var calls []string
+	err := removeWorktreeWith("/repo/.claude/worktrees/DR-860",
+		func(_ string, args ...string) ([]byte, error) {
+			calls = append(calls, strings.Join(args, " "))
+			switch args[1] {
+			case "remove":
+				if len(calls) == 1 {
+					return []byte(lockedRefusal), errors.New("exit status 128")
+				}
+				return nil, nil
+			case "unlock":
+				return nil, nil
+			}
+			t.Fatalf("unexpected git args: %v", args)
+			return nil, nil
+		})
+	if err != nil {
+		t.Fatalf("removeWorktreeWith: %v", err)
+	}
+	want := []string{
+		"worktree remove /repo/.claude/worktrees/DR-860",
+		"worktree unlock /repo/.claude/worktrees/DR-860",
+		"worktree remove /repo/.claude/worktrees/DR-860",
+	}
+	if strings.Join(calls, " | ") != strings.Join(want, " | ") {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestRemoveWorktreeSurfacesOriginalRefusalWhenUnlockFails(t *testing.T) {
+	lockedRefusal := "fatal: cannot remove a locked working tree\nuse 'remove -f -f' to override or unlock first"
+	err := removeWorktreeWith("/repo/.claude/worktrees/DR-860",
+		func(_ string, args ...string) ([]byte, error) {
+			if args[1] == "unlock" {
+				return []byte("error: not locked"), errors.New("exit status 1")
+			}
+			return []byte(lockedRefusal), errors.New("exit status 128")
+		})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "cannot remove a locked working tree") {
+		t.Fatalf("error = %q, want the original locked-tree refusal", err)
+	}
+}
+
 func TestRemoveWorktreeRejectsNonWorktreePath(t *testing.T) {
 	called := false
 	err := removeWorktreeWith("/repo", func(string, ...string) ([]byte, error) {

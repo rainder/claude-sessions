@@ -165,8 +165,26 @@ func removeWorktreeWith(path string, run worktreeRunner) error {
 		return fmt.Errorf("not a worktree path: %s", path)
 	}
 	out, err := run(repoRoot, "worktree", "remove", path)
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if !strings.Contains(msg, "locked working tree") {
+		if msg == "" {
+			return fmt.Errorf("git worktree remove: %w", err)
+		}
+		return fmt.Errorf("git worktree remove: %s", msg)
+	}
+	// Session left the tree administratively locked (e.g. a prior kill's
+	// worktree-remove raced with tmux teardown). Unlocking doesn't touch tree
+	// contents, so the retry below still refuses on dirty/untracked files —
+	// the --force-free guarantee above holds either way.
+	if _, unlockErr := run(repoRoot, "worktree", "unlock", path); unlockErr != nil {
+		return fmt.Errorf("git worktree remove: %s", msg)
+	}
+	out, err = run(repoRoot, "worktree", "remove", path)
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
+		msg = strings.TrimSpace(string(out))
 		if msg == "" {
 			return fmt.Errorf("git worktree remove: %w", err)
 		}
