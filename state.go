@@ -7,11 +7,10 @@ import (
 	"time"
 )
 
-// sessionState is the persisted client-side state for one Claude session, keyed
-// by its stable SessionID. Zero-valued fields are omitted on write.
+// sessionState is the persisted client-side state for one Claude session,
+// keyed by its stable SessionID. Zero-valued fields are omitted on write.
 type sessionState struct {
 	Group    int    `json:"group,omitempty"`
-	Disabled bool   `json:"disabled,omitempty"`
 	LastSeen string `json:"last_seen,omitempty"` // RFC3339, UTC
 }
 
@@ -23,7 +22,7 @@ type clientState struct {
 // stateMaxAge is how long an unseen entry survives before load-time GC drops it.
 const stateMaxAge = 30 * 24 * time.Hour
 
-// SessionStore is the client-machine-local persisted group/disabled state at
+// SessionStore is the client-machine-local persisted group assignment at
 // ~/.config/claude-sessions/state.json (alongside servers.yaml). It is only
 // touched from the TUI's single-threaded event loop — and read-only by the
 // `list` subcommand — so it carries no locking. Mutations save atomically (temp
@@ -83,14 +82,14 @@ func (s *SessionStore) nowStamp() string {
 	return s.clock().UTC().Format(time.RFC3339)
 }
 
-// gc drops entries that carry no state (neither group nor disabled) and entries
-// last seen more than stateMaxAge ago. An empty or unparseable last_seen on an
-// otherwise-meaningful entry is left alone rather than risk losing state on a
+// gc drops entries that carry no group and entries last seen more than
+// stateMaxAge ago. An empty or unparseable last_seen on an otherwise-
+// meaningful entry is left alone rather than risk losing state on a
 // clock/format glitch.
 func (s *SessionStore) gc(now time.Time) {
 	cutoff := now.Add(-stateMaxAge)
 	for id, e := range s.entries {
-		if e.Group == 0 && !e.Disabled {
+		if e.Group == 0 {
 			delete(s.entries, id)
 			continue
 		}
@@ -106,21 +105,6 @@ func (s *SessionStore) gc(now time.Time) {
 // Group returns the group (1..9) assigned to sessionID, or 0 if none.
 func (s *SessionStore) Group(sessionID string) int {
 	return s.entries[sessionID].Group
-}
-
-// Disabled reports whether sessionID is marked disabled.
-func (s *SessionStore) Disabled(sessionID string) bool {
-	return s.entries[sessionID].Disabled
-}
-
-// OverlayDisabled sets each session's Disabled flag from the store, overwriting
-// whatever the collector or a remote server reported. Sessions with no entry (or
-// no SessionID) become enabled. This is the sole authority for disabled state on
-// the client now.
-func (s *SessionStore) OverlayDisabled(sessions []Session) {
-	for i := range sessions {
-		sessions[i].Disabled = s.Disabled(sessions[i].SessionID)
-	}
 }
 
 // GroupsMap returns a snapshot of every grouped session's assignment, for badge
@@ -153,22 +137,11 @@ func (s *SessionStore) SetGroup(sessionID string, group int, visibleIDs []string
 	s.persist(visibleIDs)
 }
 
-// SetDisabled marks sessionID disabled or enabled. See SetGroup for visibleIDs.
-func (s *SessionStore) SetDisabled(sessionID string, disabled bool, visibleIDs []string) {
-	if sessionID == "" {
-		return
-	}
-	e := s.entries[sessionID]
-	e.Disabled = disabled
-	s.set(sessionID, e)
-	s.persist(visibleIDs)
-}
-
 // set writes an entry, stamping its last_seen, or deletes it when it no longer
 // carries any state — keeping the file free of last_seen-only junk that would
 // otherwise linger until the next load-time GC.
 func (s *SessionStore) set(sessionID string, e sessionState) {
-	if e.Group == 0 && !e.Disabled {
+	if e.Group == 0 {
 		delete(s.entries, sessionID)
 		return
 	}
@@ -178,9 +151,9 @@ func (s *SessionStore) set(sessionID string, e sessionState) {
 
 // TouchVisible refreshes last_seen for every visible session that already has
 // an entry and saves if anything changed. Mutations already do this on save;
-// this exists for plain viewing, so a session that stays grouped/disabled but
+// this exists for plain viewing, so a session that stays grouped but
 // untouched for 30 days isn't dropped by load-time GC while it's still being
-// looked at. The caller throttles it (see settleRows) — every visible entry
+// looked at. The caller throttles it (see settleRows); every visible entry
 // gets the same stamp, so calling it more often than the GC horizon matters
 // only as file-write churn.
 func (s *SessionStore) TouchVisible(visibleIDs []string) {
@@ -199,7 +172,7 @@ func (s *SessionStore) TouchVisible(visibleIDs []string) {
 }
 
 // persist refreshes last_seen for every visible session that already has an
-// entry (never creating one for an ungrouped/enabled session), then writes the
+// entry (never creating one for an ungrouped session), then writes the
 // file atomically.
 func (s *SessionStore) persist(visibleIDs []string) {
 	stamp := s.nowStamp()

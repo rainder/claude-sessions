@@ -328,6 +328,47 @@ func removeRemoteWorktree(host, path string) error {
 	return nil
 }
 
+// postDisableRemote asks host's server to set pid's disabled state, and
+// returns the state it actually applied — the server's own resolved
+// SessionID and the value it wrote, never the caller's guess of what
+// "disabled" now means. Mirrors removeRemoteWorktree's plain-function shape
+// so the network+parse logic is unit-testable without a terminal.
+func postDisableRemote(host string, pid int, sessionID string, disabled bool) (actionResult, error) {
+	body, err := json.Marshal(map[string]any{"session_id": sessionID, "disabled": disabled})
+	if err != nil {
+		return actionResult{}, err
+	}
+	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/disable", pid), "POST", body)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var r actionResult
+	if err := json.Unmarshal(resp, &r); err != nil {
+		return actionResult{}, err
+	}
+	return r, nil
+}
+
+// actToggleDisabledRemote handles "-"/"+" on a remote-selected row. No
+// confirmation dialog — unlike kill, disabling isn't destructive. Reports
+// whether anything changed, matching actToggleDisabled's local-path contract.
+func actToggleDisabledRemote(c *actCtx) bool {
+	s := c.selected()
+	if s == nil || s.SessionID == "" {
+		return false
+	}
+	r, err := postDisableRemote(s.Host, s.PID, s.SessionID, !s.Disabled)
+	if err != nil {
+		showActionError(c, "disable", err)
+		return false
+	}
+	if !r.OK {
+		showActionError(c, "disable", fmt.Errorf("%s", r.Error))
+		return false
+	}
+	return true
+}
+
 // actAttachRemote handles `a` on a remote-selected row. Gets the tmux session
 // name (migrating first if needed), then `ssh -t host tmux attach -t name`.
 func actAttachRemote(c *actCtx) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -14,22 +15,25 @@ func TestActToggleDisabledTogglesStore(t *testing.T) {
 	}{
 		{"local enable to disabled", Session{PID: 10, SessionID: "local"}, true},
 		{"local disabled to enabled", Session{PID: 11, SessionID: "local-off", Disabled: true}, false},
-		{"remote enable to disabled", Session{PID: 20, SessionID: "remote", Host: "orca"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			store := loadSessionStore("", nil)
+			// An empty path makes DisabledStore writes no-ops (mutateLocked
+			// bails on d.path == ""), so this needs a real file to actually
+			// exercise SetDisabled/Disabled round-tripping.
+			disabled := newDisabledStore(filepath.Join(t.TempDir(), "disabled.json"), nil)
 			if tc.session.Disabled {
-				store.SetDisabled(tc.session.SessionID, true, nil)
+				disabled.SetDisabled(tc.session.SessionID, true)
 			}
 			target := sessionSelectionTarget(tc.session)
-			c := &actCtx{targets: []selectionTarget{target}, sel: target.id, store: store}
+			c := &actCtx{targets: []selectionTarget{target}, sel: target.id, disabled: disabled}
 			if !actToggleDisabled(c) {
 				t.Fatal("actToggleDisabled = false, want true")
 			}
 			// The store is the sole authority — the live rows pick the value up
-			// via the caller's settleRows() re-overlay, not an in-place patch.
-			if got := store.Disabled(tc.session.SessionID); got != tc.want {
+			// via the caller's settleRows()/refresh() re-overlay, not an
+			// in-place patch.
+			if got := disabled.Disabled(tc.session.SessionID); got != tc.want {
 				t.Fatalf("store.Disabled = %v, want %v", got, tc.want)
 			}
 		})
@@ -37,21 +41,21 @@ func TestActToggleDisabledTogglesStore(t *testing.T) {
 }
 
 func TestActToggleDisabledIgnoresEmptyHostAndMissingID(t *testing.T) {
-	store := loadSessionStore("", nil)
+	disabled := newDisabledStore(filepath.Join(t.TempDir(), "disabled.json"), nil)
 
 	empty := emptyHostSelectionTarget("orca")
-	c := &actCtx{targets: []selectionTarget{empty}, sel: empty.id, store: store}
+	c := &actCtx{targets: []selectionTarget{empty}, sel: empty.id, disabled: disabled}
 	if actToggleDisabled(c) {
 		t.Fatal("empty-host target toggled")
 	}
 
 	missingID := sessionSelectionTarget(Session{PID: 2})
-	c = &actCtx{targets: []selectionTarget{missingID}, sel: missingID.id, store: store}
+	c = &actCtx{targets: []selectionTarget{missingID}, sel: missingID.id, disabled: disabled}
 	if actToggleDisabled(c) {
 		t.Fatal("missing-SessionID target toggled")
 	}
-	if len(store.entries) != 0 {
-		t.Fatalf("store mutated on ignored toggles: %#v", store.entries)
+	if len(disabled.entries) != 0 {
+		t.Fatalf("store mutated on ignored toggles: %#v", disabled.entries)
 	}
 }
 

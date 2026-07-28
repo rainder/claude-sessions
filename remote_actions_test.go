@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -58,5 +60,60 @@ func TestFetchRemoteCwdSuggestionsParsesHome(t *testing.T) {
 	want := []cwdSuggestion{{CWD: "/home/bob/repo", Count: 3}}
 	if !reflect.DeepEqual(suggestions, want) {
 		t.Fatalf("suggestions = %#v, want %#v", suggestions, want)
+	}
+}
+
+func TestPostDisableRemoteSendsResolvedIdentity(t *testing.T) {
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"session_id":"sess-1","disabled":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := postDisableRemote("box", 42, "sess-1", true)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !r.OK || r.SessionID != "sess-1" || r.Disabled == nil || !*r.Disabled {
+		t.Fatalf("response = %#v", r)
+	}
+	var sent struct {
+		SessionID string `json:"session_id"`
+		Disabled  bool   `json:"disabled"`
+	}
+	if err := json.Unmarshal(gotBody, &sent); err != nil {
+		t.Fatalf("decode sent body: %v", err)
+	}
+	if sent.SessionID != "sess-1" || !sent.Disabled {
+		t.Fatalf("sent body = %#v, want session_id=sess-1 disabled=true", sent)
+	}
+}
+
+func TestPostDisableRemoteSurfacesRefusal(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"error":"PID 42 is not a live Claude session","code":"not_live"}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := postDisableRemote("box", 42, "sess-1", true)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if r.OK || r.Code != codeNotLive {
+		t.Fatalf("response = %#v, want not_live refusal", r)
 	}
 }

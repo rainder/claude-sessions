@@ -43,12 +43,16 @@ type actCtx struct {
 	// unattended, so the caller shows a toast instead of attaching.
 	spawnedBackground bool
 
-	// store is the client-side group/disabled state; actToggleDisabled writes
-	// it. visibleSessionIDs are the sessions currently in view whose last_seen
-	// the ensuing save refreshes. Both may be nil in tests that don't exercise
-	// the store.
+	// store is the client-side group state; group assignment stays
+	// per-viewer (a view can group sessions from multiple hosts). Disabled
+	// state moved to the host-owned DisabledStore below.
 	store             *SessionStore
 	visibleSessionIDs []string
+	// disabled is this host's DisabledStore, written directly for local rows
+	// (Host == ""). Remote rows never write it — they go through
+	// actToggleDisabledRemote instead. May be nil in tests that don't
+	// exercise it.
+	disabled *DisabledStore
 }
 
 // runInteractive hands the terminal to prog with the pollers suspended,
@@ -130,20 +134,26 @@ func (c *actCtx) selectedRemoteNewTarget() (host, defaultCWD string, ok bool) {
 	return target.host, defaultCWD, true
 }
 
-// actToggleDisabled flips the disabled flag for the selected session in the
-// client store — disabled state is entirely client-side now (see state.go), so
-// this is an instant local write with no HTTP. The store is the sole authority:
-// nothing in-memory is patched here (c.selected() points into a throwaway
-// targets copy), so the caller MUST settleRows() afterwards to re-overlay the
-// new value onto the live rows. A row with no selection or no stable SessionID
-// is ignored (it can't be keyed). Reports whether anything changed.
+// actToggleDisabled flips the disabled flag for the selected session. Local
+// rows (Host == "") write directly to this host's DisabledStore — an
+// instant local write with no HTTP, mirroring the local branch every other
+// action (actKill, actAttach) takes. Remote rows delegate to
+// actToggleDisabledRemote, which makes the same write over HTTP against the
+// row's own host. Either way the store write is authoritative: nothing
+// in-memory is patched here (c.selected() points into a throwaway targets
+// copy), so the caller MUST settleRows()/refresh() afterwards to re-overlay
+// the new value onto the live rows. A row with no selection or no stable
+// SessionID is ignored (it can't be keyed). Reports whether anything changed.
 func actToggleDisabled(c *actCtx) bool {
 	session := c.selected()
 	if session == nil || session.SessionID == "" {
 		return false
 	}
-	if c.store != nil {
-		c.store.SetDisabled(session.SessionID, !session.Disabled, c.visibleSessionIDs)
+	if session.Host != "" {
+		return actToggleDisabledRemote(c)
+	}
+	if c.disabled != nil {
+		c.disabled.SetDisabled(session.SessionID, !session.Disabled)
 	}
 	return true
 }

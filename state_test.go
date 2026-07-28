@@ -20,17 +20,13 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 
 	s := loadSessionStore(path, fixedClock(now))
 	s.SetGroup("alpha", 3, []string{"alpha"})
-	s.SetDisabled("beta", true, []string{"alpha", "beta"})
 
-	// Reload from disk: assignments survive.
+	// Reload from disk: assignment survives.
 	got := loadSessionStore(path, fixedClock(now))
 	if got.Group("alpha") != 3 {
 		t.Fatalf("alpha group = %d, want 3", got.Group("alpha"))
 	}
-	if !got.Disabled("beta") {
-		t.Fatal("beta not disabled after reload")
-	}
-	if got.Group("beta") != 0 || got.Disabled("alpha") {
+	if got.Group("beta") != 0 {
 		t.Fatalf("cross-contamination: %#v", got.entries)
 	}
 	if m := got.GroupsMap(); len(m) != 1 || m["alpha"] != 3 {
@@ -58,7 +54,6 @@ func TestSessionStoreAtomicSaveLeavesNoTempFiles(t *testing.T) {
 		t.Fatalf("dir contents = %v, want only state.json", names)
 	}
 
-	// The persisted shape is {"sessions": {...}} with a stamped last_seen.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -81,11 +76,9 @@ func TestSessionStoreGCOnLoad(t *testing.T) {
 	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
 
 	seed := clientState{Sessions: map[string]sessionState{
-		"empty":      {LastSeen: recent},                        // no group/disabled: drop
-		"stale":      {Group: 2, LastSeen: old},                 // grouped but expired: drop
-		"kept":       {Group: 5, LastSeen: recent},              // grouped + fresh: keep
-		"nolastseen": {Disabled: true},                          // disabled, no stamp: keep
-		"disabled":   {Disabled: true, Group: 1, LastSeen: old}, // expired: drop
+		"empty": {LastSeen: recent},           // no group: drop
+		"stale": {Group: 2, LastSeen: old},    // grouped but expired: drop
+		"kept":  {Group: 5, LastSeen: recent}, // grouped + fresh: keep
 	}}
 	data, _ := json.MarshalIndent(seed, "", "  ")
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -93,7 +86,7 @@ func TestSessionStoreGCOnLoad(t *testing.T) {
 	}
 
 	s := loadSessionStore(path, fixedClock(now))
-	want := map[string]bool{"kept": true, "nolastseen": true}
+	want := map[string]bool{"kept": true}
 	if len(s.entries) != len(want) {
 		t.Fatalf("post-GC entries = %#v, want %v", s.entries, want)
 	}
@@ -139,10 +132,9 @@ func TestSessionStoreLastSeenRefreshesOnlyExistingVisible(t *testing.T) {
 
 	// Advance time and save again with both sessions visible.
 	clock = t0.Add(48 * time.Hour)
-	s.SetDisabled("grouped", true, []string{"grouped", "ungrouped"})
+	s.SetGroup("grouped", 1, []string{"grouped", "ungrouped"})
+	s.SetGroup("grouped", 1, []string{"grouped", "ungrouped"}) // re-assign same group: no-op toggle, still saves
 
-	// The grouped entry's last_seen advanced; the visible-but-ungrouped session
-	// never got a junk entry created for it.
 	if e := s.entries["grouped"]; e.LastSeen != clock.Format(time.RFC3339) {
 		t.Fatalf("grouped last_seen = %q, want %q", e.LastSeen, clock.Format(time.RFC3339))
 	}
@@ -154,20 +146,17 @@ func TestSessionStoreLastSeenRefreshesOnlyExistingVisible(t *testing.T) {
 func TestSessionStoreIgnoresEmptySessionID(t *testing.T) {
 	s := loadSessionStore("", fixedClock(time.Now()))
 	s.SetGroup("", 4, nil)
-	s.SetDisabled("", true, nil)
 	if len(s.entries) != 0 {
 		t.Fatalf("empty sessionID created entries: %#v", s.entries)
 	}
 }
 
 func TestLoadSessionStoreCorruptOrMissing(t *testing.T) {
-	// Missing file: empty store, no error.
 	missing := loadSessionStore(filepath.Join(t.TempDir(), "nope.json"), fixedClock(time.Now()))
 	if len(missing.entries) != 0 {
 		t.Fatalf("missing file yielded %#v", missing.entries)
 	}
 
-	// Corrupt file: empty store, no panic.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
@@ -181,30 +170,8 @@ func TestLoadSessionStoreCorruptOrMissing(t *testing.T) {
 
 func TestSessionStoreEmptyPathDisablesPersistence(t *testing.T) {
 	s := loadSessionStore("", fixedClock(time.Now()))
-	// Must not panic or write anywhere; the mutation is in-memory only.
 	s.SetGroup("x", 1, []string{"x"})
 	if s.Group("x") != 1 {
 		t.Fatalf("in-memory group lost: %d", s.Group("x"))
-	}
-}
-
-func TestSessionStoreOverlayDisabled(t *testing.T) {
-	s := loadSessionStore("", fixedClock(time.Now()))
-	s.SetDisabled("off", true, nil)
-
-	sessions := []Session{
-		{SessionID: "off", Disabled: false}, // store says disabled -> overlay on
-		{SessionID: "on", Disabled: true},   // store has no entry -> overlay off
-		{SessionID: "", Disabled: true},     // no ID -> overlay off
-	}
-	s.OverlayDisabled(sessions)
-	if !sessions[0].Disabled {
-		t.Fatal("store-disabled session not overlaid on")
-	}
-	if sessions[1].Disabled {
-		t.Fatal("server-reported disabled not overwritten by store")
-	}
-	if sessions[2].Disabled {
-		t.Fatal("blank-id session not forced enabled")
 	}
 }
