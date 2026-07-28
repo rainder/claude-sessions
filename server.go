@@ -53,6 +53,13 @@ type actionResult struct {
 	// otherwise; older clients ignore it, and a new client against an old
 	// server simply never sees it.
 	Worktree *worktreeInfo `json:"worktree,omitempty"`
+	// SessionID/Disabled are set by disableSession's success response, the
+	// same way migrate sets Tmux: the server's own resolved identity and the
+	// state it actually applied, so the client never has to trust its own
+	// guess of what "disabled" now means. *bool (not bool) so an explicit
+	// false is distinguishable from "field absent" under omitempty.
+	SessionID string `json:"session_id,omitempty"`
+	Disabled  *bool  `json:"disabled,omitempty"`
 }
 
 // worktreeInfo describes a worktree a kill has just left idle.
@@ -142,6 +149,79 @@ func sessionIDPrecondition(w http.ResponseWriter, r *http.Request) (string, erro
 		return "", err
 	}
 	return id, nil
+}
+
+// decodeDisableRequest strictly decodes the required {"session_id": "...",
+// "disabled": true} body for POST /sessions/{pid}/disable. Unlike
+// sessionIDPrecondition (kill/migrate's optional precondition), both fields
+// are mandatory here — a disable write is meaningless without an explicit
+// target and an explicit desired state — so absence, an explicit null, an
+// unknown field, or trailing content are all rejected rather than treated as
+// a no-op.
+func decodeDisableRequest(w http.ResponseWriter, r *http.Request) (sessionID string, disabled bool, err error) {
+	var body *struct {
+		SessionID json.RawMessage `json:"session_id"`
+		Disabled  json.RawMessage `json:"disabled"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		return "", false, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return "", false, fmt.Errorf("unexpected trailing json")
+	}
+	if body == nil {
+		return "", false, fmt.Errorf("body must be an object")
+	}
+	if len(body.SessionID) == 0 || string(body.SessionID) == "null" {
+		return "", false, fmt.Errorf("session_id is required")
+	}
+	if len(body.Disabled) == 0 || string(body.Disabled) == "null" {
+		return "", false, fmt.Errorf("disabled is required")
+	}
+	if err := json.Unmarshal(body.SessionID, &sessionID); err != nil {
+		return "", false, fmt.Errorf("session_id must be a string")
+	}
+	if sessionID == "" {
+		return "", false, fmt.Errorf("session_id must not be empty")
+	}
+	if err := json.Unmarshal(body.Disabled, &disabled); err != nil {
+		return "", false, fmt.Errorf("disabled must be a boolean")
+	}
+	return sessionID, disabled, nil
+}
+
+// disableSession handles POST /sessions/{pid}/disable: marks a live session
+// disabled or enabled on this host, persisted in s.disabled. session_id and
+// disabled are both required — see decodeDisableRequest. Identity resolution
+// follows kill/migrate's resolveLivePID convention: the request can only
+// narrow the target (via session_id), never widen it.
+func (s *server) disableSession(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	pid, err := strconv.Atoi(r.PathValue("pid"))
+	if err != nil {
+		http.Error(w, "bad pid", http.StatusBadRequest)
+		return
+	}
+	wantSession, disabled, err := decodeDisableRequest(w, r)
+	if err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	target, _, refusal := s.resolveLivePID(pid, wantSession)
+	if refusal != nil {
+		writeJSON(w, http.StatusOK, *refusal)
+		return
+	}
+	if s.disabled != nil {
+		s.disabled.SetDisabled(target.SessionID, disabled)
+	}
+	d := disabled
+	writeJSON(w, http.StatusOK, actionResult{OK: true, SessionID: target.SessionID, Disabled: &d})
 }
 
 type sessionFlight struct {
@@ -1483,6 +1563,7 @@ func cmdServer(args []string) int {
 	mux.HandleFunc("GET /sessions/{pid}/tmux-info", s.tmuxInfo)
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)
 	mux.HandleFunc("POST /sessions/{pid}/migrate", s.migrate)
+	mux.HandleFunc("POST /sessions/{pid}/disable", s.disableSession)
 	mux.HandleFunc("POST /sessions/new", s.newSession)
 	mux.HandleFunc("POST /worktree/remove", s.removeWorktree)
 	mux.HandleFunc("POST /devices", s.registerDevice)

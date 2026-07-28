@@ -3485,3 +3485,131 @@ func TestCompletedSpawnFreesItsSlotBeforeTheResponseIsWritten(t *testing.T) {
 		t.Fatalf("result = %#v", r)
 	}
 }
+
+func TestDisableHandlerSetsDisabledState(t *testing.T) {
+	dir := t.TempDir()
+	disabled := newDisabledStore(filepath.Join(dir, "disabled.json"), fixedClock(time.Now()))
+	s := &server{
+		token:    "secret",
+		disabled: disabled,
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 55, SessionID: "sess-55"}}, nil
+		},
+	}
+	body := strings.NewReader(`{"session_id":"sess-55","disabled":true}`)
+	req := httptest.NewRequest("POST", "/sessions/55/disable", body)
+	req.SetPathValue("pid", "55")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.disableSession(rec, req)
+
+	var r actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !r.OK || r.SessionID != "sess-55" || r.Disabled == nil || !*r.Disabled {
+		t.Fatalf("response = %#v, want OK with sess-55 disabled", r)
+	}
+	if !disabled.Disabled("sess-55") {
+		t.Fatal("store not updated")
+	}
+}
+
+func TestDisableHandlerSessionMismatchRefusesWithoutMutating(t *testing.T) {
+	dir := t.TempDir()
+	disabled := newDisabledStore(filepath.Join(dir, "disabled.json"), fixedClock(time.Now()))
+	s := &server{
+		token:    "secret",
+		disabled: disabled,
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 55, SessionID: "new-session"}}, nil
+		},
+	}
+	body := strings.NewReader(`{"session_id":"stale-session","disabled":true}`)
+	req := httptest.NewRequest("POST", "/sessions/55/disable", body)
+	req.SetPathValue("pid", "55")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.disableSession(rec, req)
+
+	var r actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("response = %#v, want session_mismatch refusal", r)
+	}
+	if disabled.Disabled("new-session") || disabled.Disabled("stale-session") {
+		t.Fatal("store mutated on a refused request")
+	}
+}
+
+func TestDisableHandlerNotLiveRefusesWithoutMutating(t *testing.T) {
+	dir := t.TempDir()
+	disabled := newDisabledStore(filepath.Join(dir, "disabled.json"), fixedClock(time.Now()))
+	s := &server{
+		token:    "secret",
+		disabled: disabled,
+		collect:  func() ([]Session, error) { return nil, nil },
+	}
+	body := strings.NewReader(`{"session_id":"ghost","disabled":true}`)
+	req := httptest.NewRequest("POST", "/sessions/55/disable", body)
+	req.SetPathValue("pid", "55")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.disableSession(rec, req)
+
+	var r actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if r.OK || r.Code != codeNotLive {
+		t.Fatalf("response = %#v, want not_live refusal", r)
+	}
+}
+
+func TestDisableHandlerRejectsMalformedBody(t *testing.T) {
+	s := &server{token: "secret", collect: func() ([]Session, error) { return nil, nil }}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing session_id", `{"disabled":true}`},
+		{"missing disabled", `{"session_id":"x"}`},
+		{"null session_id", `{"session_id":null,"disabled":true}`},
+		{"empty session_id", `{"session_id":"","disabled":true}`},
+		{"unknown field", `{"session_id":"x","disabled":true,"extra":1}`},
+		{"trailing content", `{"session_id":"x","disabled":true}{}`},
+		{"disabled not a bool", `{"session_id":"x","disabled":"yes"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/sessions/55/disable", strings.NewReader(tc.body))
+			req.SetPathValue("pid", "55")
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+
+			s.disableSession(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestDisableHandlerUnauthorized(t *testing.T) {
+	s := &server{token: "secret"}
+	req := httptest.NewRequest("POST", "/sessions/55/disable", strings.NewReader(`{"session_id":"x","disabled":true}`))
+	req.SetPathValue("pid", "55")
+	rec := httptest.NewRecorder()
+
+	s.disableSession(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
