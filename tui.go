@@ -104,6 +104,7 @@ func RunTUI(interval time.Duration) error {
 	// hideDisabled is the 'd' toggle (also runtime-only) that composes (AND) with
 	// the group filter and text query.
 	store := LoadSessionStore()
+	disabledStore := LoadDisabledStore()
 	var groupFilterState groupFilter
 	var pendingHide bool
 	var textFilter textFilterState
@@ -192,19 +193,17 @@ func RunTUI(interval time.Duration) error {
 	// selection. It chases a pending post-spawn landing until its tmux pane
 	// appears, otherwise falling back if a vanished selected row needs replacing.
 	settleRows := func() {
-		// Refresh the group snapshot and overlay the store's disabled flags onto
-		// both local and remote sessions before sorting — the overlay is
-		// authoritative and overwrites any (now always-false) server-reported
-		// value, and the sort orders disabled rows last.
+		// Refresh the group snapshot and overlay this host's disabled flags
+		// onto local sessions before sorting — the sort orders disabled rows
+		// last. Remote sessions already carry authoritative Disabled from the
+		// wire (each remote host's own DisabledStore, applied server-side in
+		// GET /sessions), so no client-side overlay is needed for them.
 		groups = store.GroupsMap()
-		store.OverlayDisabled(local)
+		disabledStore.Overlay(local)
 		SortSessions(local, sortMode)
 		// Snapshot() returns the hub's shared slices; sort remotes on copies so
 		// we never race the hub goroutine that owns them.
 		snap := hub.Snapshot()
-		for i := range snap {
-			store.OverlayDisabled(snap[i].Sessions)
-		}
 		remotes = sortRemotes(snap, sortMode)
 		// Keep long-lived group/disabled entries alive under plain viewing:
 		// refresh their last_seen about hourly so the 30-day load-time GC never
@@ -342,6 +341,7 @@ func RunTUI(interval time.Duration) error {
 			sel:               state.sel,
 			modalWakes:        modalWakes,
 			store:             store,
+			disabled:          disabledStore,
 			visibleSessionIDs: visibleSessionIDs(local, remotes),
 			pause: func() {
 				hub.Pause()
@@ -558,10 +558,15 @@ func RunTUI(interval time.Duration) error {
 				refresh(true)
 				render()
 			case "-", "+":
+				screen.Invalidate()
 				if actToggleDisabled(makeCtx()) {
-					// The store write is authoritative; settleRows re-overlays it
-					// onto local + remotes, so no per-host patch is needed.
-					settleRows()
+					// The store write is authoritative; refresh(true) re-overlays
+					// it onto local (via settleRows) and kicks an immediate remote
+					// refetch so a remote toggle shows up promptly — the same
+					// convention actKill/actAttach already follow, including the
+					// same brief eventual-consistency window if a poll was already
+					// in flight when the write landed.
+					refresh(true)
 					state.requestSelectionAnchor()
 					render()
 				}

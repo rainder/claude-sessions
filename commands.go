@@ -467,13 +467,12 @@ func cmdListSessions(args []string) int {
 		return 1
 	}
 	remotes := FetchAllRemote()
-	// Disabled state is client-side; overlay it read-only so this output
-	// matches the TUI. Groups don't affect this output.
-	store := LoadSessionStore()
-	store.OverlayDisabled(local)
-	for i := range remotes {
-		store.OverlayDisabled(remotes[i].Sessions)
-	}
+	// Disabled state is host-owned (disabled_store.go). Local sessions are
+	// this host, so overlay directly; remote sessions already carry
+	// authoritative Disabled from the wire (each remote host's own
+	// DisabledStore, applied server-side in GET /sessions). Groups don't
+	// affect this output.
+	LoadDisabledStore().Overlay(local)
 	sortMode := LoadSortMode()
 	SortSessions(local, sortMode)
 	remotes = sortRemotes(remotes, sortMode)
