@@ -4,16 +4,16 @@ import "testing"
 
 func TestParseTmuxPaneOutput(t *testing.T) {
 	got := parseTmuxPaneOutput(
-		"101\talpha beta:0.1\t0\n" +
-			"102\tsolo:1.2\t1\n" +
-			"103\tpairing:2.3\t4\n" +
-			"104\tcrowd:0.0\t12\n" +
-			"105\tunknown:0.0\tbogus\n" +
-			"106\tnegative:0.0\t-1\n" +
-			"bad\tignored:0.0\t1\n" +
-			"0\tignored-zero:0.0\t1\n" +
-			"-2\tignored-negative:0.0\t1\n" +
-			"107\t\t1\n" +
+		"101 0 alpha beta:0.1\n" +
+			"102 1 solo:1.2\n" +
+			"103 4 pairing:2.3\n" +
+			"104 12 crowd:0.0\n" +
+			"105 bogus unknown:0.0\n" +
+			"106 -1 negative:0.0\n" +
+			"bad 1 ignored:0.0\n" +
+			"0 1 ignored-zero:0.0\n" +
+			"-2 1 ignored-negative:0.0\n" +
+			"107 1 \n" +
 			"missing-fields\n",
 	)
 

@@ -13,9 +13,20 @@ type tmuxPaneInfo struct {
 
 // tmuxPaneMap returns pane_pid → pane metadata for every tmux pane on the
 // default server. Empty map (no error) if tmux isn't running.
+//
+// The format is space-separated with the free-text location last, never
+// tab-separated: a tmux client running without a UTF-8 locale — which is how
+// launchd starts this server, and how a systemd unit that inherits no locale
+// would too — sanitizes everything outside printable ASCII in its output, so
+// every tab arrives as "_" and a tab-split parser sees no panes at all. The
+// phone then shows every session as outside tmux, which is how this was found.
+//
+// -u forces the client to UTF-8 regardless of locale, which keeps a non-ASCII
+// session name readable; the separator still avoids tabs because the format
+// must parse even where -u is ignored.
 func tmuxPaneMap() (map[int]tmuxPaneInfo, error) {
-	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_attached}").Output()
+	out, err := exec.Command("tmux", "-u", "list-panes", "-a", "-F",
+		"#{pane_pid} #{session_attached} #{session_name}:#{window_index}.#{pane_index}").Output()
 	if err != nil {
 		return map[int]tmuxPaneInfo{}, nil
 	}
@@ -28,8 +39,10 @@ func parseTmuxPaneOutput(out string) map[int]tmuxPaneInfo {
 		if line == "" {
 			continue
 		}
-		fields := strings.SplitN(line, "\t", 3)
-		if len(fields) != 3 || fields[1] == "" {
+		// Location comes last because session names may contain spaces; the
+		// two numeric fields can't, so SplitN leaves the name intact.
+		fields := strings.SplitN(line, " ", 3)
+		if len(fields) != 3 || fields[2] == "" {
 			continue
 		}
 		pid, err := strconv.Atoi(fields[0])
@@ -37,8 +50,8 @@ func parseTmuxPaneOutput(out string) map[int]tmuxPaneInfo {
 			continue
 		}
 
-		info := tmuxPaneInfo{Location: fields[1]}
-		attached, err := strconv.Atoi(strings.TrimSpace(fields[2]))
+		info := tmuxPaneInfo{Location: fields[2]}
+		attached, err := strconv.Atoi(strings.TrimSpace(fields[1]))
 		if err == nil && attached >= 0 {
 			info.Attached = &attached
 		}
