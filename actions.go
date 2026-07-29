@@ -202,6 +202,12 @@ func actKill(c *actCtx) {
 	// in no list to reason about. A failed collect simply means no offer.
 	worktree, _ := localWorktreeCleanupTarget(*s)
 	c.prepareLineOutput()
+	if err := localReattest(s.PID, s.SessionID); err != nil {
+		fmt.Printf("\nkill failed: %v\n", err)
+		pauseForKey(c.fd, c.oldState)
+		c.enterRaw()
+		return
+	}
 	if err := KillSession(*s); err != nil {
 		fmt.Printf("\nkill failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
@@ -259,6 +265,12 @@ func actAttach(c *actCtx) {
 	}
 	c.prepareLineOutput()
 	fmt.Printf("\nmigrating PID %d... ", s.PID)
+	if err := localReattest(s.PID, s.SessionID); err != nil {
+		fmt.Printf("\nmigrate failed: %v\n", err)
+		pauseForKey(c.fd, c.oldState)
+		c.enterRaw()
+		return
+	}
 	tname, err := MigrateLocal(s.PID)
 	if err != nil {
 		fmt.Printf("\nmigrate failed: %v\n", err)

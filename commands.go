@@ -86,6 +86,10 @@ func cmdKill(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worktree check skipped: %v\n", err)
 	}
+	if err := localReattest(pid, sess.SessionID); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	if err := KillSession(sess); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -145,6 +149,10 @@ func cmdMigrate(args []string) int {
 			fmt.Println("aborted")
 			return 0
 		}
+	}
+	if err := localReattest(pid, sess.SessionID); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	out, err := MigrateLocal(pid)
 	if err != nil {
