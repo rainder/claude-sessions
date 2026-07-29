@@ -1,5 +1,7 @@
 # Loopback-Server-Only Local Mutations Implementation Plan
 
+> **SUPERSEDED — do not execute.** See `docs/superpowers/specs/2026-07-29-servers-only-client-design.md`'s rejection note and `2026-07-29-thread-mutation-preconditions-design.md` for what replaced it. The design this plan implements was built on a disproven premise (remote already has the same unguarded gap this plan claimed only local had) and has at least one confirmed defect (Task 4's dead-code deletion breaks `worktree_test.go:348,365`). Kept for the task-decomposition reasoning trail only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Route local session mutations (kill/migrate/spawn/disable) through the loopback `-s` daemon's HTTP API instead of calling `KillSession`/`MigrateLocal`/`SpawnNew`/`DisabledStore.SetDisabled` directly from the client, so local mutations get the same `sessionIDPrecondition`/`reattest`/`spawnDedupe` protection remote mutations already have — refusing loudly if the daemon isn't reachable rather than silently falling back to the unguarded direct call.

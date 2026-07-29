@@ -1,7 +1,22 @@
 # Loopback-Server-Only Local Mutations Design
 
 **Date:** 2026-07-29
-**Status:** Approved (revised after discovering `server_client.go`)
+**Status:** REJECTED — see `2026-07-29-thread-mutation-preconditions-design.md`
+
+**Why rejected:** this design's whole premise was that local kill/migrate/
+spawn are racier than remote, because remote gets `sessionIDPrecondition`/
+`reattest`/`spawnDedupe` and local doesn't. An `ask-codex` review (independently
+verified directly against server.go/paste.go before accepting it) found that
+premise false: those guards are opt-in per request field
+(`session_id`/`request_id`), and the *existing* remote call sites
+(`actKillRemote`, `actAttachRemote`'s migrate call, `actNewRemote`,
+`cmdNewRemote`) never send them either — `{}` bodies throughout. Remote is
+exactly as unguarded as local today; there was no gap for routing local
+through HTTP to close. It also would have introduced a real regression: a
+`--bind tailscale` daemon serves a second, paste-only loopback listener
+(`paste.go:446-461`) that would make every local mutation misreport "server
+not reachable." Kept in the repo for the reasoning trail; superseded in full
+by the smaller, correct fix in the doc named above.
 
 ## Goal
 
