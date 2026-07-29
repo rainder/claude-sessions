@@ -570,9 +570,10 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 
 	fmt.Printf("\nspawning on %s in %s... ", host, cwd)
 	body, _ := json.Marshal(map[string]string{
-		"cwd":     cwd,
-		"command": preset.Name,
-		"prompt":  prompt,
+		"cwd":        cwd,
+		"command":    preset.Name,
+		"prompt":     prompt,
+		"request_id": newSpawnRequestID(),
 	})
 	resp, err := remoteRequest(host, "/sessions/new", "POST", body)
 	if err != nil {

@@ -51,6 +51,19 @@ func randomSlug() string {
 	return hex.EncodeToString(b)
 }
 
+// newSpawnRequestID returns a fresh idempotency key for /sessions/new's
+// optional request_id, sized to satisfy validSpawnRequestID (server.go:389,
+// 8-128 chars of [A-Za-z0-9_-]). randomSlug's 6 hex chars are too short and
+// serve a different purpose (a tmux-name suffix) — this gets its own helper
+// rather than widening that one's contract.
+func newSpawnRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%032x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 // migrateSignal/migrateAlive/migrateSleep are MigrateLocal's side effects,
 // injectable so the kill-then-verify sequence can be tested without signalling a
 // real process or spending its waits in real time.

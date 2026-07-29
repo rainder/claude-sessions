@@ -298,3 +298,13 @@ func TestKillSessionWithoutTmuxEscalates(t *testing.T) {
 		t.Fatalf("signals = %v, want [SIGTERM SIGKILL]", signals)
 	}
 }
+
+func TestNewSpawnRequestIDSatisfiesServerValidation(t *testing.T) {
+	id := newSpawnRequestID()
+	if !validSpawnRequestID(id) {
+		t.Fatalf("newSpawnRequestID() = %q, fails validSpawnRequestID", id)
+	}
+	if id2 := newSpawnRequestID(); id2 == id {
+		t.Fatalf("two calls returned the same id: %q", id)
+	}
+}
