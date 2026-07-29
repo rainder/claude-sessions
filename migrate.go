@@ -312,6 +312,29 @@ func killSessionWith(s Session, deps killDeps) error {
 	return nil
 }
 
+// localReattest re-reads the session file for pid immediately before a
+// destructive local action (kill/migrate) and compares it against the
+// session identity the caller last observed. Mirrors the server's reattest
+// (server.go:618) — same two refusal cases, just in-process instead of over
+// HTTP: the caller's snapshot can be however old its confirmation dialog
+// took to resolve, and the PID can have been recycled to a different
+// session in that window. An empty wantSessionID skips the check —
+// matches sessionIDPrecondition's own "absent means no precondition"
+// contract, not a new policy invented for this path.
+func localReattest(pid int, wantSessionID string) error {
+	if wantSessionID == "" {
+		return nil
+	}
+	sess, ok := readSessionByPID(pid)
+	if !ok {
+		return fmt.Errorf("PID %d is not a live Claude session", pid)
+	}
+	if sess.SessionID != wantSessionID {
+		return fmt.Errorf("PID %d is a different session now", pid)
+	}
+	return nil
+}
+
 // readSessionByPID reads a single ~/.claude/sessions/<pid>.json file.
 // Returns ok=false if missing or malformed.
 func readSessionByPID(pid int) (Session, bool) {
