@@ -265,13 +265,7 @@ func actAttach(c *actCtx) {
 	}
 	c.prepareLineOutput()
 	fmt.Printf("\nmigrating PID %d... ", s.PID)
-	if err := localReattest(s.PID, s.SessionID); err != nil {
-		fmt.Printf("\nmigrate failed: %v\n", err)
-		pauseForKey(c.fd, c.oldState)
-		c.enterRaw()
-		return
-	}
-	tname, err := MigrateLocal(s.PID)
+	tname, err := MigrateLocalAttested(s.PID, s.SessionID)
 	if err != nil {
 		fmt.Printf("\nmigrate failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)

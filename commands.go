@@ -150,11 +150,7 @@ func cmdMigrate(args []string) int {
 			return 0
 		}
 	}
-	if err := localReattest(pid, sess.SessionID); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	out, err := MigrateLocal(pid)
+	out, err := MigrateLocalAttested(pid, sess.SessionID)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
