@@ -1,155 +1,208 @@
-# servers.yaml-Only Client Design
+# Loopback-Server-Only Local Mutations Design
 
 **Date:** 2026-07-29
-**Status:** Approved
+**Status:** Approved (revised after discovering `server_client.go`)
 
 ## Goal
 
-Remove the TUI's and scriptable subcommands' direct, in-process access to
-local sessions (`CollectLocal`, `KillSession`, `MigrateLocal` called straight
-from the client). Route every session view and mutation — local or remote —
-through a running `-s` server's HTTP API, the same path remote hosts already
-use. This closes a real correctness gap, not just a style preference: the
-server's HTTP handlers carry `sessionIDPrecondition` + `reattest` (the
-TOCTOU guard described in CLAUDE.md's "Action preconditions and idempotency")
-and `spawnDedupe`; the client's local-direct calls (`actKill`/`actAttach`/
-`actNew` in actions.go, `cmdKill`/`cmdMigrate`/`cmdNew` in commands.go) have
-none of that. Local usage is racier today than remote usage of the identical
-feature.
+Remove the client's direct, in-process **mutation** of local sessions
+(`KillSession`, `MigrateLocal`, `SpawnNew`, `DisabledStore.SetDisabled`
+called straight from `actions.go`/`commands.go`). Route local kill/migrate/
+spawn/disable through the local `-s` daemon's HTTP API instead — the same
+path remote hosts already use — so local mutations get the same
+`sessionIDPrecondition` + `reattest` (CLAUDE.md's TOCTOU guard) and
+`spawnDedupe` protection remote mutations already have. Local mutations
+today have none of that; remote mutations of the identical feature do. If
+the daemon isn't reachable, the client refuses loudly rather than silently
+falling back to the racy direct call — "always depend on a running server"
+means mutations actually depend on one.
 
-## History
+## History and correction
 
-Local and remote have been two parallel implementations since the Go rewrite
-(see CLAUDE.md's "Three roles, one substrate" — client, server, subcommands
-share primitives, but the *client's* local path calls those primitives
-directly rather than through the server). That duplication is the likely
-source of recent drift bugs (DisabledStore wired separately for local vs.
-remote in `86641ff`/`160edb0`, the self-referencing remote-fetch fix in
-`851a61e`). This design collapses the duplication by making local sessions
-just another `servers.yaml` entry.
+The original draft of this spec proposed an explicit `self: true`
+servers.yaml entry and a hard error when servers.yaml has zero entries.
+That was written before reading `server_client.go`, which already
+implements almost exactly this pattern for **reads**:
+`collectClientLocal()` (server_client.go:119) tries the loopback daemon
+first via `fetchLocalServerSessions()` → `sessionServerConfig("")` (a
+hardcoded `127.0.0.1:8765` config with an auto-created token from
+`loadOrCreateToken()`, no servers.yaml involvement at all) and silently
+falls back to direct `CollectLocal()` on any failure. `dropSelfServer`
+(remote.go:72) actively filters a servers.yaml entry that points at
+`localAddrs()` (includes `127.0.0.1`/`localhost`/`::1`) out of
+`FetchAllRemote` — i.e. the codebase already rejects the "local as a
+servers.yaml entry" shape the original draft proposed. Local access is not,
+and under this design still isn't, config-driven. This revision builds on
+`sessionServerConfig("")` / `localServerRequestWithTimeout` instead of
+inventing config surface to re-derive what that function already returns.
 
 ## Non-goals
 
-- No change to `render.go`'s section layout, `service install`/`uninstall`/
-  `status` internals, or the servers.yaml top-level shape (`servers:` /
-  `commands:`).
-- No auto-spawn of a server process on demand. If nothing is configured, the
-  client errors and offers to configure — it does not silently launch a
-  daemon behind the user's back.
-- No migration tooling for existing servers.yaml files — adding a `self`
-  entry is additive; existing remote entries are untouched.
-- No change to how remote (non-self) hosts already work — `remote_actions.go`
-  keeps its existing SSH-attach, HTTP-mutate behavior; this design only
-  extends that path to also cover the local machine.
+- No change to `render.go`, `service install`/`uninstall`/`status`
+  internals, or servers.yaml's shape (`servers:`/`commands:` unchanged,
+  `ServerConfig` unchanged).
+- No change to `collectClientLocal`'s existing silent-fallback behavior for
+  **reads** — the TUI and `cmdList` still show sessions when the daemon is
+  down. Only mutations (kill/migrate/spawn/disable) switch to refuse-loudly.
+- No auto-spawn of the daemon on demand. A local mutation with the daemon
+  unreachable errors with instructions (`claude-sessions service install`);
+  it does not launch one behind the user's back.
+- No change to remote (non-loopback) behavior at all — `remote_actions.go`'s
+  SSH-attach, HTTP-mutate path against `servers.yaml` entries is untouched.
+- No change to `worktree.go:137` or `resume.go:353`'s direct `CollectLocal()`
+  calls — the former's fresh, uncached collect right before a destructive
+  decision is a documented invariant; the latter is out of scope (resume
+  picker, not a mutation).
 
 ## Architecture
 
-### `self` server entries
+### Local mutations go through the loopback daemon
 
-`ServerConfig` gains one new field:
+`actKill`/`actAttach`/`actNew`/`actToggleDisabled` (actions.go) currently
+branch on `s.Host != ""` and, for the local (`Host == ""`) case, call
+`KillSession`/`MigrateLocal`/`SpawnNew`/`c.disabled.SetDisabled` directly.
+That branch is replaced with an HTTP call to the loopback daemon, built from
+the same primitives `collectClientLocal` already uses:
 
-```
-self: true    (optional; default false)
-```
+- `sessionServerConfig("")` (server_client.go:24) resolves the loopback
+  `ServerConfig` (host, port, auto-created token) — no servers.yaml lookup.
+- `localServerRequestWithTimeout` (server_client.go:46) sends the request,
+  with its existing loopback→Tailscale-IPv4 fallback (used for detecting
+  the box's own Tailscale address, unrelated to and unaffected by this
+  change).
+- The endpoints are the ones `remote_actions.go` already calls by name
+  (`/sessions/{pid}/kill`, `/sessions/{pid}/migrate`, `/sessions/new`,
+  `/sessions/{pid}/disable`, `/sessions/{pid}/tmux-info`,
+  `/worktree/remove`) — all already registered in `cmdServer`'s mux
+  (server.go:1557-1576). No new server-side endpoints.
 
-Exactly one entry in a given servers.yaml is expected to carry `self: true`
-— the local machine's own `-s`/service instance, normally `127.0.0.1:<port>`
-with its own generated token. `service install` seeds this entry (and starts
-the daemon) as part of its existing setup flow; it is not a new standalone
-concept for the user to hand-write, though they still can.
+This is a **new local mutation path**, not a reuse of `remote_actions.go`'s
+functions as-is — those resolve their target by servers.yaml *name* via
+`LookupServer`/`remoteRequest`, and local has no name to look up. The shared
+piece is the HTTP request/response shape (`actionResult` envelope,
+`postDisableRemote`-style JSON marshaling), refactored into a helper
+parameterized by `ServerConfig` so both the loopback call and the
+named-remote call can use it.
 
-`self` is what `actAttach`/`actAttachRemote` use to decide whether to SSH: a
-`self`-flagged host runs `tmux attach` directly on this machine instead of
-`ssh <target> tmux attach` — SSH-to-yourself is unnecessary overhead and
-would require SSH-to-localhost to be configured for no reason. Everything
-else (data fetch, kill, migrate, spawn, disable) is indistinguishable from
-any other host: plain HTTP against `EffectiveSSHTarget`'s host equivalent
-(the HTTP `host:port`, not the SSH target).
+**Attach stays direct — no HTTP, no SSH.** Attaching to a local tmux session
+is `tmux attach -t <name>` (or `switch-client`) run directly by the client,
+exactly as `runTmuxAttach` (actions.go:276) does today. There is no
+"self-flagged server" concept and no SSH involved for the local case; only
+the *migrate-before-attach* step (when the session isn't in tmux yet) goes
+through the loopback HTTP path described above, since that's a mutation.
 
-### Client becomes HTTP-only
+**Worktree cleanup on local kill changes source.** Today `actKill`'s local
+branch computes the worktree-removal offer client-side via
+`localWorktreeCleanupTarget` (actions.go:203) before calling `KillSession`.
+Once the kill itself goes over HTTP, the server's response already carries
+this decision (`actionResult.Worktree`, the same field
+`actKillRemote`/server.go's kill handler already populate) — the local path
+adopts that instead of its own client-side `localWorktreeCleanupTarget`
+call. This is a **behavior change worth calling out**, not a no-op: the
+server re-checks the live session list at kill time rather than the
+client's slightly-earlier snapshot, which is strictly more correct (matches
+the same freshness argument CLAUDE.md makes for `reattest`), but it means
+`localWorktreeCleanupTarget` (actions.go, worktree.go) becomes dead code for
+this call site — remove it. Confirm no other caller depends on it first.
 
-- **TUI**: the local-collect branch in the render/refresh path is removed.
-  `FetchAllRemote` (already fetching every configured server concurrently)
-  becomes the only data source, `self` entries included. `actKill`/
-  `actAttach`/`actNew`/`actToggleDisabled`'s local branches in actions.go
-  are deleted; `actKillRemote`/`actAttachRemote`/`actNewRemote`/
-  `actToggleDisabledRemote` (remote_actions.go) become the only
-  implementations, parameterized by whether the target `ServerConfig.Self`
-  is true (for the SSH-skip in attach only).
-- **Scriptable subcommands** (`kill`/`attach`/`migrate`/`new`/`preview`):
-  given a bare PID with no host qualifier, resolve against the `self` entry
-  and call its HTTP API instead of touching the PID in-process. Same
-  attestation guarantee the server already provides to remote callers.
-- **Server** (`cmdServer`, `CollectLocal`, `KillSession`, `MigrateLocal`,
-  `SpawnNew`): unchanged. These remain exactly what a `-s` process — local
-  or remote — uses to inventory and act on its own host. Only who *calls*
-  them changes (the local server process, never the client directly).
+### Refuse-loudly on daemon-unreachable
 
-### Empty-config behavior
+`localServerRequestWithTimeout` returning an error (timeout, connection
+refused, non-2xx) for a **mutation** call is a terminal failure for that
+action: surface `"local server not reachable — run 'claude-sessions
+service install'"` via the same `showActionError`/stderr path each action
+already uses for its other failure modes, and stop — no fallback to
+`KillSession`/`MigrateLocal`/`SpawnNew`/`DisabledStore` direct calls. This is
+deliberately asymmetric with `collectClientLocal`'s read-path fallback (see
+Non-goals): a stale read is cheap and self-heals next poll; a mutation
+that silently downgrades to the unguarded path is exactly the bug this
+design exists to close.
 
-`len(servers) == 0` (no `self`, no remote entries) is a hard error at
-startup, in both TUI and every scriptable subcommand:
+### Scriptable subcommands
 
-- TUI: prints the error, offers interactively (y/N prompt) to seed a `self`
-  entry into servers.yaml and run the equivalent of `service install`.
-- Scriptable subcommands: print the same error and the equivalent
-  instructions (`claude-sessions service install`), exit non-zero. No
-  interactive prompt, no auto-mutation of config from a script context.
+`cmdKill`, `cmdMigrate`, `cmdNewLocal` (commands.go:226 — `cmdNew`'s local
+branch), and `cmdAttach`'s migrate-first sub-case (commands.go:362) switch
+from direct calls to the same loopback-HTTP helper the TUI uses. Same
+refuse-loudly behavior on daemon-unreachable. `cmdAttach`'s already-in-tmux
+case stays a direct `tmux attach` — same reasoning as the TUI's attach
+above.
 
-An unreachable-but-configured server (self or remote) is **not** this error
-— that's the existing per-host offline/error row behavior `FetchAllRemote`
-already has, unchanged.
+### Cheap consistency win, same scope
+
+`cmdList` (main.go:105) and the scriptable list output (commands.go:464)
+currently call `CollectLocal()` directly, while the TUI already calls
+`collectClientLocal()` (tui.go:237) for the equivalent read. That's a real,
+pre-existing local/local inconsistency (scriptable output can show a
+slightly different snapshot — no server-side `Disabled` overlay applied at
+the same layer — than the live TUI on the same box). Both call sites switch
+to `collectClientLocal()`. This has no interaction with the refuse-loudly
+behavior above since it's a read, not a mutation — it keeps the same silent
+fallback `collectClientLocal` already has.
 
 ## Data Flow
 
 ```
-Before:                              After:
-┌─────────┐  direct call             ┌─────────┐  HTTP (self entry)
-│ TUI/CLI │ ───────────────────────► │ TUI/CLI │ ───────────────────────►
-│ (local) │  CollectLocal/           │         │  http://127.0.0.1:<port>
-└─────────┘  KillSession/            └─────────┘  (same code path as any
-             MigrateLocal                          remote host)
-                                                          │
-┌─────────┐  HTTP (servers.yaml)                          ▼
-│ TUI/CLI │ ───────────────────────►               ┌──────────────┐
-│(remote) │  http://<remote-host>:<port>            │ -s (this box)│
-└─────────┘                                         │ CollectLocal │
-                                                     │ KillSession  │
-                                                     │ MigrateLocal │
-                                                     └──────────────┘
+Reads (unchanged):
+┌─────────┐  collectClientLocal(): loopback HTTP, silent fallback to direct
+│ TUI/CLI │ ───────────────────────────────────────────────────────────────►
+└─────────┘
+
+Mutations (this design):
+Before:                                   After:
+┌─────────┐  direct call                  ┌─────────┐  loopback HTTP only
+│ TUI/CLI │ ──────────────────────────►   │ TUI/CLI │ ──────────────────►
+│ (local) │  KillSession/MigrateLocal/    │ (local) │  127.0.0.1:8765     │
+└─────────┘  SpawnNew/SetDisabled         └─────────┘  (refuse if down)   │
+                                                              │           ▼
+                                                              ▼    ┌──────────────┐
+                                                        ┌──────────────┐  KillSession
+                                                        │ -s (this box)│  MigrateLocal
+                                                        │ same handlers│  SpawnNew
+                                                        │ remote uses  │  DisabledStore
+                                                        └──────────────┘
 ```
 
 ## Error and Concurrency Behavior
 
 - Local kill/migrate/spawn/disable now get `sessionIDPrecondition` +
-  `reattest` + `spawnDedupe` for free — the exact TOCTOU/duplicate-spawn
-  protection remote already has, closing the gap this design exists to
-  close.
-- Attach for a `self` entry is a plain local `tmux attach`/`switch-client`
-  (unchanged behavior, just re-routed through the `Self` flag instead of
-  `Host == ""`).
-- `servers.yaml` with zero entries: hard error, offer to configure (see
-  above) — never a silent no-op or an empty TUI.
-- A configured-but-unreachable `self` entry (daemon crashed, not started)
-  behaves exactly like a configured-but-unreachable remote entry today: an
-  error/offline row, not the "nothing configured" error path.
+  `reattest` + `spawnDedupe` for free — the exact protection remote already
+  has, closing the gap this design exists to close.
+- Loopback daemon unreachable during a mutation → refuse loudly, no
+  fallback (see above). Reads are unaffected — `collectClientLocal` keeps
+  falling back silently, so the TUI still shows sessions with the daemon
+  down; only acting on them requires it to be up.
+- Local kill's worktree-removal offer now comes from the server's
+  `actionResult.Worktree` response, not `localWorktreeCleanupTarget` —
+  behavior change noted above, not a no-op.
+- Attach for a local session is unaffected except for the migrate-first sub
+  case, which now goes through the loopback HTTP path like any other local
+  mutation.
 
 ## Test Plan
 
-- `yaml.go`: parses/round-trips `self: true`; defaults to `false` when
-  absent; rejects a second `self: true` entry (config error) — exactly one
-  self entry is a documented invariant, not merely a convention.
-- Attach: `self`-flagged target skips SSH and runs local `tmux attach`;
-  non-`self` remote target still SSHes, unchanged.
-- Empty servers.yaml: TUI prompts to configure; scriptable subcommands print
-  the error + instructions and exit non-zero — both paths covered.
-- Local kill/migrate/spawn/disable via the `self` HTTP path reproduce the
-  same `session_mismatch`/`not_live` refusals and dedupe behavior already
-  tested for remote hosts (existing server_test.go coverage extends to
-  cover the loopback case, not new logic).
-- Regression: existing remote-only servers.yaml configs (no `self` entry)
-  continue to work unchanged — remote-only viewing (the "machine A views
-  only machine B" case) stays valid with zero local entry.
+- New helper `localMutateRequest` (exact name chosen in the plan): given a
+  fake `ServerConfig`/injectable transport, confirms it builds the same
+  request shape `remoteRequest` builds for a named server, just against the
+  loopback `ServerConfig`.
+- `actKill`/`actAttach`/`actNew`/`actToggleDisabled` local branches: daemon
+  reachable → mutation succeeds via HTTP, same `session_mismatch`/`not_live`
+  refusals as the existing remote-path tests exercise (reuse or mirror
+  `server_test.go` coverage against a real loopback listener in tests).
+- Daemon unreachable (test double/closed port): local mutation refuses with
+  the "run `service install`" message, does **not** call
+  `KillSession`/`MigrateLocal`/`SpawnNew`/`DisabledStore.SetDisabled` — a
+  test seam similar to `localServerRequestAttempt`
+  (server_client.go:20) that fails the request and asserts the direct
+  functions were never invoked (spy/mock on those seams).
+- Worktree offer on local kill: comes from the mocked server response's
+  `Worktree` field, not from a client-side `localWorktreeCleanupTarget`
+  call — assert the latter is not called (or is removed and this is
+  moot if dead-code removal lands in the same change).
+- Regression: `collectClientLocal`'s existing read-path fallback tests are
+  untouched and still pass (this design doesn't touch that function).
+- `cmdList`/commands.go:464 switched to `collectClientLocal()`: existing
+  tests for scriptable list output still pass, now sourced through the
+  server-first path when reachable.
 
 ### Verification
 
