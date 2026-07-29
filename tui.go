@@ -176,6 +176,12 @@ func RunTUI(interval time.Duration) error {
 	state := newTUIState()
 	screen := newScreenRenderer(os.Stdout)
 
+	// Remember the size this terminal runs at, so a detached tmux session created
+	// later by something *without* a terminal — the headless server's spawn,
+	// migrate and resume handlers — has a better guess than tmux's 80x24 default.
+	// Offered every frame; the recorder debounces and drops non-positive values.
+	sizeRecorder := newTUISizeRecorder()
+
 	// inspectorHub polls the previewed session while the inspector screen is
 	// open; nil on the session list. Shut down on exit if still open.
 	var inspectorHub *InspectorHub
@@ -270,6 +276,7 @@ func RunTUI(interval time.Duration) error {
 		if err != nil {
 			cols, rows = 0, 0
 		}
+		sizeRecorder.record(cols, rows)
 
 		if state.mode == screenInspector {
 			if inspectorHub != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,11 @@ import (
 )
 
 func TestSpawnNewSendsConfiguredCommand(t *testing.T) {
+	// HOME is pinned because the spawn now reads a persisted size hint from
+	// ~/.config/claude-sessions; without this the argv depends on the developer's
+	// own config dir.
+	t.Setenv("HOME", t.TempDir())
+	pinSpawnSize(t, 0, 0)
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "tmux.log")
 	script := filepath.Join(dir, "tmux")
@@ -30,6 +36,110 @@ func TestSpawnNewSendsConfiguredCommand(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "<send-keys>") || !strings.Contains(string(data), "<claude --model fable><Enter>") {
 		t.Fatalf("tmux argv:\n%s", data)
+	}
+}
+
+// tmuxNewSessionArgv returns the fake tmux's logged argv line for the
+// new-session call, failing the test if there wasn't exactly one. Other
+// subcommands share the log (a collect run shells out to tmux too), so the line
+// has to be picked out rather than the whole file matched.
+func tmuxNewSessionArgv(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "<new-session>") {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly one new-session call, got %d; argv:\n%s", len(found), data)
+	}
+	return found[0]
+}
+
+// TestTmuxNewDetachedSessionArgs: an unattached tmux session sits at
+// `default-size` (80x24) until a real client attaches, so a session that is only
+// ever previewed stays tiny forever. -x/-y at creation is the only fix —
+// resize-window afterwards would pin the window to manual sizing for good.
+func TestTmuxNewDetachedSessionArgs(t *testing.T) {
+	tests := []struct {
+		name       string
+		cols, rows int
+		want       string
+	}{
+		{"sized", 180, 55, "<new-session><-d><-s><work><-c></tmp/x><-x><180><-y><55>"},
+		{"no size", 0, 0, "<new-session><-d><-s><work><-c></tmp/x>"},
+		{"cols only", 180, 0, "<new-session><-d><-s><work><-c></tmp/x>"},
+		{"rows only", 0, 55, "<new-session><-d><-s><work><-c></tmp/x>"},
+		{"negative", -1, -1, "<new-session><-d><-s><work><-c></tmp/x>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logPath := installFakeTmux(t)
+			if err := tmuxNewDetachedSession("work", "/tmp/x", tt.cols, tt.rows); err != nil {
+				t.Fatal(err)
+			}
+			if got := tmuxNewSessionArgv(t, logPath); got != tt.want {
+				t.Errorf("argv = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSpawnNewSizesTheDetachedSession: the spawn path passes the resolved size
+// through, so a session created by the headless server is born wide rather than
+// 80x24.
+func TestSpawnNewSizesTheDetachedSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	pinSpawnSize(t, 180, 55)
+	logPath := installFakeTmux(t)
+
+	if _, err := SpawnNew(home, "test", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if got := tmuxNewSessionArgv(t, logPath); !strings.Contains(got, "<-x><180><-y><55>") {
+		t.Errorf("argv = %s, want the resolved size", got)
+	}
+}
+
+// TestSpawnNewFallsBackToTheFixedSize: no tty and no hint still beats tmux's own
+// default, which is the case that matters on a server whose TUI has never run.
+func TestSpawnNewFallsBackToTheFixedSize(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	pinSpawnSize(t, 0, 0)
+	logPath := installFakeTmux(t)
+
+	if _, err := SpawnNew(home, "test", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("<-x><%d><-y><%d>", spawnSizeFallbackCols, spawnSizeFallbackRows)
+	if got := tmuxNewSessionArgv(t, logPath); !strings.Contains(got, want) {
+		t.Errorf("argv = %s, want %s", got, want)
+	}
+}
+
+// TestMigrateSizesTheDetachedSession: the migrated session is the one most
+// likely to be previewed and never attached, since the point of a migrate is to
+// move a session into tmux and leave it there.
+func TestMigrateSizesTheDetachedSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	pinSpawnSize(t, 180, 55)
+	logPath := installFakeTmux(t)
+	writeMigrateSession(t, home, 999999, "aaaa-1111")
+	defer stubMigrateKill(t, func(int, syscall.Signal) error { return nil }, func(int) bool { return false })()
+
+	if _, err := MigrateLocalAttested(999999, "aaaa-1111"); err != nil {
+		t.Fatal(err)
+	}
+	if got := tmuxNewSessionArgv(t, logPath); !strings.Contains(got, "<-x><180><-y><55>") {
+		t.Errorf("argv = %s, want the resolved size", got)
 	}
 }
 
