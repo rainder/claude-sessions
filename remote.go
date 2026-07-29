@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -63,11 +64,50 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 	return RemoteResult{Name: srv.Name, Sessions: body.Sessions, HostUsage: body.HostUsage, Usage: body.Usage, CodexUsage: body.CodexUsage}
 }
 
+// dropSelfServer filters out a configured server entry that points back at
+// this same host. A servers.yaml entry naming the local machine (needed so
+// CLI --server flows can target "this host" explicitly) would otherwise
+// double up local sessions with an identical remote row in the TUI, which
+// already shows them via CollectLocal.
+func dropSelfServer(cfgs []ServerConfig) []ServerConfig {
+	local := localAddrs()
+	out := cfgs[:0:0]
+	for _, c := range cfgs {
+		if local[c.Host] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// localAddrs returns loopback plus every IP address bound to a local network
+// interface, keyed for direct string lookup against a ServerConfig.Host.
+func localAddrs() map[string]bool {
+	addrs := map[string]bool{"127.0.0.1": true, "localhost": true, "::1": true}
+	ifaceAddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return addrs
+	}
+	for _, a := range ifaceAddrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		addrs[ipNet.IP.String()] = true
+	}
+	return addrs
+}
+
 // FetchAllRemote polls all configured servers in parallel and returns the
 // results in config order. Returns nil when no servers are configured.
 func FetchAllRemote() []RemoteResult {
 	cfgs, err := LoadServerConfigs()
 	if err != nil || len(cfgs) == 0 {
+		return nil
+	}
+	cfgs = dropSelfServer(cfgs)
+	if len(cfgs) == 0 {
 		return nil
 	}
 	results := make([]RemoteResult, len(cfgs))
@@ -187,6 +227,10 @@ func (h *RemoteHub) Resume() {
 func (h *RemoteHub) fetchAll() {
 	cfgs, err := LoadServerConfigs()
 	if err != nil || len(cfgs) == 0 {
+		return
+	}
+	cfgs = dropSelfServer(cfgs)
+	if len(cfgs) == 0 {
 		return
 	}
 	h.mu.Lock()
