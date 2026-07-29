@@ -279,14 +279,12 @@ func actKillRemote(c *actCtx) {
 	defer c.enterRaw()
 
 	fmt.Print("\nsending remote kill... ")
-	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/kill", pid), "POST", []byte(`{}`))
+	r, err := killRemote(host, pid, s.SessionID)
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 		return
 	}
-	var r actionResult
-	_ = json.Unmarshal(resp, &r)
 	if !r.OK {
 		fmt.Printf("failed: %s\n", r.Error)
 		pauseForKey(c.fd, c.oldState)
@@ -339,6 +337,52 @@ func postDisableRemote(host string, pid int, sessionID string, disabled bool) (a
 		return actionResult{}, err
 	}
 	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/disable", pid), "POST", body)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var r actionResult
+	if err := json.Unmarshal(resp, &r); err != nil {
+		return actionResult{}, err
+	}
+	return r, nil
+}
+
+// killRemote asks host's server to kill pid, sending sessionID as the
+// precondition when known so the server's reattest (server.go:618) actually
+// fires — an empty sessionID falls back to the bare {} body, matching
+// sessionIDPrecondition's own "absent means no precondition" contract.
+func killRemote(host string, pid int, sessionID string) (actionResult, error) {
+	body := []byte(`{}`)
+	if sessionID != "" {
+		var err error
+		body, err = json.Marshal(map[string]string{"session_id": sessionID})
+		if err != nil {
+			return actionResult{}, err
+		}
+	}
+	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/kill", pid), "POST", body)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var r actionResult
+	if err := json.Unmarshal(resp, &r); err != nil {
+		return actionResult{}, err
+	}
+	return r, nil
+}
+
+// migrateRemote asks host's server to migrate pid, same sessionID contract
+// as killRemote.
+func migrateRemote(host string, pid int, sessionID string) (actionResult, error) {
+	body := []byte(`{}`)
+	if sessionID != "" {
+		var err error
+		body, err = json.Marshal(map[string]string{"session_id": sessionID})
+		if err != nil {
+			return actionResult{}, err
+		}
+	}
+	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/migrate", pid), "POST", body)
 	if err != nil {
 		return actionResult{}, err
 	}
@@ -415,15 +459,13 @@ func actAttachRemote(c *actCtx) {
 		}
 		c.prepareLineOutput()
 		fmt.Print("\nmigrating... ")
-		mresp, merr := remoteRequest(host, fmt.Sprintf("/sessions/%d/migrate", pid), "POST", []byte(`{}`))
+		r, merr := migrateRemote(host, pid, s.SessionID)
 		if merr != nil {
 			fmt.Printf("failed: %v\n", merr)
 			pauseForKey(c.fd, c.oldState)
 			c.enterRaw()
 			return
 		}
-		var r actionResult
-		_ = json.Unmarshal(mresp, &r)
 		if !r.OK || r.Tmux == "" {
 			fmt.Printf("failed: %s\n", r.Error)
 			pauseForKey(c.fd, c.oldState)
@@ -528,9 +570,10 @@ func actNewRemote(c *actCtx, host, defaultCWD string) {
 
 	fmt.Printf("\nspawning on %s in %s... ", host, cwd)
 	body, _ := json.Marshal(map[string]string{
-		"cwd":     cwd,
-		"command": preset.Name,
-		"prompt":  prompt,
+		"cwd":        cwd,
+		"command":    preset.Name,
+		"prompt":     prompt,
+		"request_id": newSpawnRequestID(),
 	})
 	resp, err := remoteRequest(host, "/sessions/new", "POST", body)
 	if err != nil {

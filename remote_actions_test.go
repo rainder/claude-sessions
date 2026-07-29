@@ -117,3 +117,97 @@ func TestPostDisableRemoteSurfacesRefusal(t *testing.T) {
 		t.Fatalf("response = %#v, want not_live refusal", r)
 	}
 }
+
+func TestKillRemoteSendsSessionIDWhenKnown(t *testing.T) {
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := killRemote("box", 42, "sess-1")
+	if err != nil || !r.OK {
+		t.Fatalf("killRemote = (%#v, %v)", r, err)
+	}
+	if string(gotBody) != `{"session_id":"sess-1"}` {
+		t.Fatalf("body = %s, want session_id sent", gotBody)
+	}
+}
+
+func TestKillRemoteOmitsSessionIDWhenUnknown(t *testing.T) {
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	if _, err := killRemote("box", 42, ""); err != nil {
+		t.Fatalf("killRemote err = %v", err)
+	}
+	if string(gotBody) != `{}` {
+		t.Fatalf("body = %s, want bare {} when session id unknown", gotBody)
+	}
+}
+
+func TestMigrateRemoteOmitsSessionIDWhenUnknown(t *testing.T) {
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	if _, err := migrateRemote("box", 42, ""); err != nil {
+		t.Fatalf("migrateRemote err = %v", err)
+	}
+	if string(gotBody) != `{}` {
+		t.Fatalf("body = %s, want bare {} when session id unknown", gotBody)
+	}
+}
+
+func TestMigrateRemoteSendsSessionIDWhenKnown(t *testing.T) {
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"tmux":"cs-1"}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := migrateRemote("box", 7, "sess-2")
+	if err != nil || !r.OK || r.Tmux != "cs-1" {
+		t.Fatalf("migrateRemote = (%#v, %v)", r, err)
+	}
+	if string(gotBody) != `{"session_id":"sess-2"}` {
+		t.Fatalf("body = %s, want session_id sent", gotBody)
+	}
+}

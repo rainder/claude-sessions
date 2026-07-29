@@ -86,6 +86,10 @@ func cmdKill(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worktree check skipped: %v\n", err)
 	}
+	if err := localReattest(pid, sess.SessionID); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	if err := KillSession(sess); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -146,7 +150,7 @@ func cmdMigrate(args []string) int {
 			return 0
 		}
 	}
-	out, err := MigrateLocal(pid)
+	out, err := MigrateLocalAttested(pid, sess.SessionID)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -303,10 +307,11 @@ func cmdNewRemote(a newArgs) int {
 	// whose home and filesystem differ from ours. The server resolves and
 	// validates it.
 	body, _ := json.Marshal(map[string]string{
-		"cwd":     a.dir,
-		"name":    a.name,
-		"command": a.command,
-		"prompt":  a.prompt,
+		"cwd":        a.dir,
+		"name":       a.name,
+		"command":    a.command,
+		"prompt":     a.prompt,
+		"request_id": newSpawnRequestID(),
 	})
 	resp, err := remoteRequest(a.server, "/sessions/new", "POST", body)
 	if err != nil {

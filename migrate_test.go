@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -223,6 +225,68 @@ func TestDismissTrustPromptReturnsOnCaptureError(t *testing.T) {
 	}
 }
 
+// writeSessionFileForPID writes a session fixture named by PID, matching
+// what readSessionByPID (and thus localReattest) reads. This differs from
+// writeSessionFixture in session_test.go, which names its file by SessionID
+// for CollectLocal's glob-everything-in-the-directory reads.
+func writeSessionFileForPID(t *testing.T, home string, s Session) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	path := filepath.Join(dir, strconv.Itoa(s.PID)+".json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+}
+
+func TestLocalReattestMatchingSessionSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	writeSessionFileForPID(t, dir, Session{PID: 123, SessionID: "sess-abc"})
+
+	if err := localReattest(123, "sess-abc"); err != nil {
+		t.Fatalf("localReattest = %v, want nil", err)
+	}
+}
+
+func TestLocalReattestMismatchedSessionRefuses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	writeSessionFileForPID(t, dir, Session{PID: 123, SessionID: "sess-new"})
+
+	err := localReattest(123, "sess-old")
+	if err == nil || !strings.Contains(err.Error(), "different session now") {
+		t.Fatalf("localReattest = %v, want session-mismatch error", err)
+	}
+}
+
+func TestLocalReattestGonePIDRefuses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	// No session file written for PID 999 at all.
+
+	err := localReattest(999, "sess-abc")
+	if err == nil || !strings.Contains(err.Error(), "not a live Claude session") {
+		t.Fatalf("localReattest = %v, want not-live error", err)
+	}
+}
+
+func TestLocalReattestEmptyWantSkipsCheck(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	// No session file for PID 999 — if the check ran, it would refuse.
+
+	if err := localReattest(999, ""); err != nil {
+		t.Fatalf("localReattest with empty wantSessionID = %v, want nil (skip)", err)
+	}
+}
+
 func TestTmuxSessionName(t *testing.T) {
 	cases := []struct {
 		loc     string
@@ -342,5 +406,15 @@ func TestKillSessionWithoutTmuxEscalates(t *testing.T) {
 	}
 	if len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
 		t.Fatalf("signals = %v, want [SIGTERM SIGKILL]", signals)
+	}
+}
+
+func TestNewSpawnRequestIDSatisfiesServerValidation(t *testing.T) {
+	id := newSpawnRequestID()
+	if !validSpawnRequestID(id) {
+		t.Fatalf("newSpawnRequestID() = %q, fails validSpawnRequestID", id)
+	}
+	if id2 := newSpawnRequestID(); id2 == id {
+		t.Fatalf("two calls returned the same id: %q", id)
 	}
 }

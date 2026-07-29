@@ -51,6 +51,19 @@ func randomSlug() string {
 	return hex.EncodeToString(b)
 }
 
+// newSpawnRequestID returns a fresh idempotency key for /sessions/new's
+// optional request_id, sized to satisfy validSpawnRequestID (server.go:389,
+// 8-128 chars of [A-Za-z0-9_-]). randomSlug's 6 hex chars are too short and
+// serve a different purpose (a tmux-name suffix) — this gets its own helper
+// rather than widening that one's contract.
+func newSpawnRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%032x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 // migrateSignal/migrateAlive/migrateSleep are MigrateLocal's side effects,
 // injectable so the kill-then-verify sequence can be tested without signalling a
 // real process or spending its waits in real time.
@@ -332,6 +345,29 @@ func killSessionWith(s Session, deps killDeps) error {
 	}
 	_ = deps.signal(s.PID, syscall.SIGKILL)
 	deps.sleep(time.Second)
+	return nil
+}
+
+// localReattest re-reads the session file for pid immediately before a
+// destructive local action (kill/migrate) and compares it against the
+// session identity the caller last observed. Mirrors the server's reattest
+// (server.go:618) — same two refusal cases, just in-process instead of over
+// HTTP: the caller's snapshot can be however old its confirmation dialog
+// took to resolve, and the PID can have been recycled to a different
+// session in that window. An empty wantSessionID skips the check —
+// matches sessionIDPrecondition's own "absent means no precondition"
+// contract, not a new policy invented for this path.
+func localReattest(pid int, wantSessionID string) error {
+	if wantSessionID == "" {
+		return nil
+	}
+	sess, ok := readSessionByPID(pid)
+	if !ok {
+		return fmt.Errorf("PID %d is not a live Claude session", pid)
+	}
+	if sess.SessionID != wantSessionID {
+		return fmt.Errorf("PID %d is a different session now", pid)
+	}
 	return nil
 }
 
