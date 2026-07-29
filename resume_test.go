@@ -785,3 +785,22 @@ func TestWriteResumeLoading(t *testing.T) {
 		t.Errorf("loading line does not home + clear first: %q", got)
 	}
 }
+
+// TestResumeSizesTheDetachedSession: a resumed session is spawned detached and
+// is routinely only ever inspected, so it needs the same explicit -x/-y the
+// spawn and migrate paths get — tmux's unattached default is 80x24.
+func TestResumeSizesTheDetachedSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	pinSpawnSize(t, 180, 55)
+	logPath := installFakeTmux(t)
+	writeResumableTranscript(t, home, "proj", "aaaa-1111", time.Now(),
+		`{"cwd":"/srv/app","type":"user","message":{"role":"user","content":"hi"}}`)
+
+	if _, err := ResumeSession("aaaa-1111", "/srv/app"); err != nil {
+		t.Fatal(err)
+	}
+	if got := tmuxNewSessionArgv(t, logPath); !strings.Contains(got, "<-x><180><-y><55>") {
+		t.Errorf("argv = %s, want the resolved size", got)
+	}
+}

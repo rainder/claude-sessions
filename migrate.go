@@ -143,7 +143,8 @@ func MigrateLocalAttested(pid int, wantSession string) (string, error) {
 	}
 	migrateSleep(time.Second) // let state flush to disk
 
-	if err := exec.Command("tmux", "new-session", "-d", "-s", tname, "-c", sess.CWD).Run(); err != nil {
+	cols, rows := resolveSpawnSize()
+	if err := tmuxNewDetachedSession(tname, sess.CWD, cols, rows); err != nil {
 		return "", fmt.Errorf("tmux new-session: %w", err)
 	}
 	if err := exec.Command("tmux", "send-keys", "-t", tname,
@@ -167,7 +168,8 @@ func SpawnNew(cwd, displayName, command string) (string, error) {
 // random slug, which is what every local caller wants.
 func SpawnNewWithSuffix(cwd, displayName, command, suffix string) (string, error) {
 	tname := MakeTmuxName(cwd, suffix, displayName)
-	if err := exec.Command("tmux", "new-session", "-d", "-s", tname, "-c", cwd).Run(); err != nil {
+	cols, rows := resolveSpawnSize()
+	if err := tmuxNewDetachedSession(tname, cwd, cols, rows); err != nil {
 		return "", fmt.Errorf("tmux new-session: %w", err)
 	}
 	if err := exec.Command("tmux", "send-keys", "-t", tname, command, "Enter").Run(); err != nil {
@@ -183,6 +185,27 @@ func SpawnNewWithSuffix(cwd, displayName, command, suffix string) (string, error
 	// the Ctrl+V paste binding on it. Linux-only no-op elsewhere.
 	installPasteBinding(activeServerPort)
 	return tname, nil
+}
+
+// tmuxNewDetachedSession creates a detached tmux session named name at cwd,
+// sized cols×rows.
+//
+// The size is not cosmetic. A session nobody has attached to yet takes tmux's
+// `default-size` (80x24) until a real client arrives, so a spawned, migrated or
+// resumed session that is only ever *previewed* stays 80x24 forever — a tiny
+// buffer rendered inside the much larger inspector frame. Sizing it at creation
+// is the only fix available: `tmux resize-window` afterwards would set the
+// window to manual sizing permanently, overriding the normal auto-resize when a
+// client does eventually attach.
+//
+// Non-positive dimensions omit the flags and leave tmux's default in place,
+// which is a worse pane but never a failed spawn.
+func tmuxNewDetachedSession(name, cwd string, cols, rows int) error {
+	args := []string{"new-session", "-d", "-s", name, "-c", cwd}
+	if cols > 0 && rows > 0 {
+		args = append(args, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
+	}
+	return exec.Command("tmux", args...).Run()
 }
 
 // killTmuxSession tears down a tmux session created moments ago by a spawn or

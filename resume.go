@@ -390,7 +390,8 @@ func ResumeSession(sessionID, cwd string) (string, error) {
 		return "", errResumeSessionLive
 	}
 	tname := MakeTmuxName(cwd, sessionID, "")
-	if err := exec.Command("tmux", "new-session", "-d", "-s", tname, "-c", cwd).Run(); err != nil {
+	cols, rows := resolveSpawnSize()
+	if err := tmuxNewDetachedSession(tname, cwd, cols, rows); err != nil {
 		return "", fmt.Errorf("tmux new-session: %w", err)
 	}
 	if err := exec.Command("tmux", "send-keys", "-t", tname,
