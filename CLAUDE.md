@@ -242,6 +242,21 @@ every field zero — another fail-open form. Exactly one JSON value is accepted:
 since More() only reports a well-formed next element and misses trailing
 garbage that is not itself valid JSON.
 
+Local kill/migrate get the same guard without a network hop: `localReattest`
+(migrate.go) re-reads the PID's session file immediately before the
+destructive call, the same two refusal cases as the server's `reattest`
+(server.go:618), just in-process — `actKill`/`cmdKill` call it directly before
+`KillSession`, and the local migrate sites (`actAttach`'s migrate branch,
+`cmdMigrate`) get it for free by calling `MigrateLocalAttested` instead of
+`MigrateLocal`. And every client now actually supplies the fields this section
+describes: before this branch the desktop and remote paths sent bare `{}` (or
+nothing) even though the server had carried `reattest` and `spawnDedupe` since
+they were built, so the guards existed but nothing armed them. Remote
+kill/migrate (`actKillRemote`, `actAttachRemote`, via `killRemote`/
+`migrateRemote` in remote_actions.go) now send `session_id`, and remote spawn
+(`actNewRemote`, `cmdNewRemote`) now sends a `request_id`
+(`newSpawnRequestID()`), so `spawnDedupe` finally has a caller.
+
 **Known residual windows, accepted.** The precondition narrows the race; it
 does not eliminate it. Three remain and none is closable here: a session with
 no tmux name is still killed by bare PID, since attesting a PID atomically with

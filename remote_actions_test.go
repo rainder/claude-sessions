@@ -165,6 +165,29 @@ func TestKillRemoteOmitsSessionIDWhenUnknown(t *testing.T) {
 	}
 }
 
+func TestMigrateRemoteOmitsSessionIDWhenUnknown(t *testing.T) {
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	if _, err := migrateRemote("box", 42, ""); err != nil {
+		t.Fatalf("migrateRemote err = %v", err)
+	}
+	if string(gotBody) != `{}` {
+		t.Fatalf("body = %s, want bare {} when session id unknown", gotBody)
+	}
+}
+
 func TestMigrateRemoteSendsSessionIDWhenKnown(t *testing.T) {
 	var gotBody []byte
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
