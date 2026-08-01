@@ -1518,6 +1518,53 @@ func cmdServer(args []string) int {
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
 
+	// Auto-maintain a "latest" snapshot so a reboot doesn't require having
+	// remembered to save beforehand. Best-effort: a failed save is logged, never
+	// fatal to the server. No Shutdown/stop — matches the existing paste-binding
+	// ticker below, which also runs for the process's lifetime.
+	//
+	// Guarded by a live-session check: right after a reboot, the server starts
+	// before anything has been restored, so an unconditional tick would call
+	// saveSnapshotFrom with zero sessions and overwrite the pre-reboot
+	// snapshot with an empty one — destroying the exact data this feature
+	// exists to preserve, via the unconditional os.Rename inside it. Skip the
+	// save (this tick only; "latest" is left untouched) whenever CollectLocal
+	// errors or finds no session with a non-empty SessionID — the same filter
+	// saveSnapshotFrom applies internally. The manual `snapshot save` CLI
+	// command still goes straight to SaveSnapshot, unguarded, since an
+	// explicit empty save there is a deliberate user action, not an
+	// unattended one.
+	//
+	// CollectLocal runs exactly once per tick, and the same slice it's
+	// checked against is the one handed to saveSnapshotFrom — calling
+	// SaveSnapshot here instead would collect a second, independent slice
+	// after the check, and every session could have exited in the gap,
+	// silently saving an empty "latest" despite the check just above passing.
+	go func() {
+		t := time.NewTicker(snapshotAutoSaveInterval)
+		defer t.Stop()
+		for range t.C {
+			sessions, err := CollectLocal()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "claude-sessions: auto-snapshot skipped (collect failed): %v\n", err)
+				continue
+			}
+			live := false
+			for _, sess := range sessions {
+				if sess.SessionID != "" {
+					live = true
+					break
+				}
+			}
+			if !live {
+				continue
+			}
+			if _, _, err := saveSnapshotFrom("latest", sessions); err != nil {
+				fmt.Fprintf(os.Stderr, "claude-sessions: auto-snapshot failed: %v\n", err)
+			}
+		}
+	}()
+
 	// The registry is shared: the /devices handlers write it and the push hub
 	// reads it, so they must be the same store, not two views of one file.
 	devices := LoadDeviceStore()

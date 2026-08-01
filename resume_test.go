@@ -804,3 +804,76 @@ func TestResumeSizesTheDetachedSession(t *testing.T) {
 		t.Errorf("argv = %s, want the resolved size", got)
 	}
 }
+
+// TestResumeSessionCleansUpOrphanOnSendKeysFailure: a send-keys failure after
+// a successful tmux new-session must not leave the empty session running —
+// batch restore (RestoreSnapshot) calls ResumeSession in a loop, and a leaked
+// session per failure would compound silently.
+func TestResumeSessionCleansUpOrphanOnSendKeysFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeResumableTranscript(t, home, "proj", "aaaa-1111", time.Now(),
+		`{"cwd":"/srv/app","type":"user","message":{"role":"user","content":"hi"}}`)
+
+	logPath := installFakeTmuxFailing(t, "send-keys")
+
+	if _, err := ResumeSession("aaaa-1111", "/srv/app"); err == nil {
+		t.Fatal("expected error from send-keys failure")
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "<kill-session>") {
+		t.Errorf("tmux log = %q, want a kill-session cleanup call after send-keys failed", log)
+	}
+}
+
+// TestResumeSessionInWorktreeSendsWorktreeFlag: a worktree-aware resume spawns
+// tmux at the repo root (not the worktree path) and sends the --worktree
+// incantation claude itself suggests on exit from a worktree session.
+func TestResumeSessionInWorktreeSendsWorktreeFlag(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	writeResumableTranscript(t, home, "proj", "bbbb-2222", time.Now(),
+		`{"cwd":"/repo/.claude/worktrees/DR-860","type":"user","message":{"role":"user","content":"hi"}}`)
+
+	if _, err := ResumeSessionInWorktree("bbbb-2222", "/repo", "DR-860"); err != nil {
+		t.Fatal(err)
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "<new-session>") || !strings.Contains(string(log), "<-c></repo>") {
+		t.Errorf("tmux log = %q, want new-session -c /repo", log)
+	}
+	if !strings.Contains(string(log), "claude --worktree DR-860 --resume bbbb-2222") {
+		t.Errorf("tmux log = %q, want the --worktree --resume command", log)
+	}
+}
+
+// TestResumeSessionInWorktreeRejectsUnsafeName: worktreeName reaches a shell
+// command via tmux send-keys, so it needs the same charset guard sessionID
+// already gets from resumeSessionIDRe — a name with shell metacharacters must
+// be rejected before anything is spawned.
+func TestResumeSessionInWorktreeRejectsUnsafeName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	writeResumableTranscript(t, home, "proj", "cccc-3333", time.Now(),
+		`{"cwd":"/repo/.claude/worktrees/evil","type":"user","message":{"role":"user","content":"hi"}}`)
+
+	_, err := ResumeSessionInWorktree("cccc-3333", "/repo", "evil; rm -rf /")
+	if err == nil {
+		t.Fatal("expected error for unsafe worktree name")
+	}
+
+	log, _ := os.ReadFile(logPath)
+	if len(log) != 0 {
+		t.Errorf("tmux log = %q, want no tmux calls for a rejected name", log)
+	}
+}

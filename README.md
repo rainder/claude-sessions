@@ -89,6 +89,9 @@ claude-sessions new --dir PATH [--name N] [--command PRESET] [--server S] [PROMP
 claude-sessions service install [--port N] [--bind ADDR] | uninstall | restart | status
                                             # run the server supervised (launchd on macOS,
                                             # systemd --user on Linux); install also starts it
+claude-sessions snapshot save [name]       # save the local session set (name defaults to a timestamp)
+claude-sessions snapshot restore NAME      # recreate a saved set (best-effort; requires an explicit name)
+claude-sessions snapshot list              # list saved snapshots
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
 claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)

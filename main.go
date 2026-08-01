@@ -58,6 +58,8 @@ func main() {
 		os.Exit(cmdPair(args[1:]))
 	case "service":
 		os.Exit(cmdService(args[1:]))
+	case "snapshot":
+		os.Exit(cmdSnapshot(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -91,6 +93,10 @@ subcommands:
                                   run the server as a supervised background
                                   service (launchd on macOS, systemd --user on
                                   Linux); install also starts it
+  snapshot save [name] | restore NAME | list
+                                  save/restore the local session set; name
+                                  defaults to a timestamp; restore recreates
+                                  each session (best-effort) via tmux + resume
   notify-test                     send a test push to every registered device
   -h, --help                      this help
 
