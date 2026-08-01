@@ -527,7 +527,7 @@ func cmdSnapshot(args []string) int {
 	}
 	switch args[0] {
 	case "save":
-		name := time.Now().Format("2006-01-02-1504")
+		name := time.Now().Format("2006-01-02-150405")
 		if len(args) > 1 {
 			name = args[1]
 		}
