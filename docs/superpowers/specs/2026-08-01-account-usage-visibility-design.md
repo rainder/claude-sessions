@@ -145,7 +145,7 @@ type KnownAccountUsage struct {
 }
 ```
 
-`RemoteResult` and the local snapshot equivalent gain an additive field:
+`RemoteResult` and the local snapshot equivalent gain two additive fields:
 
 ```go
 // KnownAccounts lists usage for every other account this host holds a
@@ -153,10 +153,20 @@ type KnownAccountUsage struct {
 // currently live — that's still reported via Usage). Nil from older
 // servers or hosts with no snapshots.
 KnownAccounts []KnownAccountUsage `json:"knownAccounts,omitempty"`
+// ActiveSnapshotName is the snapshot name (e.g. "avisoma") whose
+// account.json email matches this host's live Usage.Account, best-effort —
+// "" when unresolved (no snapshot matches, or the live email is unknown).
+// This is read-only reporting, purely for display/picker purposes; it is
+// what a later account-switching feature would use to mark "current" in a
+// picker without every consumer re-deriving the same email→name match.
+ActiveSnapshotName string `json:"activeSnapshotName,omitempty"`
 ```
 
 The existing `Usage *AccountUsage` field is untouched — feature 1 and all
-existing behavior keep working byte-identical when `KnownAccounts` is absent.
+existing behavior keep working byte-identical when `KnownAccounts` /
+`ActiveSnapshotName` are absent. `ActiveSnapshotName` is computed by the same
+name↔email matching `fetchKnownAccountUsage` already does to decide which
+snapshot to skip — it's a side output of that pass, not a second lookup.
 
 ### Token/email loading
 
@@ -176,6 +186,28 @@ account (so the caller doesn't emit a redundant entry). On any read/parse/
 HTTP error, returns `{Name: name, Account: snapEmail, Expired: true}` rather
 than an error — this is best-effort background enrichment, never a reason to
 fail `/sessions` or the local usage poller.
+
+`Expired` is a coarse flag by design: it covers a genuinely bad/rotated
+snapshot token *and* transient failures (network blip, 5xx, throttling) the
+same way, because this poller has no per-account retry/backoff of its own
+(see Polling below) — a transient failure just shows as "expired" until the
+next 2-minute tick, which will usually clear it. This is a deliberate
+simplification, not an oversight: distinguishing "expired" from "temporarily
+unreachable" would need per-account state the chosen transport doesn't
+carry, and getting that wrong silently is worse than an occasional
+false-"expired" blip that self-heals next tick.
+
+The batch function this feeds, `fetchAllKnownAccounts(names []string,
+liveEmail string) []KnownAccountUsage`, **always returns a fully-populated
+slice and never itself errors** because an individual account's failure — it
+calls `fetchKnownAccountUsage` per name and simply keeps whatever it
+returns, `Expired` and all. This is the property `KnownAccountsHub` below
+depends on: the poller-level `fetch func() (*T, error)` only ever fails for
+a catastrophic, host-level problem (e.g. `~/.claude` unreadable), never
+because one of several accounts individually failed to fetch — that
+distinction is exactly what keeps a single flaky account from triggering the
+poller's whole-batch backoff and hiding every *other* account's healthy
+data.
 
 ### Polling
 
@@ -207,6 +239,7 @@ func NewKnownAccountsHub() *KnownAccountsHub
 ```json
 {
   "usage": { "account": "andy@avisoma.com", "info": { "...": "..." } },
+  "activeSnapshotName": "avisoma",
   "knownAccounts": [
     { "name": "trecs", "account": "andy@trecs.aero", "info": null, "expired": true }
   ]
@@ -245,6 +278,19 @@ accounts entirely unchanged:
    pass-1 entries, which still drop on nil `Info` — no behavior change
    there).
 
+**Edge case, deliberately accepted:** if a host's own *live* usage fetch
+fails (nil `Info`, dropped from pass 1 entirely per today's `dedupeAccounts`
+behavior), that host contributes nothing for its own account to pass 1 —
+and pass 2 still won't fill the gap from *that host's own* snapshot, because
+the skip-when-matching-live-email rule in `fetchKnownAccountUsage` never
+even attempted that fetch. If a *different* host happens to hold a snapshot
+for the same email, pass 2 can still surface a line for it — which is a
+useful degraded fallback (something beats nothing), but it is explicitly
+last-successful-snapshot-fetch data, not proof the account is healthy right
+now. This is acceptable because it never contradicts fresher data (pass 1
+always wins when present) and never invents numbers — it only ever shows
+what a real fetch, at some point, actually returned.
+
 ## Error handling
 
 - A snapshot read/parse/HTTP failure never fails `/sessions`, the TUI
@@ -271,8 +317,12 @@ accounts entirely unchanged:
   live entry already has that email; survives when no live entry matches;
   two hosts' snapshots for the same email collapse to one; expired entries
   render as a placeholder rather than being dropped.
-- Protocol: `knownAccounts` round-trips through `/sessions`; an old-server
-  response without it decodes to nil and renders exactly as today.
+- `fetchAllKnownAccounts`: never returns an error when individual accounts
+  fail (only their `Expired` flags differ); one failing account doesn't
+  suppress another's healthy `Info`.
+- Protocol: `knownAccounts` and `activeSnapshotName` round-trip through
+  `/sessions`; an old-server response without them decodes to nil/"" and
+  renders exactly as today.
 - Feature 1: `renderHostHeading` includes the dimmed email when
   `sec.account != ""`, omits it when `""`, across all three view modes.
 
