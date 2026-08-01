@@ -61,9 +61,12 @@ func snapshotPath(name string) (string, error) {
 }
 
 // SaveSnapshot captures the current local sessions (via CollectLocal) under
-// name, writing atomically (temp file + rename) so a crash mid-write —
+// name, writing atomically (unique temp file + rename) so a crash mid-write —
 // expected only for the unattended auto-"latest" save — never leaves a
-// truncated snapshot behind.
+// truncated snapshot behind. The temp name must be unique per call, not a
+// fixed name+".tmp": Task 6's auto-save ticker and a manual save can both
+// target "latest" concurrently, and a shared temp path would let one
+// writer's Rename publish a file the other is still mid-write into.
 func SaveSnapshot(name string) (string, error) {
 	path, err := snapshotPath(name)
 	if err != nil {
@@ -84,8 +87,22 @@ func SaveSnapshot(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, name+"-*.json.tmp")
+	if err != nil {
+		return "", err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // best-effort; no-op once the rename below succeeds
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return "", err
+	}
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmp, path); err != nil {

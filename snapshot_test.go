@@ -89,8 +89,21 @@ func TestSaveSnapshotSkipsSessionsWithoutSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := os.Getpid()
-	data, _ := json.Marshal(Session{PID: pid, SessionID: "", CWD: "/x", StartedAt: time.Now().UnixMilli()})
-	if err := os.WriteFile(filepath.Join(sessDir, strconv.Itoa(pid)+".json"), data, 0o644); err != nil {
+	noSession, err := json.Marshal(Session{PID: pid, SessionID: "", CWD: "/x", StartedAt: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, strconv.Itoa(pid)+".json"), noSession, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withSession, err := json.Marshal(Session{
+		PID: pid, SessionID: "snap-test-2", CWD: "/home/testuser/other",
+		StartedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, strconv.Itoa(pid)+"-with-session.json"), withSession, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -98,11 +111,19 @@ func TestSaveSnapshotSkipsSessionsWithoutSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var snap Snapshot
-	json.Unmarshal(raw, &snap)
-	if len(snap.Entries) != 0 {
-		t.Errorf("entries = %+v, want none (session has no SessionID)", snap.Entries)
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Entries) != 1 {
+		t.Fatalf("entries = %+v, want exactly 1 (the session with a SessionID)", snap.Entries)
+	}
+	if got := snap.Entries[0]; got.SessionID != "snap-test-2" || got.Cwd != "/home/testuser/other" {
+		t.Errorf("entries[0] = %+v, want {SessionID: snap-test-2, Cwd: /home/testuser/other}", got)
 	}
 }
 
