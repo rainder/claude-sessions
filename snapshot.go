@@ -153,3 +153,50 @@ func ListSnapshots() ([]Snapshot, error) {
 	sort.Slice(snaps, func(i, j int) bool { return snaps[i].TakenAt.After(snaps[j].TakenAt) })
 	return snaps, nil
 }
+
+// RestoreEntryResult is the outcome of restoring one Snapshot entry.
+type RestoreEntryResult struct {
+	SessionID string `json:"sessionId"`
+	Cwd       string `json:"cwd"`
+	Restored  bool   `json:"restored"`
+	Reason    string `json:"reason,omitempty"` // empty when Restored is true
+}
+
+// RestoreReport is the full outcome of a RestoreSnapshot call.
+type RestoreReport struct {
+	Results []RestoreEntryResult `json:"results"`
+}
+
+// RestoreSnapshot recreates every session in the named snapshot: one tmux
+// session per entry, each resuming its original transcript. Best-effort — one
+// entry failing (already live, transcript gone, cwd/repo root gone) does not
+// stop the rest; every entry gets a Restored/Reason outcome in the report.
+//
+// A worktree entry (cwd under .claude/worktrees/<name>) resumes via
+// ResumeSessionInWorktree, which spawns at the main checkout and passes
+// --worktree <name> — the same command claude itself suggests on exit from a
+// worktree session, and it works whether or not the worktree checkout is
+// still on disk. Every other entry resumes via the plain ResumeSession path.
+func RestoreSnapshot(name string) (RestoreReport, error) {
+	snap, err := loadSnapshot(name)
+	if err != nil {
+		return RestoreReport{}, err
+	}
+	var report RestoreReport
+	for _, e := range snap.Entries {
+		result := RestoreEntryResult{SessionID: e.SessionID, Cwd: e.Cwd}
+		var rerr error
+		if wt := worktreeName(e.Cwd); wt != "" {
+			_, rerr = ResumeSessionInWorktree(e.SessionID, worktreeRepoRoot(e.Cwd), wt)
+		} else {
+			_, rerr = ResumeSession(e.SessionID, e.Cwd)
+		}
+		if rerr != nil {
+			result.Reason = rerr.Error()
+		} else {
+			result.Restored = true
+		}
+		report.Results = append(report.Results, result)
+	}
+	return report, nil
+}

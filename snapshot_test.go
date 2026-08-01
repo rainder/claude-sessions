@@ -149,3 +149,116 @@ func TestListSnapshotsReturnsAllSavedNewestFirst(t *testing.T) {
 		t.Errorf("order = [%s, %s], want [second, first] (newest first)", snaps[0].Name, snaps[1].Name)
 	}
 }
+
+func TestRestoreSnapshotResumesPlainAndWorktreeEntries(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installFakeTmux(t)
+	writeResumableTranscript(t, home, "proj1", "plain-1111", time.Now(),
+		`{"cwd":"/srv/app","type":"user","message":{"role":"user","content":"hi"}}`)
+	writeResumableTranscript(t, home, "proj2", "wt-2222", time.Now(),
+		`{"cwd":"/repo/.claude/worktrees/DR-1","type":"user","message":{"role":"user","content":"hi"}}`)
+
+	snap := Snapshot{
+		Name:    "restoreme",
+		TakenAt: time.Now(),
+		Entries: []SnapshotEntry{
+			{SessionID: "plain-1111", Cwd: "/srv/app"},
+			{SessionID: "wt-2222", Cwd: "/repo/.claude/worktrees/DR-1"},
+		},
+	}
+	data, _ := json.MarshalIndent(snap, "", "  ")
+	path, err := snapshotPath("restoreme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := RestoreSnapshot("restoreme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 2 {
+		t.Fatalf("len(Results) = %d, want 2", len(report.Results))
+	}
+	for _, r := range report.Results {
+		if !r.Restored {
+			t.Errorf("entry %s: Restored = false, Reason = %q, want true", r.SessionID, r.Reason)
+		}
+	}
+}
+
+func TestRestoreSnapshotSkipsAlreadyLiveEntry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installFakeTmux(t)
+	writeResumableTranscript(t, home, "proj", "live-3333", time.Now(),
+		`{"cwd":"/srv/app","type":"user","message":{"role":"user","content":"hi"}}`)
+
+	// A session file makes CollectLocal (and thus liveSessionIDs) report this
+	// session id as already running.
+	sessDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	data, _ := json.Marshal(Session{PID: pid, SessionID: "live-3333", CWD: "/srv/app", StartedAt: time.Now().UnixMilli()})
+	if err := os.WriteFile(filepath.Join(sessDir, strconv.Itoa(pid)+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := Snapshot{Name: "livecheck", TakenAt: time.Now(), Entries: []SnapshotEntry{
+		{SessionID: "live-3333", Cwd: "/srv/app"},
+	}}
+	snapData, _ := json.MarshalIndent(snap, "", "  ")
+	path, _ := snapshotPath("livecheck")
+	if err := os.WriteFile(path, snapData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := RestoreSnapshot("livecheck")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 1 || report.Results[0].Restored {
+		t.Fatalf("Results = %+v, want one skipped entry", report.Results)
+	}
+	if report.Results[0].Reason == "" {
+		t.Error("Reason is empty, want an explanation for the skip")
+	}
+}
+
+func TestRestoreSnapshotContinuesAfterOneFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installFakeTmux(t)
+	// Only the second session has a transcript; the first will fail to resume.
+	writeResumableTranscript(t, home, "proj2", "good-5555", time.Now(),
+		`{"cwd":"/srv/good","type":"user","message":{"role":"user","content":"hi"}}`)
+
+	snap := Snapshot{Name: "mixed", TakenAt: time.Now(), Entries: []SnapshotEntry{
+		{SessionID: "missing-4444", Cwd: "/srv/missing"},
+		{SessionID: "good-5555", Cwd: "/srv/good"},
+	}}
+	data, _ := json.MarshalIndent(snap, "", "  ")
+	path, _ := snapshotPath("mixed")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := RestoreSnapshot("mixed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 2 {
+		t.Fatalf("len(Results) = %d, want 2 (best-effort: both entries attempted)", len(report.Results))
+	}
+	if report.Results[0].Restored {
+		t.Error("Results[0].Restored = true, want false (no transcript)")
+	}
+	if !report.Results[1].Restored {
+		t.Errorf("Results[1].Restored = false, Reason = %q, want true", report.Results[1].Reason)
+	}
+}
