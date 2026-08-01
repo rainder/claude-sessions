@@ -161,6 +161,72 @@ func fetchRemoteFixture(t *testing.T, body string) RemoteResult {
 	return result
 }
 
+func TestMergeRemoteResultKeepsLastKnownGoodOnFailure(t *testing.T) {
+	prior := RemoteResult{
+		Name:      "alias",
+		Sessions:  []Session{{PID: 42, SessionID: "session-42"}},
+		HostUsage: HostUsage{CPUPercent: floatPtr(10)},
+	}
+	fresh := RemoteResult{Name: "alias", Error: "connection refused"}
+
+	got := mergeRemoteResult(fresh, prior, true)
+
+	if got.Error != "connection refused" {
+		t.Fatalf("Error = %q, want the failed fetch's error preserved", got.Error)
+	}
+	if !got.Stale {
+		t.Fatal("Stale = false, want true when carrying forward prior data")
+	}
+	if len(got.Sessions) != 1 || got.Sessions[0].SessionID != "session-42" {
+		t.Fatalf("Sessions = %#v, want prior sessions carried forward, not cleared", got.Sessions)
+	}
+}
+
+func TestMergeRemoteResultCarriesForwardAcrossConsecutiveFailures(t *testing.T) {
+	prior := RemoteResult{
+		Name:     "alias",
+		Sessions: []Session{{PID: 42, SessionID: "session-42"}},
+		Error:    "timeout",
+		Stale:    true, // already carrying data from an earlier successful fetch
+	}
+	fresh := RemoteResult{Name: "alias", Error: "connection refused"}
+
+	got := mergeRemoteResult(fresh, prior, true)
+
+	if !got.Stale || len(got.Sessions) != 1 {
+		t.Fatalf("got = %#v, want data still carried forward on a second consecutive failure", got)
+	}
+}
+
+func TestMergeRemoteResultNoCarryWhenNeverFetchedSuccessfully(t *testing.T) {
+	prior := RemoteResult{Name: "alias", Loading: true}
+	fresh := RemoteResult{Name: "alias", Error: "connection refused"}
+
+	got := mergeRemoteResult(fresh, prior, true)
+
+	if got.Stale || got.Sessions != nil {
+		t.Fatalf("got = %#v, want plain unreachable result — nothing to carry forward", got)
+	}
+}
+
+func TestMergeRemoteResultSuccessReplacesStaleData(t *testing.T) {
+	prior := RemoteResult{
+		Name:     "alias",
+		Sessions: []Session{{PID: 42, SessionID: "old"}},
+		Stale:    true,
+	}
+	fresh := RemoteResult{Name: "alias", Sessions: []Session{{PID: 99, SessionID: "new"}}}
+
+	got := mergeRemoteResult(fresh, prior, true)
+
+	if got.Stale {
+		t.Fatal("Stale = true, want false once a fetch succeeds again")
+	}
+	if len(got.Sessions) != 1 || got.Sessions[0].SessionID != "new" {
+		t.Fatalf("Sessions = %#v, want the fresh successful data, not the prior stale data", got.Sessions)
+	}
+}
+
 func TestRemoteHubSnapshotDoesNotAliasHubState(t *testing.T) {
 	h := &RemoteHub{
 		results: []RemoteResult{{

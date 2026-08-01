@@ -1749,6 +1749,34 @@ func TestHostHeadingPrecedesRemoteStates(t *testing.T) {
 	}
 }
 
+// TestStaleRemoteSectionKeepsRowsVisible covers the non-destructive fetch: a
+// host that errored but still carries last-known-good sessions (RemoteHub's
+// mergeRemoteResult sets Stale in that case) must render both the "[stale: …]"
+// marker and its rows — never fall back to the rows-cleared "[unreachable: …]"
+// case that has no data to show.
+func TestStaleRemoteSectionKeepsRowsVisible(t *testing.T) {
+	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/local-session"}}}
+	remotes := []RemoteResult{{
+		Name:     "flaky",
+		Error:    "connection refused",
+		Stale:    true,
+		Sessions: []Session{{PID: 99, CWD: "/remote-session"}},
+	}}
+	var b strings.Builder
+	RenderAll(&b, "1", local, remotes, "", nil, 0, 0, "dir")
+	out := b.String()
+
+	if !strings.Contains(out, "[stale: connection refused]") {
+		t.Fatalf("missing stale marker:\n%s", out)
+	}
+	if strings.Contains(out, "[unreachable:") {
+		t.Fatalf("stale section fell back to unreachable rendering:\n%s", out)
+	}
+	if !strings.Contains(out, "remote-session") {
+		t.Fatalf("stale section dropped its carried-forward rows:\n%s", out)
+	}
+}
+
 // TestRenderAllMatchesBuildTableFrame locks the compatibility invariant: the
 // text RenderAll writes must be byte-identical to the joined frame lines, and
 // its overflow return must match the frame's, across all three views and a mix

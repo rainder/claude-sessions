@@ -27,6 +27,10 @@ type RemoteResult struct {
 	CodexUsage *CodexAccountUsage
 	Error      string // "" on success, short reason otherwise
 	Loading    bool   // true for a placeholder slot whose first fetch hasn't returned yet
+	// Stale marks a result whose Sessions/HostUsage/Usage/CodexUsage are carried
+	// over from the last successful fetch because the current one failed (see
+	// Error). Only ever set alongside a non-empty Error.
+	Stale bool
 }
 
 // FetchRemote queries one server's /sessions endpoint. 5s timeout.
@@ -253,15 +257,38 @@ func (h *RemoteHub) fetchAll() {
 	var wg sync.WaitGroup
 	for i, c := range cfgs {
 		i, c := i, c
+		priorResult, hadPrior := prev[c.Name]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := FetchRemote(c)
+			r := mergeRemoteResult(FetchRemote(c), priorResult, hadPrior)
 			h.storeRemoteResult(i, r)
 			h.signalWake()
 		}()
 	}
 	wg.Wait()
+}
+
+// mergeRemoteResult implements the non-destructive fetch: on failure (e.g. a
+// flaky connection), the session list stays on screen instead of blanking,
+// marked Stale, while the error message is still surfaced. Only the session
+// list carries forward — Usage/CodexUsage feed the header rate-limit bars
+// (see dedupeAccounts), which have no "stale" rendering of their own, so a
+// frozen reading there would silently pass as live; they're left to clear as
+// before. hasData excludes a slot that never had a successful fetch (still
+// Loading, or errored with nothing yet to carry forward).
+func mergeRemoteResult(r, prior RemoteResult, hadPrior bool) RemoteResult {
+	if r.Error == "" {
+		return r
+	}
+	hasData := hadPrior && !prior.Loading && (prior.Error == "" || prior.Stale)
+	if !hasData {
+		return r
+	}
+	r.Sessions = prior.Sessions
+	r.HostUsage = prior.HostUsage
+	r.Stale = true
+	return r
 }
 
 // Snapshot returns the most recent results. Some slots may still hold prior
