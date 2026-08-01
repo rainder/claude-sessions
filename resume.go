@@ -368,12 +368,46 @@ func liveSessionIDs() map[string]bool {
 // set is rejected outright (no traversal, no shell metacharacters).
 var resumeSessionIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
+// worktreeNameRe constrains worktree names to a safe charset before they reach
+// a shell command via tmux send-keys — the same discipline resumeSessionIDRe
+// applies to session ids.
+var worktreeNameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,100}$`)
+
 // ResumeSession validates the transcript for sessionID exists, refuses if the
 // session is already live (errResumeSessionLive), then spawns a fresh tmux
 // session running `claude --resume <id>` in cwd. Returns the tmux session name.
 // Shared by the server handler and the local TUI path.
 func ResumeSession(sessionID, cwd string) (string, error) {
-	if sessionID == "" || cwd == "" {
+	if cwd == "" {
+		return "", fmt.Errorf("resume: session id and cwd required")
+	}
+	return resumeCommon(sessionID, cwd, "claude --resume "+sessionID)
+}
+
+// ResumeSessionInWorktree resumes sessionID the same way ResumeSession does,
+// but for a session whose original cwd was a `.claude/worktrees/<name>`
+// checkout. It spawns tmux at repoRoot (the main checkout, which always still
+// exists) rather than the worktree path, and sends `claude --worktree <name>
+// --resume <id>` — the same incantation claude itself suggests on exit from a
+// worktree session. This works whether or not the worktree checkout is still
+// on disk: `--worktree <name>` recreates it if needed, or reuses it if
+// present, since `.claude/worktrees/<name>` is Claude Code's own convention
+// for that name.
+func ResumeSessionInWorktree(sessionID, repoRoot, worktreeName string) (string, error) {
+	if repoRoot == "" || worktreeName == "" {
+		return "", fmt.Errorf("resume: repo root and worktree name required")
+	}
+	if !worktreeNameRe.MatchString(worktreeName) {
+		return "", fmt.Errorf("resume: invalid worktree name")
+	}
+	return resumeCommon(sessionID, repoRoot, "claude --worktree "+worktreeName+" --resume "+sessionID)
+}
+
+// resumeCommon is the shared validate → refuse-if-live → spawn → send-keys
+// sequence behind ResumeSession and ResumeSessionInWorktree. tmuxCwd is where
+// the detached tmux session is created; command is what gets typed into it.
+func resumeCommon(sessionID, tmuxCwd, command string) (string, error) {
+	if sessionID == "" {
 		return "", fmt.Errorf("resume: session id and cwd required")
 	}
 	if !resumeSessionIDRe.MatchString(sessionID) {
@@ -389,13 +423,12 @@ func ResumeSession(sessionID, cwd string) (string, error) {
 	if liveSessionIDs()[sessionID] {
 		return "", errResumeSessionLive
 	}
-	tname := MakeTmuxName(cwd, sessionID, "")
+	tname := MakeTmuxName(tmuxCwd, sessionID, "")
 	cols, rows := resolveSpawnSize()
-	if err := tmuxNewDetachedSession(tname, cwd, cols, rows); err != nil {
+	if err := tmuxNewDetachedSession(tname, tmuxCwd, cols, rows); err != nil {
 		return "", fmt.Errorf("tmux new-session: %w", err)
 	}
-	if err := exec.Command("tmux", "send-keys", "-t", tname,
-		"claude --resume "+sessionID, "Enter").Run(); err != nil {
+	if err := exec.Command("tmux", "send-keys", "-t", tname, command, "Enter").Run(); err != nil {
 		// Same partial commit SpawnNew/MigrateLocalAttested guard against: the
 		// session exists but was never told what to run.
 		killTmuxSession(tname)
