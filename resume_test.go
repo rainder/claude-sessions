@@ -804,3 +804,42 @@ func TestResumeSizesTheDetachedSession(t *testing.T) {
 		t.Errorf("argv = %s, want the resolved size", got)
 	}
 }
+
+// TestResumeSessionCleansUpOrphanOnSendKeysFailure: a send-keys failure after
+// a successful tmux new-session must not leave the empty session running —
+// batch restore (RestoreSnapshot) calls ResumeSession in a loop, and a leaked
+// session per failure would compound silently.
+func TestResumeSessionCleansUpOrphanOnSendKeysFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeResumableTranscript(t, home, "proj", "aaaa-1111", time.Now(),
+		`{"cwd":"/srv/app","type":"user","message":{"role":"user","content":"hi"}}`)
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tmux")
+	// new-session succeeds; send-keys and the killTmuxSession cleanup's
+	// kill-session both get logged so the test can assert cleanup ran.
+	body := "#!/bin/sh\n" +
+		"echo \"$@\" >> \"$TMUX_LOG\"\n" +
+		"case \"$1\" in\n" +
+		"  send-keys) exit 1;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "tmux.log")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX_LOG", logPath)
+
+	if _, err := ResumeSession("aaaa-1111", "/srv/app"); err == nil {
+		t.Fatal("expected error from send-keys failure")
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "kill-session") {
+		t.Errorf("tmux log = %q, want a kill-session cleanup call after send-keys failed", log)
+	}
+}

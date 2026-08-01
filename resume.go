@@ -396,6 +396,9 @@ func ResumeSession(sessionID, cwd string) (string, error) {
 	}
 	if err := exec.Command("tmux", "send-keys", "-t", tname,
 		"claude --resume "+sessionID, "Enter").Run(); err != nil {
+		// Same partial commit SpawnNew/MigrateLocalAttested guard against: the
+		// session exists but was never told what to run.
+		killTmuxSession(tname)
 		return "", fmt.Errorf("tmux send-keys: %w", err)
 	}
 	return tname, nil
