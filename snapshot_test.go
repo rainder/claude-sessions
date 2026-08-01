@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,7 +154,7 @@ func TestListSnapshotsReturnsAllSavedNewestFirst(t *testing.T) {
 func TestRestoreSnapshotResumesPlainAndWorktreeEntries(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	installFakeTmux(t)
+	logPath := installFakeTmux(t)
 	writeResumableTranscript(t, home, "proj1", "plain-1111", time.Now(),
 		`{"cwd":"/srv/app","type":"user","message":{"role":"user","content":"hi"}}`)
 	writeResumableTranscript(t, home, "proj2", "wt-2222", time.Now(),
@@ -187,6 +188,17 @@ func TestRestoreSnapshotResumesPlainAndWorktreeEntries(t *testing.T) {
 		if !r.Restored {
 			t.Errorf("entry %s: Restored = false, Reason = %q, want true", r.SessionID, r.Reason)
 		}
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "<claude --worktree DR-1 --resume wt-2222>") {
+		t.Errorf("tmux log = %q, want the worktree entry to resume via --worktree DR-1", log)
+	}
+	if !strings.Contains(string(log), "<claude --resume plain-1111>") {
+		t.Errorf("tmux log = %q, want the plain entry to resume via the plain command", log)
 	}
 }
 
