@@ -815,21 +815,7 @@ func TestResumeSessionCleansUpOrphanOnSendKeysFailure(t *testing.T) {
 	writeResumableTranscript(t, home, "proj", "aaaa-1111", time.Now(),
 		`{"cwd":"/srv/app","type":"user","message":{"role":"user","content":"hi"}}`)
 
-	dir := t.TempDir()
-	script := filepath.Join(dir, "tmux")
-	// new-session succeeds; send-keys and the killTmuxSession cleanup's
-	// kill-session both get logged so the test can assert cleanup ran.
-	body := "#!/bin/sh\n" +
-		"echo \"$@\" >> \"$TMUX_LOG\"\n" +
-		"case \"$1\" in\n" +
-		"  send-keys) exit 1;;\n" +
-		"esac\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(dir, "tmux.log")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_LOG", logPath)
+	logPath := installFakeTmuxFailing(t, "send-keys")
 
 	if _, err := ResumeSession("aaaa-1111", "/srv/app"); err == nil {
 		t.Fatal("expected error from send-keys failure")
@@ -839,7 +825,7 @@ func TestResumeSessionCleansUpOrphanOnSendKeysFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(log), "kill-session") {
+	if !strings.Contains(string(log), "<kill-session>") {
 		t.Errorf("tmux log = %q, want a kill-session cleanup call after send-keys failed", log)
 	}
 }
