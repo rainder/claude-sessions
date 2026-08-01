@@ -1072,6 +1072,7 @@ type section struct {
 	rows      []Session
 	error     string
 	loading   bool
+	stale     bool
 }
 
 // filterSessionRows returns the subset of rows passing the active view filter
@@ -1125,6 +1126,7 @@ func buildSections(local LocalHost, remotes []RemoteResult, gv groupView) []sect
 			rows:      filterSessionRows(r.Sessions, gv),
 			error:     r.Error,
 			loading:   r.Loading,
+			stale:     r.Stale,
 		})
 	}
 	return out
@@ -1683,6 +1685,9 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
+		case sections[i].stale && len(sectionRows[i]) > 0:
+			fmt.Fprintf(w, "  %s\n", dim("[stale: "+sections[i].error+"]"))
+			rowFn(sectionRows[i])
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
@@ -1784,6 +1789,9 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
+		case sections[i].stale && len(sectionRows[i]) > 0:
+			fmt.Fprintf(w, "  %s\n", dim("[stale: "+sections[i].error+"]"))
+			rowFn(sectionRows[i])
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
@@ -1911,6 +1919,9 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 		switch {
 		case sections[i].loading && sections[i].error == "" && len(sectionRows[i]) == 0:
 			fmt.Fprintln(w, "  "+dim("(loading...)"))
+		case sections[i].stale && len(sectionRows[i]) > 0:
+			fmt.Fprintf(w, "  %s\n", dim("[stale: "+sections[i].error+"]"))
+			rowFn(sectionRows[i])
 		case sections[i].error != "":
 			fmt.Fprintf(w, "  %s\n", dim("[unreachable: "+sections[i].error+"]"))
 		case len(sectionRows[i]) == 0:
