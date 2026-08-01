@@ -51,13 +51,16 @@ func TestSaveSnapshotCapturesLocalSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path, err := SaveSnapshot("mysave")
+	path, count, err := SaveSnapshot("mysave")
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantPath := filepath.Join(home, ".config", "claude-sessions", "snapshots", "mysave.json")
 	if path != wantPath {
 		t.Errorf("path = %q, want %q", path, wantPath)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
 	}
 
 	raw, err := os.ReadFile(path)
@@ -108,9 +111,12 @@ func TestSaveSnapshotSkipsSessionsWithoutSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path, err := SaveSnapshot("nosession")
+	path, count, err := SaveSnapshot("nosession")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -131,11 +137,11 @@ func TestSaveSnapshotSkipsSessionsWithoutSessionID(t *testing.T) {
 func TestListSnapshotsReturnsAllSavedNewestFirst(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if _, err := SaveSnapshot("first"); err != nil {
+	if _, _, err := SaveSnapshot("first"); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond)
-	if _, err := SaveSnapshot("second"); err != nil {
+	if _, _, err := SaveSnapshot("second"); err != nil {
 		t.Fatal(err)
 	}
 

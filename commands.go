@@ -531,12 +531,12 @@ func cmdSnapshot(args []string) int {
 		if len(args) > 1 {
 			name = args[1]
 		}
-		path, err := SaveSnapshot(name)
+		path, count, err := SaveSnapshot(name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "snapshot save: %v\n", err)
 			return 1
 		}
-		fmt.Printf("saved snapshot %q to %s\n", name, path)
+		fmt.Printf("saved snapshot %q to %s (%d session(s))\n", name, path, count)
 		return 0
 	case "restore":
 		if len(args) < 2 {

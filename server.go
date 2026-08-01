@@ -1525,14 +1525,21 @@ func cmdServer(args []string) int {
 	//
 	// Guarded by a live-session check: right after a reboot, the server starts
 	// before anything has been restored, so an unconditional tick would call
-	// SaveSnapshot("latest") with zero sessions and overwrite the pre-reboot
+	// saveSnapshotFrom with zero sessions and overwrite the pre-reboot
 	// snapshot with an empty one — destroying the exact data this feature
-	// exists to preserve, via SaveSnapshot's unconditional os.Rename. Skip the
+	// exists to preserve, via the unconditional os.Rename inside it. Skip the
 	// save (this tick only; "latest" is left untouched) whenever CollectLocal
 	// errors or finds no session with a non-empty SessionID — the same filter
-	// SaveSnapshot applies internally. The manual `snapshot save` CLI command
-	// still goes straight to SaveSnapshot, unguarded, since an explicit empty
-	// save there is a deliberate user action, not an unattended one.
+	// saveSnapshotFrom applies internally. The manual `snapshot save` CLI
+	// command still goes straight to SaveSnapshot, unguarded, since an
+	// explicit empty save there is a deliberate user action, not an
+	// unattended one.
+	//
+	// CollectLocal runs exactly once per tick, and the same slice it's
+	// checked against is the one handed to saveSnapshotFrom — calling
+	// SaveSnapshot here instead would collect a second, independent slice
+	// after the check, and every session could have exited in the gap,
+	// silently saving an empty "latest" despite the check just above passing.
 	go func() {
 		t := time.NewTicker(snapshotAutoSaveInterval)
 		defer t.Stop()
@@ -1552,7 +1559,7 @@ func cmdServer(args []string) int {
 			if !live {
 				continue
 			}
-			if _, err := SaveSnapshot("latest"); err != nil {
+			if _, _, err := saveSnapshotFrom("latest", sessions); err != nil {
 				fmt.Fprintf(os.Stderr, "claude-sessions: auto-snapshot failed: %v\n", err)
 			}
 		}

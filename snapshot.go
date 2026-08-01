@@ -61,20 +61,40 @@ func snapshotPath(name string) (string, error) {
 }
 
 // SaveSnapshot captures the current local sessions (via CollectLocal) under
-// name, writing atomically (unique temp file + rename) so a crash mid-write —
+// name and delegates the actual write to saveSnapshotFrom. Kept as a thin
+// wrapper so callers that already have a fresh []Session (the auto-save
+// ticker in server.go) can reuse that same slice instead of paying for a
+// second CollectLocal — see saveSnapshotFrom's doc comment.
+func SaveSnapshot(name string) (string, int, error) {
+	sessions, err := CollectLocal()
+	if err != nil {
+		return "", 0, err
+	}
+	return saveSnapshotFrom(name, sessions)
+}
+
+// saveSnapshotFrom writes a snapshot named name from an already-collected
+// []Session, atomically (unique temp file + rename) so a crash mid-write —
 // expected only for the unattended auto-"latest" save — never leaves a
 // truncated snapshot behind. The temp name must be unique per call, not a
 // fixed name+".tmp": Task 6's auto-save ticker and a manual save can both
 // target "latest" concurrently, and a shared temp path would let one
 // writer's Rename publish a file the other is still mid-write into.
-func SaveSnapshot(name string) (string, error) {
+//
+// Taking sessions as a parameter (rather than calling CollectLocal itself)
+// matters for the auto-save ticker: it has to inspect the session list for a
+// live session *before* deciding whether to save at all, and if that check
+// and the save each called CollectLocal separately, every session could exit
+// in the gap between the two calls — most likely exactly during the
+// shutdown this feature protects against — leaving the ticker's "yes, save"
+// decision stale by the time the second collection runs, so it saves an
+// empty snapshot anyway. Passing the one already-collected slice through
+// closes that window and skips the second CollectLocal price (ps -A, tmux
+// pane mapping, transcript scans) on every tick.
+func saveSnapshotFrom(name string, sessions []Session) (string, int, error) {
 	path, err := snapshotPath(name)
 	if err != nil {
-		return "", err
-	}
-	sessions, err := CollectLocal()
-	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	snap := Snapshot{Name: name, TakenAt: time.Now()}
 	for _, s := range sessions {
@@ -85,30 +105,30 @@ func SaveSnapshot(name string) (string, error) {
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, name+"-*.json.tmp")
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp) // best-effort; no-op once the rename below succeeds
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		return "", err
+		return "", 0, err
 	}
 	if err := f.Chmod(0o644); err != nil {
 		f.Close()
-		return "", err
+		return "", 0, err
 	}
 	if err := f.Close(); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return path, nil
+	return path, len(snap.Entries), nil
 }
 
 // loadSnapshot reads and decodes the snapshot file for name.
