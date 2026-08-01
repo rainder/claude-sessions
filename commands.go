@@ -517,3 +517,69 @@ func cmdListSessions(args []string) int {
 	}, remotes, "", nil, 0, 0, sortMode)
 	return 0
 }
+
+// cmdSnapshot dispatches the save/restore/list subcommands of `snapshot`.
+func cmdSnapshot(args []string) int {
+	const usage = "usage: claude-sessions snapshot save [name] | restore NAME | list"
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+	switch args[0] {
+	case "save":
+		name := time.Now().Format("2006-01-02-1504")
+		if len(args) > 1 {
+			name = args[1]
+		}
+		path, err := SaveSnapshot(name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "snapshot save: %v\n", err)
+			return 1
+		}
+		fmt.Printf("saved snapshot %q to %s\n", name, path)
+		return 0
+	case "restore":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: claude-sessions snapshot restore NAME")
+			return 2
+		}
+		report, err := RestoreSnapshot(args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "snapshot restore: %v\n", err)
+			return 1
+		}
+		restored := 0
+		for _, r := range report.Results {
+			mark := "✗"
+			status := r.Reason
+			if r.Restored {
+				mark = "✓"
+				status = r.Cwd
+				restored++
+			}
+			fmt.Printf("  %s %s %s\n", mark, r.SessionID, status)
+		}
+		fmt.Printf("restored %d/%d\n", restored, len(report.Results))
+		if restored < len(report.Results) {
+			return 1
+		}
+		return 0
+	case "list":
+		snaps, err := ListSnapshots()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "snapshot list: %v\n", err)
+			return 1
+		}
+		if len(snaps) == 0 {
+			fmt.Println("no snapshots saved")
+			return 0
+		}
+		for _, s := range snaps {
+			fmt.Printf("%-30s %s  %d session(s)\n", s.Name, s.TakenAt.Format(time.RFC3339), len(s.Entries))
+		}
+		return 0
+	default:
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+}
