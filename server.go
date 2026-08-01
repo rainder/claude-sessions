@@ -1518,6 +1518,20 @@ func cmdServer(args []string) int {
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
 
+	// Auto-maintain a "latest" snapshot so a reboot doesn't require having
+	// remembered to save beforehand. Best-effort: a failed save is logged, never
+	// fatal to the server. No Shutdown/stop — matches the existing paste-binding
+	// ticker below, which also runs for the process's lifetime.
+	go func() {
+		t := time.NewTicker(snapshotAutoSaveInterval)
+		defer t.Stop()
+		for range t.C {
+			if _, err := SaveSnapshot("latest"); err != nil {
+				fmt.Fprintf(os.Stderr, "claude-sessions: auto-snapshot failed: %v\n", err)
+			}
+		}
+	}()
+
 	// The registry is shared: the /devices handlers write it and the push hub
 	// reads it, so they must be the same store, not two views of one file.
 	devices := LoadDeviceStore()
