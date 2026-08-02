@@ -72,6 +72,26 @@ in genuine agreement, but that agreement was verified, not assumed.
   `encoding/json` only, same "stdlib + golang.org/x/term + golang.org/x/sys
   only" constraint the rest of the codebase holds to.
 
+**Second correction, post-implementation:** this spec's first draft (Core
+logic, old step 6) let `switchAccount` proceed against a credential-only
+snapshot (no `.account.json`), skipping the identity patch and leaving
+`~/.claude.json` pointing at the OUTGOING account — matching what the
+standalone shell scripts already tolerate. Independent review during
+implementation found this genuinely corruptible: `currentAccountName` has no
+way to detect that split state after the fact, so a LATER switch would read
+the stale identity, misidentify which snapshot is outgoing, and silently back
+the wrong live credential up under the wrong account's name. A "last switch"
+marker file was built to patch over it and rejected on the same review pass:
+it made the wrong snapshot look current whenever anything else rewrote
+`~/.claude.json`, which Claude Code does constantly for reasons unrelated to
+identity. The fix that shipped instead is a precondition, not a patch:
+`switchAccount` now refuses a credential-only target outright (step 2, naming
+`account save <name>` as the remedy) before touching anything. Both real
+machines this ships to already have an identity snapshot for every credential
+snapshot (verified during review), so the precondition costs nothing in
+practice — Core logic and the CLI/TUI/HTTP sections below reflect this
+corrected behavior throughout.
+
 ## CLI
 
 ### `account switch <name> [--server S]`
@@ -183,36 +203,67 @@ Concurrency):
 1. Validate `name` against `snapshotAccountNames()`; error listing available
    names if unknown. **Nothing is read or written past this point if
    invalid.**
-2. `current := currentAccountName()`. **If `current == name`, return
+2. Require `.{name}.account.json` to exist, parse, AND carry a real
+   (non-null, non-empty, exact-key) email; refuse (naming `account save
+   <name>` as the fix) if any of that fails. **Nothing is read or written
+   past this point if it fails.** (Revised from this spec's first draft,
+   which allowed a credential-only target and silently skipped the identity
+   patch — see the correction note below the Non-goals section. The non-null
+   requirement closes a follow-on gap: `identitySlice` writes an explicit
+   JSON `null` for an absent key, jq parity with the shell scripts, so a
+   snapshot saved while not actually logged in is syntactically valid but
+   practically empty. The "exact-key" requirement closes a second follow-on
+   gap: the check must read `oauthAccount` by the identical exact-key lookup
+   `patchIdentityCache` itself uses on the same parsed map — a looser,
+   case-insensitive check (as a struct-based unmarshal would give) could pass
+   a snapshot whose casing doesn't match what the patch step actually looks
+   up, silently applying nothing while looking like it succeeded.)
+3. Refuse if the pending-switch marker (step 6.5 below) is armed — a
+   previous switch was interrupted between installing the credential and
+   patching identity, and retrying blind risks corrupting whichever snapshot
+   the (now stale) identity cache misidentifies as outgoing. `account save
+   <name>` also clears this marker (capturing what's live right now under a
+   name is exactly the confirmation it's waiting for), so recovery is one
+   command, not a resync-then-remember-to-clear two-parter.
+4. `current := currentAccountName()`. **If `current == name`, return
    immediately** — a true no-op, touching zero files. (First draft of this
    spec called re-writing the same bytes on every call "harmless"; it isn't:
    the live credential can have refreshed since the target's snapshot was
    last captured, so blindly re-applying the snapshot would silently
    overwrite a fresher live token with a stale one. Skipping entirely is the
    only version of "no-op" that's actually safe.)
-3. **Unconditional rescue backup**, regardless of whether `current` resolved
+5. **Unconditional rescue backup**, regardless of whether `current` resolved
    to a known name: `readActiveCredential()` → write to
    `.last-switch-rescue.<ext>` (a single rolling slot, not per-name). This
    is the fix for the case `current == ""` (live email doesn't match any
    known snapshot — first-ever switch, a renamed/unrecognized account, or a
    prior partial failure): without an unconditional copy, that live
-   credential would be discarded in step 5 with no backup anywhere, because
-   step 4's named sync-back only fires when `current` resolved to a name.
-4. If `current != ""`: sync the outgoing account back to its own named
+   credential would be discarded in step 7 with no backup anywhere, because
+   step 6's named sync-back only fires when `current` resolved to a name.
+6. If `current != ""`: sync the outgoing account back to its own named
    snapshot — `readActiveCredential()` → write to `.{current}.<ext>`; slice
    `~/.claude.json`'s `oauthAccount`/`userID` → write to
-   `.{current}.account.json`. **Steps 3–4 must complete before step 5
+   `.{current}.account.json`. **Steps 5–6 must complete before step 7
    touches the live credential** — the live credential is never overwritten
-   until it's been captured at least once (step 3) and, when its owning
-   account is known, captured by name too (step 4).
-5. Read `.{name}.<ext>`, write it via `writeActiveCredential` (the actual
+   until it's been captured at least once (step 5) and, when its owning
+   account is known, captured by name too (step 6).
+6.5. Arm the pending-switch marker, naming `name`. This is the mitigation for
+   the one gap that can't be closed by ordering alone: steps 7 and 8 are two
+   separate writes to two separate stores (Keychain/credential file, then
+   `~/.claude.json`), so nothing can make them atomic together — a crash
+   between them leaves exactly the split state step 2 exists to prevent, just
+   reached via interruption instead of a missing file. Best-effort (a failed
+   arm is no worse than not having this mitigation, so it doesn't block the
+   switch), but always attempted.
+7. Read `.{name}.<ext>`, write it via `writeActiveCredential` (the actual
    account switch).
-6. If `.{name}.account.json` exists, `patchIdentityCache` it into
-   `~/.claude.json` — no `/login` needed. If it doesn't exist (a snapshot
-   created by the old `claude-switch` before this feature, or a
-   never-fully-synced one), skip silently — same fallback both scripts
-   already document ("`/login` once, cached for next time").
-7. Return the new active email (re-read via `loadAccountEmail()` after the
+8. `patchIdentityCache` the identity snapshot already read and parsed at
+   step 2 into `~/.claude.json` — no `/login` needed. Guaranteed to exist,
+   parse, and carry a real email by step 2, so this cannot fail for a reason
+   step 2 didn't already catch before anything was written.
+8.5. Disarm the pending-switch marker — both halves of the pair it guards
+   completed, so there is nothing left to detect.
+9. Return the new active email (re-read via `loadAccountEmail()` after the
    patch, so the return value reflects what's actually on disk, not what was
    assumed).
 
@@ -239,7 +290,7 @@ either and this doesn't make that any worse).
 
 **What this does not cover, and why that's acceptable:** a live Claude Code
 process silently refreshing/rewriting the active credential *during* the
-brief window between this tool's step 3 rescue-backup read and step 5's
+brief window between this tool's step 5 rescue-backup read and step 7's
 overwrite. This tool cannot lock a process it doesn't control. The residual
 exposure is small and non-destructive to *this* switch: worst case, the
 rescue/named backup captures a token that was about to be superseded by a
@@ -273,25 +324,34 @@ Authorization: Bearer <token>
 - No `session_id`-style precondition — this endpoint isn't scoped to a
   session, it's host identity level, and `switchAccount` is already
   idempotent: switching to the currently-active name returns immediately at
-  step 2 without touching any file (see Core logic — a real no-op, not a
+  step 4 without touching any file (see Core logic — a real no-op, not a
   harmless re-write).
 - A request naming an unknown snapshot never touches any file — validation
   is the first thing `switchAccount` does.
 
 ## Error handling
 
-- `switchAccount` failing partway (steps 5/6) is reported as an error, not
+- `switchAccount` failing partway (steps 7/8) is reported as an error, not
   silently swallowed — the CLI exits 1 with the underlying error, the
   endpoint returns 500, the TUI toasts it.
+- A missing, unparseable, or empty-of-email identity snapshot (step 2) fails
+  before anything is read or written — the same "nothing touched" guarantee
+  as the unknown-name check in step 1. A pending-switch marker from a prior
+  interrupted switch (step 3) fails the same way, for every target, not just
+  a retry of the interrupted one.
 - The sequencing guarantee: a failure can never leave you unable to get back
   to the account you were just on, because the live credential is captured
-  at least once (step 3's unconditional rescue backup) and, when its account
-  is known, captured by name too (step 4) — both before step 5 touches the
-  live credential. A failure in step 5 or 6 leaves you exactly where the
+  at least once (step 5's unconditional rescue backup) and, when its account
+  is known, captured by name too (step 6) — both before step 7 touches the
+  live credential. A failure in step 7 or 8 leaves you exactly where the
   previous account left off, in either its own named snapshot or, failing
   that, `.last-switch-rescue.<ext>` — worst case is "re-run `account switch
   <current>`" (or manually restore from the rescue file), never "no copy
-  exists anywhere of where you just were."
+  exists anywhere of where you just were." A failure specifically *between*
+  steps 7 and 8 (the one pair that can't be made atomic — see step 6.5) is
+  the pending-switch marker's job, not the rescue backup's: it stops the next
+  switch, of any target, from acting on a stale identity cache rather than
+  trying to reconstruct which account is actually live.
 - `saveAccountSnapshot` failing partway (credential written, identity write
   fails, or vice versa) is reported as an error; re-running the command is
   always safe (it overwrites both files unconditionally on success).
@@ -302,13 +362,22 @@ Authorization: Bearer <token>
 
 ## Testing
 
-- `switchAccount`: unknown name rejected before any file touched; switching
-  to the already-active name touches zero files (verify via mtime/no-write
-  assertion, not just a successful return); the unconditional rescue backup
-  is written even when `current == ""`; named sync-back writes the outgoing
-  account's snapshot correctly when `current` resolves; identity patch
-  preserves unrelated `~/.claude.json` keys; missing `.{name}.account.json`
-  skips the patch without erroring.
+- `switchAccount`: unknown name rejected before any file touched; a
+  credential-only target (missing `.{name}.account.json`) is refused before
+  any file is touched, naming `account save <name>` in the error; a
+  syntactically-valid-but-null identity snapshot (`{"oauthAccount":null,...}`)
+  is refused the same way; a pending-switch marker armed by a prior
+  interrupted switch refuses EVERY target, not just a retry of the
+  interrupted one, and leaves the tree untouched; switching to the
+  already-active name touches zero files (verify via mtime/no-write
+  assertion, not just a successful return); a clean switch disarms the
+  pending-switch marker; the unconditional rescue backup is written even when
+  `current == ""`; named sync-back writes the outgoing account's snapshot
+  correctly when `current` resolves; identity patch preserves unrelated
+  `~/.claude.json` keys; a live-credential read failure that is genuinely
+  "not found" (exit 44 + matching stderr on macOS, `os.ErrNotExist` on Linux)
+  proceeds without a rescue copy, while any other read failure refuses the
+  switch outright, including when `current == ""`.
 - Concurrency: two overlapping `switchAccount` calls (goroutines/subprocesses
   racing on the same lock file) serialize rather than interleave — assert
   the second observes the first's fully-applied state, not a torn write.
@@ -349,6 +418,16 @@ make
   (unconditional rescue backup covers that case).
 - Switching to the already-active account is a true no-op: zero files
   touched, never a fresh live token overwritten by a stale snapshot.
+- A credential-only or null-identity snapshot is refused with an actionable
+  error, never silently applied — `currentAccountName`'s email matching stays
+  correct for every account this tool has ever switched to.
+- A switch interrupted between installing the credential and patching
+  identity leaves the pending-switch marker armed, which refuses every
+  subsequent switch (any target) until a human confirms which account is
+  actually live — never a silent misattributed backup on the natural retry.
+- A "not found" classification for the outgoing live credential (safe to
+  proceed without a rescue copy) requires corroborating evidence beyond a
+  single ambiguous exit code, on both platforms.
 - Concurrent switch/save invocations on the same host serialize via
   `withAccountLock` rather than racing.
 - No new dependency (the concurrency lock uses `golang.org/x/sys/unix`,

@@ -518,6 +518,170 @@ func cmdListSessions(args []string) int {
 	return 0
 }
 
+// accountUsageMsg is the `account` subcommand family's usage line. `save` takes
+// no --server on purpose: it captures the credential that is live on *this*
+// machine, which is only meaningful where that credential lives.
+const accountUsageMsg = `usage: claude-sessions account switch NAME [--server SERVER]
+       claude-sessions account save NAME
+       claude-sessions account list [--server SERVER]`
+
+// cmdAccount dispatches the switch/save/list subcommands of `account`.
+func cmdAccount(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, accountUsageMsg)
+		return 2
+	}
+	switch args[0] {
+	case "switch":
+		return cmdAccountSwitch(args[1:])
+	case "save":
+		return cmdAccountSave(args[1:])
+	case "list":
+		return cmdAccountList(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "account: unknown subcommand %q\n%s\n", args[0], accountUsageMsg)
+		return 2
+	}
+}
+
+// parseAccountArgs reads an optional positional NAME plus an optional --server
+// value. An unknown flag or a second positional is an error rather than a silent
+// no-op, matching parseKillFlags' rule that a typo never reads as "do it anyway".
+func parseAccountArgs(args []string) (name, server string, err error) {
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--server":
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("--server needs a value")
+			}
+			server = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--"):
+			return "", "", fmt.Errorf("unknown flag: %s", a)
+		case name == "":
+			name = a
+		default:
+			return "", "", fmt.Errorf("unexpected argument: %s", a)
+		}
+	}
+	return name, server, nil
+}
+
+// accountSwitchedLine is the confirmation printed after a switch. switchAccount
+// only ever succeeds with a real, non-empty email — it refuses upstream
+// (before touching anything) when the target has no usable identity snapshot
+// to patch — so there is no "switched but email unknown" case to format here.
+func accountSwitchedLine(name, email string) string {
+	return fmt.Sprintf("switched to %s (%s)", name, email)
+}
+
+func cmdAccountSwitch(args []string) int {
+	name, server, err := parseAccountArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "account switch: %v\n%s\n", err, accountUsageMsg)
+		return 2
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, accountUsageMsg)
+		return 2
+	}
+	if server != "" {
+		return cmdAccountSwitchRemote(name, server)
+	}
+	email, err := switchAccount(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "account switch:", err)
+		return 1
+	}
+	fmt.Println(accountSwitchedLine(name, email))
+	return 0
+}
+
+// cmdAccountSwitchRemote switches a configured remote's active account over
+// HTTP. The server's own refusal message is preferred over the bare transport
+// error, so an unknown name still prints the list of names that host holds.
+func cmdAccountSwitchRemote(name, server string) int {
+	if _, ok := LookupServer(server); !ok {
+		cfgs, _ := LoadServerConfigs()
+		names := make([]string, len(cfgs))
+		for i, c := range cfgs {
+			names[i] = c.Name
+		}
+		fmt.Fprintf(os.Stderr, "account switch: unknown server %q (configured: %s)\n", server, strings.Join(names, ", "))
+		return 2
+	}
+	result, err := switchAccountRemote(server, name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "account switch:", err)
+		return 1
+	}
+	if !result.OK {
+		fmt.Fprintf(os.Stderr, "account switch: %s: %s\n", server, result.Message)
+		return 1
+	}
+	fmt.Println(accountSwitchedLine(name, result.Account))
+	return 0
+}
+
+func cmdAccountSave(args []string) int {
+	name, server, err := parseAccountArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "account save: %v\n%s\n", err, accountUsageMsg)
+		return 2
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, accountUsageMsg)
+		return 2
+	}
+	if server != "" {
+		fmt.Fprintf(os.Stderr, "account save: --server is not supported (a snapshot captures the credential live on this machine)\n")
+		return 2
+	}
+	if err := saveAccountSnapshot(name); err != nil {
+		fmt.Fprintln(os.Stderr, "account save:", err)
+		return 1
+	}
+	email := snapshotAccountEmail(name)
+	if email == "" {
+		fmt.Printf("saved snapshot %s\n", name)
+		return 0
+	}
+	fmt.Printf("saved snapshot %s (%s)\n", name, email)
+	return 0
+}
+
+func cmdAccountList(args []string) int {
+	name, server, err := parseAccountArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "account list: %v\n%s\n", err, accountUsageMsg)
+		return 2
+	}
+	if name != "" {
+		fmt.Fprintf(os.Stderr, "account list: unexpected argument: %s\n%s\n", name, accountUsageMsg)
+		return 2
+	}
+	if server != "" {
+		srv, ok := LookupServer(server)
+		if !ok {
+			cfgs, _ := LoadServerConfigs()
+			names := make([]string, len(cfgs))
+			for i, c := range cfgs {
+				names[i] = c.Name
+			}
+			fmt.Fprintf(os.Stderr, "account list: unknown server %q (configured: %s)\n", server, strings.Join(names, ", "))
+			return 2
+		}
+		fmt.Print(renderAccountTable([]accountListing{remoteAccountListing(FetchRemote(srv))}))
+		return 0
+	}
+	listings := []accountListing{localAccountListing()}
+	for _, r := range FetchAllRemote() {
+		listings = append(listings, remoteAccountListing(r))
+	}
+	fmt.Print(renderAccountTable(listings))
+	return 0
+}
+
 // cmdSnapshot dispatches the save/restore/list subcommands of `snapshot`.
 func cmdSnapshot(args []string) int {
 	const usage = "usage: claude-sessions snapshot save [name] | restore NAME | list"

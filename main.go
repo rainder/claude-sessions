@@ -60,6 +60,8 @@ func main() {
 		os.Exit(cmdService(args[1:]))
 	case "snapshot":
 		os.Exit(cmdSnapshot(args[1:]))
+	case "account":
+		os.Exit(cmdAccount(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -97,6 +99,11 @@ subcommands:
                                   save/restore the local session set; name
                                   defaults to a timestamp; restore recreates
                                   each session (best-effort) via tmux + resume
+  account switch NAME [--server SERVER] | save NAME | list [--server SERVER]
+                                  switch the active Claude Code account from a
+                                  claude-switch credential snapshot, capture the
+                                  live one as a snapshot, or list what each host
+                                  knows about
   notify-test                     send a test push to every registered device
   -h, --help                      this help
 
@@ -105,7 +112,8 @@ live-view keys:
   k    kill         a  attach (or migrate)
   p    preview      m  cycle view mode
   s    cycle sort   r  refresh
-  ?    help         q  quit`
+  ^W   account      ?  help
+  q    quit`
 
 func cmdList() error {
 	local, err := CollectLocal()

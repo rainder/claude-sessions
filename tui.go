@@ -140,6 +140,13 @@ func RunTUI(interval time.Duration) error {
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
 
+	// Every account this machine holds a claude-switch credential snapshot for,
+	// polled the same way but read-only from the snapshot files — the live
+	// credential is never touched, so the account actually logged in here keeps
+	// working exactly as before.
+	knownAccountsHub := NewKnownAccountsHub()
+	defer knownAccountsHub.Shutdown()
+
 	hostUsageHub := NewHostUsageHub(interval)
 	defer hostUsageHub.Shutdown()
 	localName := shortHostname()
@@ -301,8 +308,9 @@ func RunTUI(interval time.Duration) error {
 			Sessions:  local,
 			HostUsage: hostUsageHub.Snapshot(),
 		}, remotes, state.sel, &LocalUsage{
-			Claude: usageHub.Snapshot(),
-			Codex:  codexUsageHub.Snapshot(),
+			Claude:        usageHub.Snapshot(),
+			Codex:         codexUsageHub.Snapshot(),
+			KnownAccounts: derefKnownAccounts(knownAccountsHub.Snapshot()),
 		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
@@ -352,16 +360,37 @@ func RunTUI(interval time.Duration) error {
 			sel:        state.sel,
 			modalWakes: modalWakes,
 			disabled:   disabledStore,
+			// Straight from the pollers' latest snapshots (and, for a remote row,
+			// the last /sessions poll this loop already has in `remotes`), so
+			// Ctrl+W opens instantly and never fetches.
+			accounts: func(host string) accountSnapshot {
+				if host == "" {
+					known := knownAccountsHub.Snapshot()
+					return accountSnapshot{
+						Usage:      usageHub.Snapshot(),
+						Known:      derefKnownAccounts(known),
+						ActiveName: activeSnapshotNameOf(known),
+					}
+				}
+				for _, r := range remotes {
+					if r.Name == host {
+						return accountSnapshotOf(r)
+					}
+				}
+				return accountSnapshot{}
+			},
 			pause: func() {
 				hub.Pause()
 				usageHub.Pause()
 				codexUsageHub.Pause()
+				knownAccountsHub.Pause()
 				hostUsageHub.Pause()
 			},
 			resume: func() {
 				hub.Resume()
 				usageHub.Resume()
 				codexUsageHub.Resume()
+				knownAccountsHub.Resume()
 				hostUsageHub.Resume()
 			},
 		}
@@ -579,6 +608,22 @@ func RunTUI(interval time.Duration) error {
 					state.requestSelectionAnchor()
 					render()
 				}
+			case "\x17": // Ctrl+W: switch the selected row's host to another account
+				screen.Invalidate()
+				msg, switched := actSwitchAccount(makeCtx())
+				if switched {
+					// The account pollers still describe the *previous* account
+					// for up to two minutes; kick both so the header email and
+					// the picker's active marker catch up with the toast.
+					usageHub.Kick()
+					knownAccountsHub.Kick()
+					refresh(true)
+				}
+				if msg != "" {
+					toast = msg
+					toastUntil = time.Now().Add(4 * time.Second)
+				}
+				render()
 			case "d", "D":
 				hideDisabled = !hideDisabled
 				settleRows()
@@ -1007,6 +1052,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
+	fmt.Fprintln(&b, "    Ctrl-W       switch that host's Claude account (⏎ applies · esc cancels)")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("INSPECTOR"))
 	fmt.Fprintln(&b, "    Home / End   oldest output / resume live follow")

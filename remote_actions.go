@@ -393,6 +393,34 @@ func migrateRemote(host string, pid int, sessionID string) (actionResult, error)
 	return r, nil
 }
 
+// switchAccountRemote asks host's server to make name its active Claude Code
+// account. Same plain-function shape as killRemote/postDisableRemote, so the
+// network+parse logic is unit-testable without a terminal.
+//
+// A refusal arrives as a non-200 (400 unknown_account / 500 switch_failed) whose
+// body still carries the envelope, so the body is decoded before the transport
+// error is considered: that is what lets the caller print the host's own "known:
+// avisoma, trecs" message instead of a bare "HTTP 400".
+func switchAccountRemote(host, name string) (accountSwitchResult, error) {
+	body, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return accountSwitchResult{}, err
+	}
+	resp, reqErr := remoteRequest(host, "/account/switch", "POST", body)
+	var r accountSwitchResult
+	decoded := json.Unmarshal(resp, &r) == nil
+	if reqErr != nil {
+		if decoded && r.Message != "" {
+			return r, nil // a refusal the server explained; not a transport error
+		}
+		return accountSwitchResult{}, reqErr
+	}
+	if !decoded {
+		return accountSwitchResult{}, fmt.Errorf("bad response from %s", host)
+	}
+	return r, nil
+}
+
 // actToggleDisabledRemote handles "-"/"+" on a remote-selected row. No
 // confirmation dialog — unlike kill, disabling isn't destructive. Reports
 // whether anything changed, matching actToggleDisabled's local-path contract.

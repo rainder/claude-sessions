@@ -305,6 +305,165 @@ alongside `collect`/`terminate`/`removeTree`.
 shows it as two progress bars (5-hour and weekly limits). The token is read-only
 — refresh/rotation is Claude Code's job.
 
+`known_accounts.go` polls the *other* accounts each host knows about:
+`claude-switch` parks a credential snapshot per account
+(`~/.claude/.<name>.keychain-cred` on macOS, `.<name>.credentials.json`
+elsewhere, plus `.<name>.account.json` for the email), and `KnownAccountsHub`
+(same `usagePoller` generic, `T = knownAccountsResult`) fetches each one's
+limits with that snapshot's own token. Strictly read-only — nothing is ever
+swapped into the Keychain or the live credential file. Three rules hold. The
+**live** account is never read from its own snapshot (Claude Code rotates the
+live token in place while the snapshot keeps whatever was stashed at switch
+time, so the snapshot can look expired while the session is healthy) — it is
+skipped by email equality against `loadAccountEmail`. A per-account failure is
+never an error: it becomes that entry's `Expired` flag, so
+`fetchAllKnownAccounts` always returns a full slice and the poller's
+whole-batch backoff only ever fires on a host-level problem, never because one
+account is flaky. And only non-`Expired` entries are cached, so a restart can
+seed a recently-good account but never resurrects an expired one.
+
+`snapshotAccountNames` lists snapshots with `os.ReadDir` + a name filter, never
+`filepath.Glob`: the home directory is data, not a pattern, so a home path
+containing `[` would make the *only* error path fire (permanent backoff, every
+account gone) and one containing `*` would match into sibling directories and
+read their credential snapshots. Nothing below an unresolvable `$HOME` errors —
+a missing or unreadable `~/.claude` is an empty list, which is what keeps the
+never-fail-the-batch property intact.
+
+Transport is additive: `GET /sessions` gains `knownAccounts` and
+`activeSnapshotName` (both `omitempty`, both nil/"" from an older server).
+`activeSnapshotName` is a side output of the poll, not a per-request lookup:
+`allKnownAccounts` reports the name it skipped as the live account, the poller
+parks it beside the slice in `knownAccountsResult`, and the handler reads both
+from one `Snapshot()` — so `/sessions` touches no files and the two fields
+always describe the same pass. It is never cached to disk (which account is
+logged in can change while the process is down).
+`dedupeAccounts` merges them in a second pass after the live-account pass — a
+live line always wins over any host's snapshot copy of the same email — and an
+`Expired` entry keeps its line as a dim `auth expired` placeholder instead of
+being dropped. Snapshot-derived lines are never marked `mine`, so one can never
+render bare and pass as this machine's live account. Host headings show each
+host's active account email, dimmed, after `LOAD` (`section.account`, fed by
+that host's existing usage snapshot — no extra fetch, no protocol change).
+
+### Account switching
+
+`account.go` is the Go port of the standalone `claude-switch` scripts, and the
+two stay interchangeable: identical file names, formats and paths
+(`.<name>.keychain-cred` / `.<name>.credentials.json` / `.<name>.account.json`),
+so either tool can switch an account on any machine with no migration step.
+`account_list.go` renders `account list`; `account_picker.go` is the Ctrl+W
+overlay and its action. Entry points: the `account switch|save|list`
+subcommands, `POST /account/switch` (bearer auth like every mutating endpoint,
+`400 unknown_account` / `500 switch_failed`, no `session_id`-style precondition
+because it is host identity, not a session), and Ctrl+W in the TUI (picker →
+Enter → done, no confirm dialog).
+
+`switchAccount`'s step order **is** the contract, all of it inside
+`withAccountLock`: validate the name against `snapshotAccountNames()` (nothing
+is read or written past a failure here) → require the target to have a
+readable, parseable `.<name>.account.json` identity snapshot with a real,
+non-null email (a file that merely exists and parses isn't enough — see
+below), refusing with a message naming `account save <name>` as the fix if it
+doesn't (nothing is read or written past this failure either) → refuse if a
+previous switch left the pending-switch marker armed (see below) → if it is
+already current, return immediately, a *true* no-op touching zero files
+(re-applying the snapshot would overwrite a live token that may have
+refreshed with a stale one) → unconditional rescue copy of the live
+credential to the single rolling `.last-switch-rescue.<ext>` slot → when the
+outgoing account resolves to a name, its own credential + identity snapshot →
+arm the pending-switch marker → only then overwrite the live credential →
+patch `~/.claude.json` → disarm the marker → return the email re-read from
+disk. The rescue and named-sync-back steps exist so a failure can never
+strand you: the outgoing credential always has at least one copy on disk
+before anything overwrites it, including when its account can't be named
+(first switch, renamed account), which is exactly the case the *rescue* copy
+covers and the named sync-back cannot.
+
+**Why a credential-only snapshot is refused, not silently applied with a
+"`/login` once" fallback.** An earlier version of this code allowed it: the
+identity patch was simply skipped, matching what the standalone shell scripts
+already tolerate. That leaves `~/.claude.json` naming the OUTGOING account
+while the credential installed is the incoming one, and there is no reliable
+way to detect that split state after the fact — `currentAccountName` only has
+the (now-stale) identity cache to go on, and a later switch reading it would
+back the wrong live credential up under the wrong outgoing account's name,
+corrupting it. A "last switch" marker was tried to paper over this and
+rejected: it made the wrong snapshot look current every time something else
+rewrote `~/.claude.json`, which Claude Code does constantly for reasons that
+have nothing to do with identity (project history, tips state, onboarding
+flags). Refusing upstream — before touching anything, including the rescue
+backup — is what keeps `currentAccountName`'s plain email matching always
+correct: every switch this tool performs now leaves identity in sync with the
+credential it installs, with no exception to reason about. On both machines
+this ships to, every snapshot already has its identity file (verified, not
+assumed), so this precondition costs nothing in practice; a legacy
+credential-only snapshot self-heals with one `account save <name>` run while
+logged into it. The check is on the DATA, not the file's mere existence:
+`identitySlice` (the counterpart that builds a snapshot in `saveAccountSnapshot`)
+writes an explicit JSON `null` for any identity key `~/.claude.json` didn't
+have at capture time (jq parity with the shell scripts), so a snapshot saved
+while not actually logged in is syntactically valid but practically empty.
+This is checked via `identitySnapshotEmail`, not `snapshotAccountEmail` (the
+latter is for display elsewhere and unmarshals into a Go struct, which falls
+back to case-insensitive key matching) — `identitySnapshotEmail` looks the
+already-parsed map up by the exact key `"oauthAccount"`, the same lookup
+`patchIdentityCache` itself performs, so validating "is this usable" and
+determining "what will actually get copied" ask the identical question
+against the identical bytes. A struct-based check and a map-based patch
+disagreeing on key casing was a real, independent-review-caught bug: a
+snapshot with any casing but exactly `"oauthAccount"` would have passed a
+looser check while the patch silently copied nothing.
+
+**The pending-switch marker (`~/.claude/.account-switch-pending`) closes the
+one gap the identity precondition above cannot: two separate writes to two
+separate stores (the live credential, then `~/.claude.json`) can't be made
+atomic together, so a process killed between them leaves exactly the split
+state the precondition exists to prevent — just reached by a crash instead of
+a missing file.** The natural response to "that switch didn't seem to take"
+is to run it again, and doing so with a stale identity cache would
+misattribute the outgoing backup to the wrong snapshot and corrupt it — for
+ANY subsequent switch target, not just a retry of the same one. The marker is
+armed right before the credential write and disarmed right after the identity
+patch succeeds; while armed, every switch (any target) refuses. `account save
+<name>` ALSO clears the marker (not just a completed `switchAccountLocked`) —
+capturing what's live right now under a name is exactly the human
+confirmation the marker is waiting for, and making `save` the one complete
+recovery step (rather than a two-part "resync, then separately remember to
+clear the warning") is what the refusal message points at. This converts a
+rare, silent, corrupting failure mode into a rare, loud, safe one — the same
+"narrow the race, never guess" philosophy the session kill/migrate
+preconditions elsewhere in this file already use.
+
+Three details are load-bearing. `rescueSnapshotName` is filtered out by
+`snapshotAccountNames` — the rescue file has a snapshot's file-name shape but
+nobody is ever logged into it, and without the filter it would surface as an
+account in the poller, `account list`, and the picker alike. That also makes it
+deliberately un-switchable-to (`switchAccount` only accepts a name the listing
+produced): the slot is a manual last resort, restored by hand, not a fourth
+account. `withAccountLock`
+opens `~/.claude/.account-switch.lock` **per call**: flock locks are per open
+file description, so a cached handle would let two goroutines in the same
+process both "acquire" it. And `patchIdentityCache` decodes `~/.claude.json`
+into a `map[string]json.RawMessage`, overwrites only `oauthAccount`/`userID`
+(skipping an explicit `null`, which would strip a good value), and writes via
+temp-file-then-rename preserving the original mode — that file belongs to Claude
+Code and a live process may be reading it. And `securityFindPassword`
+(macOS) only treats a `security find-generic-password` failure as "no such
+item" (`os.ErrNotExist`, which `backupOutgoing` reads as "nothing to lose,
+proceed without a rescue copy") when BOTH the exit code is 44 AND stderr
+contains "could not be found" — exit 44 alone is ambiguous, since it's the
+low byte of a Security framework `OSStatus` and other statuses collide with
+it mod 256. Any other failure is refused rather than assumed safe: proceeding
+without a backup when a credential might actually be sitting there unreadable
+is the wrong side of that tradeoff to guess on.
+
+The macOS Keychain legs sit behind the `keychainRead`/`keychainWrite` package
+vars purely so tests can never reach the real Keychain: `TestMain` defaults them
+to a panic and each test installs a tempdir-backed fake, so a forgotten override
+fails closed instead of overwriting the developer's own live credential. Never
+add a test that runs the real `security` invocations.
+
 ### YAML config
 
 `yaml.go` is a hand-rolled parser for exactly one shape: a top-level `servers:`

@@ -235,3 +235,39 @@ func TestParseUsageBadJSON(t *testing.T) {
 		t.Error("want error for invalid JSON, got nil")
 	}
 }
+
+// parseOAuthCredentials is shared by the live token read (loadOAuthToken) and
+// every claude-switch snapshot read (snapshotToken), so both reject the same
+// shapes.
+func TestParseOAuthCredentials(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{"valid", `{"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc"}}`, "sk-ant-oat01-abc", false},
+		{"extra fields ignored", `{"claudeAiOauth":{"accessToken":"tok","refreshToken":"r","expiresAt":1},"other":true}`, "tok", false},
+		{"empty token", `{"claudeAiOauth":{"accessToken":""}}`, "", true},
+		{"missing oauth object", `{}`, "", true},
+		{"malformed json", `not json`, "", true},
+		{"empty body", ``, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseOAuthCredentials([]byte(tc.body))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("err = nil, want an error (token = %q)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if got != tc.want {
+				t.Fatalf("token = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

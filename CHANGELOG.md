@@ -85,6 +85,29 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Neither unit keeps stdout, since the server prints its bearer token there at
   startup; stderr, which carries the "listening on" and notification lines, is
   what gets logged.
+- `account switch NAME [--server S]`, `account save NAME` and
+  `account list [--server S]`, plus `Ctrl+W` in the live view and a new
+  `POST /account/switch`, port the standalone `claude-switch` scripts into the
+  binary. Same files, same formats, same paths, so either tool still works on
+  any machine. `Ctrl+W` lists the accounts the selected row's host holds —
+  built from data the pollers already have, so it opens without fetching —
+  marks the current one, and `Enter` applies it immediately (local rows switch
+  in-process, remote rows post to that host); there is no confirmation step by
+  design. `account list` reuses `GET /sessions`' existing `usage` /
+  `knownAccounts` / `activeSnapshotName` fields rather than adding a second
+  read endpoint, and an unreachable host prints its error in place of its rows
+  instead of aborting the table.
+  Two properties are worth knowing. Switching to the account that is already
+  active is a **true** no-op — zero files touched — because re-applying a
+  snapshot would overwrite a live token that may have refreshed since capture
+  with an older one. And before the live credential is overwritten it is copied
+  unconditionally to a single rolling `.last-switch-rescue.<ext>` slot, and
+  again under its own name when the outgoing account can be identified, so no
+  switch can leave you with no copy of the account you were just on — including
+  the case where that account matches no snapshot at all. Concurrent switches
+  and saves on one host serialize through an advisory lock on
+  `~/.claude/.account-switch.lock`; a live Claude Code process rewriting the
+  credential mid-switch remains an accepted, documented residual window.
 
 ### Fixed
 
