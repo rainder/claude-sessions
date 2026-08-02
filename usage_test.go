@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -287,6 +289,11 @@ func TestParseRetryAfter(t *testing.T) {
 		{"a negative delta", "-5", time.Time{}},
 		{"an RFC 1123 date", "Sun, 02 Aug 2026 12:05:00 GMT", now.Add(5 * time.Minute)},
 		{"an ANSI C date", "Sun Aug  2 12:05:00 2026", now.Add(5 * time.Minute)},
+		// A date whose wait has already elapsed is the same "no opinion" as a
+		// non-positive delta, and normalizes to the same zero time here rather than
+		// leaving a stale instant for a caller to re-check.
+		{"a date already in the past", "Sun, 02 Aug 2026 11:55:00 GMT", time.Time{}},
+		{"a date of exactly now", "Sun, 02 Aug 2026 12:00:00 GMT", time.Time{}},
 		{"absent", "", time.Time{}},
 		{"garbage", "soon-ish", time.Time{}},
 	}
@@ -332,5 +339,223 @@ func TestUsageBackoffUntil(t *testing.T) {
 				t.Fatalf("usageBackoffUntil(streak %d) = +%v, want +%v", c.streak, got.Sub(now), c.want)
 			}
 		})
+	}
+}
+
+// liveUsageFixture is one live-account reading, distinct enough that a test can
+// tell a re-served snapshot from a freshly fetched one by its numbers.
+func liveUsageFixture(pct float64) *AccountUsage {
+	return &AccountUsage{Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: usageBucket{Pct: pct}}}
+}
+
+// loginAs points loadAccountEmail at a temp HOME logged into email, since
+// newUsageFetcher re-serves a reading only while that account is still the live
+// one. Without it these tests would read the developer's own ~/.claude.json and
+// pass or fail on whose account that names.
+func loginAs(t *testing.T, email string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeLiveAccount(t, home, email)
+}
+
+// writeLiveAccount rewrites the temp HOME's ~/.claude.json, standing in for a
+// relogin or a Ctrl+W switch mid-run.
+func writeLiveAccount(t *testing.T, home, email string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"oauthAccount":{"emailAddress":%q}}`, email)
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The armed wait is 4 minutes, so nothing here can wait one out; the ordering
+// itself is the proof, exactly as in the known-accounts equivalent. Two
+// consecutive throttles are what arm the wait, so a pass that still fetches
+// after an intervening success is the evidence that success cleared the streak.
+func TestUsageFetcherBacksOffRepeatedThrottles(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	calls := 0
+	throttled := true
+	good := liveUsageFixture(21)
+	fetcher := newUsageFetcher(nil, func() (*AccountUsage, error) {
+		calls++
+		if throttled {
+			return nil, &usageHTTPError{Status: 429}
+		}
+		return good, nil
+	})
+
+	// A first throttle imposes no wait at all — most heal within one tick.
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	if calls != 1 {
+		t.Fatalf("fetches = %d, want the first pass to fetch", calls)
+	}
+	// A success ends the streak before it can build.
+	throttled = false
+	u, err := fetcher()
+	if err != nil || u != good {
+		t.Fatalf("pass 2 = (%#v, %v), want the fresh numbers", u, err)
+	}
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want the pass after one throttle to fetch", calls)
+	}
+
+	// Now two consecutive throttles. The second is what arms the wait — which
+	// also proves the success above cleared the streak, since otherwise this
+	// second pass would already have been skipped.
+	throttled = true
+	for i := 3; i <= 4; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	if calls != 4 {
+		t.Fatalf("fetches = %d, want both throttled passes to have fetched", calls)
+	}
+
+	// Inside the armed wait the endpoint is not touched, and the skip reads as an
+	// ordinary success carrying the last good numbers: an error here would engage
+	// usagePoller.run's generic 5s-doubling retry, which is the burst this whole
+	// mechanism exists to prevent.
+	u, err = fetcher()
+	if calls != 4 {
+		t.Fatalf("fetches = %d, want the pass inside the backoff to skip the endpoint", calls)
+	}
+	if err != nil || u != good {
+		t.Fatalf("backed-off pass = (%#v, %v), want the last good reading re-served", u, err)
+	}
+}
+
+// Only a throttle is answered with a wait. Every other failure is a transient
+// the generic retry handles correctly, so it must leave the account immediately
+// eligible.
+func TestUsageFetcherBacksOffOnlyOnThrottles(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	calls := 0
+	fetcher := newUsageFetcher(liveUsageFixture(21), func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 503}
+	})
+	for i := 1; i <= 3; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the failure reported", i)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("fetches = %d, want every non-throttled failure to have fetched", calls)
+	}
+}
+
+// With nothing to serve instead there is nothing to skip *for*: fabricating a
+// success with no numbers is not an option, so a backed-off pass falls through
+// and the caller gets the real error, exactly as before this wrapper existed.
+func TestUsageFetcherWithNoLastGoodStillFetches(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	calls := 0
+	fetcher := newUsageFetcher(nil, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 3; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("fetches = %d, want every pass to fetch while there is nothing to re-serve", calls)
+	}
+}
+
+// A restart landing mid-throttle re-serves the disk-cached snapshot, which is
+// what the seed is for.
+func TestUsageFetcherReservesTheSeed(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	calls := 0
+	seed := liveUsageFixture(37)
+	fetcher := newUsageFetcher(seed, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	u, err := fetcher()
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want the pass inside the backoff to skip the endpoint", calls)
+	}
+	if err != nil || u != seed {
+		t.Fatalf("backed-off pass = (%#v, %v), want the seeded snapshot re-served", u, err)
+	}
+}
+
+// last is keyed by nothing but "whoever was live last time", so a switch during
+// an armed wait must end the re-serving: bars carried under the wrong email
+// misattribute usage across accounts, which is the failure carryable exists to
+// prevent for snapshot accounts.
+func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeLiveAccount(t, home, "andy@trecs.aero")
+
+	calls := 0
+	seed := liveUsageFixture(37)
+	fetcher := newUsageFetcher(seed, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	if u, err := fetcher(); calls != 2 || err != nil || u != seed {
+		t.Fatalf("backed-off pass = (%#v, %v) after %d fetches, want the seed re-served", u, err, calls)
+	}
+
+	// Ctrl+W, or a relogin: the numbers on hand belong to the account that just
+	// left, and the armed wait was earned against its budget, not this one's.
+	writeLiveAccount(t, home, "andy@avisoma.com")
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass after the switch = nil error, want a real fetch's throttle")
+	}
+	if calls != 3 {
+		t.Fatalf("fetches = %d, want the switch to have forced a fetch", calls)
+	}
+	// usage.go also clears backoff on this path as cheap insurance, but that
+	// reset is not independently observable here: the switch already dropped
+	// last to nil, and the skip branch requires last != nil regardless of what
+	// backoff holds, so a further assertion on call counts would pass whether or
+	// not the reset happened. Proving the streak itself restarted would need a
+	// success in between to repopulate last first.
+}
+
+// The poller saves on every success, and a re-served snapshot is a success — so
+// without this wrapper a long throttle would restamp FetchedAt every two
+// minutes and usageCacheMaxAge would stop bounding a warm start.
+func TestSaveOnceUsageSkipsAReservedSnapshot(t *testing.T) {
+	seed := liveUsageFixture(37)
+	fresh := liveUsageFixture(21)
+	var saved []*AccountUsage
+	save := saveOnceUsage(seed, func(u *AccountUsage) { saved = append(saved, u) })
+
+	save(seed) // re-served warm-start seed: already on disk
+	if len(saved) != 0 {
+		t.Fatalf("saves = %d, want the seeded snapshot left alone", len(saved))
+	}
+	save(fresh)
+	save(fresh) // re-served after the backoff armed
+	save(fresh)
+	if len(saved) != 1 || saved[0] != fresh {
+		t.Fatalf("saves = %#v, want one write for the one real fetch", saved)
+	}
+	newer := liveUsageFixture(44)
+	save(newer)
+	if len(saved) != 2 || saved[1] != newer {
+		t.Fatalf("saves = %#v, want the next real fetch written", saved)
 	}
 }

@@ -69,8 +69,9 @@ var errUsageBackoffActive = errors.New("usage fetch backing off after repeated 4
 // usageBackoffForget bounds how long a failure record outlives its own
 // deadline. The map is keyed by account email, so it is naturally as small as
 // the host's snapshot count; this exists so an account nobody asks about any
-// more (renamed snapshot, host dropped from servers.yaml) stops occupying an
-// entry, not to enforce a bound.
+// more — its credential snapshot renamed or removed on this host, or simply no
+// longer named by any /usage request — stops occupying an entry, not to enforce
+// a bound.
 const usageBackoffForget = 20 * time.Minute
 
 // errNoUsageResult stands in for a fetch that returned neither a snapshot nor an
