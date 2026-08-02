@@ -78,32 +78,6 @@ func TestFetchRemoteCompatibilityWithMissingAndPartialHostUsage(t *testing.T) {
 	}
 }
 
-func TestFetchRemoteDecodesOptionalUsage(t *testing.T) {
-	// Build the body exactly as the server does — marshal an AccountUsage — so
-	// the test tracks the real serialization (UsageInfo has no JSON tags, so its
-	// wire keys are the Go field names) instead of a hand-written shape.
-	usage := AccountUsage{Account: "bot@ci.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 42}}}
-	payload, err := json.Marshal(map[string]any{"sessions": []Session{}, "usage": usage})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := fetchRemoteFixture(t, string(payload))
-	if got.Usage == nil {
-		t.Fatal("usage decoded as nil, want populated")
-	}
-	if got.Usage.Account != "bot@ci.com" {
-		t.Fatalf("account = %q, want bot@ci.com", got.Usage.Account)
-	}
-	if got.Usage.Info == nil || got.Usage.Info.FiveHour.Pct != 42 {
-		t.Fatalf("usage.info wrong: %#v", got.Usage.Info)
-	}
-
-	// An older server that omits "usage" leaves it nil — the client keeps working.
-	if old := fetchRemoteFixture(t, `{"sessions":[]}`); old.Usage != nil {
-		t.Fatalf("missing usage decoded as %#v, want nil", old.Usage)
-	}
-}
-
 func TestFetchRemoteDecodesOptionalCodexUsage(t *testing.T) {
 	// Marshal a CodexAccountUsage exactly as the server does so the test tracks
 	// the real "codex_usage" serialization.
@@ -130,49 +104,6 @@ func TestFetchRemoteDecodesOptionalCodexUsage(t *testing.T) {
 	if old := fetchRemoteFixture(t, `{"sessions":[]}`); old.CodexUsage != nil {
 		t.Fatalf("missing codex_usage decoded as %#v, want nil", old.CodexUsage)
 	}
-}
-
-func TestFetchRemoteDecodesOptionalKnownAccounts(t *testing.T) {
-	// Marshal the same values the server puts in the response so the test tracks
-	// the real "knownAccounts"/"activeSnapshotName" serialization.
-	known := []KnownAccountUsage{
-		{Name: "trecs", Account: "andy@trecs.aero", Expired: true},
-		{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
-	}
-	payload, err := json.Marshal(map[string]any{
-		"sessions":           []Session{},
-		"knownAccounts":      known,
-		"activeSnapshotName": "work",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := fetchRemoteFixture(t, string(payload))
-	if len(got.KnownAccounts) != 2 {
-		t.Fatalf("knownAccounts = %#v, want two entries", got.KnownAccounts)
-	}
-	if !got.KnownAccounts[0].Expired || got.KnownAccounts[0].Info != nil {
-		t.Fatalf("expired entry = %#v, want Expired with nil info", got.KnownAccounts[0])
-	}
-	if got.KnownAccounts[0].Name != "trecs" || got.KnownAccounts[0].Account != "andy@trecs.aero" {
-		t.Fatalf("expired entry lost its identity: %#v", got.KnownAccounts[0])
-	}
-	if got.KnownAccounts[1].Info == nil || got.KnownAccounts[1].Info.FiveHour.Pct != 41 {
-		t.Fatalf("healthy entry = %#v, want its usage", got.KnownAccounts[1])
-	}
-	if got.ActiveSnapshotName != "work" {
-		t.Fatalf("activeSnapshotName = %q, want work", got.ActiveSnapshotName)
-	}
-
-	// An older server omits both keys: nil/"" and everything else still decodes.
-	old := fetchRemoteFixture(t, `{"sessions":[],"hostUsage":{"cpuPercent":25.5}}`)
-	if old.KnownAccounts != nil {
-		t.Fatalf("missing knownAccounts decoded as %#v, want nil", old.KnownAccounts)
-	}
-	if old.ActiveSnapshotName != "" {
-		t.Fatalf("missing activeSnapshotName decoded as %q, want empty", old.ActiveSnapshotName)
-	}
-	assertFloatPtr(t, old.HostUsage.CPUPercent, floatPtr(25.5))
 }
 
 func fetchRemoteFixture(t *testing.T, body string) RemoteResult {

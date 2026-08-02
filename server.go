@@ -430,22 +430,20 @@ type server struct {
 	// hostSnapshot returns this host's latest resource usage; nil yields an
 	// empty HostUsage so old clients and tests without a hub still get 200.
 	hostSnapshot func() HostUsage
-	// usageSnapshot returns this host's account rate-limit usage paired with the
-	// account it belongs to. nil (no hub) or a nil return (no fetch yet) omits
-	// the "usage" key, so old clients and tests without a hub still get 200.
-	usageSnapshot func() *AccountUsage
 	// codexUsageSnapshot returns this host's OpenAI Codex account usage. nil (no
 	// hub) or a nil return (no fetch yet, or no Codex auth) omits the
 	// "codex_usage" key — the account email rides in the snapshot itself.
 	codexUsageSnapshot func() *CodexAccountUsage
-	// knownAccountsSnapshot returns the known-accounts poll: usage for every
-	// account this host holds a claude-switch credential snapshot for minus the
-	// live one, plus the snapshot name that same pass resolved as the live
-	// account's. nil (no hub), a nil return (no fetch yet), or an empty
-	// list/name omits the corresponding key — reporting the name from the
-	// poller's own pass is what keeps every client from re-deriving the same
-	// email→name match, and keeps /sessions off the filesystem.
-	knownAccountsSnapshot func() *knownAccountsResult
+	// usageFetch fetches one account's Anthropic rate limits: "" for the live
+	// account (token from the Keychain / .credentials.json), otherwise the
+	// claude-switch snapshot of that name (token from its stashed copy). nil
+	// falls back to fetchAccountUsage.
+	//
+	// This seam is not optional in tests. loadOAuthToken execs `security`
+	// directly rather than going through the keychainRead var TestMain guards, so
+	// a /usage handler test that left this nil would read the developer's own
+	// live credential and then really call Anthropic with it.
+	usageFetch func(snapshot string) (*UsageInfo, error)
 	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
 	// a stub to assert bounds and header wiring without touching tmux.
 	previewLoader func(int, PreviewLimits) (PreviewResult, error)
@@ -466,15 +464,6 @@ type server struct {
 	// seams above, and more urgently: without it a handler test would perform a
 	// real account switch against the machine running `go test`.
 	switchAcct func(name string) (string, error)
-	// kickUsage and kickKnownAccounts force usageHub/knownAccountsHub to refetch
-	// immediately; nil (tests, and any server built without the hubs) is a no-op.
-	// switchAccount patches the credential file straight through, bypassing both
-	// pollers, so without this a successful remote switch would leave /sessions
-	// reporting the pre-switch account (and activeSnapshotName) for up to their
-	// full poll interval — exactly the window the client-side Kick() calls in
-	// tui.go close for a local switch.
-	kickUsage         func()
-	kickKnownAccounts func()
 	// attest re-reads one PID's own session file; nil falls back to
 	// readSessionByPID. Used for the last-moment identity check before a
 	// destructive act, and separate from collect because it must be the cheapest
@@ -503,6 +492,9 @@ type server struct {
 
 	// spawns dedupes POST /sessions/new by request_id.
 	spawns spawnDedupe
+
+	// usages single-flights and briefly caches GET /usage's per-account fetches.
+	usages usageCache
 
 	// paste is the remote-image-paste broker (see paste.go); pb() lazily
 	// initializes it so both cmdServer and tests get a working broker.
@@ -759,35 +751,156 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 		"hostUsage": hostUsage,
 		"sessions":  sessions,
 	}
-	// "usage" is optional: present only once this host's poller has a snapshot,
-	// so a client can attribute the limits to this host's account. Omitted when
-	// absent — older clients ignore it and it never nulls out the response.
-	if s.usageSnapshot != nil {
-		if u := s.usageSnapshot(); u != nil {
-			resp["usage"] = u
-		}
-	}
-	// "codex_usage" is the OpenAI Codex equivalent, same optionality.
+	// "codex_usage" is optional: present only once this host's Codex poller has a
+	// snapshot. Omitted when absent — older clients ignore it and it never nulls
+	// out the response. The Anthropic account's own limits used to ride here too
+	// ("usage", "knownAccounts", "activeSnapshotName"); they moved to GET /usage,
+	// which fetches on demand instead of polling forever.
 	if s.codexUsageSnapshot != nil {
 		if u := s.codexUsageSnapshot(); u != nil {
 			resp["codex_usage"] = u
 		}
 	}
-	// "knownAccounts" and "activeSnapshotName" are additive and equally optional:
-	// a host with no claude-switch snapshots, or one whose known-accounts poll
-	// hasn't landed, simply omits them and a client falls back to the live-only
-	// display for this host — the same way an older server omitting them does.
-	// One read of the poller's snapshot, so the two fields always describe the
-	// same pass.
-	if s.knownAccountsSnapshot != nil {
-		if ka := s.knownAccountsSnapshot(); ka != nil {
-			if len(ka.Accounts) > 0 {
-				resp["knownAccounts"] = ka.Accounts
-			}
-			if ka.ActiveName != "" {
-				resp["activeSnapshotName"] = ka.ActiveName
-			}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// usageResponse is GET /usage's body, and the type the client decodes it into
+// (see FetchRemoteUsage). Every field is optional: a host with no snapshots
+// reports only its live account, and a caller that asked for nothing to be
+// fetched still gets the free half — who the accounts are.
+type usageResponse struct {
+	Usage              *AccountUsage       `json:"usage,omitempty"`
+	KnownAccounts      []KnownAccountUsage `json:"knownAccounts,omitempty"`
+	ActiveSnapshotName string              `json:"activeSnapshotName,omitempty"`
+}
+
+// fetchAccountUsage is the production usageFetch: load one account's OAuth
+// token and spend it on a usage request. snapshot is "" for the live account
+// and a claude-switch snapshot name otherwise.
+//
+// The live account is never read from its own snapshot even when one exists,
+// because Claude Code rotates the live token in place while the snapshot keeps
+// whatever was stashed at switch time — the snapshot can read as expired while
+// the live session is perfectly healthy.
+func fetchAccountUsage(snapshot string) (*UsageInfo, error) {
+	var tok string
+	var err error
+	if snapshot == "" {
+		tok, err = loadOAuthToken()
+	} else {
+		tok, err = snapshotToken(snapshot)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return fetchUsageInfo(tok)
+}
+
+func (s *server) accountUsage(snapshot string) (*UsageInfo, error) {
+	if s.usageFetch != nil {
+		return s.usageFetch(snapshot)
+	}
+	return fetchAccountUsage(snapshot)
+}
+
+// usage handles GET /usage[?ignore=a@x.com&ignore=b@y.com]: this host's
+// Anthropic rate limits, for the account it is logged into and for every
+// account it holds a claude-switch credential snapshot for.
+//
+// The endpoint exists because the two things a client wants here cost wildly
+// different amounts. *Which* accounts this host has, their emails, and which
+// snapshot is the live one are local file reads — free, and recomputed on every
+// call, so a picker opened right after an account switch is never stale. Only
+// the percentages cost an Anthropic round trip, and those go through
+// s.usages, which single-flights per account email and remembers the answer for
+// usageCacheTTL.
+//
+// ignore is repeated, not comma-joined: an email's local-part may legally
+// contain a comma, and r.URL.Query() parses repeats natively. It names the
+// accounts the caller already holds good numbers for — typically because the
+// client machine polls that same account itself — so the host skips the fetch.
+// An ignored account is still reported, with a nil Info: the account list and
+// the Ctrl+W picker build their rows straight out of KnownAccounts, so omitting
+// it would silently remove it as a switch target. The header is unaffected
+// either way — dedupeAccounts drops a non-expired entry with no Info.
+func (s *server) usage(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	ignore := make(map[string]bool)
+	for _, e := range r.URL.Query()["ignore"] {
+		if key := strings.ToLower(strings.TrimSpace(e)); key != "" {
+			ignore[key] = true
 		}
+	}
+
+	// Everything below this line up to the fan-out is local file reads.
+	liveEmail := loadAccountEmail()
+	names, _ := snapshotAccountNames()
+	known := make([]KnownAccountUsage, 0, len(names))
+	activeName := ""
+	// wanted indexes into known: the entries a fetch was actually started for.
+	var wanted []int
+	for _, name := range names {
+		email := snapshotAccountEmail(name)
+		if emailMatchesLive(email, liveEmail) {
+			// Same rule as allKnownAccounts: every snapshot standing for the live
+			// account is left out of the list (it is reported through Usage
+			// instead), and the first one names the active snapshot.
+			if activeName == "" {
+				activeName = name
+			}
+			continue
+		}
+		known = append(known, KnownAccountUsage{Name: name, Account: email})
+		if !ignore[strings.ToLower(email)] {
+			wanted = append(wanted, len(known)-1)
+		}
+	}
+
+	// One goroutine per account, not a sequential loop: a cold cache with a
+	// handful of accounts would otherwise serialize into N × the endpoint's 5s
+	// timeout and outlive the client's own.
+	var liveInfo *UsageInfo
+	fetchLive := !ignore[strings.ToLower(liveEmail)]
+	var wg sync.WaitGroup
+	if fetchLive {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			liveInfo, _ = s.usages.GetOrFetch(liveEmail, func() (*UsageInfo, error) {
+				return s.accountUsage("")
+			})
+		}()
+	}
+	for _, i := range wanted {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			entry := &known[i]
+			info, err := s.usages.GetOrFetch(entry.Account, func() (*UsageInfo, error) {
+				return s.accountUsage(entry.Name)
+			})
+			// A per-account failure is that entry's Expired flag, never an error
+			// for the request: one flaky snapshot must not cost the caller every
+			// other account's healthy numbers.
+			if err != nil {
+				entry.Expired = true
+				return
+			}
+			entry.Info = info
+		}()
+	}
+	wg.Wait()
+
+	resp := usageResponse{KnownAccounts: known, ActiveSnapshotName: activeName}
+	// The live account's email is free, so it is reported even when its numbers
+	// were ignored or failed — it is what labels this host's heading in the
+	// client's table.
+	if liveEmail != "" || liveInfo != nil {
+		resp.Usage = &AccountUsage{Account: liveEmail, Info: liveInfo}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1086,18 +1199,12 @@ func (s *server) accountSwitch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Kick both pollers so a refetch is already in flight rather than waiting
-	// for the next tick (up to usageRefreshInterval away). Kick() only enqueues
-	// the refetch — it does not block until the new snapshot lands — so this
-	// shrinks the staleness window to one fetch's latency, it does not close it:
-	// a client that reopens the picker within that window can still briefly see
-	// the pre-switch account.
-	if s.kickUsage != nil {
-		s.kickUsage()
-	}
-	if s.kickKnownAccounts != nil {
-		s.kickKnownAccounts()
-	}
+	// Nothing to invalidate afterwards. Which account is live, and under which
+	// snapshot name, is resolved from disk on every GET /usage call, so the next
+	// one already describes the switch — there is no poller left holding a
+	// pre-switch answer. Only the percentages are cached, and they are keyed by
+	// account email, so the switch cannot make any of them describe the wrong
+	// account either.
 	writeJSON(w, http.StatusOK, accountSwitchResult{OK: true, Account: email})
 }
 
@@ -1631,27 +1738,16 @@ func cmdServer(args []string) int {
 	hostUsageHub := NewHostUsageHub(hostUsageInterval)
 	defer hostUsageHub.Shutdown()
 
-	// Account rate-limit usage: the same background poller the client uses, so a
-	// remote host can surface its own account's limits (which may differ from the
-	// client's account) in the client's header. The login email is read once at
-	// startup — it's stable for the process's lifetime.
-	usageHub := NewUsageHub()
-	defer usageHub.Shutdown()
-
-	// Codex account usage: same background poller, so a remote host also surfaces
-	// its own Codex account's limits. Both snapshots are account-paired at fetch
-	// time (the Anthropic email is re-read each fetch, the Codex email rides in
-	// its payload), so a mid-run relogin re-attributes the limits and no separate
-	// startup identity read is needed.
+	// Codex account usage: a background poller, so a remote host surfaces its own
+	// Codex account's limits (which may differ from the client's) in the client's
+	// header. The snapshot is account-paired at fetch time — the email rides in
+	// the payload — so a mid-run relogin re-attributes the limits.
+	//
+	// The Anthropic side has no counterpart here on purpose: it is served by
+	// GET /usage, which fetches when a client asks and caches per account, so a
+	// host nobody is watching makes no requests at all.
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
-
-	// Known-account usage: the accounts this host holds claude-switch credential
-	// snapshots for but isn't logged into. Read-only — the snapshots are read
-	// where they lie, never swapped in, so the live credential (Keychain item or
-	// .credentials.json) is untouched.
-	knownAccountsHub := NewKnownAccountsHub()
-	defer knownAccountsHub.Shutdown()
 
 	// Auto-maintain a "latest" snapshot so a reboot doesn't require having
 	// remembered to save beforehand. Best-effort: a failed save is logged, never
@@ -1709,17 +1805,9 @@ func cmdServer(args []string) int {
 		token:              tok,
 		host:               host,
 		hostSnapshot:       hostUsageHub.Snapshot,
-		usageSnapshot:      usageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
-		// Carries the active snapshot name too: the poller resolves it as part of
-		// the pass that decides which snapshot to skip, so /sessions serves it
-		// from memory instead of re-listing snapshots per request. It tracks the
-		// live account's email, so a relogin re-resolves on the next poll.
-		knownAccountsSnapshot: knownAccountsHub.Snapshot,
-		kickUsage:             usageHub.Kick,
-		kickKnownAccounts:     knownAccountsHub.Kick,
-		devices:               devices,
-		disabled:              disabledStore,
+		devices:            devices,
+		disabled:           disabledStore,
 	}
 
 	// Push notifications are optional. Every failure here logs one line and
@@ -1744,6 +1832,7 @@ func cmdServer(args []string) int {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
+	mux.HandleFunc("GET /usage", s.usage)
 	mux.HandleFunc("GET /cwd-suggestions", s.cwdSuggestions)
 	mux.HandleFunc("GET /presets", s.presets)
 	mux.HandleFunc("GET /resumable", s.resumable)

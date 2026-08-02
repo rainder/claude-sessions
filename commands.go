@@ -510,6 +510,11 @@ func cmdListSessions(args []string) int {
 		return 0
 	}
 
+	// Only the rendered form shows account rate-limit bars, and they come from
+	// each host's /usage endpoint rather than /sessions. Fetching them after the
+	// --json branch has returned keeps a shell pipeline off a round of requests
+	// whose result it would never print.
+	remotes = mergeRemoteUsage(remotes)
 	RenderAll(os.Stdout, "1", LocalHost{
 		Name:      shortHostname(),
 		Sessions:  local,
@@ -671,11 +676,14 @@ func cmdAccountList(args []string) int {
 			fmt.Fprintf(os.Stderr, "account list: unknown server %q (configured: %s)\n", server, strings.Join(names, ", "))
 			return 2
 		}
-		fmt.Print(renderAccountTable([]accountListing{remoteAccountListing(FetchRemote(srv))}))
+		// /usage alone, no /sessions poll: the table is built entirely from the
+		// three account fields (see accountRowsFrom), and the session list behind
+		// them would be collected and thrown away.
+		fmt.Print(renderAccountTable([]accountListing{remoteAccountListing(oneRemoteUsage(srv))}))
 		return 0
 	}
 	listings := []accountListing{localAccountListing()}
-	for _, r := range FetchAllRemote() {
+	for _, r := range FetchAllRemoteUsage() {
 		listings = append(listings, remoteAccountListing(r))
 	}
 	fmt.Print(renderAccountTable(listings))

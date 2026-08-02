@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,24 +20,33 @@ type RemoteResult struct {
 	Name      string    // server name from config
 	Sessions  []Session // empty when Error != ""
 	HostUsage HostUsage
-	// Usage is the host's Anthropic account rate-limit snapshot; nil from older
-	// servers that don't report it, or before that host's first poll lands.
+	// Usage, KnownAccounts and ActiveSnapshotName describe this host's Anthropic
+	// accounts. They do NOT come from /sessions — they are overlaid from a
+	// separate GET /usage answer (applyRemoteUsage), because fetching rate limits
+	// costs an Anthropic round trip and /sessions is polled far more often than
+	// the numbers change. Every consumer still reads them off this struct, so the
+	// split is invisible past the fetch layer.
+	//
+	// Usage is the live account's snapshot. Its Info is nil when the host hasn't
+	// fetched yet, when the fetch failed, or when the caller asked for that
+	// account to be skipped; its Account (the email) is populated regardless,
+	// since reading it costs nothing.
 	Usage *AccountUsage
 	// CodexUsage is the host's OpenAI Codex account rate-limit snapshot; nil from
 	// older servers, from a host with no Codex auth, or before its first poll.
+	// This one does still ride /sessions — the Codex side is still polled.
 	CodexUsage *CodexAccountUsage
 	// KnownAccounts lists usage for every other account this host holds a
 	// claude-switch credential snapshot for (excludes whichever account is
-	// currently live — that's still reported via Usage). Nil from older servers
-	// or hosts with no snapshots.
+	// currently live — that's still reported via Usage). An entry with a nil Info
+	// and no Expired flag is an account whose numbers the caller asked to skip:
+	// still a real account, still a switch target, just unfetched.
 	KnownAccounts []KnownAccountUsage
 	// ActiveSnapshotName is the snapshot name (e.g. "avisoma") whose
 	// account.json email matches this host's live Usage.Account, best-effort —
-	// "" when unresolved (no snapshot matches, the live email is unknown, or an
-	// older server). This is read-only reporting, purely for display/picker
-	// purposes; it is what a later account-switching feature would use to mark
-	// "current" in a picker without every consumer re-deriving the same
-	// email→name match.
+	// "" when unresolved (no snapshot matches, or the live email is unknown).
+	// The host resolves it from its own files on every /usage call, so it is
+	// never stale, even immediately after an account switch.
 	ActiveSnapshotName string
 	Error              string // "" on success, short reason otherwise
 	Loading            bool   // true for a placeholder slot whose first fetch hasn't returned yet
@@ -64,16 +74,14 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 	if resp.StatusCode != http.StatusOK {
 		return RemoteResult{Name: srv.Name, Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
+	// The Anthropic account fields are deliberately not read here even if an
+	// older server still sends them: they belong to GET /usage now, and letting
+	// two sources write the same three fields would make which one wins depend on
+	// poll ordering.
 	var body struct {
 		Sessions   []Session          `json:"sessions"`
 		HostUsage  HostUsage          `json:"hostUsage"`
-		Usage      *AccountUsage      `json:"usage"`       // nil from older servers
 		CodexUsage *CodexAccountUsage `json:"codex_usage"` // nil from older servers
-		// Both absent from older servers (and from hosts with no snapshots),
-		// decoding to nil/"" — the client then shows that host's live account
-		// only, exactly as it did before this field existed.
-		KnownAccounts      []KnownAccountUsage `json:"knownAccounts"`
-		ActiveSnapshotName string              `json:"activeSnapshotName"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return RemoteResult{Name: srv.Name, Error: "bad response: " + shortErr(err)}
@@ -84,14 +92,174 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 		body.Sessions[i].Host = srv.Name
 	}
 	return RemoteResult{
-		Name:               srv.Name,
-		Sessions:           body.Sessions,
-		HostUsage:          body.HostUsage,
-		Usage:              body.Usage,
-		CodexUsage:         body.CodexUsage,
-		KnownAccounts:      body.KnownAccounts,
-		ActiveSnapshotName: body.ActiveSnapshotName,
+		Name:       srv.Name,
+		Sessions:   body.Sessions,
+		HostUsage:  body.HostUsage,
+		CodexUsage: body.CodexUsage,
 	}
+}
+
+// FetchRemoteUsage queries one server's /usage endpoint. Same shape as
+// FetchRemote — bearer auth — but a returned error instead of an Error field,
+// since the account fields are overlaid onto a RemoteResult that may well have
+// succeeded on its own. The timeout is longer than FetchRemote's 5s: a
+// cold-cache handler fans out one fetch per account concurrently against the
+// same 5s endpoint timeout (usage.go), so the handler's own wall-clock time
+// can approach 5s before this client would. 8s gives it room to actually
+// finish instead of the client giving up right as the server was about to
+// succeed.
+//
+// ignore names accounts (by email) the caller already holds good numbers for;
+// the host then reports those accounts without spending a fetch on them. It is
+// sent as a repeated parameter rather than one comma-joined value because an
+// email's local-part may legally contain a comma.
+//
+// A 404 from a server predating this route is just another per-host failure:
+// that host contributes no usage and everything else keeps working. The reverse
+// mismatch needs no handling — this repo's deploy order always upgrades the
+// local machine before pushing to a remote.
+func FetchRemoteUsage(srv ServerConfig, ignore []string) (usageResponse, error) {
+	if srv.Host == "" || srv.Token == "" {
+		return usageResponse{}, fmt.Errorf("config missing host or token")
+	}
+	q := url.Values{}
+	for _, email := range ignore {
+		q.Add("ignore", email)
+	}
+	endpoint := fmt.Sprintf("http://%s:%d/usage", srv.Host, srv.Port)
+	if encoded := q.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return usageResponse{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+srv.Token)
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return usageResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return usageResponse{}, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var body usageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return usageResponse{}, fmt.Errorf("bad response: %w", err)
+	}
+	return body, nil
+}
+
+// applyRemoteUsage overlays one host's /usage answer onto its row. This is the
+// single place the three account fields are written on the client — the TUI's
+// background hub and every one-shot CLI path all funnel through it.
+func applyRemoteUsage(r RemoteResult, u usageResponse) RemoteResult {
+	r.Usage = u.Usage
+	r.KnownAccounts = u.KnownAccounts
+	r.ActiveSnapshotName = u.ActiveSnapshotName
+	return r
+}
+
+// eachRemoteUsage fetches /usage from every cfg in parallel and hands each
+// answer to fn, which is called from the fetching goroutine and must therefore
+// only touch index i of whatever it writes into.
+func eachRemoteUsage(cfgs []ServerConfig, ignore []string, fn func(i int, u usageResponse, err error)) {
+	var wg sync.WaitGroup
+	for i, c := range cfgs {
+		i, c := i, c
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			u, err := FetchRemoteUsage(c, ignore)
+			fn(i, u, err)
+		}()
+	}
+	wg.Wait()
+}
+
+// mergeRemoteUsage overlays each host's /usage answer onto the /sessions
+// results a one-shot render is about to print. The live TUI does the same thing
+// from a background hub (RemoteUsageHub); a one-shot command has nowhere to put
+// a poller, so it pays for one extra parallel round of requests instead — and
+// without this its remote rate-limit bars would simply be blank, since
+// FetchRemote no longer carries them.
+//
+// A host whose /sessions fetch already failed is skipped (it is unreachable;
+// a second doomed 5s wait buys nothing), and a /usage failure is silent: the
+// row keeps its sessions and its error, it just has no bars. Overwriting Error
+// here would put a usage-fetch failure next to a perfectly good session list.
+//
+// The overlay is in place: remotes is written through and returned, not copied.
+// Every caller hands it a slice it already owns (FetchAllRemote's result, or
+// sortRemotes' copy).
+func mergeRemoteUsage(remotes []RemoteResult) []RemoteResult {
+	if len(remotes) == 0 {
+		return remotes
+	}
+	cfgs, err := LoadServerConfigs()
+	if err != nil {
+		return remotes
+	}
+	byName := make(map[string]ServerConfig, len(cfgs))
+	for _, c := range cfgs {
+		byName[c.Name] = c
+	}
+	var targets []ServerConfig
+	var slots []int
+	for i := range remotes {
+		cfg, ok := byName[remotes[i].Name]
+		if !ok || remotes[i].Error != "" {
+			continue
+		}
+		targets = append(targets, cfg)
+		slots = append(slots, i)
+	}
+	eachRemoteUsage(targets, nil, func(i int, u usageResponse, err error) {
+		if err != nil {
+			return
+		}
+		remotes[slots[i]] = applyRemoteUsage(remotes[slots[i]], u)
+	})
+	return remotes
+}
+
+// remoteUsageRow turns one /usage answer into a RemoteResult carrying nothing
+// but the account fields. Unlike mergeRemoteUsage, a failure here does become
+// the row's Error: with no session list on the row, a silent skip would read as
+// "this host has no account snapshots" rather than "this host is unreachable".
+func remoteUsageRow(name string, u usageResponse, err error) RemoteResult {
+	if err != nil {
+		return RemoteResult{Name: name, Error: shortErr(err)}
+	}
+	return applyRemoteUsage(RemoteResult{Name: name}, u)
+}
+
+// oneRemoteUsage is remoteUsageRow for a single named server (`account list
+// --server`).
+func oneRemoteUsage(srv ServerConfig) RemoteResult {
+	u, err := FetchRemoteUsage(srv, nil)
+	return remoteUsageRow(srv.Name, u, err)
+}
+
+// FetchAllRemoteUsage asks every configured server for its accounts alone, with
+// no /sessions poll behind it — what `account list` needs, since the table is
+// built purely from the three account fields.
+func FetchAllRemoteUsage() []RemoteResult {
+	cfgs, err := LoadServerConfigs()
+	if err != nil || len(cfgs) == 0 {
+		return nil
+	}
+	cfgs = dropSelfServer(cfgs)
+	if len(cfgs) == 0 {
+		return nil
+	}
+	out := make([]RemoteResult, len(cfgs))
+	eachRemoteUsage(cfgs, nil, func(i int, u usageResponse, err error) {
+		out[i] = remoteUsageRow(cfgs[i].Name, u, err)
+	})
+	return out
 }
 
 // dropSelfServer filters out a configured server entry that points back at
@@ -298,10 +466,11 @@ func (h *RemoteHub) fetchAll() {
 // mergeRemoteResult implements the non-destructive fetch: on failure (e.g. a
 // flaky connection), the session list stays on screen instead of blanking,
 // marked Stale, while the error message is still surfaced. Only the session
-// list carries forward — Usage/CodexUsage/KnownAccounts feed the header
-// rate-limit bars (see dedupeAccounts), which have no "stale" rendering of
-// their own, so a frozen reading there would silently pass as live; they're
-// left to clear as before. hasData excludes a slot that never had a successful fetch (still
+// list carries forward — CodexUsage feeds a header rate-limit bar (see
+// dedupeCodexAccounts), which has no "stale" rendering of its own, so a frozen
+// reading there would silently pass as live; it's left to clear as before, and
+// RemoteUsageHub applies the same rule to the Anthropic side.
+// hasData excludes a slot that never had a successful fetch (still
 // Loading, or errored with nothing yet to carry forward).
 func mergeRemoteResult(r, prior RemoteResult, hadPrior bool) RemoteResult {
 	if r.Error == "" {
