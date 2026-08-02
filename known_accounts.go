@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -44,6 +45,11 @@ type KnownAccountUsage struct {
 	// omitempty on a time.Time does nothing and every entry with no numbers
 	// would ship a "0001-01-01T00:00:00Z".
 	FetchedAt time.Time `json:"fetchedAt,omitzero"`
+	// RetryAt is a 429's Retry-After, when the endpoint gave one (see
+	// parseRetryAfter). Deliberately not serialized: it is scheduling state for
+	// the fetcher that produced this entry — how long *it* should wait before
+	// asking again — and means nothing to a consumer of the numbers.
+	RetryAt time.Time `json:"-"`
 }
 
 // snapshotCredentialSuffix is the fixed tail claude-switch gives a stashed
@@ -254,7 +260,14 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 	}
 	info, err := fetch(tok)
 	if err != nil {
-		return failed(classifyUsageErr(err))
+		expired, reason := classifyUsageErr(err)
+		res, skip := failed(expired, reason)
+		// Only a throttle carries a retry hint, and only the throttle path has a
+		// scheduler waiting for one (newKnownAccountsFetcher's backoff map).
+		if reason == usageRateLimitedReason {
+			res.RetryAt = usageRetryAt(err)
+		}
+		return res, skip
 	}
 	return &KnownAccountUsage{Name: name, Account: email, Info: info, FetchedAt: time.Now()}, false
 }
@@ -285,7 +298,7 @@ func carryable(prev *KnownAccountUsage, email string) bool {
 	return fresh(prev) && prev.Account != "" && email != "" && strings.EqualFold(prev.Account, email)
 }
 
-// fetchAllKnownAccounts fetches every named snapshot account in parallel (small,
+// allKnownAccounts fetches every named snapshot account in parallel (small,
 // fixed fanout — one goroutine per account claude-switch knows about), skipping
 // whichever name stands for liveEmail, and returns the survivors in names order
 // plus that skipped name (the active snapshot; "" when none matched).
@@ -298,15 +311,14 @@ func carryable(prev *KnownAccountUsage, email string) bool {
 //
 // prev holds each account's last result, keyed by snapshot name (absent for an
 // account that has none yet); it is what a transient failure re-serves.
-func fetchAllKnownAccounts(names []string, liveEmail string, prev map[string]KnownAccountUsage) ([]KnownAccountUsage, string) {
-	return allKnownAccounts(names, liveEmail, prev, fetchKnownAccountUsage)
-}
-
-// allKnownAccounts is fetchAllKnownAccounts with the per-account fetch injected.
-// The active-snapshot name is a genuine side output of this one pass — it is the
-// name whose own email/live-email comparison came back "skip", so it can never
-// disagree with which account the pass actually left out, the way an independent
-// second lookup (different call, possibly a different live email) could.
+//
+// The per-account fetch is injected, which is also how the poller substitutes a
+// no-round-trip answer for an account it is currently backing off (see
+// newKnownAccountsFetcher). The active-snapshot name is a genuine side output of
+// this one pass — it is the name whose own email/live-email comparison came back
+// "skip", so it can never disagree with which account the pass actually left
+// out, the way an independent second lookup (different call, possibly a
+// different live email) could.
 func allKnownAccounts(names []string, liveEmail string, prev map[string]KnownAccountUsage, one func(name, liveEmail string, prev *KnownAccountUsage) (*KnownAccountUsage, bool)) ([]KnownAccountUsage, string) {
 	results := make([]*KnownAccountUsage, len(names))
 	// Per-index, never a shared variable: the goroutines run concurrently, and
@@ -372,6 +384,22 @@ type knownAccountsResult struct {
 // that actually have numbers: an account whose snapshot was renamed or deleted
 // drops out of names, so it drops out of last on the next pass instead of
 // lingering for the life of the process.
+//
+// The closure carries a second memory beside it: how many consecutive passes
+// each account has been rate limited, and when it may be tried again
+// (usageBackoff). The same account is routinely held as a credential snapshot
+// on more than one host, and every host polls it on its own tick, so an account
+// the endpoint keeps throttling would otherwise cost a failed round trip per
+// host per usageRefreshInterval forever. While an account is backed off its
+// fetch is not attempted at all — the entry is synthesized from the answer a
+// throttled fetch would have produced, so the header keeps showing exactly what
+// it showed before, carried forward and marked stale like any other transient
+// failure.
+//
+// Both maps are rebuilt from names each pass, for the same reason, and both are
+// only ever read and written here — in the serial closure the poller calls one
+// tick at a time — never inside the per-account goroutines allKnownAccounts
+// spawns.
 func newKnownAccountsFetcher(seed *knownAccountsResult) func() (*knownAccountsResult, error) {
 	var mu sync.Mutex
 	last := map[string]KnownAccountUsage{}
@@ -380,28 +408,81 @@ func newKnownAccountsFetcher(seed *knownAccountsResult) func() (*knownAccountsRe
 			last[a.Name] = a
 		}
 	}
+	backoff := map[string]usageBackoff{}
 	return func() (*knownAccountsResult, error) {
 		names, err := snapshotAccountNames()
 		if err != nil {
 			return nil, err
 		}
+		now := time.Now()
 		mu.Lock()
 		prev := make(map[string]KnownAccountUsage, len(names))
+		held := make(map[string]usageBackoff, len(names))
 		for _, n := range names {
 			if a, ok := last[n]; ok {
 				prev[n] = a
 			}
+			if b, ok := backoff[n]; ok {
+				held[n] = b
+			}
 		}
 		mu.Unlock()
-		accounts, active := fetchAllKnownAccounts(names, loadAccountEmail(), prev)
+
+		// Decided before the fan-out so nothing concurrent reads the map.
+		skip := make(map[string]bool, len(held))
+		for n, b := range held {
+			if !b.due(now) {
+				skip[n] = true
+			}
+		}
+		one := func(name, liveEmail string, p *KnownAccountUsage) (*KnownAccountUsage, bool) {
+			if !skip[name] {
+				return fetchKnownAccountUsage(name, liveEmail, p)
+			}
+			// A backed-off account still goes through knownAccountUsage, with the
+			// answer a throttled endpoint would have given substituted for the round
+			// trip. That keeps one place deciding whether this name stands for the
+			// live account (which is what resolves ActiveName, and what a name
+			// filtered out of the batch entirely would have silently broken),
+			// whether prev's numbers may be carried forward, and how the entry reads.
+			return knownAccountUsage(name, liveEmail, p, func(string) (*UsageInfo, error) {
+				return nil, &usageHTTPError{Status: http.StatusTooManyRequests}
+			})
+		}
+		accounts, active := allKnownAccounts(names, loadAccountEmail(), prev, one)
+
 		fresh := make(map[string]KnownAccountUsage, len(accounts))
+		listed := make(map[string]bool, len(accounts))
 		for _, a := range accounts {
+			listed[a.Name] = true
 			if a.Info != nil {
 				fresh[a.Name] = a
 			}
+			// A synthesized entry is not an attempt, so it neither lengthens the
+			// wait nor resets it — the deadline already armed simply stands.
+			if skip[a.Name] {
+				continue
+			}
+			if a.Reason == usageRateLimitedReason {
+				held[a.Name] = held[a.Name].next(now, a.RetryAt)
+				continue
+			}
+			// Anything else — numbers, a dead credential, a failure of some other
+			// kind — ends the streak. The state tracks consecutive throttles only.
+			delete(held, a.Name)
 		}
+		// A name in names with no entry at all is the one this pass skipped as the
+		// live account. It is fetched through the live path now, so whatever was
+		// armed against its snapshot no longer describes anything.
+		for n := range held {
+			if !listed[n] {
+				delete(held, n)
+			}
+		}
+
 		mu.Lock()
 		last = fresh
+		backoff = held
 		mu.Unlock()
 		return &knownAccountsResult{Accounts: accounts, ActiveName: active}, nil
 	}

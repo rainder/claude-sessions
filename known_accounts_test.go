@@ -419,6 +419,10 @@ func TestClassifyUsageErr(t *testing.T) {
 		{"an unexpected status names itself", &usageHTTPError{Status: 418}, false, "HTTP 418"},
 		{"a wrapped status still classifies", fmt.Errorf("fetching: %w", &usageHTTPError{Status: 401}), true, usageExpiredReason},
 		{"the bounded-fetch timeout", errUsageFetchTimedOut, false, "timed out"},
+		// A fetch the server's cache declined to attempt reads as what it stands in
+		// for: the account is backed off because it kept being throttled.
+		{"a fetch the backoff declined", errUsageBackoffActive, false, usageRateLimitedReason},
+		{"a wrapped backoff refusal", fmt.Errorf("account: %w", errUsageBackoffActive), false, usageRateLimitedReason},
 		{"a wrapped timeout", fmt.Errorf("account: %w", errUsageFetchTimedOut), false, "timed out"},
 		// What fetchUsageInfo's own http.Client{Timeout: 5s} actually produces on
 		// expiry — a *url.Error wrapping a context deadline, not
@@ -824,5 +828,141 @@ func TestDerefKnownAccounts(t *testing.T) {
 	}
 	if got := activeSnapshotNameOf(&res); got != "trecs" {
 		t.Fatalf("active name = %q, want trecs", got)
+	}
+}
+
+// An account the endpoint keeps throttling stops being asked every tick. The
+// same account is commonly held as a snapshot on more than one host, so a
+// chronic 429 otherwise costs a failed round trip per host per poll forever.
+//
+// Wall-clock time is real here, and deliberately: every pass below runs inside
+// milliseconds, which is far inside any armed wait, so "was the endpoint
+// touched" is exactly what the call count reports. The schedule's arithmetic is
+// tested separately (TestUsageBackoffUntil).
+func TestKnownAccountsFetcherBacksOffRepeatedThrottles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+
+	var mu sync.Mutex
+	calls := 0
+	throttled := true
+	swapFetch(t, func(string) (*UsageInfo, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if throttled {
+			return nil, &usageHTTPError{Status: 429}
+		}
+		return &UsageInfo{FiveHour: usageBucket{Pct: 21}}, nil
+	})
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}
+	setThrottled := func(v bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		throttled = v
+	}
+	fetcher := newKnownAccountsFetcher(nil)
+	pass := func(t *testing.T, n int) KnownAccountUsage {
+		t.Helper()
+		res, err := fetcher()
+		if err != nil {
+			t.Fatalf("pass %d: %v", n, err)
+		}
+		if len(res.Accounts) != 1 {
+			t.Fatalf("pass %d: accounts = %#v, want the one snapshot listed", n, res.Accounts)
+		}
+		return res.Accounts[0]
+	}
+
+	// A first throttle imposes no wait at all — most heal within one tick.
+	pass(t, 1)
+	if count() != 1 {
+		t.Fatalf("fetches = %d, want the first pass to fetch", count())
+	}
+	// A success ends the streak before it can build.
+	setThrottled(false)
+	if got := pass(t, 2); got.Info == nil || got.Reason != "" {
+		t.Fatalf("pass 2 = %#v, want fresh numbers", got)
+	}
+	if count() != 2 {
+		t.Fatalf("fetches = %d, want the pass after one throttle to fetch", count())
+	}
+
+	// Now two consecutive throttles. The second is what arms the wait — which
+	// also proves the success above cleared the streak, since otherwise this pass
+	// would already have been skipped.
+	setThrottled(true)
+	pass(t, 3)
+	pass(t, 4)
+	if count() != 4 {
+		t.Fatalf("fetches = %d, want both throttled passes to have fetched", count())
+	}
+
+	// Inside the armed wait the endpoint is not touched, and the entry still
+	// reads exactly as a carried-forward throttle: the header shows the numbers
+	// it already showed, marked stale, not a blank line.
+	got := pass(t, 5)
+	if count() != 4 {
+		t.Fatalf("fetches = %d, want the pass inside the backoff to skip the endpoint", count())
+	}
+	if !got.Stale || got.Info == nil || got.Info.FiveHour.Pct != 21 {
+		t.Fatalf("backed-off entry = %#v, want the last good numbers carried forward", got)
+	}
+	if got.Reason != usageRateLimitedReason || got.Expired {
+		t.Fatalf("backed-off entry = %#v, want the throttle named and no re-login prompt", got)
+	}
+}
+
+// A snapshot that becomes the live account is fetched through the live path, so
+// whatever wait was armed against it means nothing — and, critically, it must
+// still be recognised as the active snapshot. A backed-off name that were simply
+// dropped from the batch would leave ActiveName empty and the host heading
+// unlabelled.
+func TestKnownAccountsFetcherResolvesActiveNameWhileBackedOff(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+
+	var mu sync.Mutex
+	calls := 0
+	swapFetch(t, func(string) (*UsageInfo, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	fetcher := newKnownAccountsFetcher(nil)
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+
+	// Log in as that very account: ~/.claude.json is what loadAccountEmail reads.
+	live := `{"oauthAccount":{"emailAddress":"andy@trecs.aero"}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(live), 0600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := fetcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Accounts) != 0 {
+		t.Fatalf("accounts = %#v, want the live account left out", res.Accounts)
+	}
+	if res.ActiveName != "trecs" {
+		t.Fatalf("ActiveName = %q, want the backed-off snapshot recognised as live", res.ActiveName)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want the live account never fetched from its snapshot", calls)
 	}
 }

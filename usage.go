@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -242,7 +244,11 @@ func fetchUsageInfo(token string) (*UsageInfo, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, &usageHTTPError{Status: resp.StatusCode}
+		e := &usageHTTPError{Status: resp.StatusCode}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			e.RetryAt = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		}
+		return nil, e
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -257,16 +263,130 @@ func fetchUsageInfo(token string) (*UsageInfo, error) {
 // between "run claude-switch and log in again" and "wait, this heals itself",
 // and string-matching the message to recover it would be one refactor away from
 // silently reclassifying every failure.
-type usageHTTPError struct{ Status int }
+// RetryAt carries a 429's Retry-After, resolved to an absolute instant. It is
+// best-effort sizing information for the backoff schedules below and never a
+// correctness requirement: a missing, malformed or non-positive header leaves
+// it zero, which every reader treats as "no opinion, use the schedule".
+type usageHTTPError struct {
+	Status  int
+	RetryAt time.Time
+}
 
 func (e *usageHTTPError) Error() string {
 	return fmt.Sprintf("usage endpoint: HTTP %d", e.Status)
+}
+
+// parseRetryAfter resolves a Retry-After header value against now. RFC 9110
+// allows either form — delta-seconds or an HTTP-date — and the endpoint is free
+// to pick either, so both are accepted. Anything else (empty, garbage, a
+// non-positive delta) is the zero time: this is advisory, so an unparseable
+// value must fall back to the caller's own schedule rather than fail anything.
+func parseRetryAfter(v string, now time.Time) time.Time {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return time.Time{}
+		}
+		return now.Add(time.Duration(secs) * time.Second)
+	}
+	// http.ParseTime covers all three date formats HTTP allows (RFC 1123,
+	// RFC 850, ANSI C asctime), which time.Parse with a single layout does not.
+	if t, err := http.ParseTime(v); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // usageExpiredReason is the classification for the one failure a human has to
 // act on. It doubles as the placeholder the header renders (usageExpiredText),
 // which is why it reads as a state rather than as an error.
 const usageExpiredReason = "auth expired"
+
+// usageRateLimitedReason is the classification for a 429. It is a named
+// constant because two schedulers (the client's known-accounts fetcher and the
+// server's usage cache) now recognise this specific tag to decide whether to
+// back an account off, and a literal drifting in one of the three places would
+// silently disable that.
+const usageRateLimitedReason = "rate limited"
+
+// Backoff schedule for an account the endpoint keeps throttling. One Anthropic
+// account is commonly held as a credential snapshot on more than one host, and
+// each host fetches it on its own usageRefreshInterval tick, so a chronically
+// 429ing account otherwise costs a failed round trip per host per 2 minutes for
+// the life of every process — against the very endpoint that is already
+// throttling. The first 429 is free (throttles usually heal within one tick);
+// only a *consecutive* second one starts thinning the retries.
+const (
+	// usageBackoffSecond is the wait after two consecutive 429s.
+	usageBackoffSecond = 4 * time.Minute
+	// usageBackoffMax is the wait after three or more — the schedule caps here
+	// rather than growing, so an account that heals is picked up again within
+	// one cap window instead of an ever-lengthening one.
+	usageBackoffMax = 8 * time.Minute
+	// usageBackoffCeiling bounds a Retry-After the endpoint asks for. A bogus or
+	// absurd header value must not be able to wedge an account out of the
+	// rotation for the life of the process.
+	usageBackoffCeiling = 15 * time.Minute
+)
+
+// usageBackoffUntil returns when an account whose last streak consecutive
+// fetches were rate limited may be tried again. streak <= 1 returns now — the
+// first 429 imposes no wait at all, so the next ordinary tick fetches normally.
+//
+// retryAt is the endpoint's own Retry-After (zero when it gave none, see
+// parseRetryAfter): it can only *extend* the computed deadline, never shorten
+// it — the schedule exists precisely because the endpoint's own opinion is
+// often absent or optimistic — and it is capped at usageBackoffCeiling.
+func usageBackoffUntil(now time.Time, streak int, retryAt time.Time) time.Time {
+	var wait time.Duration
+	switch {
+	case streak <= 1:
+		wait = 0
+	case streak == 2:
+		wait = usageBackoffSecond
+	default:
+		wait = usageBackoffMax
+	}
+	until := now.Add(wait)
+	if retryAt.After(until) {
+		until = retryAt
+	}
+	if ceiling := now.Add(usageBackoffCeiling); until.After(ceiling) {
+		until = ceiling
+	}
+	return until
+}
+
+// usageBackoff is one account's consecutive-429 state. nextAttempt is always
+// set (it equals the recording instant while streak is 1, i.e. "due now"), so
+// "is this account backed off" is one comparison and nothing has to special-case
+// a zero time.
+type usageBackoff struct {
+	streak      int
+	nextAttempt time.Time
+}
+
+// due reports whether an account may be fetched again now.
+func (b usageBackoff) due(now time.Time) bool { return !now.Before(b.nextAttempt) }
+
+// next advances the state after one rate-limited outcome.
+func (b usageBackoff) next(now time.Time, retryAt time.Time) usageBackoff {
+	streak := b.streak + 1
+	return usageBackoff{streak: streak, nextAttempt: usageBackoffUntil(now, streak, retryAt)}
+}
+
+// usageRetryAt digs a 429's Retry-After out of an error, or returns the zero
+// time when there is none to find.
+func usageRetryAt(err error) time.Time {
+	var httpErr *usageHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.RetryAt
+	}
+	return time.Time{}
+}
 
 // classifyUsageErr splits a failed usage fetch into "this credential is
 // actually dead" and "this attempt didn't work". Only 401/403 is the former:
@@ -288,12 +408,19 @@ func classifyUsageErr(err error) (expired bool, reason string) {
 		case httpErr.Status == http.StatusUnauthorized || httpErr.Status == http.StatusForbidden:
 			return true, usageExpiredReason
 		case httpErr.Status == http.StatusTooManyRequests:
-			return false, "rate limited"
+			return false, usageRateLimitedReason
 		case httpErr.Status >= 500:
 			return false, "server error"
 		default:
 			return false, fmt.Sprintf("HTTP %d", httpErr.Status)
 		}
+	}
+	// A fetch the server's cache declined to even attempt is reported as what it
+	// is standing in for: the account is in backoff because it kept being
+	// throttled, so the caller's row says "rate limited" exactly as it would have
+	// said after the round trip this skipped.
+	if errors.Is(err, errUsageBackoffActive) {
+		return false, usageRateLimitedReason
 	}
 	if errors.Is(err, errUsageFetchTimedOut) {
 		return false, "timed out"

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -253,5 +254,157 @@ func TestUsageCacheTurnsAResultlessFetchIntoAnError(t *testing.T) {
 	}
 	if info != nil {
 		t.Fatalf("info = %#v, want nil", info)
+	}
+}
+
+// The negative cache absorbs a burst of clients; this absorbs a client that
+// keeps coming back every usageRefreshInterval. Without it, an account the
+// endpoint chronically throttles costs one failed round trip per poll, forever,
+// against the very endpoint doing the throttling.
+func TestUsageCacheBacksOffConsecutiveThrottles(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	c := usageCache{now: func() time.Time { return now }}
+	stub := &usageStub{err: &usageHTTPError{Status: http.StatusTooManyRequests}}
+	const email = "andy@avisoma.com"
+	// Past both the negative-cache window and any wait the schedule can arm, so
+	// each call below is decided by the streak alone.
+	pastFailTTL := func() { now = now.Add(usageCacheFailTTL + time.Second) }
+
+	// The first throttle arms nothing: the next poll fetches normally.
+	if _, err := c.GetOrFetch(email, stub.fetch); err == nil {
+		t.Fatal("err = nil, want the throttle")
+	}
+	pastFailTTL()
+	if _, err := c.GetOrFetch(email, stub.fetch); errors.Is(err, errUsageBackoffActive) {
+		t.Fatal("backed off after a single throttle, want the next poll to try")
+	}
+	if stub.count() != 2 {
+		t.Fatalf("fetches = %d, want both polls to have run", stub.count())
+	}
+
+	// The second consecutive one does. A caller arriving now is turned away
+	// without an Anthropic round trip, and classifies as what it stands in for.
+	pastFailTTL()
+	_, err := c.GetOrFetch(email, stub.fetch)
+	if !errors.Is(err, errUsageBackoffActive) {
+		t.Fatalf("err = %v, want the backoff sentinel", err)
+	}
+	if stub.count() != 2 {
+		t.Fatalf("fetches = %d, want the backed-off call to skip the endpoint", stub.count())
+	}
+	if expired, reason := classifyUsageErr(err); expired || reason != usageRateLimitedReason {
+		t.Fatalf("classify = %v/%q, want a plain rate-limited row", expired, reason)
+	}
+
+	// Past the wait it tries again — a throttle that heals must be picked up.
+	now = now.Add(usageBackoffSecond)
+	if _, err := c.GetOrFetch(email, stub.fetch); errors.Is(err, errUsageBackoffActive) {
+		t.Fatal("still backed off past the deadline")
+	}
+	if stub.count() != 3 {
+		t.Fatalf("fetches = %d, want the retry past the deadline to run", stub.count())
+	}
+
+	// A success ends the streak, so the next throttle is a first one again.
+	now = now.Add(usageBackoffMax)
+	stub.err = nil
+	stub.perPct = true
+	if _, err := c.GetOrFetch(email, stub.fetch); err != nil {
+		t.Fatalf("err = %v, want the recovery to land", err)
+	}
+	now = now.Add(usageCacheTTL + time.Second)
+	stub.err = &usageHTTPError{Status: http.StatusTooManyRequests}
+	stub.perPct = false
+	if _, err := c.GetOrFetch(email, stub.fetch); errors.Is(err, errUsageBackoffActive) {
+		t.Fatal("a success did not clear the streak")
+	}
+	pastFailTTL()
+	if _, err := c.GetOrFetch(email, stub.fetch); errors.Is(err, errUsageBackoffActive) {
+		t.Fatal("the streak resumed from where it left off, want it restarted")
+	}
+	if stub.count() != 6 {
+		t.Fatalf("fetches = %d, want every non-backed-off call to have run", stub.count())
+	}
+}
+
+// Only a failure the endpoint actually answered with counts. A timeout or an
+// unreachable host says nothing about the account's budget, and thinning those
+// retries would hide a host that is merely slow.
+func TestUsageCacheBacksOffOnlyOnThrottles(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	c := usageCache{now: func() time.Time { return now }}
+	stub := &usageStub{err: &usageHTTPError{Status: http.StatusInternalServerError}}
+	const email = "andy@avisoma.com"
+
+	for i := 0; i < 4; i++ {
+		if _, err := c.GetOrFetch(email, stub.fetch); errors.Is(err, errUsageBackoffActive) {
+			t.Fatalf("call %d backed off on a 5xx", i+1)
+		}
+		now = now.Add(usageCacheFailTTL + time.Second)
+	}
+	if stub.count() != 4 {
+		t.Fatalf("fetches = %d, want every call to have run", stub.count())
+	}
+}
+
+// A burst of concurrent callers is one attempt, not one per caller: joiners
+// return before the streak is touched. Otherwise five clients arriving together
+// would jump straight to the longest wait off a single 429.
+func TestUsageCacheThrottleStreakCountsAttemptsNotCallers(t *testing.T) {
+	const callers = 5
+	now := time.Unix(1_700_000_000, 0)
+	c := usageCache{now: func() time.Time { return now }}
+	stub := &usageStub{
+		gate: make(chan struct{}),
+		seen: make(chan struct{}, callers),
+		err:  &usageHTTPError{Status: http.StatusTooManyRequests},
+	}
+	const email = "andy@avisoma.com"
+
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.GetOrFetch(email, stub.fetch)
+		}()
+	}
+	select {
+	case <-stub.seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no fetch started")
+	}
+	close(stub.gate)
+	wg.Wait()
+
+	c.mu.Lock()
+	streak := c.failures[email].streak
+	c.mu.Unlock()
+	if streak != 1 {
+		t.Fatalf("streak = %d after %d concurrent callers, want 1 — one attempt was made", streak, callers)
+	}
+}
+
+// The map must not grow for accounts nobody asks about any more (a renamed
+// snapshot, a host dropped from servers.yaml).
+func TestUsageCacheForgetsIdleFailureRecords(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	c := usageCache{now: func() time.Time { return now }}
+	stub := &usageStub{err: &usageHTTPError{Status: http.StatusTooManyRequests}}
+
+	c.GetOrFetch("gone@avisoma.com", stub.fetch)
+	c.mu.Lock()
+	held := len(c.failures)
+	c.mu.Unlock()
+	if held != 1 {
+		t.Fatalf("failure records = %d, want the throttled account remembered", held)
+	}
+	// Long enough that its deadline is ancient, then any later insert sweeps it.
+	now = now.Add(usageBackoffCeiling + usageBackoffForget + time.Minute)
+	c.GetOrFetch("other@avisoma.com", stub.fetch)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.failures["gone@avisoma.com"]; ok {
+		t.Fatalf("failures = %#v, want the idle record swept", c.failures)
 	}
 }
