@@ -617,6 +617,20 @@ func knownAccountPlaceholder(k KnownAccountUsage) string {
 	}
 }
 
+// knownAccountRank scores a known-account line for dedup: lower is healthier.
+// Used so a duplicate email across hosts keeps the best available reading
+// instead of whichever host's entry was added first — see dedupeAccounts.
+func knownAccountRank(l accountUsageLine) int {
+	switch {
+	case l.info != nil && !l.stale:
+		return 0 // fresh numbers
+	case l.info != nil && l.stale:
+		return 1 // carried-forward numbers
+	default:
+		return 2 // no numbers at all (expired, or a failure with nothing to carry)
+	}
+}
+
 // accountLocalPart is the label for a known account: the part before "@"
 // (johndoe@example.com → "johndoe"), or the whole string when there's no "@".
 func accountLocalPart(email string) string {
@@ -680,9 +694,13 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 			add(r.Usage.Account, r.Name, r.Usage.Info, false)
 		}
 	}
-	// Pass 2: known (snapshot-derived) accounts. knownSeen namespaces its keys
-	// so a snapshot name can never collide with an email key.
-	knownSeen := make(map[string]bool)
+	// Pass 2: known (snapshot-derived) accounts. knownSeen maps each key (namespaced
+	// so a snapshot name can never collide with an email key) to that key's line
+	// index, so a later, healthier duplicate from another host can replace an
+	// earlier host's worse reading of the same account instead of being dropped
+	// silently — first-added-wins would otherwise let one host's chronic failure
+	// permanently shadow another host's successful fetch of the identical account.
+	knownSeen := make(map[string]int)
 	addKnown := func(k KnownAccountUsage) {
 		if !k.Expired && k.Info == nil && k.Reason == "" {
 			// Nothing to show and no placeholder asked for. This is the ignored
@@ -698,21 +716,25 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 			}
 			key = "email\x00" + strings.ToLower(k.Account)
 		}
-		if knownSeen[key] {
-			return
-		}
-		knownSeen[key] = true
 		label := k.Name
 		if k.Account != "" {
 			label = accountLocalPart(k.Account)
 		}
-		lines = append(lines, accountUsageLine{
+		candidate := accountUsageLine{
 			label:       label,
 			email:       k.Account,
 			info:        k.Info,
 			stale:       k.Stale,
 			placeholder: knownAccountPlaceholder(k),
-		})
+		}
+		if idx, ok := knownSeen[key]; ok {
+			if knownAccountRank(candidate) < knownAccountRank(lines[idx]) {
+				lines[idx] = candidate
+			}
+			return
+		}
+		knownSeen[key] = len(lines)
+		lines = append(lines, candidate)
 	}
 	for _, k := range localKnown {
 		addKnown(k)
