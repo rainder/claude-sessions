@@ -37,11 +37,7 @@ type Session struct {
 	CostUSD          float64 `json:"costUsd,omitempty"`
 	CostSubagentsUSD float64 `json:"costSubagentsUsd,omitempty"`
 
-	// AgentsRunning is the number of currently running Task/Agent-tool
-	// subagents (incl. nested), per scanSessionAgents. Computed at collection
-	// time so remote rows render from the JSON as-is.
-	AgentsRunning int  `json:"agentsRunning,omitempty"`
-	Disabled      bool `json:"disabled,omitempty"`
+	Disabled bool `json:"disabled,omitempty"`
 
 	CPU          string `json:"cpu"`
 	Tmux         string `json:"tmux"` // "session:win.pane" or "" if not in tmux
@@ -206,7 +202,6 @@ func CollectLocal() ([]Session, error) {
 			s.Model = m.Model
 			s.ContextTokens = m.ContextTokens
 			s.CostUSD, s.CostSubagentsUSD = scanSessionCost(p)
-			s.AgentsRunning = scanSessionAgents(p, time.Now())
 		}
 		out = append(out, s)
 	}

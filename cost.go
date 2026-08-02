@@ -78,42 +78,21 @@ func usageCost(p modelPricing, u costUsage) float64 {
 
 // lineCost prices a single transcript line, returning its dollar cost and
 // whether it counted (a known-model assistant usage line not already seen).
-// e.seen dedupes streaming re-emissions by message.id+requestId. As a side
-// effect the line's content blocks maintain e.agentPending: an assistant
-// tool_use named "Agent" adds its id; a user tool_result removes its
-// tool_use_id (only Agent ids ever enter the set, so the delete is
-// unconditional). User lines whose content is a plain string fail the
-// unmarshal and are skipped, same as before.
+// e.seen dedupes streaming re-emissions by message.id+requestId. User lines
+// whose content is a plain string fail the unmarshal and are skipped, same as
+// before.
 func lineCost(line []byte, e *costCacheEntry) (cost float64, ok bool) {
 	var ev struct {
 		Type      string `json:"type"`
 		RequestID string `json:"requestId"`
 		Message   struct {
-			ID      string     `json:"id"`
-			Model   string     `json:"model"`
-			Usage   *costUsage `json:"usage"`
-			Content []struct {
-				Type      string `json:"type"`
-				ID        string `json:"id"`
-				Name      string `json:"name"`
-				ToolUseID string `json:"tool_use_id"`
-			} `json:"content"`
+			ID    string     `json:"id"`
+			Model string     `json:"model"`
+			Usage *costUsage `json:"usage"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(line, &ev); err != nil {
 		return 0, false
-	}
-	for _, b := range ev.Message.Content {
-		switch {
-		// The subagent-spawning tool is named "Agent" in current Claude Code
-		// transcripts (earlier builds used "Task"). This match is coupled to
-		// that name: if a future build renames the tool again, this silently
-		// detects zero running agents instead of erroring.
-		case ev.Type == "assistant" && b.Type == "tool_use" && b.Name == "Agent":
-			e.agentPending[b.ID] = true
-		case ev.Type == "user" && b.Type == "tool_result":
-			delete(e.agentPending, b.ToolUseID)
-		}
 	}
 	if ev.Type != "assistant" || ev.Message.Usage == nil {
 		return 0, false
@@ -131,19 +110,16 @@ func lineCost(line []byte, e *costCacheEntry) (cost float64, ok bool) {
 }
 
 // costCacheEntry holds the incremental scan state for one transcript file: the
-// byte offset consumed so far, the running dollar cost, the dedup set of
-// message.id+requestId keys already counted, and the set of Agent tool_use ids
-// spawned in this file that have no tool_result yet (a subagent's spawn and its
-// completion always land in the same transcript).
+// byte offset consumed so far, the running dollar cost, and the dedup set of
+// message.id+requestId keys already counted.
 type costCacheEntry struct {
-	offset       int64
-	costUSD      float64
-	seen         map[string]bool
-	agentPending map[string]bool
+	offset  int64
+	costUSD float64
+	seen    map[string]bool
 }
 
 func newCostCacheEntry() *costCacheEntry {
-	return &costCacheEntry{seen: map[string]bool{}, agentPending: map[string]bool{}}
+	return &costCacheEntry{seen: map[string]bool{}}
 }
 
 // costCache and its mutex mirror metaCache's concurrency model: collection can

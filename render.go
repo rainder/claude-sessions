@@ -1300,21 +1300,19 @@ func groupFilterIndicator(filter groupFilter) string {
 }
 
 func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int, filter groupFilter, query string) {
-	live, busy, subs := 0, 0, 0
+	live, busy := 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
 			live++
-			subs += s.AgentsRunning
 			// "busy" here means the main loop is occupied: working or in a shell.
 			if s.Status == "busy" || s.Status == "shell" {
 				busy++
 			}
 		}
 	}
-	// Three counts: total concurrent agent loops (each live session is one,
-	// plus every running subagent incl. nested, across local and remote),
-	// main loops only, and occupied main loops. colorize ends with a full
-	// reset, so re-assert bold after the busy count to keep the title bold.
+	// Two counts: live sessions (local + remote) and how many are occupied.
+	// colorize ends with a full reset, so re-assert bold after the busy count
+	// to keep the title bold.
 	busyStr := colorize(statusColor["busy"], fmt.Sprintf("%d busy", busy)) + ansiBold
 	// An active group filter shows a colored "only ③" / "hide ②③" indicator, and
 	// an active text query appends a dim "/query" after it (each ends in a reset),
@@ -1326,9 +1324,9 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 	if query != "" {
 		filterStr += "  " + dim("/"+query) + ansiBold
 	}
-	fmt.Fprintf(w, "%sClaude sessions  %s  (%s, %s, %s)%s  %s%s\n",
+	fmt.Fprintf(w, "%sClaude sessions  %s  (%s, %s)%s  %s%s\n",
 		ansiBold, time.Now().Format("15:04:05"),
-		plural(live+subs, "agent"), plural(live, "session"), busyStr,
+		plural(live, "session"), busyStr,
 		filterStr, ansiReset, dim("["+mode+"]"))
 	writeUsageHeader(w, accounts, codexAccounts, cols)
 	fmt.Fprintln(w)

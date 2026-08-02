@@ -146,6 +146,7 @@ const (
 	commandBack
 	commandRefreshInspector
 	commandFollowInspector
+	commandKillInspector
 	commandQuit
 )
 
@@ -166,9 +167,10 @@ func sessionKeyCommand(key string) tuiCommand {
 
 // inspectorKeyCommand maps a keystroke on the inspector screen to a fixed
 // loop-level command independent of scroll state: Back on Esc/q/Q/p/P (p toggles
-// the inspector, mirroring its open key), Quit on Ctrl-C/Ctrl-D. Scrolling and
-// refresh/follow keys return commandNone here and are dispatched through
-// handleInspectorKey, which mutates the viewport.
+// the inspector, mirroring its open key), Quit on Ctrl-C/Ctrl-D. Scrolling,
+// kill, and refresh/follow keys return commandNone here and are dispatched
+// through handleInspectorKey, which mutates the viewport or asks the loop for
+// a kill.
 func inspectorKeyCommand(key string) tuiCommand {
 	switch key {
 	case KeyEsc, "q", "Q", "p", "P":
@@ -368,8 +370,9 @@ func (s *tuiState) resolveListOffset(frame tableFrame, viewRows int) {
 // handleInspectorKey applies a keystroke to the inspector viewport and returns
 // the command the render loop should run. Pure scrolling (arrows, page keys,
 // Home) mutates the view state directly and asks for a repaint; Back, Refresh,
-// and Follow defer to the render loop via their commands because they touch the
-// hub (leave the screen, refetch, or jump to the live tail and resume polling).
+// Follow, and Kill defer to the render loop via their commands because they
+// touch the hub or session state (leave the screen, refetch, jump to the live
+// tail and resume polling, or open the kill confirmation).
 func (s *tuiState) handleInspectorKey(key string) tuiCommand {
 	switch key {
 	case "q", "Q", KeyEsc, KeyLeft:
@@ -381,10 +384,12 @@ func (s *tuiState) handleInspectorKey(key string) tuiCommand {
 	case "g", KeyHome:
 		s.inspector.home()
 		return commandRender
-	case "k", KeyUp:
+	case "k", "K":
+		return commandKillInspector
+	case KeyUp:
 		s.inspector.scroll(-1)
 		return commandRender
-	case "j", KeyDown:
+	case KeyDown:
 		s.inspector.scroll(1)
 		return commandRender
 	case KeyPageUp:

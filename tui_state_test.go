@@ -105,6 +105,19 @@ func TestInspectorKeyHandlers(t *testing.T) {
 	if cmd := s.handleInspectorKey("z"); cmd != commandNone {
 		t.Fatalf("unmapped key: cmd=%v", cmd)
 	}
+
+	// 'k'/'K' defers to the render loop to open the kill confirmation, and no
+	// longer scrolls (j/k scrolling was removed in favor of arrows only).
+	s = setup()
+	if cmd := s.handleInspectorKey("k"); cmd != commandKillInspector || s.inspector.top != 3 {
+		t.Fatalf("k: cmd=%v view=%#v", cmd, s.inspector)
+	}
+	if cmd := s.handleInspectorKey("K"); cmd != commandKillInspector {
+		t.Fatalf("K: cmd=%v", cmd)
+	}
+	if cmd := s.handleInspectorKey("j"); cmd != commandNone || s.inspector.top != 3 {
+		t.Fatalf("j should no longer scroll: cmd=%v view=%#v", cmd, s.inspector)
+	}
 }
 
 func TestInspectorMouseHandlers(t *testing.T) {

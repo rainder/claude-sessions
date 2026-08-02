@@ -536,7 +536,7 @@ func TestCollectLocalLiteLeavesEnrichmentFieldsZero(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("len(sessions) = %d, want 1", len(got))
 	}
-	if got[0].Model != "" || got[0].CostUSD != 0 || got[0].AgentsRunning != 0 || got[0].CPU != "" || got[0].Tmux != "" {
+	if got[0].Model != "" || got[0].CostUSD != 0 || got[0].CPU != "" || got[0].Tmux != "" {
 		t.Fatalf("expected no enrichment, got %+v", got[0])
 	}
 }

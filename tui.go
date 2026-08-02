@@ -483,6 +483,10 @@ func RunTUI(interval time.Duration) error {
 					screen.Invalidate()
 					actAttach(makeCtx())
 					refresh(true)
+				}, func() {
+					screen.Invalidate()
+					actKill(makeCtx())
+					refresh(true)
 				}) {
 					return nil
 				}
@@ -673,7 +677,9 @@ func RunTUI(interval time.Duration) error {
 // scrolling keys and the wheel mutate the view and repaint. hubPtr is the loop's
 // inspectorHub variable so a Refresh reaches the live hub. Enter attaches to the
 // session (mirroring the session-list Enter binding) and closes the inspector.
-func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach func()) (quit bool) {
+// 'k'/'K' opens the kill confirmation (mirroring the session-list 'k' binding)
+// and closes the inspector.
+func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach, kill func()) (quit bool) {
 	if ev.kind == eventMouse {
 		switch state.handleInspectorMouse(ev.mouse) {
 		case commandBack:
@@ -707,6 +713,9 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 
 	switch state.handleInspectorKey(ev.key) {
 	case commandBack:
+		closeInspector()
+	case commandKillInspector:
+		kill()
 		closeInspector()
 	case commandRefreshInspector:
 		if *hubPtr != nil {
@@ -1012,6 +1021,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    Home / End   oldest output / resume live follow")
 	fmt.Fprintln(&b, "    PgUp / PgDn  scroll inspector by page")
 	fmt.Fprintln(&b, "    r            refresh now")
+	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    Esc / q / p  return from inspector")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("VIEW"))

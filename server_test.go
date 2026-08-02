@@ -1481,8 +1481,8 @@ func TestSessionsResponseMatchesGolden(t *testing.T) {
 	if full.Model != "claude-opus-5" || full.ContextTokens != 84213 {
 		t.Fatalf("enriched session lost model/context: %+v", full)
 	}
-	if full.CostUSD != 3.4712 || full.CostSubagentsUSD != 1.208 || full.AgentsRunning != 2 {
-		t.Fatalf("enriched session lost cost/agents: %+v", full)
+	if full.CostUSD != 3.4712 || full.CostSubagentsUSD != 1.208 {
+		t.Fatalf("enriched session lost cost: %+v", full)
 	}
 	if full.TmuxAttached == nil || *full.TmuxAttached != 1 {
 		t.Fatalf("tmuxAttached = %v, want a pointer to 1", full.TmuxAttached)

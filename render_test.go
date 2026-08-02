@@ -1452,17 +1452,16 @@ func TestSortIndicator(t *testing.T) {
 
 func TestRenderHeaderTotal(t *testing.T) {
 	local := []Session{
-		{PID: 100, SessionID: "aaaa", CWD: "/w1", Status: "busy", StartedAt: 1, AgentsRunning: 3},
+		{PID: 100, SessionID: "aaaa", CWD: "/w1", Status: "busy", StartedAt: 1},
 		{PID: 200, SessionID: "bbbb", CWD: "/w2", Status: "idle", StartedAt: 2},
 	}
 	var buf bytes.Buffer
 	RenderAll(&buf, "1", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	out := buf.String()
 
-	// 2 sessions + 3 running subagents = 5 concurrent agent loops; one main
-	// loop occupied (busy). The busy count is colorized, so match it apart
-	// from the plain-text prefix.
-	if !strings.Contains(out, "5 agents, 2 sessions,") || !strings.Contains(out, "1 busy") {
+	// 2 live sessions; one main loop occupied (busy). The busy count is
+	// colorized, so match it apart from the plain-text prefix.
+	if !strings.Contains(out, "2 sessions,") || !strings.Contains(out, "1 busy") {
 		t.Errorf("header missing grand total:\n%s", out)
 	}
 
@@ -1470,25 +1469,25 @@ func TestRenderHeaderTotal(t *testing.T) {
 	buf.Reset()
 	RenderAll(&buf, "2", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	out = buf.String()
-	if !strings.Contains(out, "5 agents, 2 sessions,") {
+	if !strings.Contains(out, "2 sessions,") {
 		t.Errorf("minimal header missing grand total:\n%s", out)
 	}
 }
 
-func TestRenderHeaderTotalNoSubagents(t *testing.T) {
+func TestRenderHeaderTotalSingular(t *testing.T) {
 	local := []Session{
 		{PID: 100, SessionID: "aaaa", CWD: "/w1", Status: "idle", StartedAt: 1},
 	}
 	var buf bytes.Buffer
 	RenderAll(&buf, "1", testLocalHost(local...), nil, "", nil, 0, 0, "dir")
 	out := buf.String()
-	if !strings.Contains(out, "1 agent, 1 session,") {
-		t.Errorf("singular zero-subagent form missing:\n%s", out)
+	if !strings.Contains(out, "1 session,") {
+		t.Errorf("singular session form missing:\n%s", out)
 	}
 	if !strings.Contains(out, "0 busy") {
 		t.Errorf("idle-only header missing busy count:\n%s", out)
 	}
-	if strings.Contains(out, "1 agents") {
+	if strings.Contains(out, "1 sessions") {
 		t.Errorf("singular count must not pluralize:\n%s", out)
 	}
 }
@@ -1527,9 +1526,9 @@ func TestEmptyRemoteHostSelectionHighlight(t *testing.T) {
 			RenderAll(&b, mode, testLocalHost(local...), remotes, selected, nil, 0, 0, "dir")
 			row := findRow(t, b.String(), "(no sessions)")
 			assertWholeRowSelected(t, row, "  ")
-			// The empty remote host must not inflate counts: 1 local session
-			// (1 agent), 0 from beluga.
-			if !strings.Contains(b.String(), "1 agent, 1 session,") {
+			// The empty remote host must not inflate counts: 1 local session,
+			// 0 from beluga.
+			if !strings.Contains(b.String(), "1 session,") {
 				t.Fatalf("mode %s empty host changed header counts:\n%s", mode, b.String())
 			}
 		})
@@ -1544,7 +1543,7 @@ func TestEmptyLocalHostSelectionHighlight(t *testing.T) {
 			RenderAll(&b, mode, testLocalHost(), nil, selected, nil, 0, 0, "dir")
 			row := findRow(t, b.String(), "(no sessions)")
 			assertWholeRowSelected(t, row, "  ")
-			if !strings.Contains(b.String(), "0 agents, 0 sessions,") {
+			if !strings.Contains(b.String(), "0 sessions,") {
 				t.Fatalf("mode %s empty local changed header counts:\n%s", mode, b.String())
 			}
 		})
@@ -1593,7 +1592,7 @@ func TestEmptyLocalAndRemoteCoexist(t *testing.T) {
 	if strings.HasPrefix(rows[1], ansiInvert) {
 		t.Fatalf("unselected empty-remote row wrongly highlighted: %q", rows[1])
 	}
-	if !strings.Contains(out, "0 agents, 0 sessions,") {
+	if !strings.Contains(out, "0 sessions,") {
 		t.Fatalf("two empty hosts inflated header counts:\n%s", out)
 	}
 }

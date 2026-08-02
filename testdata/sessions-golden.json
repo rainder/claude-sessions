@@ -22,7 +22,6 @@
       "contextTokens": 84213,
       "costUsd": 3.4712,
       "costSubagentsUsd": 1.208,
-      "agentsRunning": 2,
       "cpu": "12.3",
       "tmux": "work:2.1",
       "tmuxAttached": 1,
