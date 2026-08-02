@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -209,5 +210,67 @@ func TestMigrateRemoteSendsSessionIDWhenKnown(t *testing.T) {
 	}
 	if string(gotBody) != `{"session_id":"sess-2"}` {
 		t.Fatalf("body = %s, want session_id sent", gotBody)
+	}
+}
+
+// TestSwitchAccountRemote proves the client posts the name to /account/switch
+// with the host's bearer token and reads back the new account email.
+func TestSwitchAccountRemote(t *testing.T) {
+	var gotPath, gotAuth, gotBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"account":"andy@trecs.aero"}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	got, err := switchAccountRemote("box", "trecs")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if gotPath != "/account/switch" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer secret" {
+		t.Fatalf("auth = %q", gotAuth)
+	}
+	if gotBody != `{"name":"trecs"}` {
+		t.Fatalf("body = %q", gotBody)
+	}
+	if !got.OK || got.Account != "andy@trecs.aero" {
+		t.Fatalf("result = %+v", got)
+	}
+}
+
+// TestSwitchAccountRemoteRefusal proves a 400 refusal is reported as the
+// server's own explanation (which lists the names that host holds) rather than a
+// bare "HTTP 400" transport error.
+func TestSwitchAccountRemoteRefusal(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"ok":false,"code":"unknown_account","message":"no account snapshot for \"nope\" (known: avisoma)"}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	got, err := switchAccountRemote("box", "nope")
+	if err != nil {
+		t.Fatalf("err = %v, want the refusal reported in the result", err)
+	}
+	if got.OK || got.Code != codeUnknownAccount || !strings.Contains(got.Message, "avisoma") {
+		t.Fatalf("result = %+v, want the host's own message", got)
 	}
 }

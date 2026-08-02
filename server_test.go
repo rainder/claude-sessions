@@ -923,6 +923,85 @@ func TestSessionsOmitsCodexUsageWhenSnapshotNilOrHubAbsent(t *testing.T) {
 	}
 }
 
+func TestSessionsIncludesKnownAccountsWhenSnapshotPresent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{
+		token: "secret",
+		host:  "devbox",
+		knownAccountsSnapshot: func() *knownAccountsResult {
+			return &knownAccountsResult{
+				Accounts: []KnownAccountUsage{
+					{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+					{Name: "trecs", Account: "andy@trecs.aero", Expired: true},
+				},
+				ActiveName: "work",
+			}
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	var raw map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	known, ok := raw["knownAccounts"].([]any)
+	if !ok || len(known) != 2 {
+		t.Fatalf("knownAccounts = %#v, want two entries", raw["knownAccounts"])
+	}
+	first, _ := known[0].(map[string]any)
+	if first["name"] != "avisoma" || first["account"] != "andy@avisoma.com" {
+		t.Fatalf("first entry = %#v", first)
+	}
+	if _, ok := first["info"].(map[string]any); !ok {
+		t.Fatalf("first entry info = %#v, want an object", first["info"])
+	}
+	second, _ := known[1].(map[string]any)
+	if second["expired"] != true || second["info"] != nil {
+		t.Fatalf("expired entry = %#v, want expired with a null info", second)
+	}
+	if raw["activeSnapshotName"] != "work" {
+		t.Fatalf("activeSnapshotName = %#v, want work", raw["activeSnapshotName"])
+	}
+}
+
+func TestSessionsOmitsKnownAccountsWhenAbsentOrEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	empty := knownAccountsResult{Accounts: []KnownAccountUsage{}}
+	cases := map[string]*server{
+		"no hub": {token: "secret", host: "devbox"},
+		"nil snapshot": {token: "secret", host: "devbox",
+			knownAccountsSnapshot: func() *knownAccountsResult { return nil }},
+		"no snapshots on this host": {token: "secret", host: "devbox",
+			knownAccountsSnapshot: func() *knownAccountsResult { return &empty }},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+			s.sessions(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+			}
+			var raw map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := raw["knownAccounts"]; present {
+				t.Fatalf("knownAccounts key present when it should be omitted: %s", rec.Body.String())
+			}
+			if _, present := raw["activeSnapshotName"]; present {
+				t.Fatalf("activeSnapshotName key present when it should be omitted: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func getServerSessions(s *server) (int, []Session, error) {
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -3611,5 +3690,128 @@ func TestDisableHandlerUnauthorized(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// TestAccountSwitchHandler covers POST /account/switch's four outcomes. The
+// switch itself is injected: without that seam this test would perform a real
+// account switch against the machine running `go test`.
+func TestAccountSwitchHandler(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		switchErr  error
+		wantStatus int
+		wantOK     bool
+		wantCode   string
+		wantCalled bool
+	}{
+		{
+			name:       "valid name switches and reports the new email",
+			body:       `{"name":"avisoma"}`,
+			wantStatus: http.StatusOK,
+			wantOK:     true,
+			wantCalled: true,
+		},
+		{
+			name:       "unknown snapshot is a bad request, nothing touched",
+			body:       `{"name":"nope"}`,
+			switchErr:  fmt.Errorf("%w for %q (known: avisoma)", errUnknownAccount, "nope"),
+			wantStatus: http.StatusBadRequest,
+			wantCode:   codeUnknownAccount,
+			wantCalled: true,
+		},
+		{
+			name:       "a failed switch is a server error",
+			body:       `{"name":"avisoma"}`,
+			switchErr:  errors.New("keychain write: exit status 1"),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   codeSwitchFailed,
+			wantCalled: true,
+		},
+		{
+			name:       "an empty name never reaches the switch",
+			body:       `{}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   codeUnknownAccount,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			s := &server{
+				token: "secret",
+				switchAcct: func(name string) (string, error) {
+					called = true
+					if tc.switchErr != nil {
+						return "", tc.switchErr
+					}
+					return "andy@" + name + ".example", nil
+				},
+			}
+			req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+
+			s.accountSwitch(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.wantStatus, rec.Body)
+			}
+			if called != tc.wantCalled {
+				t.Fatalf("switch called = %v, want %v", called, tc.wantCalled)
+			}
+			var r accountSwitchResult
+			if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if r.OK != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", r.OK, tc.wantOK)
+			}
+			if r.Code != tc.wantCode {
+				t.Fatalf("code = %q, want %q", r.Code, tc.wantCode)
+			}
+			if tc.wantOK && r.Account != "andy@avisoma.example" {
+				t.Fatalf("account = %q, want the new live email", r.Account)
+			}
+			if !tc.wantOK && r.Message == "" {
+				t.Fatal("failure carries no message")
+			}
+		})
+	}
+}
+
+func TestAccountSwitchHandlerUnauthorized(t *testing.T) {
+	called := false
+	s := &server{
+		token:      "secret",
+		switchAcct: func(string) (string, error) { called = true; return "", nil },
+	}
+	req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(`{"name":"avisoma"}`))
+	rec := httptest.NewRecorder()
+
+	s.accountSwitch(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if called {
+		t.Fatal("an unauthorized request reached the switch")
+	}
+}
+
+func TestAccountSwitchHandlerBadJSON(t *testing.T) {
+	s := &server{
+		token:      "secret",
+		switchAcct: func(string) (string, error) { t.Fatal("switch called for a bad body"); return "", nil },
+	}
+	req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(`{"name":`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.accountSwitch(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }

@@ -106,3 +106,45 @@ func TestWorktreeRemovalQuestionNamesWorktree(t *testing.T) {
 		t.Fatalf("question = %q, want it to name the worktree", got)
 	}
 }
+
+func TestParseAccountArgs(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantName   string
+		wantServer string
+		wantErr    bool
+	}{
+		{name: "name only", args: []string{"avisoma"}, wantName: "avisoma"},
+		{name: "name and server", args: []string{"avisoma", "--server", "box"}, wantName: "avisoma", wantServer: "box"},
+		{name: "server before name", args: []string{"--server", "box", "avisoma"}, wantName: "avisoma", wantServer: "box"},
+		{name: "server only", args: []string{"--server", "box"}, wantServer: "box"},
+		{name: "no args", args: nil},
+		{name: "server without a value", args: []string{"--server"}, wantErr: true},
+		{name: "unknown flag", args: []string{"avisoma", "--force"}, wantErr: true},
+		{name: "second positional", args: []string{"avisoma", "trecs"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name, server, err := parseAccountArgs(tt.args)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("err = nil, want an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if name != tt.wantName || server != tt.wantServer {
+				t.Fatalf("= (%q, %q), want (%q, %q)", name, server, tt.wantName, tt.wantServer)
+			}
+		})
+	}
+}
+
+func TestAccountSwitchedLine(t *testing.T) {
+	if got := accountSwitchedLine("trecs", "andy@trecs.aero"); !strings.Contains(got, "trecs") || !strings.Contains(got, "andy@trecs.aero") {
+		t.Fatalf("line = %q, want the name and the new email", got)
+	}
+}

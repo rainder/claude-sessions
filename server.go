@@ -62,6 +62,30 @@ type actionResult struct {
 	Disabled  *bool  `json:"disabled,omitempty"`
 }
 
+// accountSwitchResult is POST /account/switch's response envelope. It is
+// deliberately not actionResult: that struct is about a session at a PID, and
+// this endpoint acts on the host's identity, so it carries the resulting account
+// email and its own failure codes instead of Tmux/SessionID/Worktree fields that
+// could never be set here.
+type accountSwitchResult struct {
+	OK      bool   `json:"ok"`
+	Account string `json:"account,omitempty"` // login email now live on this host
+	Code    string `json:"code,omitempty"`    // codeUnknownAccount / codeSwitchFailed
+	Message string `json:"message,omitempty"`
+}
+
+// The two values accountSwitchResult.Code ever carries. Unlike the kill/migrate
+// codes these ride on non-200 responses (400 / 500), because an unknown snapshot
+// name is a bad request rather than a stale row.
+const (
+	// codeUnknownAccount: this host holds no snapshot by that name (and nothing
+	// was touched).
+	codeUnknownAccount = "unknown_account"
+	// codeSwitchFailed: the name was known but the switch itself failed. The
+	// outgoing credential is still backed up — see switchAccount's step order.
+	codeSwitchFailed = "switch_failed"
+)
+
 // worktreeInfo describes a worktree a kill has just left idle.
 type worktreeInfo struct {
 	Path string `json:"path"` // worktree checkout root
@@ -414,6 +438,14 @@ type server struct {
 	// hub) or a nil return (no fetch yet, or no Codex auth) omits the
 	// "codex_usage" key — the account email rides in the snapshot itself.
 	codexUsageSnapshot func() *CodexAccountUsage
+	// knownAccountsSnapshot returns the known-accounts poll: usage for every
+	// account this host holds a claude-switch credential snapshot for minus the
+	// live one, plus the snapshot name that same pass resolved as the live
+	// account's. nil (no hub), a nil return (no fetch yet), or an empty
+	// list/name omits the corresponding key — reporting the name from the
+	// poller's own pass is what keeps every client from re-deriving the same
+	// email→name match, and keeps /sessions off the filesystem.
+	knownAccountsSnapshot func() *knownAccountsResult
 	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
 	// a stub to assert bounds and header wiring without touching tmux.
 	previewLoader func(int, PreviewLimits) (PreviewResult, error)
@@ -429,6 +461,11 @@ type server struct {
 	// pattern as the three above, and the only way the request_id dedupe's
 	// concurrency can be tested without really starting tmux.
 	spawn func(cwd, name, command, suffix string) (string, error)
+	// switchAcct makes a named claude-switch snapshot this host's active account;
+	// nil falls back to switchAccount. Injectable for the same reason as the
+	// seams above, and more urgently: without it a handler test would perform a
+	// real account switch against the machine running `go test`.
+	switchAcct func(name string) (string, error)
 	// attest re-reads one PID's own session file; nil falls back to
 	// readSessionByPID. Used for the last-moment identity check before a
 	// destructive act, and separate from collect because it must be the cheapest
@@ -594,6 +631,13 @@ func spawnSuffix(requestID string) string {
 	return hex.EncodeToString(sum[:])[:6]
 }
 
+func (s *server) switchAccountTo(name string) (string, error) {
+	if s.switchAcct != nil {
+		return s.switchAcct(name)
+	}
+	return switchAccount(name)
+}
+
 func (s *server) attestSession(pid int) (Session, bool) {
 	if s.attest != nil {
 		return s.attest(pid)
@@ -718,6 +762,22 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 	if s.codexUsageSnapshot != nil {
 		if u := s.codexUsageSnapshot(); u != nil {
 			resp["codex_usage"] = u
+		}
+	}
+	// "knownAccounts" and "activeSnapshotName" are additive and equally optional:
+	// a host with no claude-switch snapshots, or one whose known-accounts poll
+	// hasn't landed, simply omits them and a client falls back to the live-only
+	// display for this host — the same way an older server omitting them does.
+	// One read of the poller's snapshot, so the two fields always describe the
+	// same pass.
+	if s.knownAccountsSnapshot != nil {
+		if ka := s.knownAccountsSnapshot(); ka != nil {
+			if len(ka.Accounts) > 0 {
+				resp["knownAccounts"] = ka.Accounts
+			}
+			if ka.ActiveName != "" {
+				resp["activeSnapshotName"] = ka.ActiveName
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -971,6 +1031,53 @@ func (s *server) removeWorktree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, actionResult{OK: true})
+}
+
+// accountSwitch handles POST /account/switch: make one of this host's
+// claude-switch snapshots the active Claude Code account.
+//
+// No session_id-style precondition, and none is needed. This endpoint is not
+// scoped to a session — it acts on host identity — and switchAccount is already
+// idempotent in the strongest sense: naming the account that is already active
+// returns without touching a single file, so a duplicated request cannot
+// overwrite a live token with a stale snapshot. A request naming an unknown
+// snapshot touches nothing either; validation is the first thing switchAccount
+// does.
+func (s *server) accountSwitch(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request body", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, accountSwitchResult{
+			Code:    codeUnknownAccount,
+			Message: "name is required",
+		})
+		return
+	}
+	email, err := s.switchAccountTo(req.Name)
+	if err != nil {
+		if errors.Is(err, errUnknownAccount) {
+			writeJSON(w, http.StatusBadRequest, accountSwitchResult{
+				Code:    codeUnknownAccount,
+				Message: err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, accountSwitchResult{
+			Code:    codeSwitchFailed,
+			Message: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, accountSwitchResult{OK: true, Account: email})
 }
 
 func (s *server) migrate(w http.ResponseWriter, r *http.Request) {
@@ -1518,6 +1625,13 @@ func cmdServer(args []string) int {
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
 
+	// Known-account usage: the accounts this host holds claude-switch credential
+	// snapshots for but isn't logged into. Read-only — the snapshots are read
+	// where they lie, never swapped in, so the live credential (Keychain item or
+	// .credentials.json) is untouched.
+	knownAccountsHub := NewKnownAccountsHub()
+	defer knownAccountsHub.Shutdown()
+
 	// Auto-maintain a "latest" snapshot so a reboot doesn't require having
 	// remembered to save beforehand. Best-effort: a failed save is logged, never
 	// fatal to the server. No Shutdown/stop — matches the existing paste-binding
@@ -1576,8 +1690,13 @@ func cmdServer(args []string) int {
 		hostSnapshot:       hostUsageHub.Snapshot,
 		usageSnapshot:      usageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
-		devices:            devices,
-		disabled:           disabledStore,
+		// Carries the active snapshot name too: the poller resolves it as part of
+		// the pass that decides which snapshot to skip, so /sessions serves it
+		// from memory instead of re-listing snapshots per request. It tracks the
+		// live account's email, so a relogin re-resolves on the next poll.
+		knownAccountsSnapshot: knownAccountsHub.Snapshot,
+		devices:               devices,
+		disabled:              disabledStore,
 	}
 
 	// Push notifications are optional. Every failure here logs one line and
@@ -1613,6 +1732,7 @@ func cmdServer(args []string) int {
 	mux.HandleFunc("POST /sessions/{pid}/disable", s.disableSession)
 	mux.HandleFunc("POST /sessions/new", s.newSession)
 	mux.HandleFunc("POST /worktree/remove", s.removeWorktree)
+	mux.HandleFunc("POST /account/switch", s.accountSwitch)
 	mux.HandleFunc("POST /devices", s.registerDevice)
 	mux.HandleFunc("DELETE /devices/{token}", s.unregisterDevice)
 	mux.HandleFunc("POST /pair/arm", s.armPairing)

@@ -446,7 +446,7 @@ func TestDedupeAccounts(t *testing.T) {
 		remotes := []RemoteResult{
 			{Name: "pi", Usage: &AccountUsage{Account: "dev@example.com", Info: info()}},
 		}
-		got := dedupeAccounts(local, remotes)
+		got := dedupeAccounts(local, nil, remotes)
 		if len(got) != 1 {
 			t.Fatalf("len = %d, want 1: %#v", len(got), got)
 		}
@@ -463,7 +463,7 @@ func TestDedupeAccounts(t *testing.T) {
 		remotes := []RemoteResult{
 			{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: info()}},
 		}
-		got := dedupeAccounts(local, remotes)
+		got := dedupeAccounts(local, nil, remotes)
 		if len(got) != 2 {
 			t.Fatalf("len = %d, want 2: %#v", len(got), got)
 		}
@@ -478,7 +478,7 @@ func TestDedupeAccounts(t *testing.T) {
 			{Name: "beluga", Usage: &AccountUsage{Account: "", Info: info()}},
 			{Name: "walrus", Usage: &AccountUsage{Account: "", Info: info()}},
 		}
-		got := dedupeAccounts(local, remotes)
+		got := dedupeAccounts(local, nil, remotes)
 		if len(got) != 3 {
 			t.Fatalf("len = %d, want 3 (unknowns never merge): %#v", len(got), got)
 		}
@@ -495,7 +495,7 @@ func TestDedupeAccounts(t *testing.T) {
 			{Name: "old", Usage: nil}, // pre-propagation server
 			{Name: "live", Usage: &AccountUsage{Account: "bot@ci.com", Info: info()}},
 		}
-		got := dedupeAccounts(local, remotes)
+		got := dedupeAccounts(local, nil, remotes)
 		if len(got) != 1 {
 			t.Fatalf("len = %d, want 1 (only the live snapshot): %#v", len(got), got)
 		}
@@ -509,7 +509,7 @@ func TestDedupeAccounts(t *testing.T) {
 		remotes := []RemoteResult{
 			{Name: "pi", Usage: &AccountUsage{Account: "andy@avisoma.com", Info: info()}},
 		}
-		got := dedupeAccounts(local, remotes)
+		got := dedupeAccounts(local, nil, remotes)
 		if len(got) != 2 {
 			t.Fatalf("len = %d, want 2: %#v", len(got), got)
 		}
@@ -517,6 +517,212 @@ func TestDedupeAccounts(t *testing.T) {
 			t.Errorf("labels = %q,%q want full emails on collision", got[0].label, got[1].label)
 		}
 	})
+}
+
+func TestDedupeAccountsKnownAccounts(t *testing.T) {
+	info := func() *UsageInfo { return &UsageInfo{} }
+	labels := func(lines []accountUsageLine) []string {
+		out := make([]string, len(lines))
+		for i, l := range lines {
+			out[i] = l.label
+		}
+		return out
+	}
+
+	t.Run("a live line always beats a snapshot of the same account", func(t *testing.T) {
+		liveInfo := info()
+		local := AccountUsage{Account: "andy@avisoma.com", Info: liveInfo}
+		remotes := []RemoteResult{{
+			Name: "pi",
+			// Case difference proves pass 2 uses the same lowercased key as pass 1.
+			KnownAccounts: []KnownAccountUsage{{Name: "avisoma", Account: "Andy@Avisoma.com", Info: info()}},
+		}}
+		got := dedupeAccounts(local, nil, remotes)
+		if len(got) != 1 {
+			t.Fatalf("labels = %v, want just the live account", labels(got))
+		}
+		if got[0].info != liveInfo {
+			t.Error("snapshot copy displaced the live reading")
+		}
+	})
+
+	t.Run("an account nobody is logged into still gets a line", func(t *testing.T) {
+		local := AccountUsage{Account: "andy@avisoma.com", Info: info()}
+		localKnown := []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Info: info()}}
+		got := dedupeAccounts(local, localKnown, nil)
+		if len(got) != 2 {
+			t.Fatalf("labels = %v, want the live account plus the snapshot one", labels(got))
+		}
+		if got[1].label != "andy@trecs.aero" || got[0].label != "andy@avisoma.com" {
+			// Colliding local-parts promote to full emails, as for live accounts.
+			t.Fatalf("labels = %v, want both promoted to full emails", labels(got))
+		}
+		if got[1].mine {
+			t.Error("a snapshot-derived line must never be marked mine")
+		}
+	})
+
+	t.Run("two hosts' snapshots of one account collapse to a single line", func(t *testing.T) {
+		firstInfo := info()
+		remotes := []RemoteResult{
+			{Name: "pi", KnownAccounts: []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Info: firstInfo}}},
+			{Name: "beluga", KnownAccounts: []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Info: info()}}},
+		}
+		got := dedupeAccounts(AccountUsage{}, nil, remotes)
+		if len(got) != 1 {
+			t.Fatalf("labels = %v, want one merged line", labels(got))
+		}
+		if got[0].info != firstInfo {
+			t.Error("first occurrence (config order) should win")
+		}
+	})
+
+	t.Run("expired entries survive as placeholders, unknown emails key by name", func(t *testing.T) {
+		localKnown := []KnownAccountUsage{
+			{Name: "trecs", Account: "andy@trecs.aero", Expired: true},
+			// account.json unreadable on both hosts: keyed by snapshot name, so
+			// the two collapse rather than each claiming a line.
+			{Name: "orphan", Expired: true},
+		}
+		remotes := []RemoteResult{{Name: "pi", KnownAccounts: []KnownAccountUsage{{Name: "orphan", Expired: true}}}}
+		got := dedupeAccounts(AccountUsage{}, localKnown, remotes)
+		if len(got) != 2 {
+			t.Fatalf("labels = %v, want trecs + one orphan", labels(got))
+		}
+		for _, l := range got {
+			if !l.expired || l.info != nil {
+				t.Fatalf("line %q = %#v, want an expired placeholder", l.label, l)
+			}
+		}
+		if got[0].label != "andy" || got[1].label != "orphan" {
+			t.Fatalf("labels = %v, want [andy orphan]", labels(got))
+		}
+	})
+
+	t.Run("a snapshot entry with neither info nor expired is dropped", func(t *testing.T) {
+		// Malformed input must not claim the dedupe key and silence a later good
+		// entry for the same account.
+		localKnown := []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero"}}
+		remotes := []RemoteResult{{Name: "pi", KnownAccounts: []KnownAccountUsage{
+			{Name: "trecs", Account: "andy@trecs.aero", Info: info()},
+		}}}
+		got := dedupeAccounts(AccountUsage{}, localKnown, remotes)
+		if len(got) != 1 || got[0].info == nil {
+			t.Fatalf("got %#v, want the one usable snapshot line", got)
+		}
+	})
+
+	t.Run("degraded fallback: another host's snapshot covers a failed live fetch", func(t *testing.T) {
+		// local's own live fetch failed (nil Info → dropped from pass 1) and its
+		// own snapshot of that account was never fetched (it is the live one), so
+		// only a different host's snapshot can fill the gap.
+		local := AccountUsage{Account: "andy@avisoma.com", Info: nil}
+		remotes := []RemoteResult{{
+			Name:          "pi",
+			KnownAccounts: []KnownAccountUsage{{Name: "avisoma", Account: "andy@avisoma.com", Info: info()}},
+		}}
+		got := dedupeAccounts(local, nil, remotes)
+		if len(got) != 1 || got[0].label != "andy" {
+			t.Fatalf("labels = %v, want the fallback snapshot line", labels(got))
+		}
+		if got[0].mine {
+			t.Error("the fallback is snapshot data, not this machine's live account")
+		}
+	})
+}
+
+func TestWriteUsageHeaderRendersExpiredPlaceholder(t *testing.T) {
+	accounts := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", expired: true},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, 0)
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %#v, want one per account", lines)
+	}
+	// Labels are padded to a shared width, so the placeholder starts in the same
+	// column the bars do on the line above.
+	want := dim("trecs") + "   " + dim(usageExpiredText)
+	if lines[1] != want {
+		t.Fatalf("expired line = %q, want %q", lines[1], want)
+	}
+	if !strings.Contains(lines[0], "5h") {
+		t.Fatalf("healthy line lost its bars: %q", lines[0])
+	}
+}
+
+func TestWriteUsageHeaderExpiredOnlyLineKeepsItsLabel(t *testing.T) {
+	// A sole expired line is never bare: dedupeAccounts leaves mine false on
+	// snapshot-derived lines, so "auth expired" always says whose.
+	accounts := []accountUsageLine{{label: "trecs", email: "andy@trecs.aero", expired: true}}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, 80)
+	if got := strings.TrimRight(b.String(), "\n"); got != dim("trecs")+" "+dim(usageExpiredText) {
+		t.Fatalf("sole expired line = %q", got)
+	}
+}
+
+func TestWriteUsageHeaderNarrowTerminalKeepsExpiredLine(t *testing.T) {
+	// The label-shedding pass sizes bars against segments; a segment-less line
+	// must neither crash it nor be dropped — and must keep its label, or two
+	// expired accounts render as two identical, unattributable placeholders.
+	accounts := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", expired: true},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, 20)
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %#v, want one per account", lines)
+	}
+	// The healthy line sheds its label (that's what the pass is for)...
+	if strings.Contains(lines[0], "avisoma") {
+		t.Fatalf("healthy line kept its label at cols=20: %q", lines[0])
+	}
+	// ...while the placeholder keeps its own, since it costs no bar width.
+	if lines[1] != dim("trecs")+" "+dim(usageExpiredText) {
+		t.Fatalf("expired line = %q, want it labeled trecs", lines[1])
+	}
+}
+
+func TestRenderHeaderShowsKnownAccountsFromLocalAndRemote(t *testing.T) {
+	local := LocalHost{Name: "workstation", Sessions: []Session{{PID: 1, CWD: "/local-dir"}}}
+	remotes := []RemoteResult{{
+		Name:          "beluga",
+		Sessions:      []Session{{PID: 2, Host: "beluga", CWD: "/remote-dir"}},
+		Usage:         &AccountUsage{Account: "bot@ci.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 12}}},
+		KnownAccounts: []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Expired: true}},
+	}}
+	localUsage := &LocalUsage{
+		Claude: &AccountUsage{Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		KnownAccounts: []KnownAccountUsage{
+			// Already live on beluga: the live line wins, no second line here.
+			{Name: "ci", Account: "bot@ci.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 99}}},
+			{Name: "spare", Account: "andy@spare.dev", Info: &UsageInfo{FiveHour: usageBucket{Pct: 5}}},
+		},
+	}
+	var b strings.Builder
+	RenderAll(&b, "1", local, remotes, "", localUsage, 0, 0, "dir")
+	lines := headerUsageLines(b.String())
+	if len(lines) != 4 {
+		t.Fatalf("header lines = %#v, want live andy + live bot + known spare + expired trecs", lines)
+	}
+	// Every "andy" local-part collides, so those three promote to full emails —
+	// which makes each expected label unique to exactly one line.
+	for i, want := range []string{"andy@avisoma.com", "bot", "andy@spare.dev", "andy@trecs.aero"} {
+		if !strings.Contains(lines[i], want) {
+			t.Fatalf("line %d = %q, want it labeled %q", i, lines[i], want)
+		}
+	}
+	if strings.Contains(lines[1], "99") {
+		t.Fatalf("snapshot copy displaced beluga's live reading: %q", lines[1])
+	}
+	if !strings.Contains(lines[3], usageExpiredText) {
+		t.Fatalf("expired known account = %q, want the placeholder", lines[3])
+	}
 }
 
 // headerUsageLines returns the account bar lines a full-view render emits: line
@@ -1722,6 +1928,52 @@ func TestHostUsageHeadingsAllViews(t *testing.T) {
 				t.Fatal("remote heading rendered after remote row")
 			}
 		})
+	}
+}
+
+func TestHostHeadingShowsActiveAccountAllViews(t *testing.T) {
+	local := LocalHost{
+		Name:      "workstation",
+		Sessions:  []Session{{PID: 1, CWD: "/local-dir"}},
+		HostUsage: HostUsage{CPUPercent: floatPtr(12.5)},
+	}
+	remotes := []RemoteResult{
+		{
+			Name:     "beluga",
+			Sessions: []Session{{PID: 2, Host: "beluga", CWD: "/remote-dir"}},
+			Usage:    &AccountUsage{Account: "bot@ci.com", Info: &UsageInfo{}},
+		},
+		// No usage at all (older server): the heading gets no label, not a dash.
+		{Name: "walrus", Sessions: []Session{{PID: 3, Host: "walrus", CWD: "/other-dir"}}},
+	}
+	localUsage := &LocalUsage{Claude: &AccountUsage{Account: "andy@avisoma.com", Info: &UsageInfo{}}}
+	for _, mode := range []string{"1", "2", "3"} {
+		t.Run(mode, func(t *testing.T) {
+			var b strings.Builder
+			RenderAll(&b, mode, local, remotes, "", localUsage, 0, 0, "dir")
+			out := b.String()
+			if got := findRow(t, out, "workstation"); !strings.HasSuffix(got, "  "+dim("andy@avisoma.com")) {
+				t.Fatalf("local heading = %q, want the dimmed account after LOAD", got)
+			}
+			if got := findRow(t, out, "beluga"); !strings.HasSuffix(got, "  "+dim("bot@ci.com")) {
+				t.Fatalf("remote heading = %q, want that host's own account", got)
+			}
+			if got := findRow(t, out, "walrus"); strings.Contains(got, "@") {
+				t.Fatalf("heading for a host with no usage = %q, want no account label", got)
+			}
+		})
+	}
+}
+
+func TestHostHeadingOmitsUnknownAccount(t *testing.T) {
+	// An identity read that failed (empty email) appends nothing at all, so the
+	// heading stays byte-identical to a pre-label render.
+	local := LocalHost{Name: "workstation", Sessions: []Session{{PID: 1, CWD: "/local-dir"}}}
+	var withAccount, without strings.Builder
+	RenderAll(&withAccount, "1", local, nil, "", &LocalUsage{Claude: &AccountUsage{Account: "", Info: &UsageInfo{}}}, 0, 0, "dir")
+	RenderAll(&without, "1", local, nil, "", nil, 0, 0, "dir")
+	if findRow(t, withAccount.String(), "workstation") != findRow(t, without.String(), "workstation") {
+		t.Fatalf("empty account changed the heading: %q", findRow(t, withAccount.String(), "workstation"))
 	}
 }
 

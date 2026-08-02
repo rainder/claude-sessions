@@ -43,6 +43,12 @@ type actCtx struct {
 	// unattended, so the caller shows a toast instead of attaching.
 	spawnedBackground bool
 
+	// accounts reports one host's known-account picture ("" = this machine) from
+	// what the pollers already hold, so opening the Ctrl+W picker never triggers
+	// a fetch. Nil in tests (and any caller) that don't exercise the picker, in
+	// which case Ctrl+W does nothing.
+	accounts func(host string) accountSnapshot
+
 	// disabled is this host's DisabledStore, written directly for local rows
 	// (Host == ""). Remote rows never write it — they go through
 	// actToggleDisabledRemote instead. May be nil in tests that don't

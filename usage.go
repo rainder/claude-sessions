@@ -178,6 +178,16 @@ func loadOAuthToken() (string, error) {
 			return "", err
 		}
 	}
+	return parseOAuthCredentials(data)
+}
+
+// parseOAuthCredentials pulls the OAuth access token out of a Claude Code
+// credentials blob — the JSON the macOS Keychain item holds, which is also
+// byte-for-byte what ~/.claude/.credentials.json stores and what
+// claude-switch copies into its per-account snapshot files. Shared by the live
+// path (loadOAuthToken) and the snapshot path (snapshotToken) so both parse
+// identically; an empty token is an error, not an empty string.
+func parseOAuthCredentials(data []byte) (string, error) {
 	var creds struct {
 		ClaudeAiOauth struct {
 			AccessToken string `json:"accessToken"`
@@ -204,11 +214,24 @@ func fetchUsage() (*AccountUsage, error) {
 	if err != nil {
 		return nil, err
 	}
+	info, err := fetchUsageInfo(tok)
+	if err != nil {
+		return nil, err
+	}
+	return &AccountUsage{Account: loadAccountEmail(), Info: info}, nil
+}
+
+// fetchUsageInfo is the HTTP leg alone: one usage fetch for an arbitrary OAuth
+// token. Split out of fetchUsage so the known-accounts poller can fetch a
+// snapshot account's limits with that snapshot's own token (see
+// known_accounts.go) without duplicating the request/parse plumbing, and so
+// tests can substitute it. 5s timeout, 1MB response cap, non-200 is an error.
+func fetchUsageInfo(token string) (*UsageInfo, error) {
 	req, err := http.NewRequest("GET", usageURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
@@ -223,11 +246,7 @@ func fetchUsage() (*AccountUsage, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := parseUsage(body)
-	if err != nil {
-		return nil, err
-	}
-	return &AccountUsage{Account: loadAccountEmail(), Info: info}, nil
+	return parseUsage(body)
 }
 
 // usageRefreshInterval is how often the background poller refetches. Usage

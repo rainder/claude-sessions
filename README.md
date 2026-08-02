@@ -92,6 +92,10 @@ claude-sessions service install [--port N] [--bind ADDR] | uninstall | restart |
 claude-sessions snapshot save [name]       # save the local session set (name defaults to a timestamp)
 claude-sessions snapshot restore NAME      # recreate a saved set (best-effort; requires an explicit name)
 claude-sessions snapshot list              # list saved snapshots
+claude-sessions account switch NAME [--server S]
+                                            # switch the active Claude account (local or remote)
+claude-sessions account save NAME          # capture the live credential + identity as a snapshot
+claude-sessions account list [--server S]  # what accounts each host knows, and which is active
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
 claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)
@@ -110,6 +114,7 @@ claude-sessions tmux-info PID              # tmux session name for a pid
 | Enter/p | open fullscreen inspector                       |
 | m       | toggle view mode (full ↔ minimal, persisted)    |
 | r       | refresh now                                     |
+| Ctrl-W  | switch that row's host to another Claude account |
 | ?       | help modal                                      |
 | q       | quit (Ctrl-C / Ctrl-D also work)                |
 | click   | select a row (double-click opens the inspector) |
@@ -426,6 +431,10 @@ remote.go            HTTP client + RemoteResult
 server.go            HTTP server (Tailscale bind, bearer auth, all endpoints)
 tui.go               alt-screen + raw mode + key reader + main loop
 usage.go             account rate-limit polling (5h/weekly bars in header)
+known_accounts.go    per-account snapshot discovery + read-only usage polling
+account.go           account switching (credential + identity snapshots, flock)
+account_list.go      `account list` rows + table
+account_picker.go    Ctrl+W account picker overlay + switch action
 actions.go           local action handlers (kill/attach/preview/new)
 remote_actions.go    remote action handlers
 commands.go          scriptable subcommands (used by server shell-out)

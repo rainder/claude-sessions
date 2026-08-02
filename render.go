@@ -504,12 +504,7 @@ func renderUsageSegs(w io.Writer, label string, segs []usageSeg, barW int) {
 	if len(segs) == 0 {
 		return
 	}
-	prefix := ""
-	if label != "" {
-		core := strings.TrimRight(label, " ")
-		pad := len(label) - len(core)
-		prefix = dim(core) + " " + strings.Repeat(" ", pad)
-	}
+	prefix := usageLinePrefix(label)
 	parts := make([]string, len(segs))
 	for i, s := range segs {
 		part := fmt.Sprintf("%s %s %3.0f%%",
@@ -520,6 +515,32 @@ func renderUsageSegs(w io.Writer, label string, segs []usageSeg, barW int) {
 		parts[i] = part
 	}
 	fmt.Fprintln(w, prefix+strings.Join(parts, "   "))
+}
+
+// usageLinePrefix builds a header usage line's dim label prefix: the label plus
+// one separator space, with any padding spaces the caller appended left outside
+// the dim escape so they don't leave a visible dim tail. An empty label yields
+// an empty prefix, which is what keeps a bare line byte-identical to the
+// pre-label layout.
+func usageLinePrefix(label string) string {
+	if label == "" {
+		return ""
+	}
+	core := strings.TrimRight(label, " ")
+	pad := len(label) - len(core)
+	return dim(core) + " " + strings.Repeat(" ", pad)
+}
+
+// usageExpiredText is the placeholder a known account whose snapshot token no
+// longer works renders instead of bars.
+const usageExpiredText = "auth expired"
+
+// renderUsageExpired writes one header line for an account with no usable
+// snapshot token: the same dim label prefix every other line gets, then a dim
+// "auth expired" where the bars would be. Unlike a live account with no data,
+// this line is never dropped — the account's existence is the point.
+func renderUsageExpired(w io.Writer, label string) {
+	fmt.Fprintln(w, usageLinePrefix(label)+dim(usageExpiredText))
 }
 
 // accountUsageLine is one resolved header account line: a usage snapshot with
@@ -533,7 +554,16 @@ type accountUsageLine struct {
 	// entry itself, or a remote sharing the local email. Only such a line may
 	// render bare (unlabeled) when it's the sole survivor — a lone foreign
 	// remote must keep its label or it masquerades as the local account.
+	// Always false for a known-account (pass 2) line: its numbers come from a
+	// credential snapshot some host stashed, not from that account's live
+	// session, so rendering it bare would let snapshot data pass as the local
+	// account's current state — the same masquerade this flag exists to stop.
 	mine bool
+	// expired marks a known account whose latest snapshot fetch failed. Such a
+	// line carries no info and renders as a dim "auth expired" placeholder
+	// instead of bars: it is deliberately never dropped, so the account's
+	// existence stays a visible reminder to claude-switch into it again.
+	expired bool
 }
 
 // accountLocalPart is the label for a known account: the part before "@"
@@ -560,7 +590,17 @@ func accountLocalPart(email string) string {
 // andy@avisoma.com) would otherwise render identical, indistinguishable
 // labels, so a final pass promotes any colliding known-account labels to the
 // full email.
-func dedupeAccounts(local AccountUsage, remotes []RemoteResult) []accountUsageLine {
+//
+// A second pass then appends the accounts no host is currently logged into: the
+// credential snapshots claude-switch left behind (localKnown, then each
+// remote's KnownAccounts, in config order). A snapshot entry is dropped when
+// pass 1 already produced a line for its email — a live reading always beats
+// any host's snapshot copy of the same account, which is what keeps account X
+// live on host B from being shadowed by host A's stale snapshot of X. The
+// survivors dedupe among themselves the same way (unknown-email entries key by
+// snapshot name instead), and an expired one keeps its line as a placeholder
+// rather than vanishing.
+func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes []RemoteResult) []accountUsageLine {
 	var lines []accountUsageLine
 	seen := make(map[string]bool)
 	add := func(account, host string, info *UsageInfo, isLocal bool) {
@@ -583,6 +623,38 @@ func dedupeAccounts(local AccountUsage, remotes []RemoteResult) []accountUsageLi
 	for _, r := range remotes {
 		if r.Usage != nil {
 			add(r.Usage.Account, r.Name, r.Usage.Info, false)
+		}
+	}
+	// Pass 2: known (snapshot-derived) accounts. knownSeen namespaces its keys
+	// so a snapshot name can never collide with an email key.
+	knownSeen := make(map[string]bool)
+	addKnown := func(k KnownAccountUsage) {
+		if !k.Expired && k.Info == nil {
+			return // nothing to show and no placeholder asked for
+		}
+		key := "name\x00" + k.Name
+		if k.Account != "" {
+			if seen[strings.ToLower(k.Account)] {
+				return // a live line already covers this account
+			}
+			key = "email\x00" + strings.ToLower(k.Account)
+		}
+		if knownSeen[key] {
+			return
+		}
+		knownSeen[key] = true
+		label := k.Name
+		if k.Account != "" {
+			label = accountLocalPart(k.Account)
+		}
+		lines = append(lines, accountUsageLine{label: label, email: k.Account, info: k.Info, expired: k.Expired})
+	}
+	for _, k := range localKnown {
+		addKnown(k)
+	}
+	for _, r := range remotes {
+		for _, k := range r.KnownAccounts {
+			addKnown(k)
 		}
 	}
 	labelCount := make(map[string]int)
@@ -625,16 +697,24 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 	type entry struct {
 		label string
 		segs  []usageSeg
+		// expired lines carry no segments and render as a dim placeholder; they
+		// take part in label-width alignment but in none of the bar/trailer
+		// sizing, which is all defined over segments.
+		expired bool
 	}
 	var entries []entry
 	codexPresent := len(codexAccounts) > 0
 
-	addClaude := func(label string, info *UsageInfo) {
-		if info == nil {
+	addClaude := func(label string, a accountUsageLine) {
+		if a.expired {
+			entries = append(entries, entry{label: label, expired: true})
 			return
 		}
-		if segs := claudeSegs(info); len(segs) > 0 {
-			entries = append(entries, entry{label, segs})
+		if a.info == nil {
+			return
+		}
+		if segs := claudeSegs(a.info); len(segs) > 0 {
+			entries = append(entries, entry{label: label, segs: segs})
 		}
 	}
 	addCodex := func(label string, info *CodexUsageInfo) {
@@ -642,20 +722,22 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 			return
 		}
 		if segs := codexSegs(info); len(segs) > 0 {
-			entries = append(entries, entry{label, segs})
+			entries = append(entries, entry{label: label, segs: segs})
 		}
 	}
 
-	// Anthropic block.
+	// Anthropic block. Only a live line may go bare — dedupeAccounts never marks
+	// a snapshot-derived line mine, so an unlabeled line always means "this
+	// machine's account, right now".
 	if len(accounts) == 1 && accounts[0].mine {
 		label := ""
 		if codexPresent {
 			label = "claude"
 		}
-		addClaude(label, accounts[0].info)
+		addClaude(label, accounts[0])
 	} else {
 		for _, a := range accounts {
-			addClaude(a.label, a.info)
+			addClaude(a.label, a)
 		}
 	}
 
@@ -710,19 +792,32 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 			}
 		}
 	}
-	// Drop the label column entirely when it's what's forcing bars below
-	// usageBarMin: a line with a label whose fixed width (at the smallest bar)
-	// still overflows cols is unreadable either way, so free the label's width
-	// for the bars/percent/trailer instead of clipping. Checked against the
-	// padded labelW (every entry pays for the widest label) since that's the
-	// width writeUsageHeader actually renders.
+	// Drop the label column when it's what's forcing bars below usageBarMin: a
+	// line with a label whose fixed width (at the smallest bar) still overflows
+	// cols is unreadable either way, so free the label's width for the
+	// bars/percent/trailer instead of clipping. Checked against the padded labelW
+	// (every entry pays for the widest label) since that's the width
+	// writeUsageHeader actually renders.
+	//
+	// Placeholder lines (no segs) keep their label through this: they have no
+	// bars to make room for, and a bare "auth expired" names no account — two
+	// expired accounts would render as two identical, unattributable lines,
+	// which defeats the point of keeping the line at all. So a shed leaves them
+	// wider than the segmented lines by label+separator, deliberately: on a
+	// terminal this narrow, knowing *whose* account expired is worth more than
+	// the columns it costs.
 	if cols > 0 && labelW > 0 {
 		pad := strings.Repeat(" ", labelW)
 		for _, e := range entries {
+			if len(e.segs) == 0 {
+				continue // placeholder line: no bars to make room for
+			}
 			if fixed := usageLineFixedWidth(pad, e.segs); fixed+len(e.segs)*usageBarMin > cols {
 				labelW = 0
 				for i := range entries {
-					entries[i].label = ""
+					if len(entries[i].segs) > 0 {
+						entries[i].label = ""
+					}
 				}
 				break
 			}
@@ -734,12 +829,22 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 	padded := make([]string, len(entries))
 	barW := usageBarMax
 	for i, e := range entries {
-		padded[i] = e.label + strings.Repeat(" ", labelW-utf8.RuneCountInString(e.label))
+		// A placeholder that kept its label through a shed is wider than labelW
+		// (which the shed zeroed), so the pad can go negative — it just gets none.
+		pad := labelW - utf8.RuneCountInString(e.label)
+		if pad < 0 {
+			pad = 0
+		}
+		padded[i] = e.label + strings.Repeat(" ", pad)
 		if b := lineBarW(padded[i], e.segs, cols); b < barW {
 			barW = b
 		}
 	}
 	for i, e := range entries {
+		if e.expired {
+			renderUsageExpired(w, padded[i])
+			continue
+		}
 		renderUsageSegs(w, padded[i], e.segs, barW)
 	}
 }
@@ -842,6 +947,11 @@ func dedupeCodexAccounts(local CodexAccountUsage, remotes []RemoteResult) []code
 type LocalUsage struct {
 	Claude *AccountUsage
 	Codex  *CodexAccountUsage
+	// KnownAccounts is this machine's own claude-switch credential snapshots'
+	// usage — every account it knows about except the one currently logged in
+	// (that one is Claude). Nil before the first known-accounts poll lands, or
+	// on a machine with no snapshots.
+	KnownAccounts []KnownAccountUsage
 }
 
 // formatTokens renders a context-token count compactly: 0 → "-", under 1k as
@@ -1066,8 +1176,14 @@ func dirDisplay(cwd, home, gitRoot string) string {
 // section is one rendering block. host is the stable selection/action key
 // ("" for local, configured alias for remote); name is the visible heading.
 type section struct {
-	name      string
-	host      string
+	name string
+	host string
+	// account is the email of the Anthropic account logged in on this host, ""
+	// when unknown (identity unreadable, or an older server that doesn't report
+	// usage). renderHostHeading appends it dimmed after LOAD; "" appends nothing
+	// rather than a placeholder, matching how dedupeAccounts treats an unknown
+	// account today.
+	account   string
 	hostUsage HostUsage
 	rows      []Session
 	error     string
@@ -1110,18 +1226,29 @@ func filterRemoteResults(remotes []RemoteResult, gv groupView) []RemoteResult {
 	return out
 }
 
-func buildSections(local LocalHost, remotes []RemoteResult, gv groupView) []section {
+// buildSections turns the local host and every remote result into rendering
+// blocks. localAccount is this machine's logged-in account email (see
+// section.account); each remote's comes from the usage snapshot that host
+// already reports, so the heading label costs no extra fetch and no protocol
+// change.
+func buildSections(local LocalHost, remotes []RemoteResult, gv groupView, localAccount string) []section {
 	out := make([]section, 0, 1+len(remotes))
 	out = append(out, section{
 		name:      local.Name,
 		host:      "",
+		account:   localAccount,
 		hostUsage: local.HostUsage,
 		rows:      filterSessionRows(local.Sessions, gv),
 	})
 	for _, r := range remotes {
+		account := ""
+		if r.Usage != nil {
+			account = r.Usage.Account
+		}
 		out = append(out, section{
 			name:      r.Name,
 			host:      r.Name,
+			account:   account,
 			hostUsage: r.HostUsage,
 			rows:      filterSessionRows(r.Sessions, gv),
 			error:     r.Error,
@@ -1243,17 +1370,25 @@ func formatHostLoad(load *LoadAverage, cores int) string {
 
 // renderHostHeading prints a section's host heading: the bold host name,
 // padded to nameWidth (see sectionNameWidth), followed by its whole-host CPU,
-// memory, and load-average usage. Used for the local section and every remote
+// memory, and load-average usage, and finally the host's logged-in account
+// email, dimmed, when known. Used for the local section and every remote
 // section across all three views so the layout stays uniform. Padding is
 // applied to the plain name before bolding — bolding first would let fmt's
-// width count escape bytes and break the alignment.
+// width count escape bytes and break the alignment. An unknown account appends
+// nothing at all (no placeholder, no dash), so a heading without one stays
+// byte-identical to the layout from before the label existed.
 func renderHostHeading(w io.Writer, sec section, nameWidth int) {
 	paddedName := fmt.Sprintf("%-*s", nameWidth, sec.name)
-	fmt.Fprintf(w, "  %s  CPU %s  MEM %s  LOAD %s\n",
+	account := ""
+	if sec.account != "" {
+		account = "  " + dim(sec.account)
+	}
+	fmt.Fprintf(w, "  %s  CPU %s  MEM %s  LOAD %s%s\n",
 		bold(paddedName),
 		formatHostBar(sec.hostUsage.CPUPercent),
 		formatHostBar(sec.hostUsage.MemoryPercent),
-		formatHostLoad(sec.hostUsage.Load, sec.hostUsage.NumCPU))
+		formatHostLoad(sec.hostUsage.Load, sec.hostUsage.NumCPU),
+		account)
 }
 
 // plural renders a count with its word, pluralizing the word for counts other
@@ -1365,7 +1500,22 @@ func (w *frameWriter) record(targetID string, openable bool) {
 // RenderAll wraps it for callers that only want the text. Arguments mirror
 // RenderAll (see its doc for cols/step/sortMode semantics).
 func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, sel string, localUsage *LocalUsage, cols, step int, sortMode string, gv groupView) tableFrame {
-	sections := buildSections(local, remotes, gv)
+	// Resolve this machine's own account usage before the sections are built: the
+	// local heading's account label comes from it, as does the local half of the
+	// header's account dedupe.
+	var localAU AccountUsage
+	var localCodex CodexAccountUsage
+	var localKnown []KnownAccountUsage
+	if localUsage != nil {
+		if localUsage.Claude != nil {
+			localAU = *localUsage.Claude
+		}
+		if localUsage.Codex != nil {
+			localCodex = *localUsage.Codex
+		}
+		localKnown = localUsage.KnownAccounts
+	}
+	sections := buildSections(local, remotes, gv, localAU.Account)
 	// Reserve each first-column slot only when at least one visible (post-filter)
 	// session needs it, so a frame with none of a given indicator stays
 	// byte-identical to the layout from before that slot existed.
@@ -1379,17 +1529,7 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	// Pair each provider's local snapshot with every remote's, dedupe by account,
 	// and carry the resolved lines through the header so each distinct account
 	// shows once. The two providers dedupe independently.
-	var localAU AccountUsage
-	var localCodex CodexAccountUsage
-	if localUsage != nil {
-		if localUsage.Claude != nil {
-			localAU = *localUsage.Claude
-		}
-		if localUsage.Codex != nil {
-			localCodex = *localUsage.Codex
-		}
-	}
-	accounts := dedupeAccounts(localAU, remotes)
+	accounts := dedupeAccounts(localAU, localKnown, remotes)
 	codexAccounts := dedupeCodexAccounts(localCodex, remotes)
 	w := &frameWriter{}
 	var overflowing bool

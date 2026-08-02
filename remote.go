@@ -25,8 +25,21 @@ type RemoteResult struct {
 	// CodexUsage is the host's OpenAI Codex account rate-limit snapshot; nil from
 	// older servers, from a host with no Codex auth, or before its first poll.
 	CodexUsage *CodexAccountUsage
-	Error      string // "" on success, short reason otherwise
-	Loading    bool   // true for a placeholder slot whose first fetch hasn't returned yet
+	// KnownAccounts lists usage for every other account this host holds a
+	// claude-switch credential snapshot for (excludes whichever account is
+	// currently live — that's still reported via Usage). Nil from older servers
+	// or hosts with no snapshots.
+	KnownAccounts []KnownAccountUsage
+	// ActiveSnapshotName is the snapshot name (e.g. "avisoma") whose
+	// account.json email matches this host's live Usage.Account, best-effort —
+	// "" when unresolved (no snapshot matches, the live email is unknown, or an
+	// older server). This is read-only reporting, purely for display/picker
+	// purposes; it is what a later account-switching feature would use to mark
+	// "current" in a picker without every consumer re-deriving the same
+	// email→name match.
+	ActiveSnapshotName string
+	Error              string // "" on success, short reason otherwise
+	Loading            bool   // true for a placeholder slot whose first fetch hasn't returned yet
 	// Stale marks a result whose Sessions/HostUsage/Usage/CodexUsage are carried
 	// over from the last successful fetch because the current one failed (see
 	// Error). Only ever set alongside a non-empty Error.
@@ -56,6 +69,11 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 		HostUsage  HostUsage          `json:"hostUsage"`
 		Usage      *AccountUsage      `json:"usage"`       // nil from older servers
 		CodexUsage *CodexAccountUsage `json:"codex_usage"` // nil from older servers
+		// Both absent from older servers (and from hosts with no snapshots),
+		// decoding to nil/"" — the client then shows that host's live account
+		// only, exactly as it did before this field existed.
+		KnownAccounts      []KnownAccountUsage `json:"knownAccounts"`
+		ActiveSnapshotName string              `json:"activeSnapshotName"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return RemoteResult{Name: srv.Name, Error: "bad response: " + shortErr(err)}
@@ -65,7 +83,15 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 	for i := range body.Sessions {
 		body.Sessions[i].Host = srv.Name
 	}
-	return RemoteResult{Name: srv.Name, Sessions: body.Sessions, HostUsage: body.HostUsage, Usage: body.Usage, CodexUsage: body.CodexUsage}
+	return RemoteResult{
+		Name:               srv.Name,
+		Sessions:           body.Sessions,
+		HostUsage:          body.HostUsage,
+		Usage:              body.Usage,
+		CodexUsage:         body.CodexUsage,
+		KnownAccounts:      body.KnownAccounts,
+		ActiveSnapshotName: body.ActiveSnapshotName,
+	}
 }
 
 // dropSelfServer filters out a configured server entry that points back at
@@ -272,10 +298,10 @@ func (h *RemoteHub) fetchAll() {
 // mergeRemoteResult implements the non-destructive fetch: on failure (e.g. a
 // flaky connection), the session list stays on screen instead of blanking,
 // marked Stale, while the error message is still surfaced. Only the session
-// list carries forward — Usage/CodexUsage feed the header rate-limit bars
-// (see dedupeAccounts), which have no "stale" rendering of their own, so a
-// frozen reading there would silently pass as live; they're left to clear as
-// before. hasData excludes a slot that never had a successful fetch (still
+// list carries forward — Usage/CodexUsage/KnownAccounts feed the header
+// rate-limit bars (see dedupeAccounts), which have no "stale" rendering of
+// their own, so a frozen reading there would silently pass as live; they're
+// left to clear as before. hasData excludes a slot that never had a successful fetch (still
 // Loading, or errored with nothing yet to carry forward).
 func mergeRemoteResult(r, prior RemoteResult, hadPrior bool) RemoteResult {
 	if r.Error == "" {
