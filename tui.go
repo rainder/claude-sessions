@@ -701,15 +701,15 @@ func RunTUI(interval time.Duration) error {
 				SaveViewMode(viewMode)
 				render()
 			case "s", "S":
-				delta := 1 // s cycles forward, shift-s backward
-				if k == "S" {
-					delta = -1
+				screen.Invalidate()
+				if picked, ok := pickSortMode(sortMode, modalWakes); ok && picked != sortMode {
+					sortMode = picked
+					SaveSortMode(sortMode)
+					toast = "sort: " + sortDesc(sortMode)
+					toastUntil = time.Now().Add(4 * time.Second)
+					refresh(false)
 				}
-				sortMode = cycleSortMode(sortMode, delta)
-				SaveSortMode(sortMode)
-				toast = "sort: " + sortDesc(sortMode)
-				toastUntil = time.Now().Add(4 * time.Second)
-				refresh(false)
+				screen.Invalidate()
 				render()
 			case "r", "R":
 				screen.Invalidate()
@@ -1103,7 +1103,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    h then 1..9  hide group(s) (repeat to add/remove · last one shows all)")
 	fmt.Fprintln(&b, "    d            hide/show disabled sessions")
 	fmt.Fprintln(&b, "    /            filter rows by text (type to narrow · Enter commits · Esc clears)")
-	fmt.Fprintln(&b, "    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
+	fmt.Fprintln(&b, "    s / S        open sort-by dialog (↑/↓ select · ⏎ confirm · esc cancel)")
 	fmt.Fprintln(&b, "                 current sort: "+sortMode)
 	fmt.Fprintln(&b, "    q / Ctrl-C   quit")
 	fmt.Fprintln(&b, "    ?            this help")
