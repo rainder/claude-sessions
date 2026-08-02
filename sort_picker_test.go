@@ -7,10 +7,8 @@ import (
 
 // TestSortPickerStateHandle is the picker's key table: navigation wraps,
 // Enter confirms, Esc/q/Ctrl-C cancel, and anything else is ignored rather
-// than treated as a dismissal. Mirrors TestAccountPickerStateHandle, minus
-// the empty-list cases account_picker_test.go needs — sortModeOrder is never
-// empty — while still keeping the rows==0 guard itself (defensive, in case a
-// caller ever zero-constructs the state).
+// than treated as a dismissal. Mirrors TestAccountPickerStateHandle's key
+// contract.
 func TestSortPickerStateHandle(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -58,14 +56,39 @@ func TestRenderSortPicker(t *testing.T) {
 			t.Fatalf("output missing label for %q:\n%s", mode, out)
 		}
 	}
-	for i, line := range strings.Split(out, "\n") {
-		_ = i
+	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, sortDesc("created")) && !strings.Contains(line, sortPickerActiveGlyph) {
 			t.Fatalf("current mode row is not marked: %q", line)
 		}
 		if strings.Contains(line, sortDesc("status")) && strings.Contains(line, sortPickerActiveGlyph) {
 			t.Fatalf("non-current mode row is marked: %q", line)
 		}
+	}
+}
+
+// TestRenderSortPickerHighlightsSelection proves sel, not current, drives
+// which row highlightSelectedRow marks — a renderSortPicker that ignored sel
+// entirely would still pass TestRenderSortPicker above.
+func TestRenderSortPickerHighlightsSelection(t *testing.T) {
+	highlightedIndex := func(out string) int {
+		for i, mode := range sortModeOrder {
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, sortDesc(mode)) && strings.Contains(line, ansiSelectedBG) {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+
+	out0 := renderSortPicker("created", 0, 80, 24)
+	if got := highlightedIndex(out0); got != 0 {
+		t.Fatalf("sel=0: highlighted row index = %d, want 0\n%s", got, out0)
+	}
+
+	out2 := renderSortPicker("created", 2, 80, 24)
+	if got := highlightedIndex(out2); got != 2 {
+		t.Fatalf("sel=2: highlighted row index = %d, want 2\n%s", got, out2)
 	}
 }
 
