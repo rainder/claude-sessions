@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestSortPickerStateHandle is the picker's key table: navigation wraps,
 // Enter confirms, Esc/q/Ctrl-C cancel, and anything else is ignored rather
@@ -39,5 +42,39 @@ func TestSortPickerStateHandle(t *testing.T) {
 				t.Fatalf("sel = %d, want %d", state.sel, tt.wantSel)
 			}
 		})
+	}
+}
+
+// TestRenderSortPicker proves every mode's label appears and the marker sits
+// on the row matching `current`, not necessarily the row matching `sel` —
+// the cursor can move away from the live mode before Enter is pressed.
+func TestRenderSortPicker(t *testing.T) {
+	out := renderSortPicker("created", 0, 80, 24)
+	if !strings.Contains(out, "sort by") {
+		t.Fatalf("title missing:\n%s", out)
+	}
+	for _, mode := range sortModeOrder {
+		if !strings.Contains(out, sortDesc(mode)) {
+			t.Fatalf("output missing label for %q:\n%s", mode, out)
+		}
+	}
+	for i, line := range strings.Split(out, "\n") {
+		_ = i
+		if strings.Contains(line, sortDesc("created")) && !strings.Contains(line, sortPickerActiveGlyph) {
+			t.Fatalf("current mode row is not marked: %q", line)
+		}
+		if strings.Contains(line, sortDesc("status")) && strings.Contains(line, sortPickerActiveGlyph) {
+			t.Fatalf("non-current mode row is marked: %q", line)
+		}
+	}
+}
+
+// TestRenderSortPickerUnknownSize mirrors renderConfirmOverlay's fallback: an
+// unknown terminal size emits the box unpositioned rather than panicking on
+// negative padding.
+func TestRenderSortPickerUnknownSize(t *testing.T) {
+	out := renderSortPicker("dir", 0, 0, 0)
+	if !strings.HasPrefix(out, confirmBoxTL) {
+		t.Fatalf("want an unpositioned box, got:\n%s", out)
 	}
 }
