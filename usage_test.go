@@ -271,3 +271,66 @@ func TestParseOAuthCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		header string
+		want   time.Time
+	}{
+		{"delta-seconds", "90", now.Add(90 * time.Second)},
+		{"delta-seconds with surrounding space", "  30 ", now.Add(30 * time.Second)},
+		// Both are "retry immediately", which is no opinion at all — the caller's
+		// own schedule decides, exactly as if the header had been absent.
+		{"zero seconds", "0", time.Time{}},
+		{"a negative delta", "-5", time.Time{}},
+		{"an RFC 1123 date", "Sun, 02 Aug 2026 12:05:00 GMT", now.Add(5 * time.Minute)},
+		{"an ANSI C date", "Sun Aug  2 12:05:00 2026", now.Add(5 * time.Minute)},
+		{"absent", "", time.Time{}},
+		{"garbage", "soon-ish", time.Time{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := parseRetryAfter(c.header, now)
+			if !got.Equal(c.want) {
+				t.Fatalf("parseRetryAfter(%q) = %v, want %v", c.header, got, c.want)
+			}
+		})
+	}
+}
+
+func TestUsageBackoffUntil(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		streak  int
+		retryAt time.Time
+		want    time.Duration // wait from now
+	}{
+		{"the first throttle costs nothing of its own", 1, time.Time{}, 0},
+		// An explicit Retry-After is the endpoint stating a wait, and it is honoured
+		// from the first 429 — the schedule only declines to invent one.
+		{"but a first throttle still honours an explicit Retry-After", 1, now.Add(3 * time.Minute), 3 * time.Minute},
+		{"a zero streak is the same", 0, time.Time{}, 0},
+		{"the second consecutive one waits", 2, time.Time{}, usageBackoffSecond},
+		{"the third caps the schedule", 3, time.Time{}, usageBackoffMax},
+		{"and every one after it", 9, time.Time{}, usageBackoffMax},
+		// The endpoint's own opinion may only lengthen the wait: the schedule
+		// exists because that opinion is usually absent or optimistic.
+		{"a longer Retry-After wins", 2, now.Add(6 * time.Minute), 6 * time.Minute},
+		{"a shorter one does not", 3, now.Add(time.Minute), usageBackoffMax},
+		{"a past one does not", 2, now.Add(-time.Hour), usageBackoffSecond},
+		// A bogus header must not be able to park an account for the life of the
+		// process.
+		{"an absurd Retry-After is capped", 2, now.Add(9 * time.Hour), usageBackoffCeiling},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := usageBackoffUntil(now, c.streak, c.retryAt)
+			if want := now.Add(c.want); !got.Equal(want) {
+				t.Fatalf("usageBackoffUntil(streak %d) = +%v, want +%v", c.streak, got.Sub(now), c.want)
+			}
+		})
+	}
+}

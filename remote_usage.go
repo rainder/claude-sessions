@@ -43,14 +43,45 @@ func NewRemoteUsageHub(ignore func() []string) *RemoteUsageHub {
 	return h
 }
 
+// remoteUsagePhaseOffset separates this hub's recurring ticks from
+// KnownAccountsHub's. Both are started within a few lines of each other in the
+// same client process (tui.go), both run at usageRefreshInterval, and a remote
+// host has no ticker of its own — its /usage fetches happen only when this hub
+// asks. So without an offset, this machine's own fetch of an account and every
+// remote's fetch of that same account land in one tight window every two
+// minutes, which is exactly the shape that turns a shared account's per-token
+// budget into mutual 429s. Half a minute is enough to unstack them and far too
+// small for anyone to see in the header.
+const remoteUsagePhaseOffset = 30 * time.Second
+
+// run polls on usageRefreshInterval, phase-shifted by remoteUsagePhaseOffset.
+//
+// The offset applies to the recurring ticker only: NewRemoteUsageHub's kick
+// still fetches immediately, so the first paint is not delayed. Until the
+// one-shot timer fires, tick is nil — a receive on a nil channel blocks
+// forever, which is precisely "no ticker yet" — and stop and kick stay live
+// throughout, so Pause/Resume/Shutdown are never held up by the offset window.
 func (h *RemoteUsageHub) run() {
-	t := time.NewTicker(usageRefreshInterval)
-	defer t.Stop()
+	offset := time.NewTimer(remoteUsagePhaseOffset)
+	defer offset.Stop()
+	var t *time.Ticker
+	var tick <-chan time.Time
+	defer func() {
+		if t != nil {
+			t.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-h.stop:
 			return
-		case <-t.C:
+		case <-offset.C:
+			// The offset elapsing is not itself a fetch: it only starts the clock
+			// the first real tick runs off, one full interval from here.
+			t = time.NewTicker(usageRefreshInterval)
+			tick = t.C
+			continue
+		case <-tick:
 		case <-h.kick:
 		}
 		if h.paused.Load() {

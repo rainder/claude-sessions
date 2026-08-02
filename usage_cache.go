@@ -47,10 +47,31 @@ var errUsageFetchTimedOut = errors.New("usage fetch timed out")
 // here the opposite is wanted. The usage endpoint 429s readily (every Claude
 // Code session shares the account's per-token budget — see usageRetryMin), and
 // a burst of clients arriving during a throttle would otherwise each re-trigger
-// a fetch for the same account and deepen it. A brief negative-cache window is
-// the request-driven equivalent of the poller's backoff, without reimplementing
-// exponential backoff for a model that has no ticker to back off from.
+// a fetch for the same account and deepen it.
+//
+// It is one of two layers, and they absorb different shapes of the same
+// problem. This one is about *concurrency*: several clients (or several
+// accounts' rows in one client) arriving inside the same few seconds collapse
+// onto one answer. The failures map below is about *time*: a client polling
+// this endpoint every usageRefreshInterval would otherwise walk past this window
+// on every single tick, so an account the endpoint keeps throttling costs one
+// failed round trip per tick forever. Neither replaces the other.
 const usageCacheFailTTL = 15 * time.Second
+
+// errUsageBackoffActive is returned instead of running a fetch for an account
+// whose consecutive 429s have earned it a wait (see usageBackoffUntil). It is
+// not a failure of this request — nothing was attempted — but the caller wants
+// a classification for the row either way, and classifyUsageErr maps it to the
+// same "rate limited" tag the skipped round trip would almost certainly have
+// produced.
+var errUsageBackoffActive = errors.New("usage fetch backing off after repeated 429s")
+
+// usageBackoffForget bounds how long a failure record outlives its own
+// deadline. The map is keyed by account email, so it is naturally as small as
+// the host's snapshot count; this exists so an account nobody asks about any
+// more (renamed snapshot, host dropped from servers.yaml) stops occupying an
+// entry, not to enforce a bound.
+const usageBackoffForget = 20 * time.Minute
 
 // errNoUsageResult stands in for a fetch that returned neither a snapshot nor an
 // error. Nothing in production does that — but a panic inside fetch publishes
@@ -94,6 +115,12 @@ type usageFlight struct {
 type usageCache struct {
 	mu      sync.Mutex
 	entries map[string]*usageFlight
+	// failures counts each account's consecutive rate-limited fetches and holds
+	// the deadline before which the next one is not attempted at all. It is
+	// deliberately not folded into entries: a flight is ephemeral (one per fetch
+	// attempt, replaced or pruned on its own TTL), which is the wrong lifetime
+	// for a streak that has to survive many of them.
+	failures map[string]usageBackoff
 	// now is injectable so TTL expiry is testable without sleeping.
 	now func() time.Time
 	// fetchTimeout overrides usageFetchTimeout; zero means the default. Injectable
@@ -148,6 +175,14 @@ func (c *usageCache) GetOrFetch(email string, fetch func() (*UsageInfo, error)) 
 		}
 		delete(c.entries, key)
 	}
+	// Only a caller that would otherwise start a fetch is turned away — a joiner
+	// above has already returned, and so has a caller served from a live entry.
+	// No flight is claimed and no streak moves: this request did not attempt
+	// anything, so it must not count as an attempt either.
+	if b, ok := c.failures[key]; ok && !b.due(c.timeNow()) {
+		c.mu.Unlock()
+		return nil, errUsageBackoffActive
+	}
 	c.prune()
 	if c.entries == nil {
 		c.entries = make(map[string]*usageFlight)
@@ -166,7 +201,34 @@ func (c *usageCache) GetOrFetch(email string, fetch func() (*UsageInfo, error)) 
 	if err == nil && info == nil {
 		err = errNoUsageResult
 	}
+	// Sequenced before the deferred finish rather than folded into it, and
+	// locking on its own: finish takes c.mu, and a nested acquisition of a
+	// sync.Mutex deadlocks.
+	c.record(key, err)
 	return info, err
+}
+
+// record advances or clears this account's consecutive-429 state after a fetch
+// that actually ran. Only the goroutine that owned the flight reaches here —
+// joiners return before it — so a burst of clients arriving on one throttled
+// account moves the streak by one, not by one per client.
+func (c *usageCache) record(key string, err error) {
+	rateLimited := false
+	if err != nil {
+		if _, reason := classifyUsageErr(err); reason == usageRateLimitedReason {
+			rateLimited = true
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !rateLimited {
+		delete(c.failures, key)
+		return
+	}
+	if c.failures == nil {
+		c.failures = make(map[string]usageBackoff)
+	}
+	c.failures[key] = c.failures[key].next(c.timeNow(), usageRetryAt(err))
 }
 
 // runBounded runs fetch and returns its result, or errUsageFetchTimedOut if it
@@ -215,6 +277,14 @@ func (c *usageCache) prune() {
 	for key, flight := range c.entries {
 		if c.expired(flight, now) {
 			delete(c.entries, key)
+		}
+	}
+	// Failure records are swept on the same schedule, well past their own
+	// deadline: one whose wait has merely elapsed is still wanted, since it is
+	// what makes the next 429 the third rather than the first.
+	for key, b := range c.failures {
+		if now.Sub(b.nextAttempt) > usageBackoffForget {
+			delete(c.failures, key)
 		}
 	}
 }

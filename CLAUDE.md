@@ -326,7 +326,7 @@ live token in place while the snapshot keeps whatever was stashed at switch
 time, so the snapshot can look expired while the session is healthy) — it is
 skipped by email equality against `loadAccountEmail`. A per-account failure is
 never an error: it becomes that entry's own classification, so
-`fetchAllKnownAccounts` always returns a full slice and the poller's
+`allKnownAccounts` always returns a full slice and the poller's
 whole-batch backoff only ever fires on a host-level problem, never because one
 account is flaky. And only entries with numbers are cached, so a restart can
 seed a recently-good account but never resurrects an expired one.
@@ -458,7 +458,9 @@ claim/join/publish shape), wrapped in a single `GetOrFetch` so `begin`/`finish`
 can't be misused. It differs from `spawnDedupe` in two ways. Failures are
 *kept*, for a short `usageCacheFailTTL` (15s) rather than forgotten — nothing
 was created, so there is nothing making a retry unsafe, only an endpoint to stop
-hammering when a burst of clients arrives during a throttle; success keeps
+hammering when a burst of clients arrives during a throttle (that window absorbs
+*concurrency*; the consecutive-429 backoff below absorbs *time*, and neither
+replaces the other); success keeps
 `usageCacheTTL` (100s, deliberately a little under `usageRefreshInterval` — a
 cache entry's clock starts when its fetch *completes*, strictly after the poll
 tick that triggered it, so a TTL exactly equal to the poll interval would mean
@@ -492,6 +494,40 @@ also means two differently-named snapshots sharing one email share one fetch
 and outcome — accepted, since two snapshots for the identical account is an
 unusual setup and the alternative would refetch the same account once per name.
 
+**Consecutive-429 backoff.** One Anthropic account is routinely held as a
+credential snapshot on *two* hosts, and each fetches it on its own
+`usageRefreshInterval` tick — `localFreshAccountEmails`' `ignore` list only
+suppresses the remote's copy once the local fetch is already **fresh**, which is
+exactly what a chronically throttled account never becomes. So both sides kept
+paying a failed round trip every 2 minutes, forever, against the endpoint doing
+the throttling. Both fetch paths now count consecutive `rate limited` outcomes
+per account and skip the fetch outright while a wait is armed: the first 429
+imposes no wait of its own (most heal within one tick — only an explicit
+`Retry-After` can delay it), the second waits `usageBackoffSecond` (4min), the
+third and beyond `usageBackoffMax` (8min, the cap). A 429's `Retry-After`
+(`parseRetryAfter`, either RFC 9110 form) may only *lengthen* that wait, bounded
+by `usageBackoffCeiling` (15min) so a bogus header can't park an account for the
+life of the process. Any other outcome — numbers, `Expired`, a different failure,
+or the snapshot turning out to be the live account — clears the streak
+(`usageBackoffUntil` / `usageBackoff` in usage.go hold the shared arithmetic;
+the two schedulers hold their own state).
+
+Client-side it lives in `newKnownAccountsFetcher`'s closure beside `last`, keyed
+by snapshot name and rebuilt from `snapshotAccountNames()` each pass for the same
+reason `last` is. A backed-off account is **not** filtered out of the batch: it
+still goes through `knownAccountUsage` with a synthesized 429 in place of the
+round trip, so one place keeps deciding whether that name stands for the live
+account (which is what resolves `ActiveName`) and whether `prev`'s numbers may be
+carried forward — the entry renders as the same stale-with-`rate limited` line a
+real throttle produces. Both maps are read and written only in the serial
+closure, never inside the goroutines `allKnownAccounts` spawns. Server-side it is
+`usageCache.failures`, keyed by email and deliberately separate from `entries`
+(a flight is one attempt; a streak outlives many), swept by `prune` after
+`usageBackoffForget`. Only the goroutine that owned the flight records an
+outcome, so a burst of joiners is one attempt rather than one per caller; a
+turned-away caller gets `errUsageBackoffActive`, which `classifyUsageErr` maps to
+the same `rate limited` tag the skipped round trip would have produced.
+
 On the client, `FetchRemote` no longer decodes the three account fields at all,
 even from an older server that still sends them — two writers for one field
 would make the winner depend on poll ordering. `RemoteUsageHub`
@@ -501,7 +537,15 @@ would make the winner depend on poll ordering. `RemoteUsageHub`
 are written client-side. `render.go` needed no changes — the field shape
 didn't move, only its source. The hub is `RemoteHub`'s smaller sibling minus
 the wake pipe (a percentage doesn't need an instant repaint; the 2s render
-tick suffices) and replaces its whole result set per pass rather than
+tick suffices). Its recurring ticker is phase-shifted by
+`remoteUsagePhaseOffset` (30s): a remote host has no ticker of its own, so
+without the shift this machine's own fetch of a shared account and every
+remote's fetch of that same account land in one tight window every 2 minutes —
+the shape that turns a shared per-token budget into mutual 429s. The offset
+applies to the ticker only; `NewRemoteUsageHub`'s initial kick still fetches
+immediately, and `stop`/`kick` stay live through the offset window, so
+Pause/Resume/Shutdown are never held up by it. The hub replaces its whole
+result set per pass rather than
 streaming per host, so a failed host's numbers *clear* instead of freezing —
 the same reasoning `mergeRemoteResult` documents. The `stale` marker does not
 change that: it belongs to `KnownAccountsHub`'s per-account carry-forward, and
