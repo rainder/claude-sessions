@@ -178,7 +178,11 @@ func localFreshAccountEmails(live *AccountUsage, known []KnownAccountUsage) []st
 		add(live.Account)
 	}
 	for _, k := range known {
-		if k.Expired || k.Info == nil {
+		// Stale counts as "cannot vouch for it", exactly like expired: carried-
+		// forward numbers are this machine's memory of an account it currently
+		// cannot reach, and telling every remote to skip it would spread one
+		// local blip everywhere instead of letting a healthy host answer.
+		if k.Expired || k.Stale || k.Info == nil {
 			continue
 		}
 		add(k.Account)

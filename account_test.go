@@ -31,6 +31,10 @@ import (
 func TestMain(m *testing.M) {
 	keychainRead = func() ([]byte, error) { panic("test reached the real Keychain (read)") }
 	keychainWrite = func([]byte) error { panic("test reached the real Keychain (write)") }
+	// Same fail-closed rule for the usage endpoint: a test that reaches the
+	// poller's HTTP leg without swapFetch would spend the developer's own token
+	// on a real request, so the default has to be loud rather than plausible.
+	usageInfoFetch = func(string) (*UsageInfo, error) { panic("test reached the real usage endpoint") }
 	os.Exit(m.Run())
 }
 

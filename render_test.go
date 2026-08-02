@@ -590,7 +590,7 @@ func TestDedupeAccountsKnownAccounts(t *testing.T) {
 			t.Fatalf("labels = %v, want trecs + one orphan", labels(got))
 		}
 		for _, l := range got {
-			if !l.expired || l.info != nil {
+			if l.placeholder != usageExpiredText || l.info != nil {
 				t.Fatalf("line %q = %#v, want an expired placeholder", l.label, l)
 			}
 		}
@@ -599,9 +599,43 @@ func TestDedupeAccountsKnownAccounts(t *testing.T) {
 		}
 	})
 
-	t.Run("a snapshot entry with neither info nor expired is dropped", func(t *testing.T) {
-		// Malformed input must not claim the dedupe key and silence a later good
-		// entry for the same account.
+	t.Run("a transient failure gets its own placeholder, not auth expired", func(t *testing.T) {
+		// The whole point of the split: a throttle must not read as a dead
+		// credential, or the user goes off to re-login over nothing.
+		localKnown := []KnownAccountUsage{
+			{Name: "trecs", Account: "andy@trecs.aero", Reason: "rate limited"},
+			{Name: "spare", Account: "andy@spare.dev", Reason: "unreachable"},
+		}
+		got := dedupeAccounts(AccountUsage{}, localKnown, nil)
+		if len(got) != 2 {
+			t.Fatalf("labels = %v, want both accounts kept", labels(got))
+		}
+		if got[0].placeholder != "rate limited" || got[1].placeholder != "unreachable" {
+			t.Fatalf("placeholders = %q/%q, want each failure's own reason", got[0].placeholder, got[1].placeholder)
+		}
+	})
+
+	t.Run("a stale entry keeps its numbers and is marked", func(t *testing.T) {
+		localKnown := []KnownAccountUsage{{
+			Name: "trecs", Account: "andy@trecs.aero", Info: info(), Stale: true, Reason: "rate limited",
+		}}
+		got := dedupeAccounts(AccountUsage{}, localKnown, nil)
+		if len(got) != 1 || got[0].info == nil {
+			t.Fatalf("got %#v, want the carried-forward numbers", got)
+		}
+		if !got[0].stale {
+			t.Error("stale numbers must be marked, or they pass as live")
+		}
+		if got[0].placeholder != "" {
+			t.Errorf("placeholder = %q, want bars instead", got[0].placeholder)
+		}
+	})
+
+	t.Run("an entry with no info, no expiry and no reason is dropped", func(t *testing.T) {
+		// This is the ignored account: /usage reports every account it was told
+		// to skip with bare identity and no numbers, so the Ctrl+W picker keeps
+		// it as a switch target. It must contribute no header line — and must
+		// not claim the dedupe key and silence a later good entry either.
 		localKnown := []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero"}}
 		remotes := []RemoteResult{{Name: "pi", KnownAccounts: []KnownAccountUsage{
 			{Name: "trecs", Account: "andy@trecs.aero", Info: info()},
@@ -609,6 +643,11 @@ func TestDedupeAccountsKnownAccounts(t *testing.T) {
 		got := dedupeAccounts(AccountUsage{}, localKnown, remotes)
 		if len(got) != 1 || got[0].info == nil {
 			t.Fatalf("got %#v, want the one usable snapshot line", got)
+		}
+
+		// On its own it produces nothing at all, rather than a blank placeholder.
+		if got := dedupeAccounts(AccountUsage{}, localKnown, nil); len(got) != 0 {
+			t.Fatalf("got %#v, want no line for an ignored account", got)
 		}
 	})
 
@@ -634,7 +673,7 @@ func TestDedupeAccountsKnownAccounts(t *testing.T) {
 func TestWriteUsageHeaderRendersExpiredPlaceholder(t *testing.T) {
 	accounts := []accountUsageLine{
 		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
-		{label: "trecs", email: "andy@trecs.aero", expired: true},
+		{label: "trecs", email: "andy@trecs.aero", placeholder: usageExpiredText},
 	}
 	var b strings.Builder
 	writeUsageHeader(&b, accounts, nil, 0)
@@ -656,7 +695,7 @@ func TestWriteUsageHeaderRendersExpiredPlaceholder(t *testing.T) {
 func TestWriteUsageHeaderExpiredOnlyLineKeepsItsLabel(t *testing.T) {
 	// A sole expired line is never bare: dedupeAccounts leaves mine false on
 	// snapshot-derived lines, so "auth expired" always says whose.
-	accounts := []accountUsageLine{{label: "trecs", email: "andy@trecs.aero", expired: true}}
+	accounts := []accountUsageLine{{label: "trecs", email: "andy@trecs.aero", placeholder: usageExpiredText}}
 	var b strings.Builder
 	writeUsageHeader(&b, accounts, nil, 80)
 	if got := strings.TrimRight(b.String(), "\n"); got != dim("trecs")+" "+dim(usageExpiredText) {
@@ -670,7 +709,7 @@ func TestWriteUsageHeaderNarrowTerminalKeepsExpiredLine(t *testing.T) {
 	// expired accounts render as two identical, unattributable placeholders.
 	accounts := []accountUsageLine{
 		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
-		{label: "trecs", email: "andy@trecs.aero", expired: true},
+		{label: "trecs", email: "andy@trecs.aero", placeholder: usageExpiredText},
 	}
 	var b strings.Builder
 	writeUsageHeader(&b, accounts, nil, 20)
@@ -685,6 +724,110 @@ func TestWriteUsageHeaderNarrowTerminalKeepsExpiredLine(t *testing.T) {
 	// ...while the placeholder keeps its own, since it costs no bar width.
 	if lines[1] != dim("trecs")+" "+dim(usageExpiredText) {
 		t.Fatalf("expired line = %q, want it labeled trecs", lines[1])
+	}
+}
+
+func TestWriteUsageHeaderRendersReasonPlaceholder(t *testing.T) {
+	// A transient failure with nothing cached says what happened rather than
+	// claiming the credential died — and is no more droppable than an expired
+	// one, since the account's existence is the point either way.
+	accounts := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", placeholder: "rate limited"},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, 0)
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %#v, want one per account", lines)
+	}
+	if want := dim("trecs") + "   " + dim("rate limited"); lines[1] != want {
+		t.Fatalf("throttled line = %q, want %q", lines[1], want)
+	}
+	if strings.Contains(lines[1], usageExpiredText) {
+		t.Fatalf("a throttle must not read as a dead credential: %q", lines[1])
+	}
+}
+
+func TestWriteUsageHeaderMarksStaleNumbers(t *testing.T) {
+	accounts := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, 0)
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %#v, want one per account", lines)
+	}
+	// Old numbers still beat no numbers, so the bars stay...
+	if !strings.Contains(lines[1], "5h") || !strings.Contains(lines[1], "63%") {
+		t.Fatalf("stale line lost its bars: %q", lines[1])
+	}
+	// ...but they must not pass as live.
+	if !strings.HasSuffix(lines[1], " "+dim(usageStaleText)) {
+		t.Fatalf("stale line = %q, want it marked at the end", lines[1])
+	}
+	if strings.Contains(lines[0], usageStaleText) {
+		t.Fatalf("fresh line picked up the marker: %q", lines[0])
+	}
+}
+
+// The marker hangs off the last segment, which is the one place nothing pads or
+// aligns — so a stale line must leave every other line byte-identical.
+func TestWriteUsageHeaderStaleMarkerShiftsNoOtherColumn(t *testing.T) {
+	fresh := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}},
+	}
+	stale := []accountUsageLine{
+		fresh[0],
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
+	}
+	var a, b strings.Builder
+	writeUsageHeader(&a, fresh, nil, 100)
+	writeUsageHeader(&b, stale, nil, 100)
+	freshLines := strings.Split(strings.TrimRight(a.String(), "\n"), "\n")
+	staleLines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(freshLines) != len(staleLines) {
+		t.Fatalf("line counts differ: %#v vs %#v", freshLines, staleLines)
+	}
+	if freshLines[0] != staleLines[0] {
+		t.Fatalf("the untouched line moved:\n %q\n %q", freshLines[0], staleLines[0])
+	}
+	if staleLines[1] != freshLines[1]+" "+dim(usageStaleText) {
+		t.Fatalf("stale line = %q, want the fresh line plus the marker", staleLines[1])
+	}
+}
+
+// The marker is what stops carried-forward numbers passing as live, so it has
+// to survive the same width clip every other part of the line does. Two
+// collision-promoted full-email labels on a narrow terminal is the case that
+// breaks when the marker sits outside the bar sizing: the bars fill the whole
+// budget, and cropTableFrame's clip then eats the marker, leaving a stale line
+// byte-identical to a live one.
+func TestWriteUsageHeaderStaleMarkerSurvivesWidthClip(t *testing.T) {
+	const cols = 64
+	accounts := []accountUsageLine{
+		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "andy@trecs.aero", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, cols)
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %#v, want one per account", lines)
+	}
+	// clipLine is what the TUI applies to every rendered line (cropTableFrame).
+	clippedFresh, clippedStale := clipLine(lines[0], cols), clipLine(lines[1], cols)
+	if !strings.Contains(clippedStale, usageStaleText) {
+		t.Fatalf("the clip ate the marker: %q (unclipped %q)", clippedStale, lines[1])
+	}
+	if !strings.Contains(clippedStale, "63%") {
+		t.Fatalf("stale line lost its numbers to the clip: %q", clippedStale)
+	}
+	if clippedStale == clippedFresh {
+		t.Fatalf("stale line renders identically to a live one: %q", clippedStale)
 	}
 }
 

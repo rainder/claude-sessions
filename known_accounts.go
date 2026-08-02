@@ -13,14 +13,37 @@ import (
 
 // KnownAccountUsage is one non-live known account's rate-limit snapshot, read
 // from its claude-switch credential snapshot rather than the host's active
-// login. Expired distinguishes "known account, last fetch failed" from "never
-// attempted" so the header can show a placeholder instead of silently dropping
-// the account.
+// login.
+//
+// Four states, not two, because collapsing them was actively misleading: a 429
+// from the shared per-token budget used to render as "auth expired" and send
+// the user off to re-login over a throttle that heals itself in seconds.
+//
+//	Info != nil, !Stale          fresh numbers
+//	Info != nil, Stale           numbers carried forward from an earlier poll,
+//	                             kept because this attempt failed transiently
+//	Expired                      401/403 — the credential really is dead, and
+//	                             no numbers are carried forward beside it
+//	Info == nil, Reason != ""    transient failure with nothing to carry
+//
+// Reason is the classification tag from classifyUsageErr, never raw error text.
 type KnownAccountUsage struct {
 	Name    string     `json:"name"`    // snapshot name, e.g. "avisoma"
 	Account string     `json:"account"` // email, "" if account.json missing/unreadable
-	Info    *UsageInfo `json:"info"`    // nil when Expired
-	Expired bool       `json:"expired"`
+	Info    *UsageInfo `json:"info"`    // fresh, or (with Stale) carried forward; nil when Expired
+	Expired bool       `json:"expired"` // a genuine 401/403 only — the actionable "re-login" state
+	Stale   bool       `json:"stale,omitempty"`
+	// Reason is set whenever the latest attempt failed: alongside Expired, and
+	// alongside either carried-forward or absent numbers. Empty on a clean fetch.
+	Reason string `json:"reason,omitempty"`
+	// FetchedAt is when Info was actually fetched, not when this struct was
+	// built — a carried-forward entry keeps the original timestamp, which is
+	// what bounds how long staleness may accumulate (usageCacheMaxAge).
+	//
+	// omitzero, not omitempty: encoding/json never considers a struct empty, so
+	// omitempty on a time.Time does nothing and every entry with no numbers
+	// would ship a "0001-01-01T00:00:00Z".
+	FetchedAt time.Time `json:"fetchedAt,omitzero"`
 }
 
 // snapshotCredentialSuffix is the fixed tail claude-switch gives a stashed
@@ -164,33 +187,85 @@ func emailMatchesLive(snapEmail, liveEmail string) bool {
 // the snapshot copy keeps whatever claude-switch stashed at switch time, so the
 // snapshot can read as expired while the live session is perfectly healthy.
 //
-// On any read/parse/HTTP error it returns {Name, Account, Expired: true} rather
-// than an error: this is best-effort background enrichment and must never be a
-// reason to fail /sessions or the poller. Expired is coarse on purpose — a
-// genuinely rotated token and a transient blip (network, 5xx, throttling) look
-// the same, and a false "expired" clears itself on the next tick.
-func fetchKnownAccountUsage(name, liveEmail string) (*KnownAccountUsage, bool) {
-	return knownAccountUsage(name, liveEmail, fetchUsageInfo)
+// No read/parse/HTTP error is ever returned as an error: this is best-effort
+// background enrichment and must never be a reason to fail /sessions or the
+// poller. A failure becomes that entry's classification instead (see
+// knownAccountUsage), and prev — this account's last result, nil when there is
+// none — is what a transient failure carries forward.
+func fetchKnownAccountUsage(name, liveEmail string, prev *KnownAccountUsage) (*KnownAccountUsage, bool) {
+	return knownAccountUsage(name, liveEmail, prev, usageInfoFetch)
 }
 
+// usageInfoFetch is fetchUsageInfo behind a package var so tests can drive the
+// poller's own fetch — the one place carrying numbers across polls is decided —
+// without a network or a real token. Never reassigned outside tests; the same
+// seam keychainRead/keychainWrite use in account.go.
+var usageInfoFetch = fetchUsageInfo
+
+// usageBadSnapshotReason is the classification for a credential snapshot that
+// could not be read or parsed at all. It is deliberately not one of
+// classifyUsageErr's tags: those describe what the endpoint (or the network)
+// answered, and this failure never got that far. The wording points at the file
+// because that is the only place the fix lives.
+const usageBadSnapshotReason = "bad snapshot"
+
 // knownAccountUsage is fetchKnownAccountUsage with the HTTP leg injected, so
-// tests exercise the success/expired branches without a network or a real
-// token.
-func knownAccountUsage(name, liveEmail string, fetch func(token string) (*UsageInfo, error)) (*KnownAccountUsage, bool) {
+// tests exercise every branch without a network or a real token.
+//
+// A failure splits three ways. A genuine 401/403 is Expired and carries NO
+// numbers forward — the credential is dead, and bars beside a dead credential
+// would imply it still works. Any other failure (429, 5xx, timeout, network, an
+// unreadable credential file) re-serves prev's numbers marked Stale, with
+// prev's ORIGINAL FetchedAt: restamping it to now would let an account that
+// fails forever look permanently fresh, when the whole point of the timestamp
+// is to stop carrying numbers past usageCacheMaxAge. With nothing to carry, the
+// entry keeps only its identity and the reason.
+func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch func(token string) (*UsageInfo, error)) (*KnownAccountUsage, bool) {
 	email := snapshotAccountEmail(name)
 	if emailMatchesLive(email, liveEmail) {
 		return nil, true
 	}
-	expired := &KnownAccountUsage{Name: name, Account: email, Expired: true}
+	failed := func(expired bool, reason string) (*KnownAccountUsage, bool) {
+		if expired {
+			return &KnownAccountUsage{Name: name, Account: email, Expired: true, Reason: reason}, false
+		}
+		if carryable(prev) {
+			return &KnownAccountUsage{
+				Name:      name,
+				Account:   email,
+				Info:      prev.Info,
+				Stale:     true,
+				Reason:    reason,
+				FetchedAt: prev.FetchedAt,
+			}, false
+		}
+		return &KnownAccountUsage{Name: name, Account: email, Reason: reason}, false
+	}
 	tok, err := snapshotToken(name)
 	if err != nil {
-		return expired, false
+		// Not an HTTP answer at all — a missing, unreadable or unparseable
+		// credential snapshot says nothing about whether the token it should
+		// hold is still good, so it never means Expired. It gets its own tag
+		// rather than sharing "unreachable": nothing here is a network problem,
+		// and unlike the failures that heal on their own this one stays until
+		// the snapshot is rewritten (`account save <name>` while logged into
+		// it, the same recovery switchAccount's identity precondition names).
+		return failed(false, usageBadSnapshotReason)
 	}
 	info, err := fetch(tok)
 	if err != nil {
-		return expired, false
+		return failed(classifyUsageErr(err))
 	}
-	return &KnownAccountUsage{Name: name, Account: email, Info: info}, false
+	return &KnownAccountUsage{Name: name, Account: email, Info: info, FetchedAt: time.Now()}, false
+}
+
+// carryable reports whether a previous result still has numbers worth showing
+// after a failed refresh: real Info, a real timestamp, and young enough that
+// re-serving it informs rather than misleads (the same bound a warm start from
+// disk obeys).
+func carryable(prev *KnownAccountUsage) bool {
+	return prev != nil && prev.Info != nil && !prev.FetchedAt.IsZero() &&
+		time.Since(prev.FetchedAt) <= usageCacheMaxAge
 }
 
 // fetchAllKnownAccounts fetches every named snapshot account in parallel (small,
@@ -199,12 +274,15 @@ func knownAccountUsage(name, liveEmail string, fetch func(token string) (*UsageI
 // plus that skipped name (the active snapshot; "" when none matched).
 //
 // It never returns an error, and never omits an account because that account
-// failed: a failure is carried as that entry's Expired flag. That is the
+// failed: a failure is carried as that entry's own classification. That is the
 // property KnownAccountsHub depends on — the poller's fetch only fails for a
 // catastrophic host-level problem, so one flaky account can't trigger the
 // whole-batch backoff and hide every other account's healthy data.
-func fetchAllKnownAccounts(names []string, liveEmail string) ([]KnownAccountUsage, string) {
-	return allKnownAccounts(names, liveEmail, fetchKnownAccountUsage)
+//
+// prev holds each account's last result, keyed by snapshot name (absent for an
+// account that has none yet); it is what a transient failure re-serves.
+func fetchAllKnownAccounts(names []string, liveEmail string, prev map[string]KnownAccountUsage) ([]KnownAccountUsage, string) {
+	return allKnownAccounts(names, liveEmail, prev, fetchKnownAccountUsage)
 }
 
 // allKnownAccounts is fetchAllKnownAccounts with the per-account fetch injected.
@@ -212,7 +290,7 @@ func fetchAllKnownAccounts(names []string, liveEmail string) ([]KnownAccountUsag
 // name whose own email/live-email comparison came back "skip", so it can never
 // disagree with which account the pass actually left out, the way an independent
 // second lookup (different call, possibly a different live email) could.
-func allKnownAccounts(names []string, liveEmail string, one func(name, liveEmail string) (*KnownAccountUsage, bool)) ([]KnownAccountUsage, string) {
+func allKnownAccounts(names []string, liveEmail string, prev map[string]KnownAccountUsage, one func(name, liveEmail string, prev *KnownAccountUsage) (*KnownAccountUsage, bool)) ([]KnownAccountUsage, string) {
 	results := make([]*KnownAccountUsage, len(names))
 	// Per-index, never a shared variable: the goroutines run concurrently, and
 	// the scan below wants names order anyway.
@@ -220,10 +298,17 @@ func allKnownAccounts(names []string, liveEmail string, one func(name, liveEmail
 	var wg sync.WaitGroup
 	for i, name := range names {
 		i, name := i, name
+		// Indexed here rather than inside the goroutine, so nothing concurrent
+		// ever touches the caller's map.
+		var last *KnownAccountUsage
+		if p, ok := prev[name]; ok {
+			p := p
+			last = &p
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i], skipped[i] = one(name, liveEmail)
+			results[i], skipped[i] = one(name, liveEmail, last)
 		}()
 	}
 	wg.Wait()
@@ -253,18 +338,56 @@ type knownAccountsResult struct {
 	ActiveName string
 }
 
-// fetchKnownAccounts is the poller's fetch: resolve this host's snapshot names,
-// then fetch every one that isn't the live account. The live email is re-read
-// per fetch, like fetchUsage does, so a relogin mid-run immediately changes both
-// which snapshot is skipped and which one is reported as active. Only an
-// unresolvable home directory is an error; zero snapshots is an empty list.
-func fetchKnownAccounts() (*knownAccountsResult, error) {
-	names, err := snapshotAccountNames()
-	if err != nil {
-		return nil, err
+// newKnownAccountsFetcher builds the poller's fetch: resolve this host's
+// snapshot names, then fetch every one that isn't the live account. The live
+// email is re-read per fetch, like fetchUsage does, so a relogin mid-run
+// immediately changes both which snapshot is skipped and which one is reported
+// as active. Only an unresolvable home directory is an error; zero snapshots is
+// an empty list.
+//
+// It is a closure rather than a plain function because carrying numbers across
+// a failed poll needs memory of the previous one, and usagePoller's fetch takes
+// no arguments. seed is the disk cache the hub also seeds the poller with (nil
+// when there is none), so a restart mid-throttle can carry forward too instead
+// of starting from nothing.
+//
+// last is rebuilt from each pass rather than mutated, and only from entries
+// that actually have numbers: an account whose snapshot was renamed or deleted
+// drops out of names, so it drops out of last on the next pass instead of
+// lingering for the life of the process.
+func newKnownAccountsFetcher(seed *knownAccountsResult) func() (*knownAccountsResult, error) {
+	var mu sync.Mutex
+	last := map[string]KnownAccountUsage{}
+	if seed != nil {
+		for _, a := range seed.Accounts {
+			last[a.Name] = a
+		}
 	}
-	accounts, active := fetchAllKnownAccounts(names, loadAccountEmail())
-	return &knownAccountsResult{Accounts: accounts, ActiveName: active}, nil
+	return func() (*knownAccountsResult, error) {
+		names, err := snapshotAccountNames()
+		if err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		prev := make(map[string]KnownAccountUsage, len(names))
+		for _, n := range names {
+			if a, ok := last[n]; ok {
+				prev[n] = a
+			}
+		}
+		mu.Unlock()
+		accounts, active := fetchAllKnownAccounts(names, loadAccountEmail(), prev)
+		fresh := make(map[string]KnownAccountUsage, len(accounts))
+		for _, a := range accounts {
+			if a.Info != nil {
+				fresh[a.Name] = a
+			}
+		}
+		mu.Lock()
+		last = fresh
+		mu.Unlock()
+		return &knownAccountsResult{Accounts: accounts, ActiveName: active}, nil
+	}
 }
 
 // knownAccountsCachePath is where the last successful known-accounts fetch is
@@ -276,19 +399,25 @@ func knownAccountsCachePath() string {
 }
 
 // cachedKnownAccounts is the on-disk envelope: the per-account snapshots plus
-// when they were fetched. The active-snapshot name is deliberately not
-// persisted — it describes which account is logged in *now*, which a restart
-// can have changed, and it is re-resolved by the first fetch anyway.
+// when the file was written. That envelope timestamp is informational only —
+// each entry carries its own FetchedAt, and an entry re-served after a failed
+// refresh keeps the timestamp of the fetch that actually produced its numbers,
+// so an envelope-level "written just now" would say nothing about how old the
+// numbers inside are. The active-snapshot name is deliberately not persisted —
+// it describes which account is logged in *now*, which a restart can have
+// changed, and it is re-resolved by the first fetch anyway.
 type cachedKnownAccounts struct {
 	FetchedAt time.Time           `json:"fetched_at"`
 	Accounts  []KnownAccountUsage `json:"accounts"`
 }
 
-// saveKnownAccountsCache persists the successful entries of a fetch — expired
-// ones are deliberately dropped, so a restart can seed a recently-good account
-// but never resurrects a previously-expired one as if it were fresh (it starts
-// as "no data yet" and waits for the next live fetch to decide). Best-effort: a
-// read-only /tmp just means no warm start next launch.
+// saveKnownAccountsCache persists the entries of a fetch that have numbers —
+// expired ones are deliberately dropped, so a restart can seed a recently-good
+// account but never resurrects a previously-expired one as if it were fresh (it
+// starts as "no data yet" and waits for the next live fetch to decide). A stale
+// entry does pass, carrying the FetchedAt of the fetch its numbers came from,
+// which is what stops a restart from laundering it into a fresh reading.
+// Best-effort: a read-only /tmp just means no warm start next launch.
 func saveKnownAccountsCache(res *knownAccountsResult) {
 	fresh := make([]KnownAccountUsage, 0, len(res.Accounts))
 	for _, a := range res.Accounts {
@@ -305,11 +434,19 @@ func saveKnownAccountsCache(res *knownAccountsResult) {
 }
 
 // loadKnownAccountsCache returns the cached snapshots, or nil if absent,
-// unreadable, older than usageCacheMaxAge, or carrying nothing usable. An entry
-// without Info is dropped rather than seeded: dedupeAccounts would silently
-// discard it anyway, and it must not masquerade as a healthy account. A seeded
-// result carries no ActiveName (see cachedKnownAccounts) — the first fetch
-// fills it in.
+// unreadable, or carrying nothing usable. An entry without Info is dropped
+// rather than seeded: dedupeAccounts would silently discard it anyway, and it
+// must not masquerade as a healthy account. A seeded result carries no
+// ActiveName (see cachedKnownAccounts) — the first fetch fills it in.
+//
+// Age is judged per account, not per file, because entries in one file no
+// longer share an age: a stale entry's numbers can be usageCacheMaxAge older
+// than the write that persisted them. carryable is the same gate a live
+// carry-forward uses, so an entry that survives a restart is exactly one that
+// would have survived without one. A cache file written before per-account
+// timestamps existed decodes to the zero time and is therefore dropped whole —
+// intended: one poll replaces it, and inventing an age for numbers of unknown
+// vintage is what this gate exists to prevent.
 func loadKnownAccountsCache() *knownAccountsResult {
 	data, err := os.ReadFile(knownAccountsCachePath())
 	if err != nil {
@@ -319,12 +456,10 @@ func loadKnownAccountsCache() *knownAccountsResult {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil
 	}
-	if c.FetchedAt.IsZero() || time.Since(c.FetchedAt) > usageCacheMaxAge {
-		return nil
-	}
 	accounts := make([]KnownAccountUsage, 0, len(c.Accounts))
 	for _, a := range c.Accounts {
-		if a.Expired || a.Info == nil {
+		a := a
+		if a.Expired || !carryable(&a) {
 			continue
 		}
 		accounts = append(accounts, a)
@@ -343,9 +478,13 @@ func loadKnownAccountsCache() *knownAccountsResult {
 type KnownAccountsHub = usagePoller[knownAccountsResult]
 
 // NewKnownAccountsHub starts the poller and returns immediately, seeded from a
-// recent disk cache.
+// recent disk cache. The cache is read once and handed to both the poller (what
+// the header shows until the first fetch lands) and the fetcher (what a first
+// pass that fails transiently carries forward) — two reads could disagree, and
+// the second would buy nothing.
 func NewKnownAccountsHub() *KnownAccountsHub {
-	return newUsagePoller(loadKnownAccountsCache(), fetchKnownAccounts, saveKnownAccountsCache)
+	seed := loadKnownAccountsCache()
+	return newUsagePoller(seed, newKnownAccountsFetcher(seed), saveKnownAccountsCache)
 }
 
 // derefKnownAccounts flattens the poller's *knownAccountsResult (nil until the

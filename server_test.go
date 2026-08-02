@@ -1038,8 +1038,8 @@ func TestUsageEndpointResolvesTheActiveSnapshotOnEveryCall(t *testing.T) {
 	}
 }
 
-// A per-account failure is that entry's Expired flag, never an error for the
-// request: one flaky snapshot must not cost every other account's numbers.
+// A per-account failure is that entry's own classification, never an error for
+// the request: one flaky snapshot must not cost every other account's numbers.
 func TestUsageEndpointMarksAFailedAccountExpired(t *testing.T) {
 	f := newAccountFixture(t)
 	f.setIdentity("andy@avisoma.com")
@@ -1048,7 +1048,7 @@ func TestUsageEndpointMarksAFailedAccountExpired(t *testing.T) {
 
 	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
 		if snapshot == "trecs" {
-			return nil, errors.New("usage endpoint: HTTP 401")
+			return nil, &usageHTTPError{Status: 401}
 		}
 		return &UsageInfo{FiveHour: usageBucket{Pct: 55}}, nil
 	})
@@ -1059,11 +1059,44 @@ func TestUsageEndpointMarksAFailedAccountExpired(t *testing.T) {
 	if !failed.Expired || failed.Info != nil {
 		t.Fatalf("failed entry = %#v, want Expired with no info", failed)
 	}
-	if healthy := findKnownAccount(t, resp, "side"); healthy.Expired || healthy.Info == nil {
+	if failed.Reason != usageExpiredReason {
+		t.Fatalf("reason = %q, want %q", failed.Reason, usageExpiredReason)
+	}
+	healthy := findKnownAccount(t, resp, "side")
+	if healthy.Expired || healthy.Info == nil {
 		t.Fatalf("healthy entry = %#v, want its numbers despite the sibling's failure", healthy)
+	}
+	// The timestamp travels with the numbers: it is what a client judges
+	// staleness against, and a missing one means "vintage unknown, drop it".
+	if time.Since(healthy.FetchedAt) > time.Minute {
+		t.Fatalf("FetchedAt = %v, want the time of this fetch", healthy.FetchedAt)
 	}
 	if resp.Usage == nil || resp.Usage.Info == nil {
 		t.Fatalf("usage = %#v, want the live account unaffected", resp.Usage)
+	}
+}
+
+// The reason this endpoint reports a classification rather than a bare flag: a
+// 429 off the account's shared per-token budget is routine, and reporting it as
+// "auth expired" sent the user to re-login over a throttle that heals itself.
+func TestUsageEndpointDoesNotCallAThrottleExpired(t *testing.T) {
+	f := newAccountFixture(t)
+	f.setIdentity("andy@avisoma.com")
+	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
+
+	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
+		if snapshot == "trecs" {
+			return nil, &usageHTTPError{Status: 429}
+		}
+		return &UsageInfo{FiveHour: usageBucket{Pct: 55}}, nil
+	})
+
+	throttled := findKnownAccount(t, getUsage(t, s), "trecs")
+	if throttled.Expired {
+		t.Fatalf("throttled entry = %#v, want it not reported as a dead credential", throttled)
+	}
+	if throttled.Reason != "rate limited" || throttled.Info != nil {
+		t.Fatalf("throttled entry = %#v, want the classification with no numbers", throttled)
 	}
 }
 

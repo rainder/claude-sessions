@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -240,13 +241,63 @@ func fetchUsageInfo(token string) (*UsageInfo, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("usage endpoint: HTTP %d", resp.StatusCode)
+		return nil, &usageHTTPError{Status: resp.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
 	return parseUsage(body)
+}
+
+// usageHTTPError is a non-200 answer from the usage endpoint, carrying the
+// status so callers can tell a genuinely dead credential (401/403) apart from a
+// throttle or an outage. It exists because that distinction is the difference
+// between "run claude-switch and log in again" and "wait, this heals itself",
+// and string-matching the message to recover it would be one refactor away from
+// silently reclassifying every failure.
+type usageHTTPError struct{ Status int }
+
+func (e *usageHTTPError) Error() string {
+	return fmt.Sprintf("usage endpoint: HTTP %d", e.Status)
+}
+
+// usageExpiredReason is the classification for the one failure a human has to
+// act on. It doubles as the placeholder the header renders (usageExpiredText),
+// which is why it reads as a state rather than as an error.
+const usageExpiredReason = "auth expired"
+
+// classifyUsageErr splits a failed usage fetch into "this credential is
+// actually dead" and "this attempt didn't work". Only 401/403 is the former:
+// the endpoint 429s readily (every Claude Code session shares the account's
+// per-token budget), and a 5xx, a timeout, or an unreachable network say
+// nothing at all about the token.
+//
+// reason is a short fixed tag, never the underlying error's text. A network
+// failure stringifies as a *url.Error carrying the full request URL, which is
+// noise in a one-line header placeholder and would leak into the /usage JSON;
+// the tags below are the whole vocabulary.
+func classifyUsageErr(err error) (expired bool, reason string) {
+	if err == nil {
+		return false, ""
+	}
+	var httpErr *usageHTTPError
+	if errors.As(err, &httpErr) {
+		switch {
+		case httpErr.Status == http.StatusUnauthorized || httpErr.Status == http.StatusForbidden:
+			return true, usageExpiredReason
+		case httpErr.Status == http.StatusTooManyRequests:
+			return false, "rate limited"
+		case httpErr.Status >= 500:
+			return false, "server error"
+		default:
+			return false, fmt.Sprintf("HTTP %d", httpErr.Status)
+		}
+	}
+	if errors.Is(err, errUsageFetchTimedOut) {
+		return false, "timed out"
+	}
+	return false, "unreachable"
 }
 
 // usageRefreshInterval is how often the background poller refetches. Usage

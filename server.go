@@ -822,7 +822,10 @@ func (s *server) accountUsage(snapshot string) (*UsageInfo, error) {
 // An ignored account is still reported, with a nil Info: the account list and
 // the Ctrl+W picker build their rows straight out of KnownAccounts, so omitting
 // it would silently remove it as a switch target. The header is unaffected
-// either way — dedupeAccounts drops a non-expired entry with no Info.
+// either way — dedupeAccounts drops exactly the entry with no Info, no Expired
+// flag and no Reason, which an ignored account (never fetched, so never
+// classified) is; a failed one always carries at least a Reason and keeps its
+// line.
 func (s *server) usage(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -883,14 +886,17 @@ func (s *server) usage(w http.ResponseWriter, r *http.Request) {
 			info, err := s.usages.GetOrFetch(entry.Account, func() (*UsageInfo, error) {
 				return s.accountUsage(entry.Name)
 			})
-			// A per-account failure is that entry's Expired flag, never an error
-			// for the request: one flaky snapshot must not cost the caller every
-			// other account's healthy numbers.
+			// A per-account failure is that entry's own classification, never an
+			// error for the request: one flaky snapshot must not cost the caller
+			// every other account's healthy numbers. Only a 401/403 sets Expired
+			// — a 429 off the shared per-token budget is not a dead credential,
+			// and saying so sends the user to re-login over a throttle.
 			if err != nil {
-				entry.Expired = true
+				entry.Expired, entry.Reason = classifyUsageErr(err)
 				return
 			}
 			entry.Info = info
+			entry.FetchedAt = time.Now()
 		}()
 	}
 	wg.Wait()
