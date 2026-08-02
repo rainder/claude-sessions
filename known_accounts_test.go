@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -305,6 +306,32 @@ func TestKnownAccountUsage(t *testing.T) {
 		}
 	})
 
+	t.Run("a snapshot name reused for a different account never carries the old account's numbers", func(t *testing.T) {
+		// The bug: prev is keyed by snapshot NAME in the fetcher's memory, not by
+		// account identity. If "trecs" used to belong to a different account and
+		// got re-saved onto today's andy@trecs.aero, a transient failure on the
+		// very next poll must not re-serve the OLD account's numbers under the
+		// NEW account's email — that is misattribution, worse than the
+		// over-broad "auth expired" this mechanism replaced.
+		prev := &KnownAccountUsage{
+			Name:      "trecs",
+			Account:   "someone-else@old-owner.example",
+			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+			FetchedAt: time.Now().Add(-3 * time.Minute),
+		}
+		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 429})
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, throttled)
+		if got.Info != nil || got.Stale {
+			t.Fatalf("mismatched-identity carry = %#v, want no numbers at all", got)
+		}
+		if got.Account != "andy@trecs.aero" {
+			t.Fatalf("account = %q, want the snapshot's CURRENT email, not prev's", got.Account)
+		}
+		if got.Reason != "rate limited" {
+			t.Fatalf("reason = %q, want the failure classification preserved", got.Reason)
+		}
+	})
+
 	t.Run("numbers past the max age are not carried forward", func(t *testing.T) {
 		prev := &KnownAccountUsage{
 			Name:      "trecs",
@@ -393,6 +420,13 @@ func TestClassifyUsageErr(t *testing.T) {
 		{"a wrapped status still classifies", fmt.Errorf("fetching: %w", &usageHTTPError{Status: 401}), true, usageExpiredReason},
 		{"the bounded-fetch timeout", errUsageFetchTimedOut, false, "timed out"},
 		{"a wrapped timeout", fmt.Errorf("account: %w", errUsageFetchTimedOut), false, "timed out"},
+		// What fetchUsageInfo's own http.Client{Timeout: 5s} actually produces on
+		// expiry — a *url.Error wrapping a context deadline, not
+		// errUsageFetchTimedOut (that sentinel belongs to usage_cache.go's
+		// separate runBounded watchdog). Without a net.Error check this fell
+		// through to "unreachable", which reads as a network fault rather than
+		// what actually happened.
+		{"the HTTP client's own deadline", &url.Error{Op: "Get", URL: "https://api.anthropic.com/api/oauth/usage", Err: context.DeadlineExceeded}, false, "timed out"},
 		{"anything else", errors.New("dial tcp: no route to host"), false, "unreachable"},
 		{"no error at all", nil, false, ""},
 	}

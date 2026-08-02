@@ -229,7 +229,7 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 		if expired {
 			return &KnownAccountUsage{Name: name, Account: email, Expired: true, Reason: reason}, false
 		}
-		if carryable(prev) {
+		if carryable(prev, email) {
 			return &KnownAccountUsage{
 				Name:      name,
 				Account:   email,
@@ -259,13 +259,30 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 	return &KnownAccountUsage{Name: name, Account: email, Info: info, FetchedAt: time.Now()}, false
 }
 
-// carryable reports whether a previous result still has numbers worth showing
-// after a failed refresh: real Info, a real timestamp, and young enough that
-// re-serving it informs rather than misleads (the same bound a warm start from
-// disk obeys).
-func carryable(prev *KnownAccountUsage) bool {
-	return prev != nil && prev.Info != nil && !prev.FetchedAt.IsZero() &&
-		time.Since(prev.FetchedAt) <= usageCacheMaxAge
+// fresh reports whether a result's own numbers are young enough to still
+// inform rather than mislead (the same bound a warm start from disk obeys),
+// with no identity check — it is used only where prev and the value being
+// aged are the same record (loadKnownAccountsCache checking a cache entry
+// against itself), so there is nothing to misattribute.
+func fresh(v *KnownAccountUsage) bool {
+	return v != nil && v.Info != nil && !v.FetchedAt.IsZero() &&
+		time.Since(v.FetchedAt) <= usageCacheMaxAge
+}
+
+// carryable reports whether a previous result's numbers may be re-served
+// under a DIFFERENT attempt's email: fresh (see above), plus, critically,
+// still the SAME account. prev is keyed by snapshot name in
+// newKnownAccountsFetcher's memory, not by account identity, so a name that
+// gets reused for a different account (`account save work` while logged into
+// an account that previously belonged to someone else) must not carry the old
+// account's numbers forward under the new account's email — that would
+// misattribute usage across accounts, which is worse than the over-broad
+// "auth expired" this whole mechanism replaced. email is the name's
+// freshly-read current account (snapshotAccountEmail, read moments before
+// this call); an unknown prev or current email (either "") never carries,
+// since identity can't be confirmed either way.
+func carryable(prev *KnownAccountUsage, email string) bool {
+	return fresh(prev) && prev.Account != "" && email != "" && strings.EqualFold(prev.Account, email)
 }
 
 // fetchAllKnownAccounts fetches every named snapshot account in parallel (small,
@@ -459,7 +476,7 @@ func loadKnownAccountsCache() *knownAccountsResult {
 	accounts := make([]KnownAccountUsage, 0, len(c.Accounts))
 	for _, a := range c.Accounts {
 		a := a
-		if a.Expired || !carryable(&a) {
+		if a.Expired || !fresh(&a) {
 			continue
 		}
 		accounts = append(accounts, a)

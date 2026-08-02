@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -295,6 +296,14 @@ func classifyUsageErr(err error) (expired bool, reason string) {
 		}
 	}
 	if errors.Is(err, errUsageFetchTimedOut) {
+		return false, "timed out"
+	}
+	// fetchUsageInfo's own http.Client{Timeout} expires as a *url.Error wrapping
+	// a context deadline, not errUsageFetchTimedOut (that sentinel belongs to
+	// usage_cache.go's separate runBounded watchdog) — net.Error.Timeout() is
+	// what actually distinguishes it from a DNS failure or a refused connection.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
 		return false, "timed out"
 	}
 	return false, "unreachable"
