@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -156,11 +160,11 @@ func TestSnapshotTokenAndEmail(t *testing.T) {
 	}
 }
 
-func TestFetchKnownAccountsWithNoSnapshots(t *testing.T) {
+func TestKnownAccountsFetcherWithNoSnapshots(t *testing.T) {
 	// A fresh machine with no claude-switch setup: an empty list, never an error
 	// — an error here would put the poller into backoff over nothing.
 	t.Setenv("HOME", t.TempDir())
-	got, err := fetchKnownAccounts()
+	got, err := newKnownAccountsFetcher(nil)()
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -172,14 +176,31 @@ func TestFetchKnownAccountsWithNoSnapshots(t *testing.T) {
 	}
 }
 
+// swapFetch points the poller's HTTP leg at a stub for the duration of one
+// test, restoring it afterwards. Nothing here may reach the real endpoint.
+func swapFetch(t *testing.T, fetch func(string) (*UsageInfo, error)) {
+	t.Helper()
+	prev := usageInfoFetch
+	usageInfoFetch = fetch
+	t.Cleanup(func() { usageInfoFetch = prev })
+}
+
 // stubUsageFetch returns a fetch func that answers per token: a nil entry means
-// that token fails.
+// that token fails with a genuine auth rejection (the typed error, not a
+// look-alike string — classifyUsageErr reads the status, and a plain error
+// would classify as merely unreachable).
 func stubUsageFetch(byToken map[string]*UsageInfo) func(string) (*UsageInfo, error) {
+	return stubUsageFetchErr(byToken, &usageHTTPError{Status: 401})
+}
+
+// stubUsageFetchErr is stubUsageFetch with the failure mode chosen, so a test
+// can drive the transient branches (429, 5xx, network) as well as expiry.
+func stubUsageFetchErr(byToken map[string]*UsageInfo, err error) func(string) (*UsageInfo, error) {
 	return func(token string) (*UsageInfo, error) {
 		if info, ok := byToken[token]; ok && info != nil {
 			return info, nil
 		}
-		return nil, fmt.Errorf("usage endpoint: HTTP 401")
+		return nil, err
 	}
 }
 
@@ -202,7 +223,7 @@ func TestKnownAccountUsage(t *testing.T) {
 	})
 
 	t.Run("skips the snapshot standing for the live account", func(t *testing.T) {
-		got, skipped := knownAccountUsage("avisoma", "Andy@Avisoma.com", fetch)
+		got, skipped := knownAccountUsage("avisoma", "Andy@Avisoma.com", nil, fetch)
 		if !skipped {
 			t.Fatal("skipped = false, want true for the live account's own snapshot")
 		}
@@ -212,12 +233,12 @@ func TestKnownAccountUsage(t *testing.T) {
 	})
 
 	t.Run("populated Info on success", func(t *testing.T) {
-		got, skipped := knownAccountUsage("avisoma", "andy@trecs.aero", fetch)
+		got, skipped := knownAccountUsage("avisoma", "andy@trecs.aero", nil, fetch)
 		if skipped {
 			t.Fatal("skipped = true, want false for a non-live account")
 		}
-		if got.Expired {
-			t.Fatalf("Expired = true on a successful fetch: %#v", got)
+		if got.Expired || got.Stale || got.Reason != "" {
+			t.Fatalf("a successful fetch must be clean: %#v", got)
 		}
 		if got.Name != "avisoma" || got.Account != "andy@avisoma.com" {
 			t.Fatalf("identity wrong: %#v", got)
@@ -225,22 +246,120 @@ func TestKnownAccountUsage(t *testing.T) {
 		if got.Info == nil || got.Info.FiveHour.Pct != 41 {
 			t.Fatalf("Info = %#v, want the fetched snapshot", got.Info)
 		}
+		// The timestamp is what every staleness decision is made against, so a
+		// success has to stamp it.
+		if time.Since(got.FetchedAt) > time.Minute {
+			t.Fatalf("FetchedAt = %v, want the time of this fetch", got.FetchedAt)
+		}
 	})
 
-	t.Run("HTTP failure marks the account expired, keeps its identity", func(t *testing.T) {
-		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", fetch)
+	t.Run("401 marks the account expired, keeps its identity", func(t *testing.T) {
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, fetch)
 		if !got.Expired || got.Info != nil {
 			t.Fatalf("failed fetch = %#v, want Expired with no Info", got)
+		}
+		if got.Reason != usageExpiredReason {
+			t.Fatalf("reason = %q, want %q", got.Reason, usageExpiredReason)
 		}
 		if got.Name != "trecs" || got.Account != "andy@trecs.aero" {
 			t.Fatalf("identity lost on failure: %#v", got)
 		}
 	})
 
-	t.Run("unreadable credentials mark the account expired without fetching", func(t *testing.T) {
-		got, _ := knownAccountUsage("broken", "andy@avisoma.com", fetch)
-		if !got.Expired || got.Info != nil {
-			t.Fatalf("unparseable snapshot = %#v, want Expired with no Info", got)
+	t.Run("a 429 is not an expired credential", func(t *testing.T) {
+		// The bug this whole state split exists for: every Claude Code session
+		// shares the account's per-token budget, so a throttle is routine — and
+		// telling the user to re-login over one is wrong.
+		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 429})
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, throttled)
+		if got.Expired {
+			t.Fatalf("429 = %#v, want it classified as transient, not expired", got)
+		}
+		if got.Reason != "rate limited" || got.Info != nil {
+			t.Fatalf("throttled entry = %#v, want the reason with no numbers", got)
+		}
+	})
+
+	t.Run("a transient failure re-serves the previous numbers, marked stale", func(t *testing.T) {
+		fetched := time.Now().Add(-3 * time.Minute)
+		prev := &KnownAccountUsage{
+			Name:      "trecs",
+			Account:   "andy@trecs.aero",
+			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+			FetchedAt: fetched,
+		}
+		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 429})
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, throttled)
+		if !got.Stale || got.Expired {
+			t.Fatalf("carried-forward entry = %#v, want Stale and not Expired", got)
+		}
+		if got.Info == nil || got.Info.FiveHour.Pct != 63 {
+			t.Fatalf("Info = %#v, want the previous numbers", got.Info)
+		}
+		if got.Reason != "rate limited" {
+			t.Fatalf("reason = %q, want the failure that caused the carry", got.Reason)
+		}
+		// Restamping would let an account failing forever look forever fresh.
+		if !got.FetchedAt.Equal(fetched) {
+			t.Fatalf("FetchedAt = %v, want the original %v", got.FetchedAt, fetched)
+		}
+	})
+
+	t.Run("numbers past the max age are not carried forward", func(t *testing.T) {
+		prev := &KnownAccountUsage{
+			Name:      "trecs",
+			Account:   "andy@trecs.aero",
+			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+			FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute),
+		}
+		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 429})
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, throttled)
+		if got.Info != nil || got.Stale {
+			t.Fatalf("aged-out entry = %#v, want no numbers at all", got)
+		}
+		if got.Reason != "rate limited" {
+			t.Fatalf("reason = %q, want the placeholder to say what failed", got.Reason)
+		}
+	})
+
+	t.Run("an untimestamped previous result is never carried forward", func(t *testing.T) {
+		// Numbers of unknown vintage: with no FetchedAt there is nothing to
+		// judge staleness against, so they are treated as having none.
+		prev := &KnownAccountUsage{Name: "trecs", Info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}}
+		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 503})
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, throttled)
+		if got.Info != nil || got.Stale {
+			t.Fatalf("untimestamped entry = %#v, want no numbers", got)
+		}
+		if got.Reason != "server error" {
+			t.Fatalf("reason = %q, want the 5xx classification", got.Reason)
+		}
+	})
+
+	t.Run("an expired credential never shows numbers beside it", func(t *testing.T) {
+		// A dead token with recent numbers cached: showing bars next to "auth
+		// expired" would imply the credential still works.
+		prev := &KnownAccountUsage{
+			Name:      "trecs",
+			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+			FetchedAt: time.Now(),
+		}
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, fetch)
+		if !got.Expired || got.Info != nil || got.Stale {
+			t.Fatalf("expired entry = %#v, want Expired alone", got)
+		}
+	})
+
+	t.Run("unreadable credentials name the snapshot, not the network", func(t *testing.T) {
+		// A credential file that won't parse is not an answer from the endpoint
+		// about the token, so it is never Expired — and it is not a network
+		// problem either, so "unreachable" would point the user nowhere.
+		got, _ := knownAccountUsage("broken", "andy@avisoma.com", nil, fetch)
+		if got.Expired || got.Info != nil {
+			t.Fatalf("unparseable snapshot = %#v, want a non-expired failure with no Info", got)
+		}
+		if got.Reason != usageBadSnapshotReason {
+			t.Fatalf("reason = %q, want %q", got.Reason, usageBadSnapshotReason)
 		}
 		if got.Account != "andy@broken.dev" {
 			t.Fatalf("account = %q, want the email account.json still holds", got.Account)
@@ -248,7 +367,7 @@ func TestKnownAccountUsage(t *testing.T) {
 	})
 
 	t.Run("an unknown email never matches the live account", func(t *testing.T) {
-		got, skipped := knownAccountUsage("nameless", "andy@avisoma.com", fetch)
+		got, skipped := knownAccountUsage("nameless", "andy@avisoma.com", nil, fetch)
 		if skipped {
 			t.Fatal("a snapshot with no readable email must not be skipped as live")
 		}
@@ -256,6 +375,53 @@ func TestKnownAccountUsage(t *testing.T) {
 			t.Fatalf("got %#v, want an unnamed but fetched account", got)
 		}
 	})
+}
+
+func TestClassifyUsageErr(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		expired bool
+		reason  string
+	}{
+		{"401 is a dead credential", &usageHTTPError{Status: 401}, true, usageExpiredReason},
+		{"403 is a dead credential", &usageHTTPError{Status: 403}, true, usageExpiredReason},
+		{"429 is the shared budget, not the token", &usageHTTPError{Status: 429}, false, "rate limited"},
+		{"500 is theirs", &usageHTTPError{Status: 500}, false, "server error"},
+		{"503 is theirs", &usageHTTPError{Status: 503}, false, "server error"},
+		{"an unexpected status names itself", &usageHTTPError{Status: 418}, false, "HTTP 418"},
+		{"a wrapped status still classifies", fmt.Errorf("fetching: %w", &usageHTTPError{Status: 401}), true, usageExpiredReason},
+		{"the bounded-fetch timeout", errUsageFetchTimedOut, false, "timed out"},
+		{"a wrapped timeout", fmt.Errorf("account: %w", errUsageFetchTimedOut), false, "timed out"},
+		{"anything else", errors.New("dial tcp: no route to host"), false, "unreachable"},
+		{"no error at all", nil, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			expired, reason := classifyUsageErr(c.err)
+			if expired != c.expired || reason != c.reason {
+				t.Fatalf("classify(%v) = %v/%q, want %v/%q", c.err, expired, reason, c.expired, c.reason)
+			}
+		})
+	}
+}
+
+// The reason tag is a fixed classification, never the underlying error's text:
+// a network failure stringifies as a *url.Error carrying the whole request URL,
+// which would end up in a one-line header placeholder and in the /usage JSON.
+func TestClassifyUsageErrLeaksNoErrorText(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "https://api.anthropic.com/api/oauth/usage?token=hunter2",
+		Err: errors.New("dial tcp 1.2.3.4:443: connect: connection refused"),
+	}
+	_, reason := classifyUsageErr(err)
+	if reason != "unreachable" {
+		t.Fatalf("reason = %q, want the fixed tag", reason)
+	}
+	if strings.Contains(reason, "anthropic.com") || strings.Contains(reason, "hunter2") {
+		t.Fatalf("reason leaked the request URL: %q", reason)
+	}
 }
 
 func TestAllKnownAccountsNeverFailsOnOneBadAccount(t *testing.T) {
@@ -269,11 +435,11 @@ func TestAllKnownAccountsNeverFailsOnOneBadAccount(t *testing.T) {
 		"tok-t": {FiveHour: usageBucket{Pct: 22}},
 	})
 	// The real per-account path, only with the HTTP leg stubbed.
-	one := func(name, liveEmail string) (*KnownAccountUsage, bool) {
-		return knownAccountUsage(name, liveEmail, fetch)
+	one := func(name, liveEmail string, prev *KnownAccountUsage) (*KnownAccountUsage, bool) {
+		return knownAccountUsage(name, liveEmail, prev, fetch)
 	}
 
-	got, active := allKnownAccounts([]string{"avisoma", "dead", "trecs"}, "someone@else.com", one)
+	got, active := allKnownAccounts([]string{"avisoma", "dead", "trecs"}, "someone@else.com", nil, one)
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want every account represented: %#v", len(got), got)
 	}
@@ -299,7 +465,7 @@ func TestAllKnownAccountsNeverFailsOnOneBadAccount(t *testing.T) {
 	// difference proves the match is case-insensitive, like the dedupe key — and
 	// the skipped name comes straight back out as the active snapshot, so the two
 	// can never disagree about which account was left out.
-	live, active := allKnownAccounts([]string{"avisoma", "dead", "trecs"}, "Andy@Avisoma.com", one)
+	live, active := allKnownAccounts([]string{"avisoma", "dead", "trecs"}, "Andy@Avisoma.com", nil, one)
 	if len(live) != 2 || live[0].Name != "dead" || live[1].Name != "trecs" {
 		t.Fatalf("live-account skip wrong: %#v", live)
 	}
@@ -308,8 +474,132 @@ func TestAllKnownAccountsNeverFailsOnOneBadAccount(t *testing.T) {
 	}
 
 	// No names at all is an empty result, never a nil-deref or an error path.
-	if got, active := allKnownAccounts(nil, "", one); len(got) != 0 || active != "" {
+	if got, active := allKnownAccounts(nil, "", nil, one); len(got) != 0 || active != "" {
 		t.Fatalf("no names = %#v/%q, want empty", got, active)
+	}
+}
+
+// Each account's previous result reaches its own fetch and nobody else's.
+func TestAllKnownAccountsThreadsEachAccountsOwnPrev(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeSnapshotFixture(t, home, "avisoma", "tok-a", "andy@avisoma.com")
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+
+	var mu sync.Mutex
+	seen := map[string]*KnownAccountUsage{}
+	one := func(name, liveEmail string, prev *KnownAccountUsage) (*KnownAccountUsage, bool) {
+		mu.Lock()
+		seen[name] = prev
+		mu.Unlock()
+		return &KnownAccountUsage{Name: name}, false
+	}
+	prev := map[string]KnownAccountUsage{
+		"trecs": {Name: "trecs", Info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}},
+	}
+	allKnownAccounts([]string{"avisoma", "trecs"}, "", prev, one)
+
+	if got := seen["trecs"]; got == nil || got.Info == nil || got.Info.FiveHour.Pct != 63 {
+		t.Fatalf("trecs' prev = %#v, want its own previous result", got)
+	}
+	// An account with no history gets nil, not its neighbour's numbers.
+	if got := seen["avisoma"]; got != nil {
+		t.Fatalf("avisoma's prev = %#v, want nil", got)
+	}
+}
+
+// The hub's fetcher is the only thing with memory across polls: a failed second
+// pass must re-serve the first pass' numbers, and a snapshot that disappears
+// from disk must stop being remembered.
+func TestKnownAccountsFetcherCarriesNumbersAcrossPolls(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+	writeSnapshotFixture(t, home, "spare", "tok-s", "andy@spare.dev")
+
+	healthy := map[string]*UsageInfo{
+		"tok-t": {FiveHour: usageBucket{Pct: 63}},
+		"tok-s": {FiveHour: usageBucket{Pct: 12}},
+	}
+	var mu sync.Mutex
+	throttled := false
+	swapFetch(t, func(token string) (*UsageInfo, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if throttled {
+			return nil, &usageHTTPError{Status: 429}
+		}
+		return healthy[token], nil
+	})
+
+	fetcher := newKnownAccountsFetcher(nil)
+	first, err := fetcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Accounts) != 2 || first.Accounts[0].Info == nil {
+		t.Fatalf("first pass = %#v, want both accounts fetched", first.Accounts)
+	}
+
+	mu.Lock()
+	throttled = true
+	mu.Unlock()
+	second, err := fetcher()
+	if err != nil {
+		t.Fatalf("a throttled pass must not fail the batch: %v", err)
+	}
+	if len(second.Accounts) != 2 {
+		t.Fatalf("second pass = %#v, want both accounts still listed", second.Accounts)
+	}
+	for _, a := range second.Accounts {
+		if !a.Stale || a.Info == nil || a.Expired {
+			t.Fatalf("throttled account = %#v, want stale numbers carried forward", a)
+		}
+		if a.Reason != "rate limited" {
+			t.Fatalf("reason = %q, want the throttle named", a.Reason)
+		}
+	}
+
+	// A snapshot deleted from disk drops out of the listing, and with it out of
+	// the fetcher's memory — nothing keeps re-serving numbers for an account
+	// this host no longer has.
+	if err := os.Remove(snapshotCredentialPath(home, "spare")); err != nil {
+		t.Fatal(err)
+	}
+	third, err := fetcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.Accounts) != 1 || third.Accounts[0].Name != "trecs" {
+		t.Fatalf("third pass = %#v, want only the surviving snapshot", third.Accounts)
+	}
+}
+
+// A warm start carries forward too: the disk cache seeds the fetcher's memory,
+// so a first poll that lands mid-throttle shows the cached numbers rather than
+// a placeholder.
+func TestKnownAccountsFetcherSeedsFromCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+	swapFetch(t, func(string) (*UsageInfo, error) { return nil, &usageHTTPError{Status: 429} })
+
+	seed := &knownAccountsResult{Accounts: []KnownAccountUsage{{
+		Name:      "trecs",
+		Account:   "andy@trecs.aero",
+		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+		FetchedAt: time.Now().Add(-time.Minute),
+	}}}
+	res, err := newKnownAccountsFetcher(seed)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Accounts) != 1 {
+		t.Fatalf("accounts = %#v, want one", res.Accounts)
+	}
+	if got := res.Accounts[0]; !got.Stale || got.Info == nil || got.Info.FiveHour.Pct != 63 {
+		t.Fatalf("first pass after a warm start = %#v, want the seeded numbers, stale", got)
 	}
 }
 
@@ -317,7 +607,7 @@ func TestKnownAccountsCacheRoundTrip(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	res := knownAccountsResult{
 		Accounts: []KnownAccountUsage{
-			{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+			{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: time.Now()},
 		},
 		ActiveName: "trecs",
 	}
@@ -342,7 +632,7 @@ func TestKnownAccountsCacheRoundTrip(t *testing.T) {
 func TestKnownAccountsCacheNeverPersistsExpired(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	res := knownAccountsResult{Accounts: []KnownAccountUsage{
-		{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: time.Now()},
 		{Name: "trecs", Account: "andy@trecs.aero", Expired: true},
 	}}
 	saveKnownAccountsCache(&res)
@@ -363,11 +653,88 @@ func TestKnownAccountsCacheNeverPersistsExpired(t *testing.T) {
 	}
 }
 
+// Age is judged per account, not per file: a stale entry's numbers are older
+// than the write that persisted them, so one envelope timestamp cannot speak
+// for every entry in the file.
+func TestKnownAccountsCacheAgesEachAccountSeparately(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	// One file, written at the same instant, holding numbers of two very
+	// different vintages — which is exactly what a carried-forward entry beside
+	// a freshly-fetched one is.
+	mixed, err := json.Marshal(cachedKnownAccounts{
+		FetchedAt: time.Now(),
+		Accounts: []KnownAccountUsage{
+			{Name: "fresh", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: time.Now().Add(-time.Minute)},
+			{Name: "ancient", Info: &UsageInfo{FiveHour: usageBucket{Pct: 99}}, FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(knownAccountsCachePath(), mixed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := loadKnownAccountsCache()
+	if got == nil {
+		t.Fatal("a file with one usable entry seeded nothing")
+	}
+	if len(got.Accounts) != 1 || got.Accounts[0].Name != "fresh" {
+		t.Fatalf("seeded %#v, want only the entry young enough to trust", got.Accounts)
+	}
+
+	// A cache file written before per-account timestamps existed decodes to the
+	// zero time everywhere, so the whole thing drops — one poll replaces it, and
+	// numbers of unknown vintage are exactly what this gate rejects.
+	legacy, err := json.Marshal(cachedKnownAccounts{
+		FetchedAt: time.Now(),
+		Accounts:  []KnownAccountUsage{{Name: "avisoma", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(knownAccountsCachePath(), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadKnownAccountsCache(); got != nil {
+		t.Fatalf("untimestamped cache seeded %#v, want nil", *got)
+	}
+}
+
+// A stale entry survives a restart with its numbers AND its original
+// timestamp — laundering it into a fresh reading is the one thing the cache
+// must not do.
+func TestKnownAccountsCachePersistsStaleWithoutRestamping(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fetched := time.Now().Add(-5 * time.Minute)
+	res := knownAccountsResult{Accounts: []KnownAccountUsage{{
+		Name:      "trecs",
+		Account:   "andy@trecs.aero",
+		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+		Stale:     true,
+		Reason:    "rate limited",
+		FetchedAt: fetched,
+	}}}
+	saveKnownAccountsCache(&res)
+	got := loadKnownAccountsCache()
+	if got == nil || len(got.Accounts) != 1 {
+		t.Fatalf("stale entry did not survive the cache: %#v", got)
+	}
+	a := got.Accounts[0]
+	if a.Info == nil || a.Info.FiveHour.Pct != 63 || !a.Stale {
+		t.Fatalf("cached stale entry = %#v, want its numbers and its marker", a)
+	}
+	if !a.FetchedAt.Round(time.Second).Equal(fetched.Round(time.Second)) {
+		t.Fatalf("FetchedAt = %v, want the original %v", a.FetchedAt, fetched)
+	}
+}
+
 func TestKnownAccountsCacheExpiryAndCorruption(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	stale := cachedKnownAccounts{
-		FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute),
-		Accounts:  []KnownAccountUsage{{Name: "avisoma", Info: &UsageInfo{}}},
+		FetchedAt: time.Now(),
+		Accounts: []KnownAccountUsage{
+			{Name: "avisoma", Info: &UsageInfo{}, FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute)},
+		},
 	}
 	data, err := json.Marshal(stale)
 	if err != nil {
@@ -383,7 +750,7 @@ func TestKnownAccountsCacheExpiryAndCorruption(t *testing.T) {
 	// An entry that decodes without Info is a miss, not a healthy-looking zero.
 	nilInfo, err := json.Marshal(cachedKnownAccounts{
 		FetchedAt: time.Now(),
-		Accounts:  []KnownAccountUsage{{Name: "avisoma"}},
+		Accounts:  []KnownAccountUsage{{Name: "avisoma", FetchedAt: time.Now()}},
 	})
 	if err != nil {
 		t.Fatal(err)

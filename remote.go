@@ -38,9 +38,10 @@ type RemoteResult struct {
 	CodexUsage *CodexAccountUsage
 	// KnownAccounts lists usage for every other account this host holds a
 	// claude-switch credential snapshot for (excludes whichever account is
-	// currently live — that's still reported via Usage). An entry with a nil Info
-	// and no Expired flag is an account whose numbers the caller asked to skip:
-	// still a real account, still a switch target, just unfetched.
+	// currently live — that's still reported via Usage). An entry with a nil Info,
+	// no Expired flag and no Reason is an account whose numbers the caller asked
+	// to skip: still a real account, still a switch target, just unfetched — a
+	// failed one always carries at least a Reason (see KnownAccountUsage).
 	KnownAccounts []KnownAccountUsage
 	// ActiveSnapshotName is the snapshot name (e.g. "avisoma") whose
 	// account.json email matches this host's live Usage.Account, best-effort —

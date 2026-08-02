@@ -325,11 +325,80 @@ swapped into the Keychain or the live credential file. Three rules hold. The
 live token in place while the snapshot keeps whatever was stashed at switch
 time, so the snapshot can look expired while the session is healthy) — it is
 skipped by email equality against `loadAccountEmail`. A per-account failure is
-never an error: it becomes that entry's `Expired` flag, so
+never an error: it becomes that entry's own classification, so
 `fetchAllKnownAccounts` always returns a full slice and the poller's
 whole-batch backoff only ever fires on a host-level problem, never because one
-account is flaky. And only non-`Expired` entries are cached, so a restart can
+account is flaky. And only entries with numbers are cached, so a restart can
 seed a recently-good account but never resurrects an expired one.
+
+**A failed fetch has four outcomes, not two.** `Expired` used to mean "the last
+fetch failed", which is how a 429 came to render as `auth expired` and send the
+user off to re-login over a throttle — and the endpoint 429s constantly, since
+every Claude Code session shares the account's per-token budget. So
+`classifyUsageErr` (usage.go) splits the failure on the typed `usageHTTPError`
+that `fetchUsageInfo` now returns: **401/403 alone** is `Expired` (the only
+actionable state — that credential really is dead), while 429 → `rate limited`,
+5xx → `server error`, `errUsageFetchTimedOut` → `timed out`, and anything else
+(network, parse) → `unreachable`. A credential snapshot that cannot be read or
+parsed at all never reaches `classifyUsageErr` — there was no answer to
+classify — and carries its own `bad snapshot` tag (`usageBadSnapshotReason`,
+known_accounts.go) rather than falling in with `unreachable`: nothing about it
+is a network problem, and unlike every tag above it does not heal on its own.
+The fix is `account save <name>` while logged into that account, the same
+recovery `switchAccount`'s identity precondition names. `Reason`
+is a short fixed tag and never the underlying error's text: a `*url.Error`
+stringifies with the whole request URL, which would land in a one-line header
+placeholder and in the `/usage` JSON.
+
+A transient failure then **carries the last good numbers forward** rather than
+blanking the account — in `KnownAccountsHub`, the client-side poller, which is
+the only thing anywhere with memory of a previous pass (the server classifies
+identically but has no `prev`, see `/usage` below):
+`knownAccountUsage` takes a `prev` and re-serves its
+`Info` with `Stale: true`, the failure's `Reason`, and `prev`'s **original**
+`FetchedAt` — restamping it would let an account that fails forever look
+forever fresh, when that timestamp is the only thing bounding the carry
+(`carryable`, `usageCacheMaxAge`). An `Expired` entry carries nothing forward:
+bars beside a dead credential imply it still works. The four states are
+`Info` fresh / `Info` + `Stale` / `Expired` / neither-with-a-`Reason`, and
+`KnownAccountUsage` documents them.
+
+Memory across polls lives in `newKnownAccountsFetcher`'s closure, because
+`usagePoller`'s `fetch` takes no arguments. Its `last` map is **rebuilt** from
+each pass (intersected with the current snapshot names, entries with `Info`
+only), so a renamed or deleted snapshot stops being re-served instead of
+lingering for the life of the process. `NewKnownAccountsHub` reads the disk
+cache **once** and hands it to both the poller (what the header shows before
+the first fetch) and the fetcher (what a first pass landing mid-throttle
+carries forward). There is deliberately no memoryless one-pass wrapper beside
+it: nothing outside the poller calls one, and keeping one alive for a test to
+exercise is how dead code survives — the test that used it now drives
+`newKnownAccountsFetcher(nil)()`, the shape production actually runs.
+`usageInfoFetch` is the package-var seam that lets tests drive the poller
+without a network (same pattern as `keychainRead`/`keychainWrite`).
+
+The disk cache ages **per account**, not per file. Entries in one file no
+longer share a vintage — a carried-forward entry's numbers can be
+`usageCacheMaxAge` older than the write that persisted them — so
+`loadKnownAccountsCache` gates each entry through the same `carryable` a live
+carry-forward uses and ignores the envelope timestamp entirely. A cache file
+written before per-account timestamps existed decodes to the zero time and is
+dropped whole on the first load; that is intended, and there is deliberately no
+fallback to the envelope's clock.
+
+`usageCache` (usage_cache.go) was left alone on purpose — it has no last-good
+layer. For any account **this machine** holds a snapshot for that is enough:
+`dedupeAccounts` already prefers the local known-account line over any remote's
+copy of the same email, so the local hub's carry-forward is what the header
+shows and the server's answer never gets a chance to matter. The gap is an
+account only a **remote** holds a snapshot for — nothing anywhere remembers its
+last good numbers, so a 429 there still renders as a bare `rate limited`
+placeholder with no bars. That is no worse than the `auth expired` placeholder
+it replaced, and it is left open rather than papered over: closing it means
+`usageCache` growing a last-good layer of its own — a second carry-forward with
+its own age bound, running on a different machine from the one whose header the
+numbers land in — and one place deciding how old is too old is worth more than
+a remote-only account's bars.
 
 **Both hubs run in the TUI client only.** A `claude-sessions -s` server used to
 start them too, so every host polled Anthropic every 2 minutes for the life of
@@ -371,11 +440,15 @@ parses repeats natively. An ignored account is still reported, with a nil
 `Info`: `accountRowsFrom` (account_list.go) builds the Ctrl+W picker's and
 `account list`'s rows straight out of `knownAccounts`, so omitting it would
 silently remove it as a *switch target*, and the header is unaffected either way
-because `dedupeAccounts`' `addKnown` already drops a non-`Expired` entry with no
-`Info`. The live account's `Account` (its email) is populated even when its
+because `dedupeAccounts`' `addKnown` drops an entry with no `Info`, no `Expired`
+and no `Reason` — which an ignored account, never fetched, is exactly. The live
+account's `Account` (its email) is populated even when its
 numbers were ignored or failed — reading it is free, and it is what labels that
-host's heading. Per-account failures become `Expired`, never an error for the
-request; accounts are fetched **concurrently**, one goroutine each, because a
+host's heading. Per-account failures go through `classifyUsageErr` into that
+entry's `Expired`/`Reason`, never an error for the request, and a success
+stamps `FetchedAt`; the server keeps no cross-request memory, so it never
+produces a `Stale` entry — carrying numbers forward is the client hub's job.
+Accounts are fetched **concurrently**, one goroutine each, because a
 cold cache with a handful of accounts would otherwise serialize into N × the
 endpoint's 5s timeout and outlive the client's own.
 
@@ -430,8 +503,11 @@ didn't move, only its source. The hub is `RemoteHub`'s smaller sibling minus
 the wake pipe (a percentage doesn't need an instant repaint; the 2s render
 tick suffices) and replaces its whole result set per pass rather than
 streaming per host, so a failed host's numbers *clear* instead of freezing —
-the same reasoning `mergeRemoteResult` documents, since usage bars have no
-stale rendering and a carried-forward reading would silently pass as live.
+the same reasoning `mergeRemoteResult` documents. The `stale` marker does not
+change that: it belongs to `KnownAccountsHub`'s per-account carry-forward, and
+`RemoteUsageHub` has no equivalent — it keeps no memory across passes, so a
+frozen remote reading would carry nothing marking it and would silently pass
+as live.
 `FetchRemoteUsage`'s own timeout is 8s, not `FetchRemote`'s 5s: a cold-cache
 `/usage` handler fans out one fetch per account concurrently against that same
 5s-per-account budget (server.go), so the handler's own wall-clock time can
@@ -439,10 +515,13 @@ approach 5s before a 5s client would give up on it.
 
 The `ignore` list is recomputed each tick by `localFreshAccountEmails` from this
 machine's *own* hub snapshots, and only from entries it actually has numbers for
-(`Info != nil`, and `!Expired` for known accounts). A locally-**expired** email
-is deliberately excluded: telling every remote to skip the one account this
-machine has no numbers for would turn one transient 429 here into a blank bar
-everywhere, which is the opposite of the point. (Local's own bars can be up to
+(`Info != nil`, and neither `Expired` nor `Stale` for known accounts). A
+locally-**expired** email is deliberately excluded: telling every remote to skip
+the one account this machine has no numbers for would turn one transient 429
+here into a blank bar everywhere, which is the opposite of the point. **`Stale`
+is excluded for exactly the same reason** — carried-forward numbers are this
+machine's memory of an account it currently cannot reach, and a host that *can*
+reach it must not be told to skip it. (Local's own bars can be up to
 `usageCacheMaxAge` stale from a disk-cache warm start — accepted, since the
 remote's bar then just mirrors what local already shows.)
 
@@ -463,8 +542,24 @@ first.
 
 `dedupeAccounts` merges known accounts in a second pass after the live-account
 pass — a live line always wins over any host's snapshot copy of the same email —
-and an `Expired` entry keeps its line as a dim `auth expired` placeholder
-instead of being dropped. Snapshot-derived lines are never marked `mine`, so one
+and a failed entry keeps its line instead of being dropped: an `Expired` one as
+the dim `auth expired` placeholder, a transient one as a dim placeholder naming
+its `Reason` (`rate limited`, `bad snapshot`, …), and a `Stale` one as its bars
+plus a dim `stale` marker. That marker is appended after the **last** segment,
+which is the one place `segTrailerText` never pads or aligns, so it shifts no
+column on any other line (`usageSegsLine` exists to make that append possible).
+It does still take part in **sizing**: `writeUsageHeader` carries its display
+width as that entry's `suffixW` into `lineBarW`/`usageLineFixedWidth`, so the
+shared bar width shrinks to leave room for it. Alignment and sizing pulling
+apart like that is deliberate, and leaving the marker out of *both* was a real
+bug — with two collision-promoted full-email labels at ~64 columns the bars
+sized to fill the entire budget, `cropTableFrame`'s clip then ate the marker,
+and the stale line rendered byte-identical to a live one, which is the single
+thing the marker exists to prevent. The one entry shape
+still dropped is `Info == nil && !Expired && Reason == ""` — that is precisely
+the **ignored** account `/usage` reports for identity only, and giving it a
+header line would undo what `ignore` is for. Snapshot-derived lines are never
+marked `mine`, so one
 can never render bare and pass as this machine's live account. Host headings
 show each host's active account email, dimmed, after `LOAD` (`section.account`,
 fed by that host's `Usage.Account` — which is why `/usage` reports the live

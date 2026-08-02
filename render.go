@@ -371,7 +371,7 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 		return
 	}
 	segs := claudeSegs(u)
-	renderUsageSegs(w, label, segs, lineBarW(label, segs, cols))
+	renderUsageSegs(w, label, segs, lineBarW(label, segs, 0, cols))
 }
 
 // claudeSegs builds the Anthropic header segments for a non-nil snapshot: the 5h
@@ -448,15 +448,16 @@ func segTrailerText(s usageSeg, isLast bool) string {
 
 // lineBarW computes the bar width one header line can afford: the terminal width
 // (cols) minus everything fixed — the padded label prefix, the segment labels,
-// percentages, trailers (at their padded width, see segTrailerWidth), and
-// inter-segment separators — split across the segments, clamped to
-// usageBarMin..usageBarMax. cols <= 0 (unknown width, or no segments) yields
-// usageBarMax. label is the already-padded label ("" for a bare line).
-func lineBarW(label string, segs []usageSeg, cols int) int {
+// percentages, trailers (at their padded width, see segTrailerWidth), any suffix
+// hung off the end (suffixW, 0 for a line with none), and inter-segment
+// separators — split across the segments, clamped to usageBarMin..usageBarMax.
+// cols <= 0 (unknown width, or no segments) yields usageBarMax. label is the
+// already-padded label ("" for a bare line).
+func lineBarW(label string, segs []usageSeg, suffixW, cols int) int {
 	if cols <= 0 || len(segs) == 0 {
 		return usageBarMax
 	}
-	fixed := usageLineFixedWidth(label, segs)
+	fixed := usageLineFixedWidth(label, segs, suffixW)
 	barW := usageBarMax
 	if b := (cols - fixed) / len(segs); b < barW {
 		barW = b
@@ -469,15 +470,21 @@ func lineBarW(label string, segs []usageSeg, cols int) int {
 
 // usageLineFixedWidth is everything on a header usage line except the bars
 // themselves: the padded label prefix, each segment's label/percent/trailer,
-// and the inter-segment separators. Shared by lineBarW (sizing the bars) and
-// writeUsageHeader's label-hiding check (does the line fit at all, even at
-// usageBarMin, with the label kept).
-func usageLineFixedWidth(label string, segs []usageSeg) int {
+// the inter-segment separators, and suffixW — the display width of anything the
+// caller hangs off the end (the stale marker; 0 when there is none). Shared by
+// lineBarW (sizing the bars) and writeUsageHeader's label-hiding check (does the
+// line fit at all, even at usageBarMin, with the label kept).
+//
+// The suffix takes part in sizing even though it takes part in no alignment:
+// leaving it out let a stale line size its bars to the full width and then lose
+// the marker to the render loop's clip (cropTableFrame), which is the one thing
+// the marker exists to prevent — carried-forward numbers reading as live.
+func usageLineFixedWidth(label string, segs []usageSeg, suffixW int) int {
 	prefixW := 0
 	if label != "" {
 		prefixW = len(label) + 1
 	}
-	fixed := prefixW + 3*(len(segs)-1) // prefix + inter-segment separators
+	fixed := prefixW + suffixW + 3*(len(segs)-1) // prefix + suffix + inter-segment separators
 	for i, s := range segs {
 		fixed += len(s.label) + 1 + 1 + len(fmt.Sprintf("%3.0f%%", s.pct))
 		if tw := segTrailerWidth(s, i == len(segs)-1); tw > 0 {
@@ -501,10 +508,22 @@ func usageLineFixedWidth(label string, segs []usageSeg) int {
 // never padded, so a line never ends in trailing whitespace. Empty segs writes
 // nothing.
 func renderUsageSegs(w io.Writer, label string, segs []usageSeg, barW int) {
-	if len(segs) == 0 {
-		return
+	if line := usageSegsLine(label, segs, barW); line != "" {
+		fmt.Fprintln(w, line)
 	}
-	prefix := usageLinePrefix(label)
+}
+
+// usageSegsLine is renderUsageSegs' line, unwritten, so a caller can append to
+// it. Empty segs yields "" (which renderUsageSegs turns back into writing
+// nothing). writeUsageHeader uses this to hang the stale marker off the end of
+// a line: the last segment is the one place nothing pads or aligns, so a suffix
+// there can't shift a column on any other line. Exempt from alignment is not
+// exempt from sizing — the caller still owes the suffix's width to
+// usageLineFixedWidth, or the clip eats it.
+func usageSegsLine(label string, segs []usageSeg, barW int) string {
+	if len(segs) == 0 {
+		return ""
+	}
 	parts := make([]string, len(segs))
 	for i, s := range segs {
 		part := fmt.Sprintf("%s %s %3.0f%%",
@@ -514,7 +533,7 @@ func renderUsageSegs(w io.Writer, label string, segs []usageSeg, barW int) {
 		part += segTrailerText(s, i == len(segs)-1)
 		parts[i] = part
 	}
-	fmt.Fprintln(w, prefix+strings.Join(parts, "   "))
+	return usageLinePrefix(label) + strings.Join(parts, "   ")
 }
 
 // usageLinePrefix builds a header usage line's dim label prefix: the label plus
@@ -532,15 +551,25 @@ func usageLinePrefix(label string) string {
 }
 
 // usageExpiredText is the placeholder a known account whose snapshot token no
-// longer works renders instead of bars.
-const usageExpiredText = "auth expired"
+// longer works renders instead of bars. It is classifyUsageErr's 401/403 tag,
+// so the wording the user reads and the state the code branches on are one
+// string.
+const usageExpiredText = usageExpiredReason
 
-// renderUsageExpired writes one header line for an account with no usable
-// snapshot token: the same dim label prefix every other line gets, then a dim
-// "auth expired" where the bars would be. Unlike a live account with no data,
-// this line is never dropped — the account's existence is the point.
-func renderUsageExpired(w io.Writer, label string) {
-	fmt.Fprintln(w, usageLinePrefix(label)+dim(usageExpiredText))
+// usageStaleText marks a line whose bars are carried forward from an earlier
+// poll because the latest one failed. Short and dim on purpose: the numbers are
+// still worth reading, and the marker only has to stop them passing as live.
+const usageStaleText = "stale"
+
+// renderUsagePlaceholder writes one header line for an account with no numbers
+// to show: the same dim label prefix every other line gets, then dim text where
+// the bars would be — "auth expired" for a dead credential, or the failure's
+// reason ("rate limited", "unreachable", "bad snapshot", …) otherwise. Unlike
+// a live account with no data, this line is never dropped — the account's
+// existence is the point, and which of those two things happened is what tells
+// the user whether to act.
+func renderUsagePlaceholder(w io.Writer, label, text string) {
+	fmt.Fprintln(w, usageLinePrefix(label)+dim(text))
 }
 
 // accountUsageLine is one resolved header account line: a usage snapshot with
@@ -559,11 +588,33 @@ type accountUsageLine struct {
 	// session, so rendering it bare would let snapshot data pass as the local
 	// account's current state — the same masquerade this flag exists to stop.
 	mine bool
-	// expired marks a known account whose latest snapshot fetch failed. Such a
-	// line carries no info and renders as a dim "auth expired" placeholder
-	// instead of bars: it is deliberately never dropped, so the account's
-	// existence stays a visible reminder to claude-switch into it again.
-	expired bool
+	// stale marks a line whose info was carried forward from an earlier poll
+	// because the latest one failed transiently. It still renders bars — old
+	// numbers beat no numbers — plus a dim marker so they can't pass as live.
+	stale bool
+	// placeholder is the dim text a known account with no numbers renders
+	// instead of bars: "auth expired" for a dead credential (the actionable
+	// one — claude-switch into it and log in again), or whatever reason the
+	// failed attempt classified as otherwise ("rate limited", "bad snapshot",
+	// …). Empty means a normal segment line. Such
+	// a line is deliberately never dropped, so the account's existence stays
+	// visible either way.
+	placeholder string
+}
+
+// knownAccountPlaceholder is the dim text a known account renders instead of
+// bars, or "" when it has numbers to show. Order matters: an entry can carry
+// both a Reason and carried-forward numbers (that is exactly what a stale entry
+// is), and checking Info first is what keeps its bars.
+func knownAccountPlaceholder(k KnownAccountUsage) string {
+	switch {
+	case k.Expired:
+		return usageExpiredText
+	case k.Info == nil && k.Reason != "":
+		return k.Reason
+	default:
+		return ""
+	}
 }
 
 // accountLocalPart is the label for a known account: the part before "@"
@@ -598,8 +649,12 @@ func accountLocalPart(email string) string {
 // any host's snapshot copy of the same account, which is what keeps account X
 // live on host B from being shadowed by host A's stale snapshot of X. The
 // survivors dedupe among themselves the same way (unknown-email entries key by
-// snapshot name instead), and an expired one keeps its line as a placeholder
-// rather than vanishing.
+// snapshot name instead), and a failed one keeps its line rather than vanishing:
+// an Expired entry as the dim "auth expired" placeholder, a transient one with
+// nothing to carry as a dim placeholder naming its Reason ("rate limited",
+// "bad snapshot", …), and a Stale one as its carried-forward bars plus the dim
+// "stale" marker. Only the fourth shape is dropped — no Info, no Expired and no
+// Reason, which is exactly the account /usage was told to skip (see addKnown).
 func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes []RemoteResult) []accountUsageLine {
 	var lines []accountUsageLine
 	seen := make(map[string]bool)
@@ -629,8 +684,12 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 	// so a snapshot name can never collide with an email key.
 	knownSeen := make(map[string]bool)
 	addKnown := func(k KnownAccountUsage) {
-		if !k.Expired && k.Info == nil {
-			return // nothing to show and no placeholder asked for
+		if !k.Expired && k.Info == nil && k.Reason == "" {
+			// Nothing to show and no placeholder asked for. This is the ignored
+			// account: /usage reports every account it was told to skip with
+			// bare identity and no numbers, so the picker keeps it as a switch
+			// target — it must not sprout a header line saying nothing.
+			return
 		}
 		key := "name\x00" + k.Name
 		if k.Account != "" {
@@ -647,7 +706,13 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 		if k.Account != "" {
 			label = accountLocalPart(k.Account)
 		}
-		lines = append(lines, accountUsageLine{label: label, email: k.Account, info: k.Info, expired: k.Expired})
+		lines = append(lines, accountUsageLine{
+			label:       label,
+			email:       k.Account,
+			info:        k.Info,
+			stale:       k.Stale,
+			placeholder: knownAccountPlaceholder(k),
+		})
 	}
 	for _, k := range localKnown {
 		addKnown(k)
@@ -697,24 +762,37 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 	type entry struct {
 		label string
 		segs  []usageSeg
-		// expired lines carry no segments and render as a dim placeholder; they
-		// take part in label-width alignment but in none of the bar/trailer
-		// sizing, which is all defined over segments.
-		expired bool
+		// placeholder lines ("auth expired", "rate limited", …) carry no
+		// segments and render as dim text; they take part in label-width
+		// alignment but in none of the bar/trailer sizing, which is all defined
+		// over segments.
+		placeholder string
+		// suffix hangs off the end of a segment line (the stale marker), and
+		// suffixW is its display width (the escapes in suffix are not width).
+		// It takes part in no alignment — the last segment is never padded, so
+		// nothing else moves because of it — but it does take part in sizing:
+		// bars that fill the whole terminal would leave the marker to be clipped
+		// away, and an unmarked stale line reads as a live one.
+		suffix  string
+		suffixW int
 	}
 	var entries []entry
 	codexPresent := len(codexAccounts) > 0
 
 	addClaude := func(label string, a accountUsageLine) {
-		if a.expired {
-			entries = append(entries, entry{label: label, expired: true})
+		if a.placeholder != "" {
+			entries = append(entries, entry{label: label, placeholder: a.placeholder})
 			return
 		}
 		if a.info == nil {
 			return
 		}
 		if segs := claudeSegs(a.info); len(segs) > 0 {
-			entries = append(entries, entry{label: label, segs: segs})
+			suffix, suffixW := "", 0
+			if a.stale {
+				suffix, suffixW = " "+dim(usageStaleText), 1+len(usageStaleText)
+			}
+			entries = append(entries, entry{label: label, segs: segs, suffix: suffix, suffixW: suffixW})
 		}
 	}
 	addCodex := func(label string, info *CodexUsageInfo) {
@@ -812,7 +890,7 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 			if len(e.segs) == 0 {
 				continue // placeholder line: no bars to make room for
 			}
-			if fixed := usageLineFixedWidth(pad, e.segs); fixed+len(e.segs)*usageBarMin > cols {
+			if fixed := usageLineFixedWidth(pad, e.segs, e.suffixW); fixed+len(e.segs)*usageBarMin > cols {
 				labelW = 0
 				for i := range entries {
 					if len(entries[i].segs) > 0 {
@@ -824,8 +902,9 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		}
 	}
 	// Bars must be the same width on every line, so size them to the narrowest
-	// line's affordable width (computed against the padded labels and trailers)
-	// and render all lines with it. cols <= 0 leaves every line at usageBarMax.
+	// line's affordable width (computed against the padded labels, the trailers
+	// and any end-of-line suffix) and render all lines with it. cols <= 0 leaves
+	// every line at usageBarMax.
 	padded := make([]string, len(entries))
 	barW := usageBarMax
 	for i, e := range entries {
@@ -836,16 +915,20 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 			pad = 0
 		}
 		padded[i] = e.label + strings.Repeat(" ", pad)
-		if b := lineBarW(padded[i], e.segs, cols); b < barW {
+		if b := lineBarW(padded[i], e.segs, e.suffixW, cols); b < barW {
 			barW = b
 		}
 	}
 	for i, e := range entries {
-		if e.expired {
-			renderUsageExpired(w, padded[i])
+		if e.placeholder != "" {
+			renderUsagePlaceholder(w, padded[i], e.placeholder)
 			continue
 		}
-		renderUsageSegs(w, padded[i], e.segs, barW)
+		// The suffix rides along only when there is a line to hang it off; a
+		// segment-less entry can never emit a bare marker.
+		if line := usageSegsLine(padded[i], e.segs, barW); line != "" {
+			fmt.Fprintln(w, line+e.suffix)
+		}
 	}
 }
 
@@ -864,7 +947,7 @@ func writeCodexUsage(w io.Writer, label string, info *CodexUsageInfo, cols int) 
 	if len(segs) == 0 {
 		return
 	}
-	renderUsageSegs(w, label, segs, lineBarW(label, segs, cols))
+	renderUsageSegs(w, label, segs, lineBarW(label, segs, 0, cols))
 }
 
 // codexSegs builds one segment per Codex rate-limit window; a window with no

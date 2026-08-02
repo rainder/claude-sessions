@@ -295,6 +295,10 @@ func TestLocalFreshAccountEmailsSkipsWhatLocalCannotVouchFor(t *testing.T) {
 		// Locally expired: telling a remote to skip this one would suppress the
 		// healthy numbers it may well have for the same account.
 		{Name: "side", Account: "andy@side.dev", Expired: true},
+		// Stale is the same situation wearing better clothes: these numbers are
+		// this machine's memory of an account it currently cannot reach, so a
+		// remote that CAN reach it must not be told to skip it.
+		{Name: "old", Account: "andy@old.dev", Info: &UsageInfo{}, Stale: true},
 		// Fetched nothing yet.
 		{Name: "new", Account: "andy@new.dev"},
 		// No identity file: an empty ignore entry names nothing.
