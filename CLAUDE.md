@@ -507,10 +507,15 @@ imposes no wait of its own (most heal within one tick — only an explicit
 third and beyond `usageBackoffMax` (8min, the cap). A 429's `Retry-After`
 (`parseRetryAfter`, either RFC 9110 form) may only *lengthen* that wait, bounded
 by `usageBackoffCeiling` (15min) so a bogus header can't park an account for the
-life of the process. Any other outcome — numbers, `Expired`, a different failure,
-or the snapshot turning out to be the live account — clears the streak
+life of the process. On a pass that actually attempts the account, any outcome
+other than another rate-limited failure — numbers, `Expired`, a different
+failure, or the snapshot turning out to be the live account — clears the streak
 (`usageBackoffUntil` / `usageBackoff` in usage.go hold the shared arithmetic;
-the two schedulers hold their own state).
+the two schedulers hold their own state). A *skipped* pass never touches the
+streak either way, even if the synthesized path's own local reads (e.g.
+`snapshotToken`) would have reported something other than a throttle, like a
+now-unreadable credential — the already-armed wait simply stands, and
+self-corrects at the next real attempt once it elapses.
 
 Client-side it lives in `newKnownAccountsFetcher`'s closure beside `last`, keyed
 by snapshot name and rebuilt from `snapshotAccountNames()` each pass for the same
