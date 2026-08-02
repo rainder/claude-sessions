@@ -546,7 +546,14 @@ numbers these are. `NewUsageHub` pairs the fetcher with
 `saveUsageCache` restamps `FetchedAt` with `time.Now()` and the poller saves on
 every success, so without it a long throttle would rewrite the cache every two
 minutes and `usageCacheMaxAge` would stop bounding a warm start — the same
-restamping `KnownAccountUsage`'s carried-forward `FetchedAt` refuses. Server-side
+restamping `KnownAccountUsage`'s carried-forward `FetchedAt` refuses. That said,
+`last` here has no per-carry age bound the way `carryable` re-checks one on
+every known-account carry — `AccountUsage` has no `FetchedAt` of its own, so a
+live account throttled for hours keeps re-serving those hour-old bars with no
+`stale` marker, and `localFreshAccountEmails` (gated only on `Info != nil`)
+still lists it in the `ignore` sent to remotes. Accepted for now: closing it
+means giving `AccountUsage` the same age-gated carry `KnownAccountUsage` has.
+Server-side
 it is
 `usageCache.failures`, keyed by email and deliberately separate from `entries`
 (a flight is one attempt; a streak outlives many), swept by `prune` after

@@ -526,14 +526,12 @@ func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
 	if calls != 3 {
 		t.Fatalf("fetches = %d, want the switch to have forced a fetch", calls)
 	}
-	// And the wait is gone with it: this next 429 is the new account's first, so
-	// it imposes no wait of its own and the pass after it still fetches.
-	if _, err := fetcher(); err == nil {
-		t.Fatal("pass after the switch = nil error, want a real fetch's throttle")
-	}
-	if calls != 4 {
-		t.Fatalf("fetches = %d, want the new account's streak to start over", calls)
-	}
+	// usage.go also clears backoff on this path as cheap insurance, but that
+	// reset is not independently observable here: the switch already dropped
+	// last to nil, and the skip branch requires last != nil regardless of what
+	// backoff holds, so a further assertion on call counts would pass whether or
+	// not the reset happened. Proving the streak itself restarted would need a
+	// success in between to repopulate last first.
 }
 
 // The poller saves on every success, and a re-served snapshot is a success — so
