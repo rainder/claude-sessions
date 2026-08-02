@@ -466,6 +466,15 @@ type server struct {
 	// seams above, and more urgently: without it a handler test would perform a
 	// real account switch against the machine running `go test`.
 	switchAcct func(name string) (string, error)
+	// kickUsage and kickKnownAccounts force usageHub/knownAccountsHub to refetch
+	// immediately; nil (tests, and any server built without the hubs) is a no-op.
+	// switchAccount patches the credential file straight through, bypassing both
+	// pollers, so without this a successful remote switch would leave /sessions
+	// reporting the pre-switch account (and activeSnapshotName) for up to their
+	// full poll interval — exactly the window the client-side Kick() calls in
+	// tui.go close for a local switch.
+	kickUsage         func()
+	kickKnownAccounts func()
 	// attest re-reads one PID's own session file; nil falls back to
 	// readSessionByPID. Used for the last-moment identity check before a
 	// destructive act, and separate from collect because it must be the cheapest
@@ -1076,6 +1085,18 @@ func (s *server) accountSwitch(w http.ResponseWriter, r *http.Request) {
 			Message: err.Error(),
 		})
 		return
+	}
+	// Kick both pollers so a refetch is already in flight rather than waiting
+	// for the next tick (up to usageRefreshInterval away). Kick() only enqueues
+	// the refetch — it does not block until the new snapshot lands — so this
+	// shrinks the staleness window to one fetch's latency, it does not close it:
+	// a client that reopens the picker within that window can still briefly see
+	// the pre-switch account.
+	if s.kickUsage != nil {
+		s.kickUsage()
+	}
+	if s.kickKnownAccounts != nil {
+		s.kickKnownAccounts()
 	}
 	writeJSON(w, http.StatusOK, accountSwitchResult{OK: true, Account: email})
 }
@@ -1695,6 +1716,8 @@ func cmdServer(args []string) int {
 		// from memory instead of re-listing snapshots per request. It tracks the
 		// live account's email, so a relogin re-resolves on the next poll.
 		knownAccountsSnapshot: knownAccountsHub.Snapshot,
+		kickUsage:             usageHub.Kick,
+		kickKnownAccounts:     knownAccountsHub.Kick,
 		devices:               devices,
 		disabled:              disabledStore,
 	}

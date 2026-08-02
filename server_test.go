@@ -3705,6 +3705,12 @@ func TestAccountSwitchHandler(t *testing.T) {
 		wantOK     bool
 		wantCode   string
 		wantCalled bool
+		// wantKicked: the hub kicks must fire on a successful switch (so
+		// /sessions stops reporting the pre-switch account without waiting for
+		// the next poll tick) and must NOT fire on any failure path — a failed
+		// switch changed nothing, so there is nothing new for a refetch to pick
+		// up.
+		wantKicked bool
 	}{
 		{
 			name:       "valid name switches and reports the new email",
@@ -3712,6 +3718,7 @@ func TestAccountSwitchHandler(t *testing.T) {
 			wantStatus: http.StatusOK,
 			wantOK:     true,
 			wantCalled: true,
+			wantKicked: true,
 		},
 		{
 			name:       "unknown snapshot is a bad request, nothing touched",
@@ -3739,6 +3746,7 @@ func TestAccountSwitchHandler(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
+			usageKicked, knownKicked := false, false
 			s := &server{
 				token: "secret",
 				switchAcct: func(name string) (string, error) {
@@ -3748,6 +3756,8 @@ func TestAccountSwitchHandler(t *testing.T) {
 					}
 					return "andy@" + name + ".example", nil
 				},
+				kickUsage:         func() { usageKicked = true },
+				kickKnownAccounts: func() { knownKicked = true },
 			}
 			req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(tc.body))
 			req.Header.Set("Authorization", "Bearer secret")
@@ -3760,6 +3770,9 @@ func TestAccountSwitchHandler(t *testing.T) {
 			}
 			if called != tc.wantCalled {
 				t.Fatalf("switch called = %v, want %v", called, tc.wantCalled)
+			}
+			if usageKicked != tc.wantKicked || knownKicked != tc.wantKicked {
+				t.Fatalf("usage/known-accounts kicked = %v/%v, want %v", usageKicked, knownKicked, tc.wantKicked)
 			}
 			var r accountSwitchResult
 			if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
