@@ -147,6 +147,22 @@ func RunTUI(interval time.Duration) error {
 	knownAccountsHub := NewKnownAccountsHub()
 	defer knownAccountsHub.Shutdown()
 
+	// Each remote host's accounts come from its own /usage endpoint rather than
+	// riding /sessions, so a host nobody is watching never calls Anthropic at
+	// all. Each tick tells every host which accounts THIS machine already has
+	// good numbers for, so a remote host skips fetching an account this client
+	// is already showing from its own live poll — the redundant case this whole
+	// design exists to cut. It does not dedupe across remotes with no bearing on
+	// this client: two remotes sharing an account neither client account covers
+	// still each fetch it independently.
+	remoteUsageHub := NewRemoteUsageHub(func() []string {
+		return localFreshAccountEmails(
+			usageHub.Snapshot(),
+			derefKnownAccounts(knownAccountsHub.Snapshot()),
+		)
+	})
+	defer remoteUsageHub.Shutdown()
+
 	hostUsageHub := NewHostUsageHub(interval)
 	defer hostUsageHub.Shutdown()
 	localName := shortHostname()
@@ -220,6 +236,10 @@ func RunTUI(interval time.Duration) error {
 		// we never race the hub goroutine that owns them.
 		snap := hub.Snapshot()
 		remotes = sortRemotes(snap, sortMode)
+		// The account fields ride their own poll now, not /sessions, so overlay
+		// them here — before anything reads `remotes`, whether that is the header's
+		// rate-limit bars, a host heading's account label, or the Ctrl+W picker.
+		remotes = overlayRemoteUsage(remotes, remoteUsageHub.Snapshot())
 		// Keep long-lived group entries alive under plain viewing: refresh
 		// their last_seen about hourly so the 30-day load-time GC never drops
 		// state for a session that's still on screen. Disabled's own
@@ -384,6 +404,7 @@ func RunTUI(interval time.Duration) error {
 				usageHub.Pause()
 				codexUsageHub.Pause()
 				knownAccountsHub.Pause()
+				remoteUsageHub.Pause()
 				hostUsageHub.Pause()
 			},
 			resume: func() {
@@ -391,6 +412,7 @@ func RunTUI(interval time.Duration) error {
 				usageHub.Resume()
 				codexUsageHub.Resume()
 				knownAccountsHub.Resume()
+				remoteUsageHub.Resume()
 				hostUsageHub.Resume()
 			},
 		}
@@ -616,11 +638,16 @@ func RunTUI(interval time.Duration) error {
 				screen.Invalidate()
 				msg, switched := actSwitchAccount(makeCtx())
 				if switched {
-					// The account pollers still describe the *previous* account
-					// for up to two minutes; kick both so the header email and
-					// the picker's active marker catch up with the toast.
+					// The local account pollers still describe the *previous*
+					// account for up to two minutes; kick both so this machine's
+					// header email and picker marker catch up with the toast.
 					usageHub.Kick()
 					knownAccountsHub.Kick()
+					// A remote switch needs no kick to be *correct* — every host
+					// re-resolves which account is live on each /usage call — but
+					// its percentages are cached per account, so refetch so the
+					// bars follow the switch instead of lagging a tick behind.
+					remoteUsageHub.Refresh()
 					refresh(true)
 				}
 				if msg != "" {

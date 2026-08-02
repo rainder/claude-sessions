@@ -299,13 +299,22 @@ alongside `collect`/`terminate`/`removeTree`.
 
 ### Usage polling
 
+Two different things live here and they cost wildly different amounts, which is
+the whole shape of this subsystem. **Which** accounts a host has, their emails,
+and which one is logged in are local file reads — free. **How much** of each
+account's rate limit is used costs an Anthropic round trip, and that endpoint
+429s readily, since every Claude Code session shares the account's per-token
+budget (`usageRetryMin`). So the free half is recomputed from disk every single
+time it is asked for and never cached anywhere, and only the numbers go through
+a cache.
+
 `usage.go` polls Anthropic's OAuth usage endpoint (token from the macOS Keychain
 / `~/.claude/.credentials.json`) every 2 minutes in a background goroutine
 (`UsageHub`, following `RemoteHub`'s pattern minus the wake pipe); the TUI header
 shows it as two progress bars (5-hour and weekly limits). The token is read-only
 — refresh/rotation is Claude Code's job.
 
-`known_accounts.go` polls the *other* accounts each host knows about:
+`known_accounts.go` covers the *other* accounts each host knows about:
 `claude-switch` parks a credential snapshot per account
 (`~/.claude/.<name>.keychain-cred` on macOS, `.<name>.credentials.json`
 elsewhere, plus `.<name>.account.json` for the email), and `KnownAccountsHub`
@@ -322,6 +331,16 @@ whole-batch backoff only ever fires on a host-level problem, never because one
 account is flaky. And only non-`Expired` entries are cached, so a restart can
 seed a recently-good account but never resurrects an expired one.
 
+**Both hubs run in the TUI client only.** A `claude-sessions -s` server used to
+start them too, so every host polled Anthropic every 2 minutes for the life of
+the process whether or not a client had ever connected — and hosts sharing an
+account each paid separately for numbers the client's own `dedupeAccounts`
+would then throw away, deepening exactly the 429s that surface as "auth
+expired" flicker in the header. The server now answers `GET /usage` on demand
+instead, and makes no request until a client asks. The Codex side
+(`codex_usage.go`) still polls on the server and still rides `/sessions`; only
+the Anthropic half moved.
+
 `snapshotAccountNames` lists snapshots with `os.ReadDir` + a name filter, never
 `filepath.Glob`: the home directory is data, not a pattern, so a home path
 containing `[` would make the *only* error path fire (permanent backoff, every
@@ -330,21 +349,126 @@ read their credential snapshots. Nothing below an unresolvable `$HOME` errors �
 a missing or unreadable `~/.claude` is an empty list, which is what keeps the
 never-fail-the-batch property intact.
 
-Transport is additive: `GET /sessions` gains `knownAccounts` and
-`activeSnapshotName` (both `omitempty`, both nil/"" from an older server).
-`activeSnapshotName` is a side output of the poll, not a per-request lookup:
-`allKnownAccounts` reports the name it skipped as the live account, the poller
-parks it beside the slice in `knownAccountsResult`, and the handler reads both
-from one `Snapshot()` — so `/sessions` touches no files and the two fields
-always describe the same pass. It is never cached to disk (which account is
-logged in can change while the process is down).
-`dedupeAccounts` merges them in a second pass after the live-account pass — a
-live line always wins over any host's snapshot copy of the same email — and an
-`Expired` entry keeps its line as a dim `auth expired` placeholder instead of
-being dropped. Snapshot-derived lines are never marked `mine`, so one can never
-render bare and pass as this machine's live account. Host headings show each
-host's active account email, dimmed, after `LOAD` (`section.account`, fed by
-that host's existing usage snapshot — no extra fetch, no protocol change).
+**The `/usage` endpoint.** `GET /usage[?ignore=a@x.com&ignore=b@y.com]`
+(server.go, beside `sessions`) answers `usageResponse`: `usage` (the live
+account), `knownAccounts`, and `activeSnapshotName`. The whole account universe
+— names from `snapshotAccountNames`, emails from `snapshotAccountEmail`, and
+which snapshot matches `loadAccountEmail` — is resolved from disk on **every**
+call, mirroring `allKnownAccounts`' skip rule (every snapshot standing for the
+live account is left out of `knownAccounts`; the first one names
+`activeSnapshotName`) but split apart from fetching, since fetching is now
+conditional. That is what removed a whole class of staleness: an earlier
+revision of this code had `kickUsage`/`kickKnownAccounts` seams on the server
+and matching `Kick()` calls after a remote account switch, purely so
+`activeSnapshotName` would stop describing the pre-switch account before the
+next 2-minute tick. Nothing caches it now, so the next call is already right and
+those seams are gone.
+
+`ignore` names accounts the caller already holds good numbers for, so the host
+skips their fetch. It is a **repeated** parameter, never comma-joined — an
+email's local-part may legally contain a comma, and `r.URL.Query()["ignore"]`
+parses repeats natively. An ignored account is still reported, with a nil
+`Info`: `accountRowsFrom` (account_list.go) builds the Ctrl+W picker's and
+`account list`'s rows straight out of `knownAccounts`, so omitting it would
+silently remove it as a *switch target*, and the header is unaffected either way
+because `dedupeAccounts`' `addKnown` already drops a non-`Expired` entry with no
+`Info`. The live account's `Account` (its email) is populated even when its
+numbers were ignored or failed — reading it is free, and it is what labels that
+host's heading. Per-account failures become `Expired`, never an error for the
+request; accounts are fetched **concurrently**, one goroutine each, because a
+cold cache with a handful of accounts would otherwise serialize into N × the
+endpoint's 5s timeout and outlive the client's own.
+
+`usage_cache.go` is the only thing that remembers anything: a per-email
+single-flight + TTL cache modeled on `spawnDedupe` (same map-of-flights,
+claim/join/publish shape), wrapped in a single `GetOrFetch` so `begin`/`finish`
+can't be misused. It differs from `spawnDedupe` in two ways. Failures are
+*kept*, for a short `usageCacheFailTTL` (15s) rather than forgotten — nothing
+was created, so there is nothing making a retry unsafe, only an endpoint to stop
+hammering when a burst of clients arrives during a throttle; success keeps
+`usageCacheTTL` (100s, deliberately a little under `usageRefreshInterval` — a
+cache entry's clock starts when its fetch *completes*, strictly after the poll
+tick that triggered it, so a TTL exactly equal to the poll interval would mean
+the next tick almost always lands just before expiry and reuses a stale answer
+instead of refreshing, roughly doubling steady-state staleness). And an
+**empty email bypasses the cache entirely**: an account whose `.account.json`
+is missing or unreadable resolves to `""`, and two different such accounts
+would otherwise collide on one key and be served each other's limits, fetched
+with the wrong token. Entries are pruned on insert (no size cap — the key space
+is "accounts this host holds snapshots for"; pruning exists so a renamed
+snapshot stops occupying an entry, not to enforce a bound).
+
+Every fetch inside `GetOrFetch` is itself bounded (`runBounded`,
+`usageFetchTimeout` = 10s), independent of whatever `fetch` does. Without this,
+a fetch that never returns — a locked macOS Keychain prompting a SecurityAgent
+dialog nothing will ever answer in a headless launchd/systemd session
+(`loadOAuthToken`, usage.go), or a wedged filesystem read (`snapshotToken`) —
+would leave that email's flight permanently unfinished: `expired`/`prune` both
+treat an unfinished flight as never-expired, the same rule that correctly
+protects a genuinely in-flight fetch from eviction, so every later `GET /usage`
+call for that account would park a new goroutine on the same flight forever and
+the account would never be fetchable again for the life of the process — a
+strictly worse failure mode than the always-on poller this replaced, which just
+left one snapshot stale while every other request kept working. `runBounded`
+guarantees the flight always finishes, publishing `errUsageFetchTimedOut` that
+the short `usageCacheFailTTL` then lets a later caller retry past — self-healing
+if the hang was transient, and at worst one leaked goroutine every
+`usageCacheFailTTL` for a persistently wedged account, not one per client per
+`usageRefreshInterval` forever. Keying by email rather than by snapshot name
+also means two differently-named snapshots sharing one email share one fetch
+and outcome — accepted, since two snapshots for the identical account is an
+unusual setup and the alternative would refetch the same account once per name.
+
+On the client, `FetchRemote` no longer decodes the three account fields at all,
+even from an older server that still sends them — two writers for one field
+would make the winner depend on poll ordering. `RemoteUsageHub`
+(`remote_usage.go`) polls `/usage` per host on `usageRefreshInterval`, and
+`tui.go` overlays its `Snapshot()` onto `remotes` in `settleRows` via
+`overlayRemoteUsage` (remote_usage.go), which is the single place those fields
+are written client-side. `render.go` needed no changes — the field shape
+didn't move, only its source. The hub is `RemoteHub`'s smaller sibling minus
+the wake pipe (a percentage doesn't need an instant repaint; the 2s render
+tick suffices) and replaces its whole result set per pass rather than
+streaming per host, so a failed host's numbers *clear* instead of freezing —
+the same reasoning `mergeRemoteResult` documents, since usage bars have no
+stale rendering and a carried-forward reading would silently pass as live.
+`FetchRemoteUsage`'s own timeout is 8s, not `FetchRemote`'s 5s: a cold-cache
+`/usage` handler fans out one fetch per account concurrently against that same
+5s-per-account budget (server.go), so the handler's own wall-clock time can
+approach 5s before a 5s client would give up on it.
+
+The `ignore` list is recomputed each tick by `localFreshAccountEmails` from this
+machine's *own* hub snapshots, and only from entries it actually has numbers for
+(`Info != nil`, and `!Expired` for known accounts). A locally-**expired** email
+is deliberately excluded: telling every remote to skip the one account this
+machine has no numbers for would turn one transient 429 here into a blank bar
+everywhere, which is the opposite of the point. (Local's own bars can be up to
+`usageCacheMaxAge` stale from a disk-cache warm start — accepted, since the
+remote's bar then just mirrors what local already shows.)
+
+One-shot CLI paths have nowhere to put a poller, so they pay for one extra
+parallel round instead: `mergeRemoteUsage` (remote.go) overlays `/usage` onto
+`FetchAllRemote`'s results for `cmdList` and `cmdListSessions`' rendered branch
+— placed *after* the `--json` early return, which never prints account fields —
+and `FetchAllRemoteUsage` / `oneRemoteUsage` serve `account list`, which drops
+its `/sessions` poll entirely since `accountRowsFrom` never reads `Sessions`.
+The two differ in one deliberate way: a `/usage` failure is silent in
+`mergeRemoteUsage` (the row's session list is still good, and overwriting
+`Error` would print a usage failure beside it) but becomes the row's `Error` in
+`FetchAllRemoteUsage`, where a silent skip would read as "this host has no
+snapshots" rather than "this host is unreachable". A `404` from a server
+predating the route is just another per-host failure; the reverse mismatch needs
+no handling, since this repo's deploy order always upgrades the local machine
+first.
+
+`dedupeAccounts` merges known accounts in a second pass after the live-account
+pass — a live line always wins over any host's snapshot copy of the same email —
+and an `Expired` entry keeps its line as a dim `auth expired` placeholder
+instead of being dropped. Snapshot-derived lines are never marked `mine`, so one
+can never render bare and pass as this machine's live account. Host headings
+show each host's active account email, dimmed, after `LOAD` (`section.account`,
+fed by that host's `Usage.Account` — which is why `/usage` reports the live
+email even when it reported no numbers for it).
 
 ### Account switching
 

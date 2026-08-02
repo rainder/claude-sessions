@@ -102,9 +102,9 @@ func accountRowsFrom(host string, snap accountSnapshot) []accountRow {
 	return rows
 }
 
-// remoteAccountListing turns one host's /sessions poll into its rows — no extra
-// endpoint and no extra request: the usage-visibility transport already carries
-// everything the table needs.
+// remoteAccountListing turns one host's reported accounts into its rows. It
+// reads nothing but the three account fields, which is why the CLI paths fetch
+// /usage alone for it and never poll /sessions.
 func remoteAccountListing(r RemoteResult) accountListing {
 	if r.Error != "" {
 		return accountListing{Host: r.Name, Error: r.Error}

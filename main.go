@@ -130,6 +130,9 @@ func cmdList() error {
 	sortMode := LoadSortMode()
 	SortSessions(local, sortMode)
 	remotes = sortRemotes(remotes, sortMode)
+	// Each host's account rate-limit bars come from its /usage endpoint, not
+	// /sessions; without this the remote half of the header would be blank.
+	remotes = mergeRemoteUsage(remotes)
 	RenderAll(os.Stdout, LoadViewMode(), LocalHost{
 		Name:      shortHostname(),
 		Sessions:  local,
