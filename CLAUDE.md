@@ -500,8 +500,8 @@ credential snapshot on *two* hosts, and each fetches it on its own
 suppresses the remote's copy once the local fetch is already **fresh**, which is
 exactly what a chronically throttled account never becomes. So both sides kept
 paying a failed round trip every 2 minutes, forever, against the endpoint doing
-the throttling. Both fetch paths now count consecutive `rate limited` outcomes
-per account and skip the fetch outright while a wait is armed: the first 429
+the throttling. Every fetch path now counts consecutive `rate limited` outcomes
+per account and skips the fetch outright while a wait is armed: the first 429
 imposes no wait of its own (most heal within one tick — only an explicit
 `Retry-After` can delay it), the second waits `usageBackoffSecond` (4min), the
 third and beyond `usageBackoffMax` (8min, the cap). A 429's `Retry-After`
@@ -511,7 +511,7 @@ life of the process. On a pass that actually attempts the account, any outcome
 other than another rate-limited failure — numbers, `Expired`, a different
 failure, or the snapshot turning out to be the live account — clears the streak
 (`usageBackoffUntil` / `usageBackoff` in usage.go hold the shared arithmetic;
-the two schedulers hold their own state). A *skipped* pass never touches the
+each scheduler holds its own state). A *skipped* pass never touches the
 streak either way, even if the synthesized path's own local reads (e.g.
 `snapshotToken`) would have reported something other than a throttle, like a
 now-unreadable credential — the already-armed wait simply stands, and
@@ -525,7 +525,29 @@ round trip, so one place keeps deciding whether that name stands for the live
 account (which is what resolves `ActiveName`) and whether `prev`'s numbers may be
 carried forward — the entry renders as the same stale-with-`rate limited` line a
 real throttle produces. Both maps are read and written only in the serial
-closure, never inside the goroutines `allKnownAccounts` spawns. Server-side it is
+closure, never inside the goroutines `allKnownAccounts` spawns. The **live**
+account gets the same treatment from `newUsageFetcher` (usage.go), the
+one-account shape of that closure — it is the account every session on the host
+is actually spending, so it is the likeliest to be throttled. A skipped pass
+there re-serves the last good `AccountUsage` as an ordinary **success**, never an
+error: an error would engage `usagePoller.run`'s generic 5s-doubling retry —
+shared with `CodexUsageHub`, and the right answer for a genuine transient, which
+is why it stays untouched — and that retry is the very burst this prevents. With
+no last-good reading yet (`last == nil`) there is nothing to skip *for*, so the
+pass falls through and fetches. The re-serve is **identity-gated** for the reason
+`carryable` documents: `last` is keyed by nothing — just "whoever was live last
+time" — so a Ctrl+W switch or a relogin during an armed wait would otherwise keep
+the previous account's bars on screen under its own email. A confirmed change of
+live email drops both memories (the wait was earned against the other account's
+budget); an *unconfirmable* one — either email unreadable — fetches without
+dropping anything, since a file that could not be read says nothing about whose
+numbers these are. `NewUsageHub` pairs the fetcher with
+`saveOnceUsage`, which drops a re-served snapshot by **pointer identity**:
+`saveUsageCache` restamps `FetchedAt` with `time.Now()` and the poller saves on
+every success, so without it a long throttle would rewrite the cache every two
+minutes and `usageCacheMaxAge` would stop bounding a warm start — the same
+restamping `KnownAccountUsage`'s carried-forward `FetchedAt` refuses. Server-side
+it is
 `usageCache.failures`, keyed by email and deliberately separate from `entries`
 (a flight is one attempt; a streak outlives many), swept by `prune` after
 `usageBackoffForget`. Only the goroutine that owned the flight records an

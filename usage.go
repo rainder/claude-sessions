@@ -278,9 +278,16 @@ func (e *usageHTTPError) Error() string {
 
 // parseRetryAfter resolves a Retry-After header value against now. RFC 9110
 // allows either form — delta-seconds or an HTTP-date — and the endpoint is free
-// to pick either, so both are accepted. Anything else (empty, garbage, a
-// non-positive delta) is the zero time: this is advisory, so an unparseable
-// value must fall back to the caller's own schedule rather than fail anything.
+// to pick either, so both are accepted. Anything else (empty, garbage, or a
+// wait that has already elapsed by now — a non-positive delta, a date not in
+// the future) is the zero time: this is advisory, so an unparseable value must
+// fall back to the caller's own schedule rather than fail anything.
+//
+// The two forms are normalized identically on purpose. Both callers happen to
+// neutralize a past deadline downstream (usageBackoffUntil only lets a
+// Retry-After *lengthen* its own wait), but leaving one form returning a stale
+// instant and the other the zero time means the same conceptual case has two
+// shapes here, and the next reader of this value has to know which.
 func parseRetryAfter(v string, now time.Time) time.Time {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -295,6 +302,9 @@ func parseRetryAfter(v string, now time.Time) time.Time {
 	// http.ParseTime covers all three date formats HTTP allows (RFC 1123,
 	// RFC 850, ANSI C asctime), which time.Parse with a single layout does not.
 	if t, err := http.ParseTime(v); err == nil {
+		if !t.After(now) {
+			return time.Time{}
+		}
 		return t
 	}
 	return time.Time{}
@@ -505,9 +515,118 @@ func loadUsageCache() *AccountUsage {
 // Snapshot, Pause, Resume, Kick, Shutdown — is unchanged.
 type UsageHub = usagePoller[AccountUsage]
 
+// newUsageFetcher wraps a live-account usage fetch with the same consecutive-429
+// backoff newKnownAccountsFetcher applies per snapshot account — the one-account
+// shape of it, so a single usageBackoff replaces that closure's map. The live
+// account is the one every Claude Code session on this host is actually
+// spending, so it is the account most likely to be throttled, and
+// usagePoller.run's generic retry (5s doubling to usageRefreshInterval) would
+// otherwise answer a 429 with roughly six more requests in the first four
+// minutes, against the endpoint already saying stop.
+//
+// That generic schedule is deliberately left alone — CodexUsageHub shares it and
+// it is the right answer for a genuine transient (a network blip, a Keychain
+// hiccup). So a skipped pass is reported as an ordinary *success* re-serving
+// last, not an error: an error would engage exactly the retry storm this exists
+// to prevent, while a success simply leaves the poller on its 2-minute cadence
+// and lets this closure's own due() gate decide whether the next call is a real
+// round trip. Nothing observable changes for the header either way — the poller
+// already keeps the previous value visible across a failed refresh.
+//
+// last is nil until the first success (seeded from the disk cache, so a restart
+// mid-throttle can re-serve too). While it is nil there is nothing to serve
+// instead, so a backed-off pass falls through and attempts the fetch anyway:
+// fabricating a success with no numbers is not an option, and the error that
+// comes back is exactly the pre-existing behaviour for that case.
+//
+// A re-serve is gated on identity for the reason carryable (known_accounts.go)
+// documents: last is keyed by nothing at all — it is simply "whoever was live
+// last time" — and fetchUsage's whole point is that it re-reads the account
+// email every fetch, so a switch (Ctrl+W, a relogin, a warm start from a cache
+// written before either) would otherwise keep the previous account's bars on
+// screen under its own email for the length of the wait. Misattributing usage
+// across accounts is worse than the round trip skipping it saves. A changed
+// identity drops both memories: the wait was armed against another account's
+// budget, and its numbers are not this one's.
+//
+// fetch is a parameter rather than a package var so a test can drive the whole
+// state machine with a counter and no seam into the network or the Keychain
+// (the same reason allKnownAccounts takes its per-account fetch as one). Both
+// last and backoff are touched only inside the returned closure, which
+// usagePoller.run calls one at a time from its single goroutine — the same
+// single-owner rule newKnownAccountsFetcher's maps rely on, so neither needs a
+// lock.
+func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) func() (*AccountUsage, error) {
+	last := seed
+	var backoff usageBackoff
+	return func() (*AccountUsage, error) {
+		now := time.Now()
+		if !backoff.due(now) && last != nil {
+			live := loadAccountEmail()
+			switch {
+			case live != "" && last.Account != "" && strings.EqualFold(last.Account, live):
+				return last, nil
+			case live != "" && last.Account != "":
+				// A different account is logged in now: the wait was armed against
+				// the previous one's budget and those numbers are not this one's, so
+				// neither memory survives the switch.
+				last, backoff = nil, usageBackoff{}
+			}
+			// Identity unconfirmable (either side unreadable): fetch rather than
+			// re-serve, since putting an account's bars on screen means knowing it is
+			// still the account on screen — but keep the memory, because a file that
+			// could not be read this pass says nothing about whose numbers these are.
+		}
+		u, err := fetch()
+		if err != nil {
+			// Only a throttle builds the streak; every other failure clears it, the
+			// same rule the known-accounts scheduler follows — the wait is an answer
+			// to being rate limited, not to being broken.
+			if _, reason := classifyUsageErr(err); reason == usageRateLimitedReason {
+				backoff = backoff.next(now, usageRetryAt(err))
+			} else {
+				backoff = usageBackoff{}
+			}
+			return nil, err
+		}
+		last = u
+		backoff = usageBackoff{}
+		return u, nil
+	}
+}
+
+// saveOnceUsage keeps a re-served snapshot out of the disk cache. saveUsageCache
+// stamps FetchedAt with time.Now(), and the poller saves on every success — so
+// without this, newUsageFetcher's skipped passes would rewrite the cache every
+// two minutes with numbers that never moved, and usageCacheMaxAge would stop
+// bounding anything: a warm start during a long throttle would seed the header
+// with arbitrarily old percentages presented as current. That is precisely the
+// failure KnownAccountUsage avoids by carrying prev's *original* FetchedAt
+// forward rather than restamping it.
+//
+// Identity, not equality, is the test: the skip path returns the very pointer it
+// was handed, so pointer comparison separates "re-served" from "fetched again"
+// exactly, with no assumption about whether two fetches that happen to agree
+// should count as one. seed is the same snapshot the fetcher starts as its last,
+// so a first pass that lands mid-throttle re-serves it without rewriting the
+// cache entry it came from.
+func saveOnceUsage(seed *AccountUsage, save func(*AccountUsage)) func(*AccountUsage) {
+	saved := seed
+	return func(u *AccountUsage) {
+		if u == saved {
+			return
+		}
+		saved = u
+		save(u)
+	}
+}
+
 // NewUsageHub starts the poller and returns immediately; the first fetch is
 // kicked off asynchronously. A recent disk-cached snapshot seeds the header so
-// a restart while the endpoint is throttling still shows a (stale) bar.
+// a restart while the endpoint is throttling still shows a (stale) bar — and
+// seeds the fetcher and the save wrapper alongside it, so a pass skipped by the
+// backoff re-serves that snapshot without restamping it on disk.
 func NewUsageHub() *UsageHub {
-	return newUsagePoller(loadUsageCache(), fetchUsage, saveUsageCache)
+	seed := loadUsageCache()
+	return newUsagePoller(seed, newUsageFetcher(seed, fetchUsage), saveOnceUsage(seed, saveUsageCache))
 }
