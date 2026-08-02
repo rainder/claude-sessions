@@ -1,6 +1,11 @@
 package main
 
-import "strings"
+import (
+	"os"
+	"strings"
+
+	"golang.org/x/term"
+)
 
 // The 's'/'S' sort-mode dialog: a small bordered overlay listing every entry
 // in sortModeOrder, current mode marked, Enter applies immediately.
@@ -131,4 +136,44 @@ func renderSortPicker(current string, sel, cols, rows int) string {
 	}
 	lines = append(lines, box...)
 	return strings.Join(lines, "\n")
+}
+
+// pickSortMode drives the blocking picker, mirroring pickAccount's read/handle
+// loop (account_picker.go). Must be called in raw mode; it never leaves raw
+// or the alt-screen, so the caller's next render() paints over it. wakes
+// carries the modal wake sources (resize) so the box stays centered across a
+// live resize.
+//
+// The selection starts on the mode matching `current`, so Enter without
+// moving reports that same mode back — the caller is responsible for
+// treating "confirmed but unchanged" as a no-op (see tui.go's wiring).
+func pickSortMode(current string, wakes []wakeFD) (picked string, ok bool) {
+	state := sortPickerState{rows: len(sortModeOrder)}
+	for i, mode := range sortModeOrder {
+		if mode == current {
+			state.sel = i
+			break
+		}
+	}
+	renderer := newScreenRenderer(os.Stdout)
+	decoder := newInputDecoder()
+	fd := int(os.Stdin.Fd())
+
+	for {
+		cols, rows, err := term.GetSize(fd)
+		if err != nil {
+			cols, rows = 0, 0
+		}
+		_ = renderer.Draw(renderSortPicker(current, state.sel, cols, rows), cols, rows)
+		keys, _ := readModalEvents(decoder, wakes)
+		for _, key := range keys {
+			confirm, cancel := state.handle(key)
+			if cancel {
+				return "", false
+			}
+			if confirm {
+				return sortModeOrder[state.sel], true
+			}
+		}
+	}
 }
