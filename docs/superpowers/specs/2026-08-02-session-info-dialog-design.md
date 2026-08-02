@@ -43,7 +43,9 @@ Pulled directly from the already-collected `Session`/`RemoteResult` row —
 no fetch, no async:
 
 - Name
-- Worktree/cwd (squashed-home display, same as the table's DIR column)
+- Worktree/cwd — same display rule as the table's DIR column
+  (`dirDisplay`, render.go:1269): short repo/worktree name for a git-backed
+  cwd, squashed-home path only as the non-git fallback.
 - Host (shown only for remote rows — `Session.Host` is deliberately empty
   for local rows and there is no local-hostname field to show instead)
 - `updated: <time>` — `UpdatedAt` if present, else `StartedAt`. Labeled
@@ -71,7 +73,12 @@ either → section omitted entirely, no error shown.
    literal we control ("what is being fixed? short version like i am 25");
    the fetched ticket text — which includes free-text comments an attacker
    or a mischievous teammate could shape — never gets concatenated into the
-   prompt argument, only piped as data.
+   prompt argument, only piped as data. This closes the argv/shell-injection
+   surface (no ticket text ever reaches a shell or a command-line argument).
+   It does **not** eliminate semantic prompt injection — a crafted ticket
+   comment is still text the model reads. The fixed, narrow instruction
+   limits what such text could realistically hijack; this is a mitigation,
+   not a hard boundary.
 
 **Failure handling (three distinct outcomes, not two)**:
 - No ticket id detected → section omitted.
@@ -84,21 +91,39 @@ either → section omitted entirely, no error shown.
 ## Conversation section
 
 **Extraction**: a new dedicated function — not `formatTranscriptTail`
-reused as-is, which was the original (wrong) plan. `formatTranscriptTail`
-renders `thinking`/`tool_use`/`tool_result` blocks too (preview.go:352-369);
-this feature wants conversational text only. The new extractor:
+reused as-is, which was the original (wrong) plan. Two problems with that
+first plan, both confirmed by reading the code:
 
-- Tail-scans the transcript (same bounded-buffer `bufio.Scanner` approach
-  `formatTranscriptTail` already uses) for `type == "user" || "assistant"`
-  entries.
+1. `formatTranscriptTail` renders `thinking`/`tool_use`/`tool_result` blocks
+   too (preview.go:352-369); this feature wants conversational text only.
+2. It is not actually a bounded tail-scan — it accumulates *every* matching
+   entry into `convo` across the whole file and only trims to `n` after EOF
+   (preview.go:294-312). For a long-running session's transcript that's
+   unbounded work per `i` keypress.
+
+The real bounded-tail pattern in this repo is `scanTranscript` (model.go:
+95-114): seek to `size - modelTailBytes` (256KB) before scanning, discard
+the truncated first line, then scan forward. The new extractor follows that
+shape — seek-then-scan over a fixed byte budget, not whole-file accumulate:
+
+- Seeks to the last `infoTailBytes` (reuse or mirror `modelTailBytes`)
+  before scanning; discards the first (likely-partial) line, same as
+  `scanTranscript`.
+- Scans forward for `type == "user" || "assistant"` entries, keeping only
+  the most recent 5 in a small fixed-size ring buffer — never accumulates
+  the full tail-window into memory as a list.
 - For `user` entries: the plain string content, or the first text block.
 - For `assistant` entries: concatenated `text` content blocks only —
   `thinking`/`tool_use`/`tool_result` dropped.
 - Deduplicates streaming assistant re-emissions by `message.id`+`requestId`,
-  the same key cost.go already uses for cost accounting (cost.go:81) —
-  without this, "last 5 entries" can yield duplicate or fragmentary turns
-  from a single streamed response.
-- Keeps the last 5 resulting turns, truncated to a total size cap before
+  but **last-wins**, not first-wins: `cost.go`'s `e.seen[key]` (cost.go:104-
+  108) is first-seen-wins, which is correct for cost accounting (usage
+  numbers don't change across re-emissions) but wrong here — a later
+  streamed re-emission of the same `message.id`+`requestId` is typically the
+  more complete text, and an earlier fragment should be overwritten, not
+  kept. This matches `scanTranscript`'s own stated convention: "tracked
+  independently (last wins)" (model.go:92-93).
+- The resulting last-5 turns are truncated to a total size cap before
   piping (keeps the summarization call cheap and avoids a pathological huge
   prompt).
 
@@ -110,12 +135,23 @@ on the server:
 - Bearer-auth, same as other endpoints.
 - `session_id` format-validated against the existing `resumeSessionIDRe`
   pattern before touching the filesystem.
+- `n` is clamped server-side, same convention as `previewLimitsFromRequest`
+  (server.go:1029-1051): accept only a small range (e.g. 1..10), default 5,
+  400 on anything else (non-numeric, negative, out of range). The first
+  draft left `n` unbounded, which meant "bounded response" was actually
+  per-message-cap × unbounded `n` — a real gap, not just a documentation
+  omission.
 - Resolves the transcript via the same `findTranscript` helper, server-side.
 - Response is bounded: each message's text is capped (same `trunc(...)`
   idiom preview.go already uses), and includes both the transcript's mtime
-  **and** size — mtime alone is a weak revision key for a file that may be
-  mid-write (stat/read race); `(mtime, size)` together catch a write that
-  lands between the two.
+  **and** size. This narrows the stat/read race (a write landing strictly
+  between the initial stat and the read can still produce a stale-labeled
+  cache entry) but doesn't eliminate it — closing it fully needs a
+  post-read re-stat compared against the pre-read one, treating a mismatch
+  as "don't cache this result." Same "narrows the race, doesn't make it
+  atomic" tradeoff CLAUDE.md already documents for the kill/migrate
+  preconditions; acceptable here since the cost of a stale hit is a
+  slightly-out-of-date summary, not a destructive action.
 - 404 if no transcript is found for that session id.
 
 **Both paths** feed the extracted text to a second `claude -p --bare` call
@@ -161,9 +197,24 @@ func (a *asyncSection) close() {
 ```
 
 `run` wires the context into `exec.CommandContext` for every subprocess in
-that section's pipeline, so closing the modal actually kills any in-flight
-`cu`/`claude` process rather than leaking it. `infoDialogTimeout` bounds a
-wedged subprocess even if the modal is never closed (suggest 20s).
+that section's pipeline (both local calls and, for the remote conversation
+fetch, `http.NewRequestWithContext` — not a bare `http.Get`), so closing the
+modal or the timeout firing signals every step of the pipeline to stop.
+`infoDialogTimeout` bounds a wedged subprocess even if the modal is never
+closed (suggest 20s).
+
+**Residual limitation, accepted**: canceling the context reliably tells a
+running `exec.CommandContext` process to die, but Go's `exec.Cmd` has a
+`WaitDelay` of zero by default — if a subprocess's stdout/stderr pipe is
+still held open by a grandchild process after the context is canceled,
+`cmd.Wait()` can still block, and `close()` does not join the fetch
+goroutine to guarantee it has actually returned. Each pipeline sets an
+explicit `cmd.WaitDelay` (a few seconds) so a wedged pipe forces a hard kill
+instead of hanging indefinitely. This narrows the window to "bounded by
+`WaitDelay`," the same "narrow the race, never guess" tradeoff this repo
+already accepts elsewhere (see CLAUDE.md's kill/migrate precondition
+"Known residual windows, accepted" section) — it does not claim the
+goroutine is guaranteed gone the instant the modal closes.
 
 ## Rendering
 
