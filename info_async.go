@@ -35,7 +35,9 @@ func (a *asyncSection) close() {
 	if a == nil {
 		return
 	}
-	a.cancel()
+	if a.cancel != nil {
+		a.cancel()
+	}
 	a.previewPane.close()
 }
 
@@ -50,15 +52,29 @@ func (a *asyncSection) snapshot() overlayPreview {
 	return a.previewPane.snapshot()
 }
 
-// modalWakesWithAll merges the wake fds of multiple preview panes onto
-// wakes, for a modal (like the info dialog) with more than one asyncSection.
-// Safe to chain: each call to modalWakesWith allocates a fresh backing
-// array (len+1 capacity) before appending, so it never mutates a shared
-// slice regardless of which of its two branches ran — see
-// confirm_overlay.go:189-201.
-func modalWakesWithAll(wakes []wakeFD, panes ...*previewPane) []wakeFD {
-	for _, p := range panes {
-		wakes = modalWakesWith(wakes, p)
+// pane returns a's underlying previewPane, or nil if a itself is nil — lets
+// callers pass asyncSection values directly to modalWakesWithAll without a
+// nil check, the same nil-receiver-safe contract close()/snapshot() already
+// have.
+func (a *asyncSection) pane() *previewPane {
+	if a == nil {
+		return nil
+	}
+	return a.previewPane
+}
+
+// modalWakesWithAll merges the wake fds of multiple asyncSections onto
+// wakes, for a modal (like the info dialog) with more than one
+// asyncSection — any of which may be nil (e.g. no ticket id detected), so
+// this takes *asyncSection rather than the underlying *previewPane and
+// resolves each via the nil-safe pane() before merging.
+// modalWakesWith never mutates its input: one branch returns it aliased and
+// unwritten, the other returns a freshly allocated slice with no spare
+// capacity, so neither leaves room for a later append to corrupt anything
+// else holding the original slice — see confirm_overlay.go:189-201.
+func modalWakesWithAll(wakes []wakeFD, sections ...*asyncSection) []wakeFD {
+	for _, sec := range sections {
+		wakes = modalWakesWith(wakes, sec.pane())
 	}
 	return wakes
 }
