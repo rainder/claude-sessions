@@ -181,7 +181,7 @@ func runCodexSummarize(ctx context.Context, instruction string, input []byte) ([
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, wrapExecErr(stderr.Bytes(), err)
+		return nil, wrapExecErr(codexFailureLine(stderr.Bytes()), err)
 	}
 	last, err := os.ReadFile(outPath)
 	if err != nil {
@@ -191,6 +191,33 @@ func runCodexSummarize(ctx context.Context, instruction string, input []byte) ([
 		return nil, errors.New("codex exec returned an empty summary")
 	}
 	return last, nil
+}
+
+// codexFailureLine picks the line of a failed `codex exec` run's stderr that
+// wrapExecErr should surface. Unlike claude's stdout (which puts its own
+// user-facing error, e.g. "Not logged in", on the first line), codex's
+// stderr opens with several lines of session banner before the actual
+// failure — reproduced directly (a bad --model run prints "Reading
+// additional input from stdin..." / "OpenAI Codex vN.N.N" / etc. before its
+// "ERROR: {...}" line). wrapExecErr on its own only ever keeps the first
+// line, which would render every codex failure as that banner instead of the
+// error. This returns the last "ERROR:"-prefixed line if there is one, else
+// the last non-empty line, so wrapExecErr's first-line trim keeps the right
+// text.
+func codexFailureLine(stderr []byte) []byte {
+	lines := bytes.Split(stderr, []byte("\n"))
+	var lastNonEmpty []byte
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			continue
+		}
+		lastNonEmpty = trimmed
+		if bytes.HasPrefix(trimmed, []byte("ERROR:")) {
+			return trimmed
+		}
+	}
+	return lastNonEmpty
 }
 
 // codexSummarizeCmd builds (but does not run) the `codex exec` command. Split
