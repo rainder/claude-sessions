@@ -25,6 +25,7 @@ const infoTailBytes = 256 * 1024
 
 type transcriptLine struct {
 	Type      string `json:"type"`
+	IsMeta    bool   `json:"isMeta"`
 	RequestID string `json:"requestId"`
 	Message   struct {
 		ID      string          `json:"id"`
@@ -136,11 +137,17 @@ func extractConversationTail(path string, n int) ([]transcriptTurn, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue
 		}
+		if e.IsMeta {
+			continue
+		}
 		if e.Type != "user" && e.Type != "assistant" {
 			continue
 		}
 		text, ok := extractTurnText(e.Message.Content)
 		if !ok {
+			continue
+		}
+		if e.Type == "user" && strings.HasPrefix(strings.TrimSpace(text), "<") {
 			continue
 		}
 		dedupKey := ""
