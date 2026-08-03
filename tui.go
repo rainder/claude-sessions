@@ -216,8 +216,35 @@ func RunTUI(interval time.Duration) error {
 	// the inspector body only once it has landed — nothing is reserved for it
 	// while it is still in flight.
 	var ticketSummarySec *asyncSection
+
+	// resizeInspected fires a best-effort tmux resize (or, with revert=true,
+	// an un-pin) for sess, dispatching local vs. remote exactly like
+	// sendKeysToInspected below. Errors are never surfaced: this is a display
+	// enhancement, not something that can block entering or leaving preview —
+	// preview content renders via capture-pane regardless of the pane's
+	// current size (see docs/superpowers/specs/
+	// 2026-08-03-preview-resize-design.md).
+	resizeInspected := func(sess Session, cols, rows int, revert bool) {
+		if sess.Host == "" {
+			live, err := resolveLivePIDLocal(sess.PID, sess.SessionID)
+			if err != nil {
+				return
+			}
+			_ = resizeSession(live, cols, rows, revert)
+			return
+		}
+		_, _ = resizeRemote(sess.Host, sess.PID, sess.SessionID, cols, rows, revert)
+	}
+
 	defer func() {
 		if inspectorHub != nil {
+			// Covers every RunTUI return path that skips closeInspector — most
+			// notably quitting outright (Ctrl+D/'q') while the inspector is
+			// open, which previously left the target's tmux window pinned to
+			// manual-size mode forever. A hard process kill (SIGKILL) still
+			// bypasses this — accepted, see the design spec's known
+			// limitations.
+			resizeInspected(state.inspector.snapshot.Session, 0, 0, true)
 			inspectorHub.Shutdown()
 		}
 		ticketSummarySec.close() // nil-safe
@@ -458,6 +485,14 @@ func RunTUI(interval time.Duration) error {
 				return fetchTicketSummaryCached(ctx, ticketID)
 			})
 		}
+		if cols, rows, err := term.GetSize(fd); err == nil && cols > 0 {
+			// Best-effort only: the ticket-summary block hasn't loaded yet at
+			// this point, so this slightly under-reserves rows on first open —
+			// the accepted one-shot tradeoff documented in the design spec.
+			if innerRows := rows - inspectorChromeRows; innerRows > 0 {
+				resizeInspected(sess, cols, innerRows, false)
+			}
+		}
 		state.mode = screenInspector
 		state.inspector = newInspectorViewState(target.id)
 		state.inspectorTargetGone = false
@@ -470,6 +505,7 @@ func RunTUI(interval time.Duration) error {
 	// inspector state, and returns to a freshly-refreshed session list.
 	closeInspector := func() {
 		if inspectorHub != nil {
+			resizeInspected(state.inspector.snapshot.Session, 0, 0, true)
 			inspectorHub.Shutdown()
 			inspectorHub = nil
 		}
@@ -898,8 +934,8 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 	}
 
 	if ev.key == KeyEnter {
-		attach()
 		closeInspector()
+		attach()
 		return false, false
 	}
 
