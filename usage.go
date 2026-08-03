@@ -605,31 +605,39 @@ func liveCarryable(last *AccountUsage, live string) bool {
 // this one's, so both memories are dropped and this pass has nothing whatsoever
 // to say about the new account until it asks.
 //
+// Switch detection cannot be keyed off last.Account: last is nil until the
+// first success, and can hold an empty Account forever if identity was
+// unreadable at the moment that success landed — either way it would leave the
+// wait permanently unable to recognise a switch, silently swallowing a Ctrl+W
+// kick for the rest of the backoff window. armedFor is tracked independently —
+// the email that was live at the moment the CURRENT streak was armed or
+// extended — precisely so switch detection works whether or not last carries a
+// usable identity of its own.
+//
 // fetch is a parameter rather than a package var so a test can drive the whole
 // state machine with a counter and no seam into the network or the Keychain
-// (the same reason allKnownAccounts takes its per-account fetch as one). Both
-// last and backoff are touched only inside the returned closure, which
+// (the same reason allKnownAccounts takes its per-account fetch as one). last,
+// backoff and armedFor are touched only inside the returned closure, which
 // usagePoller.run calls one at a time from its single goroutine — the same
 // single-owner rule newKnownAccountsFetcher's maps rely on, so neither needs a
 // lock.
 func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) func() (*AccountUsage, error) {
 	last := seed
 	var backoff usageBackoff
+	armedFor := ""
+	if seed != nil {
+		armedFor = seed.Account
+	}
 	return func() (*AccountUsage, error) {
 		now := time.Now()
-		// An explicit flag, not backoff's zero value: the confirmed-switch branch
-		// below has to force a real fetch even though the wait is armed, since the
-		// wait says nothing about the account that just arrived.
-		attempt := backoff.due(now)
-		if !attempt {
-			live := loadAccountEmail()
+		live := loadAccountEmail()
+		if !backoff.due(now) {
 			switch {
-			case live != "" && last != nil && last.Account != "" && !strings.EqualFold(last.Account, live):
-				// A different account is logged in now: the wait was armed against
-				// the previous one's budget and those numbers are not this one's, so
-				// neither memory survives the switch.
-				last, backoff = nil, usageBackoff{}
-				attempt = true
+			case live != "" && armedFor != "" && !strings.EqualFold(armedFor, live):
+				// A different account is logged in now than the one this wait was
+				// armed against — that budget says nothing about this account, so
+				// both memories drop and this pass asks for real.
+				last, backoff, armedFor = nil, usageBackoff{}, ""
 			case liveCarryable(last, live):
 				// A copy, never the stored pointer: last must keep its original
 				// FetchedAt so the carry stays bounded, and must not itself become
@@ -652,13 +660,14 @@ func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) fu
 			// to being rate limited, not to being broken.
 			if _, reason := classifyUsageErr(err); reason == usageRateLimitedReason {
 				backoff = backoff.next(now, usageRetryAt(err))
+				armedFor = live
 			} else {
-				backoff = usageBackoff{}
+				backoff, armedFor = usageBackoff{}, ""
 			}
 			return nil, err
 		}
 		last = u
-		backoff = usageBackoff{}
+		backoff, armedFor = usageBackoff{}, u.Account
 		return u, nil
 	}
 }

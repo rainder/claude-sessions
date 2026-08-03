@@ -555,6 +555,18 @@ the account that just arrived); an *unconfirmable* one — either email unreadab
 rule now that a third option exists: showing no numbers misattributes nothing and
 costs no request.
 
+Switch detection cannot key off `last.Account`, though an earlier version of
+this did and it was a real regression: `last` is nil until the first success,
+and can hold an empty `Account` forever once one lands with identity unreadable
+(`fetchUsage` reports `Account: loadAccountEmail()`, which is `""` on any read
+error, and nothing later corrects it). Either state would leave the wait
+permanently unable to recognise a switch, silently swallowing a Ctrl+W kick for
+up to `usageBackoffMax` (or `usageBackoffCeiling` with a `Retry-After`) instead
+of the immediate re-fetch a switch is supposed to force. `armedFor` tracks the
+email that was live at the moment the *current* streak was armed or extended,
+independently of what `last` holds, so switch detection works whether or not
+`last` carries a usable identity of its own.
+
 `NewUsageHub` pairs the fetcher with `saveOnceUsage`, which keeps everything but
 a genuinely fetched reading off disk — **pointer identity** for a re-served seed,
 plus `Stale` and a nil `Info`, since a carry and a placeholder are each a fresh

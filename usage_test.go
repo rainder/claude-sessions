@@ -713,6 +713,78 @@ func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
 	}
 }
 
+// A cold start (no seed) has no last to key switch detection off. Keying it off
+// last.Account instead of a separately-tracked armedFor would leave the wait
+// unable to ever recognise a switch in this state — a Ctrl+W kick would answer
+// with the placeholder instead of asking, silently swallowing the switch until
+// the wait elapses on its own (up to usageBackoffMax, or usageBackoffCeiling
+// with a Retry-After). That regression is exactly what this pins.
+func TestUsageFetcherRecognizesSwitchWithNoSeed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeLiveAccount(t, home, "andy@trecs.aero")
+
+	calls := 0
+	fetcher := newUsageFetcher(nil, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	if u, err := fetcher(); calls != 2 || err != nil {
+		t.Fatalf("backed-off pass = (%#v, %v) after %d fetches, want the placeholder with no fetch", u, err, calls)
+	}
+
+	// The switch must still force a real fetch — there was never a last to have
+	// kept the wait from recognising it.
+	writeLiveAccount(t, home, "andy@avisoma.com")
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass after the switch = nil error, want a real fetch's throttle")
+	}
+	if calls != 3 {
+		t.Fatalf("fetches = %d, want the switch to have forced a fetch despite no seed", calls)
+	}
+}
+
+// A success whose identity read failed leaves last.Account permanently empty —
+// fetchUsage reports Account: loadAccountEmail(), which is "" on any read or
+// parse error, and nothing here ever corrects it after the fact. Keying switch
+// detection off last.Account would make this account's wait immune to switch
+// detection for the rest of the process, not just this one pass: this pins that
+// armedFor (tracked from the live email at the moment each streak was armed,
+// independent of what last carries) still catches the switch.
+func TestUsageFetcherRecognizesSwitchWhenLastHasNoAccount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeLiveAccount(t, home, "andy@trecs.aero")
+
+	calls := 0
+	blank := &AccountUsage{Account: "", Info: &UsageInfo{FiveHour: usageBucket{Pct: 12}}, FetchedAt: time.Now()}
+	fetcher := newUsageFetcher(blank, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	if u, err := fetcher(); calls != 2 || err != nil {
+		t.Fatalf("backed-off pass = (%#v, %v) after %d fetches, want the placeholder with no fetch", u, err, calls)
+	}
+
+	writeLiveAccount(t, home, "andy@avisoma.com")
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass after the switch = nil error, want a real fetch's throttle")
+	}
+	if calls != 3 {
+		t.Fatalf("fetches = %d, want the switch to have forced a fetch despite last.Account being empty", calls)
+	}
+}
+
 // The poller saves on every success, and a re-served snapshot is a success — so
 // without this wrapper a long throttle would restamp FetchedAt every two
 // minutes and usageCacheMaxAge would stop bounding a warm start.
