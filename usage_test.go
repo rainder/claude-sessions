@@ -143,8 +143,10 @@ func TestUsageCacheRoundTrip(t *testing.T) {
 	if got := loadUsageCache(); got != nil {
 		t.Fatalf("loadUsageCache with no file = %+v, want nil", got)
 	}
+	fetchedAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
 	want := &AccountUsage{
-		Account: "andy@work.com",
+		Account:   "andy@work.com",
+		FetchedAt: fetchedAt,
 		Info: &UsageInfo{
 			FiveHour:          usageBucket{Pct: 85, ResetsAt: time.Now().Add(time.Hour).UTC()},
 			SevenDay:          usageBucket{Pct: 46, ResetsAt: time.Now().Add(48 * time.Hour).UTC()},
@@ -166,6 +168,11 @@ func TestUsageCacheRoundTrip(t *testing.T) {
 	}
 	if got.Info.WeeklyScopedLabel != "Fable" || got.Info.WeeklyScoped.Pct != 10 {
 		t.Errorf("scoped weekly round-trip mismatch: %+v/%q", got.Info.WeeklyScoped, got.Info.WeeklyScopedLabel)
+	}
+	// The snapshot's own timestamp has to survive the file, or a warm-start seed
+	// reads as unstamped and liveCarryable refuses to carry it at all.
+	if !got.FetchedAt.Equal(fetchedAt) {
+		t.Errorf("round-trip FetchedAt = %v, want %v", got.FetchedAt, fetchedAt)
 	}
 }
 
@@ -344,8 +351,68 @@ func TestUsageBackoffUntil(t *testing.T) {
 
 // liveUsageFixture is one live-account reading, distinct enough that a test can
 // tell a re-served snapshot from a freshly fetched one by its numbers.
+// FetchedAt is stamped because a reading with none is deliberately not
+// carryable (liveCarryable's zero check), so an unstamped fixture would make
+// every re-serve fall through to the identity placeholder and quietly gut the
+// tests below.
 func liveUsageFixture(pct float64) *AccountUsage {
-	return &AccountUsage{Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: usageBucket{Pct: pct}}}
+	return liveUsageFixtureAged(pct, 0)
+}
+
+// liveUsageFixtureAged dates a reading, for the bound liveCarryable puts on how
+// long a carry may go on.
+func liveUsageFixtureAged(pct float64, age time.Duration) *AccountUsage {
+	return &AccountUsage{
+		Account:   "andy@trecs.aero",
+		Info:      &UsageInfo{FiveHour: usageBucket{Pct: pct}},
+		FetchedAt: time.Now().Add(-age),
+	}
+}
+
+// carriedFrom asserts a backed-off pass re-served want: the same numbers under
+// the same account, marked stale so they cannot pass as live, keeping want's
+// ORIGINAL timestamp — and as a copy, so the fetcher's own memory of want stays
+// unmarked and keeps aging.
+func carriedFrom(t *testing.T, u *AccountUsage, want *AccountUsage) {
+	t.Helper()
+	if u == nil {
+		t.Fatal("backed-off pass = nil, want the last good numbers carried forward")
+	}
+	if u == want {
+		t.Fatal("re-serve returned the stored pointer; only a copy keeps last unmarked and its timestamp honest")
+	}
+	if u.Info != want.Info || u.Account != want.Account {
+		t.Fatalf("re-served = %#v, want %#v's numbers", u, want)
+	}
+	if !u.Stale {
+		t.Error("carried-forward numbers must be marked stale, or they pass as live")
+	}
+	if !u.FetchedAt.Equal(want.FetchedAt) {
+		t.Errorf("re-serve restamped FetchedAt (%v, want %v): a permanently throttled account would look permanently fresh", u.FetchedAt, want.FetchedAt)
+	}
+	if want.Stale {
+		t.Error("the stored reading itself got marked stale; the flag belongs only to the copy")
+	}
+}
+
+// placeholded asserts a backed-off pass with nothing safe to re-serve answered
+// with identity alone. It must be a SUCCESS: an error is what engages
+// usagePoller.run's 5s-doubling retry, the request burst the wait exists to
+// prevent.
+func placeholded(t *testing.T, u *AccountUsage, err error, email string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("backed-off pass = %v, want a success — an error engages the generic retry burst", err)
+	}
+	if u == nil {
+		t.Fatal("backed-off pass = nil, want an identity placeholder")
+	}
+	if u.Info != nil {
+		t.Fatalf("placeholder carries numbers (%+v); nothing safe to re-serve means nothing shown", u.Info)
+	}
+	if u.Account != email {
+		t.Errorf("placeholder account = %q, want %q", u.Account, email)
+	}
 }
 
 // loginAs points loadAccountEmail at a temp HOME logged into email, since
@@ -424,9 +491,10 @@ func TestUsageFetcherBacksOffRepeatedThrottles(t *testing.T) {
 	if calls != 4 {
 		t.Fatalf("fetches = %d, want the pass inside the backoff to skip the endpoint", calls)
 	}
-	if err != nil || u != good {
-		t.Fatalf("backed-off pass = (%#v, %v), want the last good reading re-served", u, err)
+	if err != nil {
+		t.Fatalf("backed-off pass = %v, want the last good reading re-served as a success", err)
 	}
+	carriedFrom(t, u, good)
 }
 
 // Only a throttle is answered with a wait. Every other failure is a transient
@@ -449,23 +517,124 @@ func TestUsageFetcherBacksOffOnlyOnThrottles(t *testing.T) {
 	}
 }
 
-// With nothing to serve instead there is nothing to skip *for*: fabricating a
-// success with no numbers is not an option, so a backed-off pass falls through
-// and the caller gets the real error, exactly as before this wrapper existed.
-func TestUsageFetcherWithNoLastGoodStillFetches(t *testing.T) {
+// A cold start against an already-throttled account is the case this whole
+// mechanism exists for, and the one it used to miss entirely: with no seed there
+// was nothing to re-serve, so every backed-off pass fell through to a real fetch
+// and the 429 came back as an error — which usagePoller.run answers with its own
+// 5s-doubling retry, i.e. the wait was armed and bought nothing at all.
+//
+// Now the wait holds regardless of whether there is anything to show. The pass
+// reports identity only, as a success.
+func TestUsageFetcherColdStartStopsFetchingOnceBackedOff(t *testing.T) {
 	loginAs(t, "andy@trecs.aero")
 	calls := 0
 	fetcher := newUsageFetcher(nil, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	})
-	for i := 1; i <= 3; i++ {
+	// The first throttle imposes no wait; the second is what arms it. Both are
+	// real attempts, and both report the error they actually got.
+	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
 		}
 	}
-	if calls != 3 {
-		t.Fatalf("fetches = %d, want every pass to fetch while there is nothing to re-serve", calls)
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want both throttled passes to have fetched", calls)
+	}
+	u, err := fetcher()
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want the pass inside the backoff to skip the endpoint even with nothing to re-serve", calls)
+	}
+	placeholded(t, u, err, "andy@trecs.aero")
+}
+
+// Identity unconfirmable — an unreadable ~/.claude.json — used to fall through
+// to a real fetch, on the grounds that showing an account's bars means knowing
+// whose they are. The placeholder is strictly better: it shows no numbers, so
+// there is nothing to misattribute, and it costs no request against an endpoint
+// that just said stop.
+func TestUsageFetcherPlaceholdsWhenIdentityIsUnconfirmable(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	calls := 0
+	good := liveUsageFixture(37)
+	fetcher := newUsageFetcher(good, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	// Whose numbers these are can no longer be established.
+	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
+	u, err := fetcher()
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want an unconfirmable identity to hold the wait, not spend a request", calls)
+	}
+	placeholded(t, u, err, "")
+}
+
+// The carry is bounded by the age of the numbers themselves, the same bound a
+// warm start from disk obeys. Past it the reading is dropped rather than shown —
+// and the wait still stands, since numbers going stale is no reason to override
+// an endpoint that is throttling.
+func TestUsageFetcherWillNotCarryNumbersPastTheAgeBound(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	calls := 0
+	old := liveUsageFixtureAged(37, usageCacheMaxAge+time.Minute)
+	fetcher := newUsageFetcher(old, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	u, err := fetcher()
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want an expired carry to hold the wait rather than force a fetch", calls)
+	}
+	placeholded(t, u, err, "andy@trecs.aero")
+}
+
+// A carry must not consume itself: re-serving hands out a copy, so the stored
+// reading keeps its own timestamp and its unmarked state and can be carried
+// again on the next pass. Marking the stored copy in place would make the second
+// re-serve report numbers already flagged stale as its own fresh memory, and
+// would leak a stale reading into the disk cache through saveOnceUsage.
+func TestUsageFetcherReservesRepeatedlyWithoutMarkingItsOwnCopy(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	calls := 0
+	good := liveUsageFixture(37)
+	fetcher := newUsageFetcher(good, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	first, err := fetcher()
+	if err != nil {
+		t.Fatalf("first re-serve = %v, want a success", err)
+	}
+	carriedFrom(t, first, good)
+	second, err := fetcher()
+	if err != nil {
+		t.Fatalf("second re-serve = %v, want a success", err)
+	}
+	carriedFrom(t, second, good)
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want every re-serve to skip the endpoint", calls)
+	}
+	if first == second {
+		t.Error("both re-serves handed out one shared copy; each pass must own its own")
 	}
 }
 
@@ -488,9 +657,10 @@ func TestUsageFetcherReservesTheSeed(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("fetches = %d, want the pass inside the backoff to skip the endpoint", calls)
 	}
-	if err != nil || u != seed {
-		t.Fatalf("backed-off pass = (%#v, %v), want the seeded snapshot re-served", u, err)
+	if err != nil {
+		t.Fatalf("backed-off pass = %v, want the seeded snapshot re-served as a success", err)
 	}
+	carriedFrom(t, u, seed)
 }
 
 // last is keyed by nothing but "whoever was live last time", so a switch during
@@ -513,9 +683,11 @@ func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
 		}
 	}
-	if u, err := fetcher(); calls != 2 || err != nil || u != seed {
-		t.Fatalf("backed-off pass = (%#v, %v) after %d fetches, want the seed re-served", u, err, calls)
+	u, err := fetcher()
+	if calls != 2 || err != nil {
+		t.Fatalf("backed-off pass = %v after %d fetches, want the seed re-served", err, calls)
 	}
+	carriedFrom(t, u, seed)
 
 	// Ctrl+W, or a relogin: the numbers on hand belong to the account that just
 	// left, and the armed wait was earned against its budget, not this one's.
@@ -526,12 +698,91 @@ func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
 	if calls != 3 {
 		t.Fatalf("fetches = %d, want the switch to have forced a fetch", calls)
 	}
-	// usage.go also clears backoff on this path as cheap insurance, but that
-	// reset is not independently observable here: the switch already dropped
-	// last to nil, and the skip branch requires last != nil regardless of what
-	// backoff holds, so a further assertion on call counts would pass whether or
-	// not the reset happened. Proving the streak itself restarted would need a
-	// success in between to repopulate last first.
+	// The streak must have restarted with the account, not been inherited from
+	// it. That throttle was the new account's FIRST, and a first 429 imposes no
+	// wait at all, so the very next pass is due again. Without the reset the
+	// streak would have carried on at 3 and armed the 8-minute wait instead —
+	// and since a nil last no longer falls through to a fetch, that pass would
+	// answer with the placeholder rather than asking the endpoint. Dropping last
+	// alone cannot produce this; only clearing backoff can.
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass after the switch's throttle = nil error, want a real fetch")
+	}
+	if calls != 4 {
+		t.Fatalf("fetches = %d, want the new account's first throttle to impose no wait", calls)
+	}
+}
+
+// A cold start (no seed) has no last to key switch detection off. Keying it off
+// last.Account instead of a separately-tracked armedFor would leave the wait
+// unable to ever recognise a switch in this state — a Ctrl+W kick would answer
+// with the placeholder instead of asking, silently swallowing the switch until
+// the wait elapses on its own (up to usageBackoffMax, or usageBackoffCeiling
+// with a Retry-After). That regression is exactly what this pins.
+func TestUsageFetcherRecognizesSwitchWithNoSeed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeLiveAccount(t, home, "andy@trecs.aero")
+
+	calls := 0
+	fetcher := newUsageFetcher(nil, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	if u, err := fetcher(); calls != 2 || err != nil {
+		t.Fatalf("backed-off pass = (%#v, %v) after %d fetches, want the placeholder with no fetch", u, err, calls)
+	}
+
+	// The switch must still force a real fetch — there was never a last to have
+	// kept the wait from recognising it.
+	writeLiveAccount(t, home, "andy@avisoma.com")
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass after the switch = nil error, want a real fetch's throttle")
+	}
+	if calls != 3 {
+		t.Fatalf("fetches = %d, want the switch to have forced a fetch despite no seed", calls)
+	}
+}
+
+// A success whose identity read failed leaves last.Account permanently empty —
+// fetchUsage reports Account: loadAccountEmail(), which is "" on any read or
+// parse error, and nothing here ever corrects it after the fact. Keying switch
+// detection off last.Account would make this account's wait immune to switch
+// detection for the rest of the process, not just this one pass: this pins that
+// armedFor (tracked from the live email at the moment each streak was armed,
+// independent of what last carries) still catches the switch.
+func TestUsageFetcherRecognizesSwitchWhenLastHasNoAccount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeLiveAccount(t, home, "andy@trecs.aero")
+
+	calls := 0
+	blank := &AccountUsage{Account: "", Info: &UsageInfo{FiveHour: usageBucket{Pct: 12}}, FetchedAt: time.Now()}
+	fetcher := newUsageFetcher(blank, func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	for i := 1; i <= 2; i++ {
+		if _, err := fetcher(); err == nil {
+			t.Fatalf("pass %d = nil error, want the throttle reported", i)
+		}
+	}
+	if u, err := fetcher(); calls != 2 || err != nil {
+		t.Fatalf("backed-off pass = (%#v, %v) after %d fetches, want the placeholder with no fetch", u, err, calls)
+	}
+
+	writeLiveAccount(t, home, "andy@avisoma.com")
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass after the switch = nil error, want a real fetch's throttle")
+	}
+	if calls != 3 {
+		t.Fatalf("fetches = %d, want the switch to have forced a fetch despite last.Account being empty", calls)
+	}
 }
 
 // The poller saves on every success, and a re-served snapshot is a success — so
@@ -557,5 +808,34 @@ func TestSaveOnceUsageSkipsAReservedSnapshot(t *testing.T) {
 	save(newer)
 	if len(saved) != 2 || saved[1] != newer {
 		t.Fatalf("saves = %#v, want the next real fetch written", saved)
+	}
+}
+
+// Pointer identity alone stopped recognising a re-serve once newUsageFetcher
+// began handing out a fresh copy per pass, and a backed-off pass with nothing to
+// carry hands out a fresh placeholder besides. Both are new pointers, so both
+// would reach the disk cache: the copy restamping the envelope every two minutes
+// with numbers that never moved (the exact failure this wrapper exists to
+// prevent), the placeholder overwriting a good cache file with a nil-Info entry
+// loadUsageCache then reads as a miss — destroying the warm start rather than
+// merely staling it.
+func TestSaveOnceUsageSkipsCarriedAndEmptySnapshots(t *testing.T) {
+	fresh := liveUsageFixture(21)
+	var saved []*AccountUsage
+	save := saveOnceUsage(nil, func(u *AccountUsage) { saved = append(saved, u) })
+
+	save(fresh)
+	if len(saved) != 1 {
+		t.Fatalf("saves = %d, want the real fetch written", len(saved))
+	}
+
+	carried := *fresh
+	carried.Stale = true
+	save(&carried)
+
+	save(&AccountUsage{Account: "andy@trecs.aero"}) // backed off with nothing to carry
+
+	if len(saved) != 1 {
+		t.Fatalf("saves = %#v, want only the one genuinely fetched reading on disk", saved)
 	}
 }

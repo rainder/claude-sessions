@@ -532,27 +532,72 @@ is actually spending, so it is the likeliest to be throttled. A skipped pass
 there re-serves the last good `AccountUsage` as an ordinary **success**, never an
 error: an error would engage `usagePoller.run`'s generic 5s-doubling retry —
 shared with `CodexUsageHub`, and the right answer for a genuine transient, which
-is why it stays untouched — and that retry is the very burst this prevents. With
-no last-good reading yet (`last == nil`) there is nothing to skip *for*, so the
-pass falls through and fetches. The re-serve is **identity-gated** for the reason
+is why it stays untouched — and that retry is the very burst this prevents. An
+armed wait holds **whether or not** there is anything to show: when nothing is
+safe to re-serve — no `last` at all (a cold start, or an account that has never
+once succeeded), an identity that cannot be confirmed, or numbers past
+`usageCacheMaxAge` — the pass answers with a bare identity placeholder
+(`AccountUsage{Account: loadAccountEmail()}`, nil `Info`) and still makes no
+request. Falling through to a real fetch there, as it once did, was a **no-op
+backoff**, and it fired in precisely the case this exists for: a fresh TUI launch
+against an already-throttled account, whose 429 came back as an error and woke
+the generic retry. The known-account path never had that hole —
+`allKnownAccounts` never returns an error for one account's failure, so nothing
+there can wake the retry regardless of carry state; only the live path could.
+The re-serve is **identity-gated** for the reason
 `carryable` documents: `last` is keyed by nothing — just "whoever was live last
 time" — so a Ctrl+W switch or a relogin during an armed wait would otherwise keep
 the previous account's bars on screen under its own email. A confirmed change of
-live email drops both memories (the wait was earned against the other account's
-budget); an *unconfirmable* one — either email unreadable — fetches without
-dropping anything, since a file that could not be read says nothing about whose
-numbers these are. `NewUsageHub` pairs the fetcher with
-`saveOnceUsage`, which drops a re-served snapshot by **pointer identity**:
-`saveUsageCache` restamps `FetchedAt` with `time.Now()` and the poller saves on
-every success, so without it a long throttle would rewrite the cache every two
-minutes and `usageCacheMaxAge` would stop bounding a warm start — the same
-restamping `KnownAccountUsage`'s carried-forward `FetchedAt` refuses. That said,
-`last` here has no per-carry age bound the way `carryable` re-checks one on
-every known-account carry — `AccountUsage` has no `FetchedAt` of its own, so a
-live account throttled for hours keeps re-serving those hour-old bars with no
-`stale` marker, and `localFreshAccountEmails` (gated only on `Info != nil`)
-still lists it in the `ignore` sent to remotes. Accepted for now: closing it
-means giving `AccountUsage` the same age-gated carry `KnownAccountUsage` has.
+live email drops both memories and forces a real fetch (the wait was earned
+against the other account's budget, and this pass knows nothing whatsoever about
+the account that just arrived); an *unconfirmable* one — either email unreadable
+— takes the placeholder too, which dominates the old "fetch rather than re-serve"
+rule now that a third option exists: showing no numbers misattributes nothing and
+costs no request.
+
+Switch detection cannot key off `last.Account`, though an earlier version of
+this did and it was a real regression: `last` is nil until the first success,
+and can hold an empty `Account` forever once one lands with identity unreadable
+(`fetchUsage` reports `Account: loadAccountEmail()`, which is `""` on any read
+error, and nothing later corrects it). Either state would leave the wait
+permanently unable to recognise a switch, silently swallowing a Ctrl+W kick for
+up to `usageBackoffMax` (or `usageBackoffCeiling` with a `Retry-After`) instead
+of the immediate re-fetch a switch is supposed to force. `armedFor` tracks the
+email that was live at the moment the *current* streak was armed or extended,
+independently of what `last` holds, so switch detection works whether or not
+`last` carries a usable identity of its own.
+
+`NewUsageHub` pairs the fetcher with `saveOnceUsage`, which keeps everything but
+a genuinely fetched reading off disk — **pointer identity** for a re-served seed,
+plus `Stale` and a nil `Info`, since a carry and a placeholder are each a fresh
+pointer per pass and identity alone stopped recognising them. `saveUsageCache`
+restamps `FetchedAt` with `time.Now()` and the poller saves on every success, so
+persisting a carry would rewrite the cache every two minutes and
+`usageCacheMaxAge` would stop bounding a warm start — the same restamping
+`KnownAccountUsage`'s carried-forward `FetchedAt` refuses; persisting a
+placeholder is worse still, since `loadUsageCache` reads a nil-`Info` entry as a
+miss, so it would *destroy* the warm start rather than merely stale it.
+
+`AccountUsage` carries its own `FetchedAt` (stamped in `fetchUsage` and nowhere
+else — the server's on-demand `/usage` handler has no memory to carry anything
+forward, so it never produces a `Stale` reading, exactly as with
+`KnownAccountUsage`) and its own `Stale`, so the live carry is bounded the way a
+known account's already was. `liveCarryable` is `carryable` in one-account shape
+— `fresh`'s numbers-and-age test, including the explicit zero check, plus the
+identity test — and a re-serve returns a **copy** marked `Stale` keeping the
+original timestamp, never the stored pointer, so `last` stays unmarked and keeps
+aging. Past `usageCacheMaxAge` the reading is dropped for the placeholder rather
+than shown, and the wait still stands: numbers going stale is no reason to
+override an endpoint that is throttling. A disk seed written before this field
+existed reads as unstamped and is simply not carryable — the same one-time drop
+`loadKnownAccountsCache` takes for its own pre-timestamp entries.
+`localFreshAccountEmails` excludes a `Stale` live account for the identical
+reason it already excluded a `Stale` known one, and `dedupeAccounts` threads
+`Stale` into its pass-1 `add` so a carried live or remote line takes the same dim
+`stale` marker a snapshot line does. That marker is display only: precedence and
+`mine` are untouched, and a live line still wins its email's slot over any
+snapshot copy of the same account however old it is — showing your *own*
+account's last-known reading is the point of that rule.
 Server-side
 it is
 `usageCache.failures`, keyed by email and deliberately separate from `entries`

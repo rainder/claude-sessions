@@ -318,6 +318,21 @@ func TestLocalFreshAccountEmailsSkipsWhatLocalCannotVouchFor(t *testing.T) {
 	}
 }
 
+// The live account earns the same exclusion as a snapshot account, now that
+// newUsageFetcher carries its numbers forward through a throttle too: bars this
+// machine is re-serving from memory are not numbers it can vouch for, and a
+// remote that can actually reach the account must not be told to skip it.
+func TestLocalFreshAccountEmailsSkipsAStaleLiveAccount(t *testing.T) {
+	live := &AccountUsage{Account: "andy@avisoma.com", Info: &UsageInfo{}, Stale: true}
+	known := []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Info: &UsageInfo{}}}
+
+	got := localFreshAccountEmails(live, known)
+
+	if len(got) != 1 || got[0] != "andy@trecs.aero" {
+		t.Fatalf("ignore list = %v, want only the account local actually reached", got)
+	}
+}
+
 func TestLocalFreshAccountEmailsSkipsAnUnfetchedLiveAccount(t *testing.T) {
 	if got := localFreshAccountEmails(&AccountUsage{Account: "andy@avisoma.com"}, nil); len(got) != 0 {
 		t.Fatalf("ignore list = %v, want nothing while local has no numbers of its own", got)
