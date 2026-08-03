@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -59,9 +60,10 @@ func readModalEvents(dec *inputDecoder, wakes []wakeFD) ([]string, wakeKind) {
 	}
 }
 
-// inspectorChromeRows is the number of fixed rows RenderInspector reserves
-// around the scrolling body (title, metadata, separator, footer). The viewport
-// height is the terminal height minus this, and must match the body arithmetic
+// inspectorChromeRows is the number of *fixed* rows RenderInspector reserves
+// around the scrolling body (title, metadata, separator, footer). A loaded
+// ticket summary costs inspectorSummaryExtraRows on top of it, so the viewport
+// height is the terminal height minus both, and must match the body arithmetic
 // in RenderInspector.
 const inspectorChromeRows = 4
 
@@ -208,10 +210,17 @@ func RunTUI(interval time.Duration) error {
 	// inspectorHub polls the previewed session while the inspector screen is
 	// open; nil on the session list. Shut down on exit if still open.
 	var inspectorHub *InspectorHub
+	// ticketSummarySec fetches the DR-XXXX summary for the inspected session, the
+	// same cache-backed fetch the 'i' info dialog runs; nil when the open session
+	// carries no ticket id (and on the session list). Its result is drawn above
+	// the inspector body only once it has landed — nothing is reserved for it
+	// while it is still in flight.
+	var ticketSummarySec *asyncSection
 	defer func() {
 		if inspectorHub != nil {
 			inspectorHub.Shutdown()
 		}
+		ticketSummarySec.close() // nil-safe
 	}()
 
 	// toast is a transient one-liner (the sort mode after pressing 's') pinned
@@ -316,9 +325,13 @@ func RunTUI(interval time.Duration) error {
 				state.inspector.snapshot.Loading = false
 				state.inspector.snapshot.Stale = false
 			}
-			state.inspector.resize(rows - inspectorChromeRows)
+			// One derivation feeds both the viewport size and the drawn block —
+			// two would be free to drift, and the body arithmetic is what keeps
+			// scrolling and the footer row in agreement.
+			summaryLines := inspectorSummaryFit(inspectorTicketSummaryLines(ticketSummarySec.snapshot(), cols), rows)
+			state.inspector.resize(rows - inspectorChromeRows - inspectorSummaryExtraRows(summaryLines))
 			var buf strings.Builder
-			state.hits = RenderInspector(&buf, state.inspector, cols, rows)
+			state.hits = RenderInspector(&buf, state.inspector, summaryLines, cols, rows)
 			_ = screen.Draw(buf.String(), cols, rows)
 			return
 		}
@@ -434,6 +447,17 @@ func RunTUI(interval time.Duration) error {
 			return
 		}
 		inspectorHub = ih
+		// Start the ticket fetch only once the hub is up: a failed NewInspectorHub
+		// returns above with no inspector open and no closeInspector to reap it.
+		// closeInspector always runs before the list can reopen, so there is
+		// nothing live here — close anyway rather than rely on that invariant.
+		ticketSummarySec.close() // nil-safe
+		ticketSummarySec = nil
+		if ticketID := detectTicketID(sess.CWD, sess.Name); ticketID != "" {
+			ticketSummarySec = startAsyncSection("ticket", func(ctx context.Context) (PreviewResult, error) {
+				return fetchTicketSummaryCached(ctx, ticketID)
+			})
+		}
 		state.mode = screenInspector
 		state.inspector = newInspectorViewState(target.id)
 		state.inspectorTargetGone = false
@@ -449,6 +473,8 @@ func RunTUI(interval time.Duration) error {
 			inspectorHub.Shutdown()
 			inspectorHub = nil
 		}
+		ticketSummarySec.close() // nil-safe; same reason the hub reference is dropped
+		ticketSummarySec = nil
 		state.mode = screenSessions
 		state.inspector = inspectorViewState{}
 		state.inspectorTargetGone = false
@@ -491,6 +517,9 @@ func RunTUI(interval time.Duration) error {
 		if inspectorHub != nil {
 			wakes = append(wakes, wakeFD{fd: inspectorHub.WakeFD(), kind: wakeInspector})
 		}
+		// No nil guard: pane() and wake() are both nil-receiver-safe and wake()
+		// reports fd -1 when there is nothing to wait on, which pollEvents skips.
+		wakes = append(wakes, ticketSummarySec.pane().wake())
 		events, woke := pollEvents(decoder, timeout, wakes)
 
 		if len(events) == 0 {
@@ -515,8 +544,9 @@ func RunTUI(interval time.Duration) error {
 				render()
 				nextTick = time.Now().Add(interval)
 			default:
-				// Resize and/or inspector update only: redraw at the current
-				// size (render re-reads it) without disturbing the wall clock.
+				// Resize, inspector update and/or a landed ticket summary
+				// (wakePreview) only: redraw at the current size (render re-reads
+				// it) without disturbing the wall clock.
 				render()
 			}
 			continue

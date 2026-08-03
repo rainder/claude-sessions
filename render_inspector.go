@@ -32,22 +32,36 @@ var footerLabels = []struct {
 
 const footerGap = "  "
 
+// inspectorTicketSummaryMaxLines bounds the ticket block drawn above the body —
+// heading included — so a long summary can never crowd out the session output
+// the inspector exists to show.
+const inspectorTicketSummaryMaxLines = 4
+
 // RenderInspector writes the fullscreen session inspector to w as plain lines
 // (no cursor movement or alternate-screen escapes — RunTUI owns positioning) and
 // returns the zero-based clickable footer regions for the frame it drew.
 //
 // Layout, top to bottom: a title (name, PID, host), a width-responsive metadata
 // line (model, status, context, cost — dropping cost below 80 cols, context
-// below 64, everything but status below 48), a separator, the content body from
+// below 64, everything but status below 48), a separator, an optional ticket
+// summary block (summaryLines plus its own trailing separator, drawn only when
+// summaryLines is non-empty — so the chrome budget is 4 rows plus
+// inspectorSummaryExtraRows(summaryLines), not a fixed 4), the content body from
 // view.top, and a footer whose left carries the Back/Refresh/Follow controls and
 // whose right shows the source and live-freshness status when space allows.
 // Below the min-size floor it emits a concise "terminal too small" notice with a
 // Back control. Every emitted line is clipped to cols.
-func RenderInspector(w io.Writer, view inspectorViewState, cols, rows int) []hitRegion {
+//
+// summaryLines is re-fit to rows here even though the caller already fit it: the
+// clamp is idempotent, and a renderer that can draw a frame taller than rows —
+// dropping the footer while still reporting hit regions on the last row — is not
+// something to leave to a caller's discipline.
+func RenderInspector(w io.Writer, view inspectorViewState, summaryLines []string, cols, rows int) []hitRegion {
 	if rows < minInspectorRows || cols < minInspectorCols {
 		return renderInspectorTooSmall(w, cols, rows)
 	}
 
+	summaryLines = inspectorSummaryFit(summaryLines, rows)
 	snap := view.snapshot
 
 	// Row 0: title.
@@ -57,12 +71,90 @@ func RenderInspector(w io.Writer, view inspectorViewState, cols, rows int) []hit
 	// Row 2: separator.
 	fmt.Fprintln(w, clipLine(dim(strings.Repeat("-", cols)), cols))
 
-	// Rows 3 .. rows-2: content body.
-	bodyRows := rows - 4
+	// Optional ticket summary block, closed by a separator of its own.
+	if len(summaryLines) > 0 {
+		for _, line := range summaryLines {
+			fmt.Fprintln(w, clipLine(line, cols))
+		}
+		fmt.Fprintln(w, clipLine(dim(strings.Repeat("-", cols)), cols))
+	}
+
+	// Remaining rows above the footer: content body.
+	bodyRows := rows - 4 - inspectorSummaryExtraRows(summaryLines)
+	if bodyRows < 0 {
+		bodyRows = 0
+	}
 	inspectorBody(w, view, bodyRows, cols)
 
 	// Row rows-1: footer with clickable controls.
 	return inspectorFooter(w, view, cols, rows-1)
+}
+
+// inspectorTicketSummaryLines renders the ticket summary block shown above the
+// inspector body: a bold heading plus the summary's own lines word-wrapped to
+// cols, capped at inspectorTicketSummaryMaxLines with a dim "…" replacing the
+// last kept line on overflow. Returns nil whenever there is nothing worth
+// showing — still fetching, failed, or empty — because the inspector reserves no
+// space for a summary it doesn't have: no placeholder, no spinner.
+func inspectorTicketSummaryLines(ticketSummary overlayPreview, cols int) []string {
+	if !ticketSummary.Loaded || ticketSummary.Err != nil {
+		return nil
+	}
+	content := trimTrailingBlank(ticketSummary.Lines)
+	if len(content) == 0 {
+		return nil
+	}
+
+	heading := "ticket:"
+	if ticketSummary.Label != "" {
+		heading = "ticket: " + ticketSummary.Label + ":"
+	}
+	out := []string{bold(heading)}
+	// Blank lines pass through unwrapped, matching infoDialogSectionLines.
+	for _, line := range content {
+		if line == "" {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, wrapRunes(line, cols)...)
+	}
+	if len(out) > inspectorTicketSummaryMaxLines {
+		out = out[:inspectorTicketSummaryMaxLines]
+		out[inspectorTicketSummaryMaxLines-1] = dim("…")
+	}
+	return out
+}
+
+// inspectorSummaryExtraRows is how many rows the summary block costs on top of
+// RenderInspector's fixed chrome: its own lines plus the separator that closes
+// it, or nothing at all when there is no summary.
+func inspectorSummaryExtraRows(summaryLines []string) int {
+	if len(summaryLines) == 0 {
+		return 0
+	}
+	return len(summaryLines) + 1
+}
+
+// inspectorSummaryFit shortens the summary block to what rows can actually hold,
+// keeping at least one body row — a frame taller than the terminal loses its
+// footer to the screen renderer's truncation while inspectorFooter still reports
+// hit regions on the last row, so the bottom row would click as "Back" without
+// saying so. A block that can't keep its heading plus one content line is
+// dropped entirely rather than rendered as a bare heading.
+//
+// It returns a prefix and nothing else, which is what makes it idempotent: both
+// RunTUI's render (which must size the viewport from the same block it draws)
+// and RenderInspector itself apply it.
+func inspectorSummaryFit(summaryLines []string, rows int) []string {
+	// rows - 4 - (n+1) >= 1  =>  n <= rows - 6
+	allowed := rows - 6
+	if allowed > len(summaryLines) {
+		allowed = len(summaryLines)
+	}
+	if allowed < 2 {
+		return nil
+	}
+	return summaryLines[:allowed]
 }
 
 // renderInspectorTooSmall draws the degraded notice: the message on the first
