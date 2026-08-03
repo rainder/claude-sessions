@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +36,8 @@ func TestMain(m *testing.M) {
 	// poller's HTTP leg without swapFetch would spend the developer's own token
 	// on a real request, so the default has to be loud rather than plausible.
 	usageInfoFetch = func(string) (*UsageInfo, error) { panic("test reached the real usage endpoint") }
+	cuFetchFunc = func(context.Context, string) ([]byte, error) { panic("test reached the real cu CLI") }
+	claudeSummarizeFunc = func(context.Context, string, []byte) ([]byte, error) { panic("test reached the real claude CLI") }
 	os.Exit(m.Run())
 }
 
