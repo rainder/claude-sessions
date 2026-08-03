@@ -386,6 +386,9 @@ func TestRenderInspectorFooterAtMinColsNeverOverflows(t *testing.T) {
 	if strings.Contains(out, "Compose") {
 		t.Fatalf("Compose label should have been dropped at cols=%d:\n%s", minInspectorCols, out)
 	}
+	if hasHit(hits, hitInspectorCompose) {
+		t.Fatalf("Compose hit region should not exist when its label is dropped at cols=%d: %#v", minInspectorCols, hits)
+	}
 	if !hasHit(hits, hitInspectorBack) || !hasHit(hits, hitInspectorRefresh) || !hasHit(hits, hitInspectorFollow) {
 		t.Fatalf("footer hits missing a floor control at cols=%d: %#v", minInspectorCols, hits)
 	}
@@ -430,6 +433,7 @@ func TestRenderInspectorFooterHitColumns(t *testing.T) {
 		hitInspectorBack:    {0, 3},   // "Back"
 		hitInspectorRefresh: {6, 12},  // "Refresh"
 		hitInspectorFollow:  {15, 20}, // "Follow"
+		hitInspectorCompose: {23, 29}, // "Compose"
 	}
 	footerY := 20 - 1
 	for _, h := range hits {

@@ -21,7 +21,11 @@ const (
 
 // footerLabels are the inspector's clickable controls, laid left-to-right with a
 // two-space gap. Their order fixes both the visible columns and the hit-region
-// ordering returned to the render loop.
+// ordering returned to the render loop. It also fixes which label gets dropped
+// first when width is tight: inspectorFooter's drop logic always trims from the
+// end (footerLabels[:len(footerLabels)-1]), so whichever entry is added last is
+// the least essential one and must be the last in this slice — a 5th label
+// added anywhere but the end would get dropped in Compose's place.
 var footerLabels = []struct {
 	text   string
 	action hitAction
@@ -193,22 +197,29 @@ func inspectorEmptyBody(snap InspectorSnapshot) string {
 // so when width is too tight for both, Compose (the newest and least
 // essential label; its 'i' keybinding still works with the button hidden) is
 // dropped first to make room, mirroring the width-based prioritization
-// inspectorMetadata uses above. If dropping Compose still doesn't leave room,
-// the footer-right text simply doesn't render (same as before Compose
-// existed — see the padding-only branch below); Back/Refresh/Follow is the
-// floor, never dropped further.
+// inspectorMetadata uses above. Dropping Compose is conditional on it actually
+// helping: at some widths the right text won't fit even with the 3-label
+// footer, and dropping Compose there would lose the button for nothing, so it
+// only drops when doing so crosses the fit threshold. Back/Refresh/Follow is
+// the floor either way, never dropped further.
 func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []hitRegion {
 	right := inspectorFooterRight(view)
 	rightVis := utf8.RuneCountInString(right)
 
 	labels := footerLabels
 	fullW := footerLeftWidth(len(footerLabels))
+	shortW := footerLeftWidth(len(footerLabels) - 1)
 	// rightVis is 0 only if inspectorFooterRight ever returned "", which it
 	// currently never does (inspectorStatusText's default case always yields
 	// "LIVE ↓"); cols < fullW is kept as a defensive floor for that case
 	// anyway, so the label line itself is never clipped mid-word even if a
-	// future change made the right side legitimately empty.
-	if cols < fullW || (rightVis > 0 && cols-fullW-rightVis < 2) {
+	// future change made the right side legitimately empty. The second clause
+	// is the active path: only drop Compose when the full label set doesn't
+	// fit the right text (cols-fullW-rightVis < 2) AND dropping to 3 labels
+	// actually creates room (cols-shortW-rightVis >= 2) — otherwise the right
+	// text won't fit either way and Compose stays, since losing it would gain
+	// nothing.
+	if cols < fullW || (rightVis > 0 && cols-fullW-rightVis < 2 && cols-shortW-rightVis >= 2) {
 		labels = footerLabels[:len(footerLabels)-1]
 	}
 
