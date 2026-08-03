@@ -103,9 +103,14 @@ same pattern already used by send-keys' local path) and calls
 - Both the entry resize and the exit revert are **one-shot** per open/close.
   No repeat on inspector poll ticks, and no live re-resize if the viewer's
   terminal itself resizes while preview stays open.
-- A resize/revert failure is logged and non-fatal: preview content still
+- A resize/revert failure is discarded, not logged: preview content still
   renders via `capture-pane` regardless of pane size, so this is a
   best-effort enhancement, never a blocker to entering or exiting preview.
+  (An earlier draft of this spec said "logged and non-fatal". There is no
+  logging mechanism anywhere in `tui.go` — the TUI owns the terminal, so
+  there is nowhere to write a line to — and both the plan and the
+  implementation only ever discard the error. The wording is corrected here
+  so the doc describes what the code does.)
 
 ## Sizing
 
@@ -141,6 +146,25 @@ with no wasted or cut-off width.
   CLAUDE.md), so window and pane are practically the same thing for the
   sessions this feature targets. A manually split or multi-linked window is
   not guarded against.
+- **Session ends mid-preview, remote only**: the exit revert resolves its
+  target fresh (`resolveLivePIDLocal` locally, `resolveLivePID` server-side),
+  so a session that exits while it is being previewed no longer resolves and
+  the revert has nothing to act on. Locally this is now recovered:
+  `resizeInspected` (tui.go) falls back to reverting against `sess.Tmux`, the
+  pane address the inspector snapshot was built with — a last-known-good
+  address whose worst case is un-pinning a window that is already gone or has
+  been reused, which is acceptable for a revert (it only clears an option)
+  where it would not be for an entry resize or a send-keys. The **remote**
+  path has no such fallback: `resizeHandler` (server.go) resolves the pane
+  itself and accepts no client-supplied pane address, so once
+  `resolveLivePID` fails there is nothing to revert against, and the refusal
+  is all the client gets. A remote session that ends mid-preview can
+  therefore still leave its tmux window pinned to `window-size manual`
+  indefinitely — in practice only when the window outlives the claude process
+  (a hand-managed pane, not one this tool spawned, since a spawned session's
+  window dies with it). Closing it needs an API change (an optional
+  client-supplied pane address on the resize body, trusted only for the
+  revert direction), which is more surface than the case warrants for now.
 - **Concurrent real attach**: if a real user is already attached to the
   target session when preview opens, resizing will visibly disrupt their
   session. This design does not skip resizing in that case; revert-on-exit is
@@ -151,9 +175,14 @@ with no wasted or cut-off width.
 
 ## Testing plan
 
-- Unit tests for `resizeTmuxTarget`/`revertTmuxTarget` against a fake tmux
-  command runner (injectable seam, not the real `tmux` binary — same style as
-  `keychainRead`/`keychainWrite`).
+- Unit tests for `resizeTmuxTarget`/`revertTmuxTarget`. The fake-tmux
+  injectable seam this bullet originally planned (same style as
+  `keychainRead`/`keychainWrite`) was **not** built: `resize.go` calls
+  `exec.Command` directly, and `resize_test.go` covers the guards that return
+  *before* it — empty `Tmux`, invalid size, and which primitive
+  `resizeSession` dispatches to — so the suite never shells out to a real
+  `tmux`. What that leaves uncovered is the argument construction itself; the
+  seam is worth adding if this file grows a third command.
 - Server handler test: `s.resizeFn` seam, body decode/validation,
   `resolveLivePID` failure paths (400/409-style codes).
 - Manual check: open preview on a remote session from a narrow and a wide

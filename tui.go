@@ -216,8 +216,50 @@ func RunTUI(interval time.Duration) error {
 	// the inspector body only once it has landed — nothing is reserved for it
 	// while it is still in flight.
 	var ticketSummarySec *asyncSection
+
+	// resizeInspected fires a best-effort tmux resize (or, with revert=true,
+	// an un-pin) for sess, dispatching local vs. remote exactly like
+	// sendKeysToInspected below. Errors are never surfaced: this is a display
+	// enhancement, not something that can block entering or leaving preview —
+	// preview content renders via capture-pane regardless of the pane's
+	// current size (see docs/superpowers/specs/
+	// 2026-08-03-preview-resize-design.md).
+	//
+	// A **revert** whose fresh resolve fails falls back to sess.Tmux, the pane
+	// address the snapshot was built with. Without it, a session that exits
+	// while it is being previewed takes its resolveLivePIDLocal entry with it,
+	// the revert silently returns, and a hand-managed tmux window that outlives
+	// the claude process stays pinned to window-size=manual forever — the one
+	// failure mode this whole feature exists to avoid. A stale address here can
+	// only un-pin a window that is already gone or has been reused, which is
+	// why the same fallback would be wrong for send-keys (it types text) and is
+	// deliberately not taken on the **entry** resize: a wrong pane resized is a
+	// fresh pin on a stranger's window, and there is no stuck state for an
+	// entry resize to recover in the first place.
+	resizeInspected := func(sess Session, cols, rows int, revert bool) {
+		if sess.Host == "" {
+			live, err := resolveLivePIDLocal(sess.PID, sess.SessionID)
+			if err != nil {
+				if revert {
+					_ = revertTmuxTarget(sess)
+				}
+				return
+			}
+			_ = resizeSession(live, cols, rows, revert)
+			return
+		}
+		_, _ = resizeRemote(sess.Host, sess.PID, sess.SessionID, cols, rows, revert)
+	}
+
 	defer func() {
 		if inspectorHub != nil {
+			// Covers every RunTUI return path that skips closeInspector — most
+			// notably quitting outright (Ctrl+D/'q') while the inspector is
+			// open, which previously left the target's tmux window pinned to
+			// manual-size mode forever. A hard process kill (SIGKILL) still
+			// bypasses this — accepted, see the design spec's known
+			// limitations.
+			resizeInspected(state.inspector.snapshot.Session, 0, 0, true)
 			inspectorHub.Shutdown()
 		}
 		ticketSummarySec.close() // nil-safe
@@ -458,6 +500,21 @@ func RunTUI(interval time.Duration) error {
 				return fetchTicketSummaryCached(ctx, ticketID)
 			})
 		}
+		if cols, rows, err := term.GetSize(fd); err == nil && cols > 0 {
+			// Best-effort only: the ticket-summary block hasn't loaded yet at
+			// this point, so this slightly under-reserves rows on first open —
+			// the accepted one-shot tradeoff documented in the design spec.
+			// Synchronous, not fired in a goroutine: closeInspector's and the
+			// quit-path defer's reverts assume the entry resize has already
+			// landed, so an async entry can race a quick close/quit and leave
+			// the window pinned to window-size=manual with no un-pin ever
+			// following it. Bounded at 5s worst case by resizeRemote's own
+			// timeout (remote_actions.go) — the same shape send_keys.go's
+			// local resolveLivePIDLocal path already accepts on the UI thread.
+			if innerRows := rows - inspectorChromeRows; innerRows > 0 {
+				resizeInspected(sess, cols, innerRows, false)
+			}
+		}
 		state.mode = screenInspector
 		state.inspector = newInspectorViewState(target.id)
 		state.inspectorTargetGone = false
@@ -470,6 +527,7 @@ func RunTUI(interval time.Duration) error {
 	// inspector state, and returns to a freshly-refreshed session list.
 	closeInspector := func() {
 		if inspectorHub != nil {
+			resizeInspected(state.inspector.snapshot.Session, 0, 0, true)
 			inspectorHub.Shutdown()
 			inspectorHub = nil
 		}
@@ -898,8 +956,8 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 	}
 
 	if ev.key == KeyEnter {
-		attach()
 		closeInspector()
+		attach()
 		return false, false
 	}
 

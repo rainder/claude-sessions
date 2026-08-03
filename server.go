@@ -219,6 +219,36 @@ func sendKeysBody(w http.ResponseWriter, r *http.Request) (sessionID, text strin
 	return body.SessionID, body.Text, nil
 }
 
+// resizeBody reads the required {"session_id","cols","rows","revert"} body
+// for POST /sessions/{pid}/resize. session_id is mandatory — like
+// sendKeysBody, this endpoint has no legacy caller predating an identity
+// guard, so there is no reason to allow an unguarded call. cols/rows are
+// required and must be positive unless revert is true, in which case they
+// are ignored (a revert is always "undo whatever size is currently set").
+func resizeBody(w http.ResponseWriter, r *http.Request) (sessionID string, cols, rows int, revert bool, err error) {
+	var body struct {
+		SessionID string `json:"session_id"`
+		Cols      int    `json:"cols"`
+		Rows      int    `json:"rows"`
+		Revert    bool   `json:"revert"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		return "", 0, 0, false, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return "", 0, 0, false, fmt.Errorf("unexpected trailing json")
+	}
+	if body.SessionID == "" {
+		return "", 0, 0, false, fmt.Errorf("session_id is required")
+	}
+	if !body.Revert && (body.Cols <= 0 || body.Rows <= 0) {
+		return "", 0, 0, false, fmt.Errorf("cols and rows must be positive")
+	}
+	return body.SessionID, body.Cols, body.Rows, body.Revert, nil
+}
+
 // decodeDisableRequest strictly decodes the required {"session_id": "...",
 // "disabled": true} body for POST /sessions/{pid}/disable. Unlike
 // sessionIDPrecondition (kill/migrate's optional precondition), both fields
@@ -518,6 +548,10 @@ type server struct {
 	// falls back to the package-level sendKeys (send_keys.go). Same pattern as
 	// collect/terminate above.
 	sendKeysFn func(Session, string) error
+	// resizeFn is an injectable seam for tests; nil in production, where it
+	// falls back to the package-level resizeSession (resize.go). Same pattern
+	// as sendKeysFn above.
+	resizeFn func(Session, int, int, bool) error
 
 	// disabled is this host's persisted disabled-session flag store (see
 	// disabled_store.go). Nil only in tests that don't exercise it — Overlay
@@ -1266,6 +1300,43 @@ func (s *server) sendKeysHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, actionResult{OK: true})
 }
 
+// resizeHandler handles POST /sessions/{pid}/resize: resizes (revert=false)
+// or un-pins (revert=true) pid's tmux window to match the inspector viewer's
+// terminal. session_id is required (resizeBody), then resolved the same way
+// send-keys resolves its target (s.resolveLivePID, server.go:739) — a
+// best-effort display enhancement, not a destructive action, so no extra
+// reattest beyond the single fresh resolveLivePID check.
+func (s *server) resizeHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	pid, err := strconv.Atoi(r.PathValue("pid"))
+	if err != nil {
+		http.Error(w, "bad pid", http.StatusBadRequest)
+		return
+	}
+	sessionID, cols, rows, revert, err := resizeBody(w, r)
+	if err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	target, _, refusal := s.resolveLivePID(pid, sessionID)
+	if refusal != nil {
+		writeJSON(w, http.StatusOK, *refusal)
+		return
+	}
+	fn := s.resizeFn
+	if fn == nil {
+		fn = resizeSession
+	}
+	if err := fn(*target, cols, rows, revert); err != nil {
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, actionResult{OK: true})
+}
+
 // removeWorktree handles POST /worktree/remove. The path arrives from a client,
 // so it is validated (absolute, clean, worktree-shaped, a real git worktree)
 // before anything touches disk, and re-checked against the live session list so
@@ -1995,6 +2066,7 @@ func cmdServer(args []string) int {
 	mux.HandleFunc("POST /sessions/{pid}/migrate", s.migrate)
 	mux.HandleFunc("POST /sessions/{pid}/disable", s.disableSession)
 	mux.HandleFunc("POST /sessions/{pid}/send-keys", s.sendKeysHandler)
+	mux.HandleFunc("POST /sessions/{pid}/resize", s.resizeHandler)
 	mux.HandleFunc("POST /sessions/new", s.newSession)
 	mux.HandleFunc("POST /worktree/remove", s.removeWorktree)
 	mux.HandleFunc("POST /account/switch", s.accountSwitch)

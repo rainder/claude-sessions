@@ -165,6 +165,90 @@ func TestSendKeysRemotePropagatesRefusal(t *testing.T) {
 	}
 }
 
+func TestResizeRemoteSendsSessionIDColsRowsRevert(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := resizeRemote("box", 42, "sess-1", 120, 40, false)
+	if err != nil || !r.OK {
+		t.Fatalf("resizeRemote = (%#v, %v)", r, err)
+	}
+	if gotPath != "/sessions/42/resize" {
+		t.Fatalf("path = %q, want /sessions/42/resize", gotPath)
+	}
+	if string(gotBody) != `{"cols":120,"revert":false,"rows":40,"session_id":"sess-1"}` {
+		t.Fatalf("body = %s, want session_id/cols/rows/revert", gotBody)
+	}
+}
+
+// The revert direction is the one whose failure is silent and permanent (a
+// window left pinned to window-size=manual with nothing ever un-pinning it),
+// and it was the direction with no client-side coverage at all: a typo in the
+// route or a dropped field would have shipped green. cols/rows are 0 here
+// because that is exactly what tui.go's revert call sites send.
+func TestResizeRemoteRevertSendsRevertTrue(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := resizeRemote("box", 42, "sess-1", 0, 0, true)
+	if err != nil || !r.OK {
+		t.Fatalf("resizeRemote = (%#v, %v)", r, err)
+	}
+	if gotPath != "/sessions/42/resize" {
+		t.Fatalf("path = %q, want /sessions/42/resize", gotPath)
+	}
+	if string(gotBody) != `{"cols":0,"revert":true,"rows":0,"session_id":"sess-1"}` {
+		t.Fatalf("body = %s, want revert:true with session_id", gotBody)
+	}
+}
+
+func TestResizeRemotePropagatesRefusal(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"error":"PID 42 is a different session now","code":"session_mismatch"}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := resizeRemote("box", 42, "sess-stale", 120, 40, false)
+	if err != nil {
+		t.Fatalf("resizeRemote err = %v", err)
+	}
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("result = %+v, want refusal with codeSessionMismatch", r)
+	}
+}
+
 func TestKillRemoteSendsSessionIDWhenKnown(t *testing.T) {
 	var gotBody []byte
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

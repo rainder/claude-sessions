@@ -447,6 +447,8 @@ clipboard.go         remote-image-paste client (clipboard read + relay)
 migrate.go           shared migrate/spawn logic
 worktree.go          worktree detection + removal on last-session kill
 preview.go           tmux capture / JSONL transcript renderer
+resize.go            tmux window resize + un-pin for inspector preview
+send_keys.go         literal keystroke send into a session's tmux pane
 notify.go            wait-generation state machine + push hub
 apns.go              ES256 provider tokens + APNs delivery
 apns_config.go       apns.yaml + stable host id
