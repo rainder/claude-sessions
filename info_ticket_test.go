@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectTicketID(t *testing.T) {
@@ -139,5 +140,24 @@ func TestFetchTicketSummaryRawFallbackTruncatesMultilineWithoutGutter(t *testing
 	}
 	if !strings.HasPrefix(body, raw[:ticketRawCap]) {
 		t.Errorf("truncated body does not start with the expected raw prefix")
+	}
+}
+
+func TestFetchTicketSummaryCachedAvoidsRefetch(t *testing.T) {
+	prevCu, prevClaude := cuFetchFunc, claudeSummarizeFunc
+	t.Cleanup(func() { cuFetchFunc, claudeSummarizeFunc = prevCu, prevClaude })
+	var calls int
+	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
+		calls++
+		return []byte("raw"), nil
+	}
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return []byte("summary"), nil
+	}
+	ticketCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 64) // fresh cache, isolated from other tests
+	fetchTicketSummaryCached(context.Background(), "DR-99")
+	fetchTicketSummaryCached(context.Background(), "DR-99")
+	if calls != 1 {
+		t.Errorf("cu fetch called %d times, want 1", calls)
 	}
 }

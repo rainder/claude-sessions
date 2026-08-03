@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // ticketIDRe matches a ClickUp custom id like DR-860. \b is an ASCII word
@@ -65,4 +66,23 @@ func fetchTicketSummary(ctx context.Context, ticketID string) (PreviewResult, er
 		return PreviewResult{Source: "ticket", Label: ticketID, Content: sanitizeTerminalText(content)}, nil
 	}
 	return PreviewResult{Source: "ticket", Label: ticketID, Content: sanitizeTerminalText(strings.TrimSpace(string(summary)))}, nil
+}
+
+const (
+	ticketCacheTTL          = time.Hour // ticket text rarely changes turn to turn
+	ticketCacheFailTTL      = 15 * time.Second
+	ticketCacheFetchTimeout = 20 * time.Second
+	ticketCacheMax          = 64
+)
+
+var ticketCache = newSummaryCache(ticketCacheTTL, ticketCacheFailTTL, ticketCacheFetchTimeout, ticketCacheMax)
+
+// fetchTicketSummaryCached wraps fetchTicketSummary in ticketCache, keyed by
+// ticket id — the whole cu+claude pipeline is cached as one unit, since
+// there's no cheap separate "has this ticket changed" check worth doing
+// before deciding to refetch.
+func fetchTicketSummaryCached(ctx context.Context, ticketID string) (PreviewResult, error) {
+	return ticketCache.getOrFetch(ctx, ticketID, func(fetchCtx context.Context) (PreviewResult, error) {
+		return fetchTicketSummary(fetchCtx, ticketID)
+	})
 }
