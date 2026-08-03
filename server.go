@@ -219,6 +219,36 @@ func sendKeysBody(w http.ResponseWriter, r *http.Request) (sessionID, text strin
 	return body.SessionID, body.Text, nil
 }
 
+// resizeBody reads the required {"session_id","cols","rows","revert"} body
+// for POST /sessions/{pid}/resize. session_id is mandatory — like
+// sendKeysBody, this endpoint has no legacy caller predating an identity
+// guard, so there is no reason to allow an unguarded call. cols/rows are
+// required and must be positive unless revert is true, in which case they
+// are ignored (a revert is always "undo whatever size is currently set").
+func resizeBody(w http.ResponseWriter, r *http.Request) (sessionID string, cols, rows int, revert bool, err error) {
+	var body struct {
+		SessionID string `json:"session_id"`
+		Cols      int    `json:"cols"`
+		Rows      int    `json:"rows"`
+		Revert    bool   `json:"revert"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		return "", 0, 0, false, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return "", 0, 0, false, fmt.Errorf("unexpected trailing json")
+	}
+	if body.SessionID == "" {
+		return "", 0, 0, false, fmt.Errorf("session_id is required")
+	}
+	if !body.Revert && (body.Cols <= 0 || body.Rows <= 0) {
+		return "", 0, 0, false, fmt.Errorf("cols and rows must be positive")
+	}
+	return body.SessionID, body.Cols, body.Rows, body.Revert, nil
+}
+
 // decodeDisableRequest strictly decodes the required {"session_id": "...",
 // "disabled": true} body for POST /sessions/{pid}/disable. Unlike
 // sessionIDPrecondition (kill/migrate's optional precondition), both fields

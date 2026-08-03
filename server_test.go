@@ -4277,3 +4277,67 @@ func TestSendKeysHandlerRejectsOverLengthText(t *testing.T) {
 		t.Fatalf("status = %d, want 400 for text exceeding sendKeysMaxLen", w.Code)
 	}
 }
+
+func TestResizeBodyRequiresSessionID(t *testing.T) {
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"cols":120,"rows":40}`))
+	w := httptest.NewRecorder()
+	_, _, _, _, err := resizeBody(w, req)
+	if err == nil || !strings.Contains(err.Error(), "session_id is required") {
+		t.Fatalf("resizeBody err = %v, want session_id-required error", err)
+	}
+}
+
+func TestResizeBodyRequiresPositiveColsRowsUnlessRevert(t *testing.T) {
+	cases := []string{
+		`{"session_id":"sess-1","cols":0,"rows":40}`,
+		`{"session_id":"sess-1","cols":120,"rows":0}`,
+		`{"session_id":"sess-1","cols":-1,"rows":40}`,
+	}
+	for _, body := range cases {
+		req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		_, _, _, _, err := resizeBody(w, req)
+		if err == nil || !strings.Contains(err.Error(), "cols and rows must be positive") {
+			t.Fatalf("resizeBody(%s) err = %v, want cols/rows-positive error", body, err)
+		}
+	}
+}
+
+func TestResizeBodyRevertIgnoresColsRows(t *testing.T) {
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"session_id":"sess-1","revert":true}`))
+	w := httptest.NewRecorder()
+	sessionID, _, _, revert, err := resizeBody(w, req)
+	if err != nil {
+		t.Fatalf("resizeBody err = %v, want nil", err)
+	}
+	if sessionID != "sess-1" || !revert {
+		t.Fatalf("resizeBody = (%q, revert=%v), want (sess-1, true)", sessionID, revert)
+	}
+}
+
+func TestResizeBodyValidResizeSucceeds(t *testing.T) {
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"session_id":"sess-1","cols":120,"rows":40}`))
+	w := httptest.NewRecorder()
+	sessionID, cols, rows, revert, err := resizeBody(w, req)
+	if err != nil {
+		t.Fatalf("resizeBody err = %v, want nil", err)
+	}
+	if sessionID != "sess-1" || cols != 120 || rows != 40 || revert {
+		t.Fatalf("resizeBody = (%q, %d, %d, revert=%v), want (sess-1, 120, 40, false)", sessionID, cols, rows, revert)
+	}
+}
+
+func TestResizeBodyRejectsUnknownFieldsAndTrailingContent(t *testing.T) {
+	cases := []string{
+		`{"session_id":"sess-1","cols":120,"rows":40,"extra":1}`,
+		`{"session_id":"sess-1","cols":120,"rows":40}{}`,
+	}
+	for _, body := range cases {
+		req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		_, _, _, _, err := resizeBody(w, req)
+		if err == nil {
+			t.Fatalf("resizeBody(%s) err = nil, want error", body)
+		}
+	}
+}
