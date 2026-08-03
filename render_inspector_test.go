@@ -269,6 +269,44 @@ func TestRenderInspectorComposingShowsInputBar(t *testing.T) {
 	}
 }
 
+func TestRenderInspectorComposingShowsSendingStatus(t *testing.T) {
+	var buf strings.Builder
+	view := inspectorViewState{
+		viewportRows:  10,
+		composing:     true,
+		composeText:   "hello",
+		composeStatus: "sending…",
+		snapshot:      InspectorSnapshot{Session: Session{PID: 1}},
+	}
+	RenderInspector(&buf, view, 80, 14)
+	out := buf.String()
+	if !strings.Contains(out, "> hello") {
+		t.Fatalf("output = %q, want it to contain the compose prompt", out)
+	}
+	if !strings.Contains(out, "sending…") {
+		t.Fatalf("output = %q, want it to contain the in-flight send status", out)
+	}
+}
+
+func TestRenderInspectorComposingShowsFailureStatus(t *testing.T) {
+	var buf strings.Builder
+	view := inspectorViewState{
+		viewportRows:  10,
+		composing:     true,
+		composeText:   "hello",
+		composeStatus: "send failed: broken pipe",
+		snapshot:      InspectorSnapshot{Session: Session{PID: 1}},
+	}
+	RenderInspector(&buf, view, 80, 14)
+	out := buf.String()
+	if !strings.Contains(out, "> hello") {
+		t.Fatalf("output = %q, want it to still contain the compose prompt so the user can retry", out)
+	}
+	if !strings.Contains(out, "send failed: broken pipe") {
+		t.Fatalf("output = %q, want it to contain the failure message", out)
+	}
+}
+
 func TestInspectorFooterRightShowsComposeStatusBeforeExpiry(t *testing.T) {
 	view := inspectorViewState{
 		composeStatus:      "sent",

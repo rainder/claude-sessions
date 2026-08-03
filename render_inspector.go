@@ -210,8 +210,21 @@ func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []
 // reverse-video bar the footer uses, styled after new_picker.go's
 // renderPromptInput (new_picker.go:221-230). No hit regions — clicking during
 // compose is out of scope; the box only responds to the keyboard.
+//
+// composeStatus is appended whenever non-empty, with no composeStatusUntil
+// expiry check: handleInspectorEvent (tui.go) sets it to "sending…" while
+// composing is still true, and on a failed send leaves composing true (by
+// design, so the text survives for a retry) with the failure message in
+// composeStatus. Neither of those is ever otherwise visible, since
+// inspectorFooter/inspectorFooterRight — the only other place composeStatus
+// renders, with the expiry check — is skipped entirely while composing. The
+// status simply stays until the user's next submit attempt overwrites it
+// with a new "sending…"; no separate clearing logic is needed.
 func inspectorComposeBar(w io.Writer, view inspectorViewState, cols int) []hitRegion {
 	line := "> " + view.composeText + dim("_")
+	if view.composeStatus != "" {
+		line += "  " + dim(view.composeStatus)
+	}
 	fmt.Fprintln(w, ansiPreviewBar+clipLine(line, cols)+ansiReset)
 	return nil
 }
