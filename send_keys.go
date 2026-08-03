@@ -18,7 +18,20 @@ const sendKeysMaxLen = 4096
 // that tmux action instead of being typed literally. Neither call goes
 // through a shell (exec.Command argument slices), so there is no
 // shell-injection surface regardless of message content.
+//
+// s.Tmux must be non-empty. tmux does not fail safely on an empty target: `tmux
+// send-keys -t "" ...` exits 0 and silently delivers to tmux's default/current
+// session instead of erroring, so an unguarded call here would misdeliver
+// keystrokes into the wrong pane with no error to catch it. Every other call
+// site against Session.Tmux in this codebase checks it first (actions.go:182,256;
+// commands.go:68; migrate.go:327; worktree.go:87,100; render.go:80) — this
+// matches that idiom. resolveLivePIDLocal can legitimately return a Session
+// with Tmux == "" (a claude session not yet mapped to a pane), so callers
+// cannot assume the field is populated.
 func sendKeys(s Session, text string) error {
+	if s.Tmux == "" {
+		return fmt.Errorf("PID %d has no tmux pane", s.PID)
+	}
 	if err := exec.Command("tmux", "send-keys", "-t", s.Tmux, "-l", text).Run(); err != nil {
 		return fmt.Errorf("send text: %w", err)
 	}

@@ -54,3 +54,10 @@ func TestResolveLivePIDLocalEmptySessionIDRefuses(t *testing.T) {
 		t.Fatalf("resolveLivePIDLocal = %v, want session_id-required error", err)
 	}
 }
+
+func TestSendKeysEmptyTmuxRefuses(t *testing.T) {
+	err := sendKeys(Session{PID: 4242}, "hello")
+	if err == nil || !strings.Contains(err.Error(), "no tmux pane") {
+		t.Fatalf("sendKeys = %v, want no-tmux-pane error", err)
+	}
+}
