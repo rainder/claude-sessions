@@ -38,6 +38,12 @@ func TestMain(m *testing.M) {
 	usageInfoFetch = func(string) (*UsageInfo, error) { panic("test reached the real usage endpoint") }
 	cuFetchFunc = func(context.Context, string) ([]byte, error) { panic("test reached the real cu CLI") }
 	claudeSummarizeFunc = func(context.Context, string, []byte) ([]byte, error) { panic("test reached the real claude CLI") }
+	codexSummarizeFunc = func(context.Context, string, []byte) ([]byte, error) { panic("test reached the real codex CLI") }
+	// Hermetic default: without this, resolveSummarizeFunc would call the
+	// real LoadSummaryBackend, reading whatever this developer's own
+	// ~/.config/claude-sessions/summary-backend happens to say instead of
+	// the "claude" every existing claudeSummarizeFunc override assumes.
+	summaryBackendFunc = func() string { return "claude" }
 	os.Exit(m.Run())
 }
 

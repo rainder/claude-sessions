@@ -62,3 +62,37 @@ func TestCommandPresetNameRoundTrip(t *testing.T) {
 		t.Fatalf("loaded preset index = %d, want 1", got)
 	}
 }
+
+func TestLoadSummaryBackendMissing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if got := LoadSummaryBackend(); got != "claude" {
+		t.Errorf("LoadSummaryBackend() with no file = %q, want %q", got, "claude")
+	}
+}
+
+func TestLoadSummaryBackendGarbage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "claude-sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "summary-backend"), []byte("nonsense\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadSummaryBackend(); got != "claude" {
+		t.Errorf("LoadSummaryBackend() with garbage value = %q, want %q", got, "claude")
+	}
+}
+
+func TestSummaryBackendRoundTrip(t *testing.T) {
+	for _, backend := range []string{"claude", "codex"} {
+		t.Run(backend, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			SaveSummaryBackend(backend)
+			if got := LoadSummaryBackend(); got != backend {
+				t.Errorf("LoadSummaryBackend() after SaveSummaryBackend(%q) = %q, want %q", backend, got, backend)
+			}
+		})
+	}
+}

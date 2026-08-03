@@ -72,7 +72,7 @@ func fetchTicketSummary(ctx context.Context, ticketID string) (PreviewResult, er
 	if err != nil {
 		return PreviewResult{}, fmt.Errorf("cu fetch failed: %w", err)
 	}
-	summary, err := claudeSummarizeFunc(ctx, ticketSummaryInstruction, raw)
+	summary, err := resolveSummarizeFunc()(ctx, ticketSummaryInstruction, raw)
 	if err != nil {
 		content := fmt.Sprintf("[summary unavailable: %s]\n\n%s", err, truncRawBytes(string(raw), ticketRawCap))
 		return PreviewResult{Source: ticketSummaryDegradedSource, Label: ticketID, Content: sanitizeTerminalText(content)}, nil

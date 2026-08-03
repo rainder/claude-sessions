@@ -62,6 +62,8 @@ func main() {
 		os.Exit(cmdSnapshot(args[1:]))
 	case "account":
 		os.Exit(cmdAccount(args[1:]))
+	case "summary":
+		os.Exit(cmdSummary(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -104,6 +106,8 @@ subcommands:
                                   claude-switch credential snapshot, capture the
                                   live one as a snapshot, or list what each host
                                   knows about
+  summary [claude|codex]          print or set the ticket/conversation
+                                  summary backend (default claude)
   notify-test                     send a test push to every registered device
   -h, --help                      this help
 

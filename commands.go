@@ -755,3 +755,27 @@ func cmdSnapshot(args []string) int {
 		return 2
 	}
 }
+
+// cmdSummary manages the backend for the ticket/conversation summary
+// feature (info_ticket.go, info_transcript.go): `claude-sessions summary`
+// prints the current backend, `claude-sessions summary claude|codex` sets it.
+func cmdSummary(args []string) int {
+	const usage = "usage: claude-sessions summary [claude|codex]"
+	if len(args) == 0 {
+		fmt.Println(LoadSummaryBackend())
+		return 0
+	}
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+	switch args[0] {
+	case "claude", "codex":
+		SaveSummaryBackend(args[0])
+		fmt.Printf("summary backend set to %s\n", args[0])
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "summary: unknown backend %q\n%s\n", args[0], usage)
+		return 2
+	}
+}

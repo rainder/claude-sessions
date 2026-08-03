@@ -96,3 +96,28 @@ func SaveCommandPresetName(name string) {
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, "command-preset"), []byte(name+"\n"), 0o644)
 }
+
+// LoadSummaryBackend reads the persisted backend ("claude" or "codex") for
+// the ticket/conversation summary feature (info_ticket.go, info_transcript.go).
+// Defaults to "claude" on any error or unrecognized value.
+func LoadSummaryBackend() string {
+	data, err := os.ReadFile(filepath.Join(ConfigDir(), "summary-backend"))
+	if err != nil {
+		return "claude"
+	}
+	switch v := strings.TrimSpace(string(data)); v {
+	case "claude", "codex":
+		return v
+	}
+	return "claude"
+}
+
+// SaveSummaryBackend persists the summary backend. Best-effort, like SaveViewMode.
+func SaveSummaryBackend(backend string) {
+	dir := ConfigDir()
+	if dir == "" {
+		return
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "summary-backend"), []byte(backend+"\n"), 0o644)
+}
