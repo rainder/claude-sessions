@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -22,7 +25,45 @@ const subprocessWaitDelay = 5 * time.Second
 var cuFetchFunc = runCuFetch
 
 func runCuFetch(ctx context.Context, ticketID string) ([]byte, error) {
-	return cuFetchCmd(ctx, ticketID).Output()
+	out, err := cuFetchCmd(ctx, ticketID).Output()
+	return out, wrapExecErr(out, err)
+}
+
+// wrapExecErr appends the subprocess's own failure text (first line, capped)
+// to a failed exec.Cmd.Output() call, so the caller's err.Error() carries
+// something more useful than the bare "exit status N" an *exec.ExitError
+// renders on its own. Every caller here (info_ticket.go, info_transcript.go)
+// surfaces err.Error() straight to the terminal (info_dialog.go), so without
+// this every distinct failure (auth, rate limit, bad argv) looked identical.
+//
+// stdout is checked first, not stderr: reproduced directly against the real
+// `claude` CLI, its own user-facing errors ("Not logged in · Please run
+// /login") are written to stdout, and Output() still returns those bytes
+// even on a non-zero exit — the caller was just discarding `out` on the
+// error path. Stderr (which Output() does populate on *exec.ExitError) is
+// the fallback for failures that don't fit that shape (e.g. cu's own
+// errors). Either stream is untrusted subprocess output, so it goes through
+// sanitizeTerminalText like every other externally-sourced string this
+// package renders.
+func wrapExecErr(out []byte, err error) error {
+	if err == nil {
+		return nil
+	}
+	text := string(out)
+	if strings.TrimSpace(text) == "" {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			text = string(ee.Stderr)
+		}
+	}
+	line := strings.TrimSpace(text)
+	if line == "" {
+		return err
+	}
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	return fmt.Errorf("%w: %s", err, sanitizeTerminalText(truncBytesHead(line, 200)))
 }
 
 // cuFetchCmd builds (but does not run) the `cu fetch` command. Split out from
@@ -42,7 +83,8 @@ func cuFetchCmd(ctx context.Context, ticketID string) *exec.Cmd {
 var claudeSummarizeFunc = runClaudeSummarize
 
 func runClaudeSummarize(ctx context.Context, instruction string, input []byte) ([]byte, error) {
-	return claudeSummarizeCmd(ctx, instruction, input).Output()
+	out, err := claudeSummarizeCmd(ctx, instruction, input).Output()
+	return out, wrapExecErr(out, err)
 }
 
 // claudeSystemPrompt replaces Claude Code's default system prompt for these

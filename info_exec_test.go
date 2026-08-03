@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +42,60 @@ func TestClaudeSummarizeFuncSeamIsSwappable(t *testing.T) {
 	if err != nil || string(out) != "summary" {
 		t.Errorf("got (%q, %v)", out, err)
 	}
+}
+
+// TestWrapExecErr covers the three shapes wrapExecErr must distinguish:
+// stdout carrying the real failure text (the `claude` CLI's own shape —
+// "Not logged in" is written to stdout, not stderr, and Output() still
+// returns it alongside the *exec.ExitError), a stderr fallback for
+// processes that follow the usual convention, and a nil/empty-both case
+// that must pass the original error through unchanged rather than panic
+// or produce an empty-looking wrap.
+func TestWrapExecErr(t *testing.T) {
+	t.Run("nil error passes through", func(t *testing.T) {
+		if err := wrapExecErr([]byte("anything"), nil); err != nil {
+			t.Errorf("got %v, want nil", err)
+		}
+	})
+
+	t.Run("stdout text wins over exit-status-only message", func(t *testing.T) {
+		_, err := exec.Command("sh", "-c", "printf 'Not logged in - Please run /login\\nmore\\n'; exit 1").Output()
+		if err == nil {
+			t.Fatal("expected the sh command to fail")
+		}
+		out := []byte("Not logged in - Please run /login\nmore\n")
+		got := wrapExecErr(out, err)
+		if !strings.Contains(got.Error(), "Not logged in - Please run /login") {
+			t.Errorf("got %q, want it to contain the stdout failure line", got.Error())
+		}
+		if strings.Contains(got.Error(), "more") {
+			t.Errorf("got %q, want only the first line kept", got.Error())
+		}
+	})
+
+	t.Run("falls back to stderr when stdout is empty", func(t *testing.T) {
+		cmd := exec.Command("sh", "-c", "echo boom >&2; exit 1")
+		_, err := cmd.Output()
+		if err == nil {
+			t.Fatal("expected the sh command to fail")
+		}
+		got := wrapExecErr(nil, err)
+		if !strings.Contains(got.Error(), "boom") {
+			t.Errorf("got %q, want it to contain the stderr text", got.Error())
+		}
+	})
+
+	t.Run("both empty returns the original error unchanged", func(t *testing.T) {
+		cmd := exec.Command("sh", "-c", "exit 1")
+		_, err := cmd.Output()
+		if err == nil {
+			t.Fatal("expected the sh command to fail")
+		}
+		got := wrapExecErr(nil, err)
+		if got != err {
+			t.Errorf("got %v, want the original error unchanged", got)
+		}
+	})
 }
 
 // TestCuFetchCmdArgs verifies the real argv `cu fetch --with-comments <id>`
