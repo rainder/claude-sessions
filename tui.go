@@ -489,15 +489,15 @@ func RunTUI(interval time.Duration) error {
 			// Best-effort only: the ticket-summary block hasn't loaded yet at
 			// this point, so this slightly under-reserves rows on first open —
 			// the accepted one-shot tradeoff documented in the design spec.
-			// Fired in a goroutine: nothing waits on its result, and running it
-			// synchronously here would make the inspector's first paint wait on
-			// a local tmux call or (worst case, before a downed remote host's
-			// 5s timeout elapses) a full network round trip. Unlike the revert
-			// calls in closeInspector and the quit-path defer, there is no race
-			// to lose here — entry has nothing after it that depends on the
-			// resize having landed.
+			// Synchronous, not fired in a goroutine: closeInspector's and the
+			// quit-path defer's reverts assume the entry resize has already
+			// landed, so an async entry can race a quick close/quit and leave
+			// the window pinned to window-size=manual with no un-pin ever
+			// following it. Bounded at 5s worst case by resizeRemote's own
+			// timeout (remote_actions.go) — the same shape send_keys.go's
+			// local resolveLivePIDLocal path already accepts on the UI thread.
 			if innerRows := rows - inspectorChromeRows; innerRows > 0 {
-				go resizeInspected(sess, cols, innerRows, false)
+				resizeInspected(sess, cols, innerRows, false)
 			}
 		}
 		state.mode = screenInspector
