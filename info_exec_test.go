@@ -233,6 +233,36 @@ func TestCodexSummarizeCmdArgs(t *testing.T) {
 	}
 }
 
+// TestCodexFailureLine covers the shape a real failing `codex exec` run
+// produces (banner lines, then an "ERROR:"-prefixed line — see the
+// codexFailureLine doc comment) plus the fallback shapes: no ERROR line at
+// all, and an empty buffer.
+func TestCodexFailureLine(t *testing.T) {
+	t.Run("picks the ERROR line over the banner", func(t *testing.T) {
+		stderr := []byte("Reading additional input from stdin...\nOpenAI Codex v0.145.0\n--------\nworkdir: /tmp\n" +
+			`ERROR: {"type":"error","status":400,"error":{"message":"bad model"}}` + "\n")
+		got := codexFailureLine(stderr)
+		want := `ERROR: {"type":"error","status":400,"error":{"message":"bad model"}}`
+		if string(got) != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("falls back to the last non-empty line when there is no ERROR line", func(t *testing.T) {
+		stderr := []byte("some banner text\nlast diagnostic line\n\n")
+		got := codexFailureLine(stderr)
+		if string(got) != "last diagnostic line" {
+			t.Errorf("got %q, want %q", got, "last diagnostic line")
+		}
+	})
+
+	t.Run("empty stderr returns nil", func(t *testing.T) {
+		if got := codexFailureLine(nil); got != nil {
+			t.Errorf("got %q, want nil", got)
+		}
+	})
+}
+
 // TestResolveSummarizeFunc covers both branches of the summary-backend
 // switch (config.go's LoadSummaryBackend/SaveSummaryBackend) — the reason
 // resolveSummarizeFunc exists at all.
