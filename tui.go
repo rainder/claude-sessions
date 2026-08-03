@@ -1080,6 +1080,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    k            kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
+	fmt.Fprintln(&b, "    i            show session info (ticket + conversation summary)")
 	fmt.Fprintln(&b, "    Ctrl-W       switch that host's Claude account (⏎ applies · esc cancels)")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("INSPECTOR"))

@@ -112,13 +112,37 @@ func renderInfoDialog(header []string, ticketSec, convoSec *asyncSection, cols, 
 		return confirmBoxV + " " + s + strings.Repeat(" ", innerWidth-visualLen(s)) + " " + confirmBoxV
 	}
 
-	var b strings.Builder
-	b.WriteString(confirmBoxTL + strings.Repeat(confirmBoxH, innerWidth+2) + confirmBoxTR + "\n")
+	box := make([]string, 0, len(body)+2)
+	box = append(box, confirmBoxTL+strings.Repeat(confirmBoxH, innerWidth+2)+confirmBoxTR)
 	for _, line := range body {
-		b.WriteString(pad(line) + "\n")
+		box = append(box, pad(line))
 	}
-	b.WriteString(confirmBoxBL + strings.Repeat(confirmBoxH, innerWidth+2) + confirmBoxBR + "\n")
-	return b.String()
+	box = append(box, confirmBoxBL+strings.Repeat(confirmBoxH, innerWidth+2)+confirmBoxBR)
+
+	if cols <= 0 || rows <= 0 {
+		return strings.Join(box, "\n")
+	}
+
+	boxWidth := innerWidth + 4
+	left := (cols - boxWidth) / 2
+	if left < 0 {
+		left = 0
+	}
+	leftPad := strings.Repeat(" ", left)
+	for i, l := range box {
+		box[i] = leftPad + l
+	}
+
+	top := (rows - len(box)) / 2
+	if top < 0 {
+		top = 0
+	}
+	lines := make([]string, 0, top+len(box))
+	for i := 0; i < top; i++ {
+		lines = append(lines, "")
+	}
+	lines = append(lines, box...)
+	return strings.Join(lines, "\n")
 }
 
 // showInfoDialog opens the 'i'-hotkey info modal for s: a deterministic

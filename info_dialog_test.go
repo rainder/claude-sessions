@@ -111,7 +111,7 @@ func TestRenderInfoDialogHasOneDividerPerSection(t *testing.T) {
 	dividerRow := confirmBoxV + " " + strings.Repeat(confirmBoxH, infoDialogInnerWidth) + " " + confirmBoxV
 	got := 0
 	for _, line := range strings.Split(out, "\n") {
-		if line == dividerRow {
+		if strings.TrimLeft(line, " ") == dividerRow {
 			got++
 		}
 	}
