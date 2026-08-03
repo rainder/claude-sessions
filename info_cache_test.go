@@ -114,6 +114,37 @@ func TestSummaryCachePruneNeverEvictsInFlightEntries(t *testing.T) {
 	}
 }
 
+func TestSummaryCacheFresh(t *testing.T) {
+	c := newSummaryCache(20*time.Millisecond, 20*time.Millisecond, time.Second, 10)
+	if c.fresh("missing") {
+		t.Error("fresh(missing key) = true, want false")
+	}
+
+	start := make(chan struct{})
+	fetchDone := make(chan struct{})
+	go func() {
+		c.getOrFetch(context.Background(), "k1", func(ctx context.Context) (PreviewResult, error) {
+			<-start
+			return PreviewResult{Content: "result"}, nil
+		})
+		close(fetchDone)
+	}()
+	time.Sleep(10 * time.Millisecond) // let the fetch register in-flight
+	if !c.fresh("k1") {
+		t.Error("fresh(in-flight key) = false, want true")
+	}
+	close(start)
+	<-fetchDone
+
+	if !c.fresh("k1") {
+		t.Error("fresh(just-completed key) = false, want true")
+	}
+	time.Sleep(30 * time.Millisecond) // past the 20ms successTTL
+	if c.fresh("k1") {
+		t.Error("fresh(expired key) = true, want false")
+	}
+}
+
 func TestSummaryCacheConcurrentCallersJoinOneFlight(t *testing.T) {
 	c := newSummaryCache(time.Hour, time.Minute, time.Second, 10)
 	var calls int32

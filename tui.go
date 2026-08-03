@@ -271,6 +271,30 @@ func RunTUI(interval time.Duration) error {
 	var toast string
 	var toastUntil time.Time
 
+	// prefetchTicketSummaries warms ticketCache for every DR-XXXX id visible
+	// in the current local+remote rows, so openInspector's own fetch below
+	// almost always hits a warm cache instead of starting a fresh cu+claude
+	// round trip the moment the user opens preview. All the dedup/freshness/
+	// concurrency-cap bookkeeping lives in prefetchTicketSummary
+	// (info_ticket.go) — this just enumerates what's currently visible.
+	prefetchTicketSummaries := func() {
+		seen := make(map[string]bool)
+		prefetch := func(cwd, name string) {
+			if id := detectTicketID(cwd, name); id != "" && !seen[id] {
+				seen[id] = true
+				prefetchTicketSummary(id)
+			}
+		}
+		for _, s := range local {
+			prefetch(s.CWD, s.Name)
+		}
+		for _, r := range remotes {
+			for _, s := range r.Sessions {
+				prefetch(s.CWD, s.Name)
+			}
+		}
+	}
+
 	// settleRows sorts the latest local and remote snapshots, then reconciles
 	// selection. It chases a pending post-spawn landing until its tmux pane
 	// appears, otherwise falling back if a vanished selected row needs replacing.
@@ -309,6 +333,7 @@ func RunTUI(interval time.Duration) error {
 			filterRemoteResults(remotes, gv),
 		)
 		state.settleSelection(targets)
+		prefetchTicketSummaries()
 	}
 
 	// refresh re-reads local sessions through the authoritative loopback server
@@ -493,6 +518,12 @@ func RunTUI(interval time.Duration) error {
 		// returns above with no inspector open and no closeInspector to reap it.
 		// closeInspector always runs before the list can reopen, so there is
 		// nothing live here — close anyway rather than rely on that invariant.
+		// This is usually a cache hit, not a fresh fetch: prefetchTicketSummaries
+		// (settleRows, above) already warms ticketCache for every visible
+		// DR-XXXX id while the session sits on the list, so by the time the
+		// user opens preview startAsyncSection's fetch typically just reads
+		// back what's already there instead of starting a new cu+claude round
+		// trip.
 		ticketSummarySec.close() // nil-safe
 		ticketSummarySec = nil
 		if ticketID := detectTicketID(sess.CWD, sess.Name); ticketID != "" {
@@ -501,9 +532,13 @@ func RunTUI(interval time.Duration) error {
 			})
 		}
 		if cols, rows, err := term.GetSize(fd); err == nil && cols > 0 {
-			// Best-effort only: the ticket-summary block hasn't loaded yet at
-			// this point, so this slightly under-reserves rows on first open —
-			// the accepted one-shot tradeoff documented in the design spec.
+			// Best-effort only: the ticket-summary block usually hasn't loaded
+			// yet at this point — prefetchTicketSummaries (settleRows, above)
+			// warms ticketCache while the session is still on the list, but a
+			// ticket that only just became visible, or whose prefetch is still
+			// queued behind ticketPrefetchConcurrency, still lands here cold —
+			// so this can still slightly under-reserve rows on first open, the
+			// accepted one-shot tradeoff documented in the design spec.
 			// Synchronous, not fired in a goroutine: closeInspector's and the
 			// quit-path defer's reverts assume the entry resize has already
 			// landed, so an async entry can race a quick close/quit and leave
