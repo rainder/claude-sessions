@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -251,6 +252,41 @@ func TestRenderInspectorClipsEveryLine(t *testing.T) {
 		if visibleWidth(ln) > 40 {
 			t.Fatalf("line exceeds width 40: %d cols", visibleWidth(ln))
 		}
+	}
+}
+
+func TestRenderInspectorComposingShowsInputBar(t *testing.T) {
+	var buf strings.Builder
+	view := inspectorViewState{
+		viewportRows: 10,
+		composing:    true,
+		composeText:  "hello",
+		snapshot:     InspectorSnapshot{Session: Session{PID: 1}},
+	}
+	RenderInspector(&buf, view, 80, 14)
+	if !strings.Contains(buf.String(), "> hello") {
+		t.Fatalf("output = %q, want it to contain the compose prompt", buf.String())
+	}
+}
+
+func TestInspectorFooterRightShowsComposeStatusBeforeExpiry(t *testing.T) {
+	view := inspectorViewState{
+		composeStatus:      "sent",
+		composeStatusUntil: time.Now().Add(1 * time.Minute),
+	}
+	if got := inspectorFooterRight(view); got != "sent" {
+		t.Fatalf("inspectorFooterRight = %q, want sent", got)
+	}
+}
+
+func TestInspectorFooterRightFallsBackAfterExpiry(t *testing.T) {
+	view := inspectorViewState{
+		composeStatus:      "sent",
+		composeStatusUntil: time.Now().Add(-1 * time.Minute),
+		follow:             true,
+	}
+	if got := inspectorFooterRight(view); got != "LIVE ↓" {
+		t.Fatalf("inspectorFooterRight = %q, want LIVE ↓ (status expired, fall back to freshness text)", got)
 	}
 }
 

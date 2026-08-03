@@ -5,6 +5,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -61,7 +62,11 @@ func RenderInspector(w io.Writer, view inspectorViewState, cols, rows int) []hit
 	bodyRows := rows - 4
 	inspectorBody(w, view, bodyRows, cols)
 
-	// Row rows-1: footer with clickable controls.
+	// Row rows-1: footer — the compose input bar while composing, otherwise
+	// the normal Back/Refresh/Follow controls.
+	if view.composing {
+		return inspectorComposeBar(w, view, cols)
+	}
 	return inspectorFooter(w, view, cols, rows-1)
 }
 
@@ -200,9 +205,28 @@ func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []
 	return hits
 }
 
+// inspectorComposeBar draws the send-keys compose row in place of the normal
+// footer while view.composing is true: a "> text_" prompt on the same
+// reverse-video bar the footer uses, styled after new_picker.go's
+// renderPromptInput (new_picker.go:221-230). No hit regions — clicking during
+// compose is out of scope; the box only responds to the keyboard.
+func inspectorComposeBar(w io.Writer, view inspectorViewState, cols int) []hitRegion {
+	line := "> " + view.composeText + dim("_")
+	fmt.Fprintln(w, ansiPreviewBar+clipLine(line, cols)+ansiReset)
+	return nil
+}
+
 // inspectorFooterRight is the source-plus-freshness-status text shown on the
-// footer's right when it fits, e.g. "tmux · LIVE ↓".
+// footer's right when it fits, e.g. "tmux · LIVE ↓". A recent compose-send
+// result (composeStatus, while composeStatusUntil hasn't passed) takes
+// priority over the normal freshness text, so "sent" or a failure message is
+// what the user sees right after pressing Enter — then it falls back to the
+// ordinary status once the deadline passes, without needing a separate
+// render path.
 func inspectorFooterRight(view inspectorViewState) string {
+	if view.composeStatus != "" && time.Now().Before(view.composeStatusUntil) {
+		return view.composeStatus
+	}
 	status := inspectorStatusText(view)
 	src := view.snapshot.Source
 	switch {
