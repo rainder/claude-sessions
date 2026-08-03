@@ -1800,10 +1800,12 @@ func TestRemoveWorktreeHandlerRemoves(t *testing.T) {
 // TestSessionsResponseMatchesGolden pins the wire shape the iOS client decodes.
 //
 // Session is both the on-disk model and the HTTP DTO, so a field rename here is
-// a silent client break with no compile error on either side. The same fixture
-// is decoded by a test in the Swift package, so the two fail together. If this
-// test fails because the shape legitimately changed, update the fixture AND the
-// Swift test.
+// a silent client break with no compile error on either side. The Swift package
+// keeps its own copy of this fixture (not byte-identical — it also carries an
+// `api` block, pinned separately by TestSessionsAdvertisesAPIHandshake on this
+// side, since the anonymous struct below doesn't decode `api` at all). If this
+// test fails because the shape legitimately changed, update both fixtures AND
+// the Swift test.
 func TestSessionsResponseMatchesGolden(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "sessions-golden.json"))
 	if err != nil {
