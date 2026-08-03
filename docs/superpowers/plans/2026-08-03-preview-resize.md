@@ -133,14 +133,21 @@ func resizeTmuxTarget(s Session, cols, rows int) error {
 }
 
 // revertTmuxTarget un-pins s's tmux window from manual-size mode via `tmux
-// resize-window -A`, restoring normal auto-resize-to-largest-attached-client
-// behavior.
+// set-window-option -u window-size`, restoring the window's normal
+// (typically auto-resize-to-latest-active-client) behavior.
+//
+// This is NOT `tmux resize-window -A`: that command recalculates the size
+// once but leaves the window-size option explicitly set to "manual" (verified
+// against a real tmux session — `show-window-options` reports "manual" even
+// after `-A`), so a window "reverted" that way never again auto-adjusts to an
+// attaching client and stays silently frozen at the last preview's
+// dimensions. `-u` (unset) is the only way to actually clear the override.
 func revertTmuxTarget(s Session) error {
 	if s.Tmux == "" {
 		return fmt.Errorf("PID %d has no tmux pane", s.PID)
 	}
-	if err := exec.Command("tmux", "resize-window", "-t", s.Tmux, "-A").Run(); err != nil {
-		return fmt.Errorf("resize-window -A: %w", err)
+	if err := exec.Command("tmux", "set-window-option", "-t", s.Tmux, "-u", "window-size").Run(); err != nil {
+		return fmt.Errorf("set-window-option -u window-size: %w", err)
 	}
 	return nil
 }
@@ -653,20 +660,24 @@ git commit -m "feat: add resizeRemote client for /sessions/{pid}/resize"
 
 ---
 
-### Task 5: Wire resize/revert into inspector open/close
+### Task 5: Wire resize/revert into inspector open/close/attach/quit
 
 **Files:**
-- Modify: `tui.go` — new closure before `openInspector` (currently `tui.go:434`); one insertion inside `openInspector` (currently ends `tui.go:466`); one change inside `closeInspector` (currently `tui.go:471-484`)
+- Modify: `tui.go` — new closure + extended defer after `var ticketSummarySec *asyncSection` (currently `tui.go:218-224`); one insertion inside `openInspector` (currently ends `tui.go:466`); one change inside `closeInspector` (currently `tui.go:471-484`); one reordering inside `handleInspectorEvent`'s Enter-key branch (currently `tui.go:900-903`)
 
 **Interfaces:**
 - Consumes: `resolveLivePIDLocal(pid int, wantSessionID string) (Session, error)` (existing, `send_keys.go:51`), `resizeSession` (Task 1), `resizeRemote` (Task 4), `inspectorChromeRows` (existing constant, `tui.go:68`), `term.GetSize(fd int) (int, int, error)` (existing import, already used at `tui.go:311`).
 - Produces: nothing new consumed elsewhere — this is the final caller.
 
-This task has no new unit tests: `openInspector`/`closeInspector`/`sendKeysToInspected` are unexported closures inside `RunTUI` with no existing dedicated tests (verified via `grep -rn "openInspector\|closeInspector" tui_test.go` returning nothing) — the existing pattern for this code is build + full regression suite + manual verification, not isolated unit tests. Follow that pattern rather than inventing new test scaffolding for it.
+This task has no new unit tests: `openInspector`/`closeInspector`/`sendKeysToInspected`/`handleInspectorEvent`'s Enter branch are unexported closures/functions inside/around `RunTUI` with no existing dedicated tests for this kind of wiring (verified via `grep -rn "openInspector\|closeInspector" tui_test.go` returning nothing) — the existing pattern for this code is build + full regression suite + manual verification, not isolated unit tests. Follow that pattern.
 
-- [ ] **Step 1: Add the `resizeInspected` dispatch closure**
+**Background — why this task has more than open/close (from an independent review that caught two real bugs in an earlier version of this plan, both verified against a real tmux session):**
+1. `tmux resize-window -A` does **not** actually revert anything (see Task 1 — it leaves `window-size` pinned to `manual` forever); the correct primitive is `set-window-option -u window-size`.
+2. Two lifecycle paths previously had no revert at all: (a) quitting the TUI outright while the inspector is open skipped `closeInspector` entirely, and (b) the Enter-to-attach flow called the blocking interactive `attach()` **before** `closeInspector()`'s revert, so the entire real attach session ran on a still-pinned window. Both are fixed below.
 
-Insert immediately before the `// openInspector enters...` comment (currently `tui.go:434`):
+- [ ] **Step 1: Add the `resizeInspected` dispatch closure, declared early**
+
+Insert immediately after `var ticketSummarySec *asyncSection` (currently `tui.go:218`) and **before** the existing hub-shutdown defer (currently `tui.go:219-224`) — it must be declared before that defer since the defer will call it (Step 2) and Go does not allow a closure to forward-reference a not-yet-declared local variable:
 
 ```go
 	// resizeInspected fires a best-effort tmux resize (or, with revert=true,
@@ -690,7 +701,40 @@ Insert immediately before the `// openInspector enters...` comment (currently `t
 
 ```
 
-- [ ] **Step 2: Fire the resize on inspector entry**
+- [ ] **Step 2: Extend the existing hub-shutdown defer to revert first (quit-path safety net)**
+
+Replace the existing defer (currently `tui.go:219-224`):
+
+```go
+	defer func() {
+		if inspectorHub != nil {
+			inspectorHub.Shutdown()
+		}
+		ticketSummarySec.close() // nil-safe
+	}()
+```
+
+with:
+
+```go
+	defer func() {
+		if inspectorHub != nil {
+			// Covers every RunTUI return path that skips closeInspector — most
+			// notably quitting outright (Ctrl+D/'q') while the inspector is
+			// open, which previously left the target's tmux window pinned to
+			// manual-size mode forever. A hard process kill (SIGKILL) still
+			// bypasses this — accepted, see the design spec's known
+			// limitations.
+			resizeInspected(state.inspector.snapshot.Session, 0, 0, true)
+			inspectorHub.Shutdown()
+		}
+		ticketSummarySec.close() // nil-safe
+	}()
+```
+
+(`state` is already declared above this point, `tui.go:201`.)
+
+- [ ] **Step 3: Fire the resize on inspector entry**
 
 In `openInspector`, insert immediately before `state.mode = screenInspector` (currently `tui.go:461`, right after the `if ticketID := ...; ticketID != "" { ... }` block closes):
 
@@ -707,7 +751,7 @@ In `openInspector`, insert immediately before `state.mode = screenInspector` (cu
 
 (`sess` and `fd` are already in scope — `sess` from `sess := *target.session` earlier in `openInspector`, `fd` from `RunTUI`'s outer scope, same one `render()` uses.)
 
-- [ ] **Step 3: Fire the revert on inspector exit**
+- [ ] **Step 4: Fire the revert on inspector exit (normal back-navigation)**
 
 Replace the start of `closeInspector` (currently `tui.go:471-475`):
 
@@ -730,12 +774,38 @@ with:
 		}
 ```
 
-- [ ] **Step 4: Build and run the full test suite**
+- [ ] **Step 5: Fix attach-before-revert ordering**
+
+In `handleInspectorEvent` (currently `tui.go:900-903`), the Enter-key branch calls the blocking interactive `attach()` before `closeInspector()`, which means a real attach used to run on a still-pinned window for its entire duration. Swap the order so the revert (inside `closeInspector`, from Step 4) fires first:
+
+Replace:
+
+```go
+	if ev.key == KeyEnter {
+		attach()
+		closeInspector()
+		return false, false
+	}
+```
+
+with:
+
+```go
+	if ev.key == KeyEnter {
+		closeInspector()
+		attach()
+		return false, false
+	}
+```
+
+(This is safe to reorder: `closeInspector` tears down the hub, resets `state.mode`, and refreshes the session list; the `attach` closure passed in here — defined at the `handleInspectorEvent` call site — already calls its own `refresh(true)` after the interactive attach returns, so the post-attach list refresh is unaffected by this reordering.)
+
+- [ ] **Step 6: Build and run the full test suite**
 
 Run: `go build ./... && go vet ./... && go test ./...`
 Expected: build succeeds, vet is clean, all tests (old and new) pass.
 
-- [ ] **Step 5: Manual verification**
+- [ ] **Step 7: Manual verification**
 
 1. Start (or reuse) a local tmux session running a Claude session tracked by `claude-sessions`.
 2. Note its current tmux window size: `tmux list-windows -t <session> -F '#{window_width}x#{window_height}'`.
@@ -743,10 +813,12 @@ Expected: build succeeds, vet is clean, all tests (old and new) pass.
 4. Open inspector/preview on that session (arrow to select, then Enter/'p' per the existing keybinding).
 5. Re-run `tmux list-windows -t <session> -F '#{window_width}x#{window_height}'` from another terminal — confirm it now matches the inspector's inner viewport (terminal cols x (terminal rows - `inspectorChromeRows`)).
 6. Leave preview mode (Esc/back).
-7. Re-run `tmux list-windows -t <session> -F '#{window_width}x#{window_height} #{window_size}'` — the window should be back to automatic sizing (`#{window_size}` should no longer report `manual`).
+7. Re-run `tmux show-window-options -t <session> window-size` — confirm it reports nothing (unset/inherited), never `manual`.
 8. Repeat steps 3–7 against a **remote** session (a host in `servers.yaml`) to confirm the same behavior over the `/resize` endpoint.
+9. Re-open preview on the local session, then quit the TUI outright with Ctrl+D. Confirm (`tmux show-window-options -t <session> window-size`) that the revert still fired even though `closeInspector` was never called.
+10. Re-open preview, then press Enter to attach interactively. Confirm the attached session is sized normally from the very start (not frozen at the preview's dimensions) — this is the attach-ordering fix from Step 5.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add tui.go
@@ -759,12 +831,13 @@ git commit -m "feat: resize previewed session's tmux window to match inspector v
 
 **Spec coverage:**
 - Both local and remote scope → Tasks 1 (shared primitive), 4 (remote client), 5 (dispatches on `sess.Host`). ✓
-- Auto-revert on preview exit → Task 5, Step 3. ✓
-- One-shot on entry, no poll-tick/live-resize repetition → Task 5, Steps 2–3 fire exactly once each (`openInspector`/`closeInspector`, not `render()`). ✓
-- Inner-viewport sizing (not full terminal) → Task 5, Step 2 subtracts `inspectorChromeRows`. ✓
-- Scrollback-rewrap and manual-size-mode limitations accepted, documented → noted in Task 1 and Task 5 comments, full detail already in the design spec. ✓
+- Correct revert mechanism (`set-window-option -u window-size`, not the broken `resize-window -A`) → Task 1, verified against a real tmux session before writing the plan. ✓
+- Auto-revert on preview exit, including the two lifecycle gaps an independent review caught → Task 5 Step 2 (quit-path defer), Step 4 (normal back-navigation), Step 5 (attach-ordering fix). ✓
+- One-shot on entry, no poll-tick/live-resize repetition → Task 5 Steps 3–4 fire exactly once each (`openInspector`/`closeInspector`, not `render()`). ✓
+- Inner-viewport sizing (not full terminal) → Task 5 Step 3 subtracts `inspectorChromeRows`. ✓
+- Scrollback-rewrap, whole-window blast radius, and hard-kill limitations accepted, documented → noted in Task 1/5 comments, full detail in the design spec's Known Limitations section. ✓
 - `POST /sessions/{pid}/resize` endpoint, `session_id` required, injectable seam → Tasks 2–3. ✓
-- Testing plan (unit tests for primitives, handler tests, manual check) → Tasks 1–4 unit tests, Task 5 manual verification. ✓
+- Testing plan (unit tests for primitives, handler tests, manual check including quit-path and attach-ordering) → Tasks 1–4 unit tests, Task 5 Step 7 manual verification (10 steps, including the two regressions found in review). ✓
 
 **Placeholder scan:** No TBD/TODO; every step has literal code or an exact shell command.
 
