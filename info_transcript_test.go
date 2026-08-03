@@ -2,9 +2,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractConversationTailBasic(t *testing.T) {
@@ -227,5 +232,86 @@ func TestExtractConversationTailSkipsMetaAndWrapperText(t *testing.T) {
 	}
 	if len(turns) != 1 || turns[0].Text != "a real question" {
 		t.Errorf("got %+v, want only the real user turn", turns)
+	}
+}
+
+func TestSummarizeTurnsEmpty(t *testing.T) {
+	got, err := summarizeTurns(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got.Content == "" {
+		t.Error("want a non-empty placeholder for zero turns")
+	}
+}
+
+func TestSummarizeTurnsCallsClaude(t *testing.T) {
+	prev := claudeSummarizeFunc
+	t.Cleanup(func() { claudeSummarizeFunc = prev })
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		if instruction != conversationSummaryInstruction {
+			t.Errorf("instruction = %q", instruction)
+		}
+		if !strings.Contains(string(input), "hello") {
+			t.Errorf("input = %q, want it to contain the turn text", input)
+		}
+		return []byte(" summary text "), nil
+	}
+	got, err := summarizeTurns(context.Background(), []transcriptTurn{{Role: "user", Text: "hello"}})
+	if err != nil || got.Content != "summary text" {
+		t.Errorf("got (%+v, %v)", got, err)
+	}
+}
+
+func TestSummarizeTurnsClaudeFails(t *testing.T) {
+	prev := claudeSummarizeFunc
+	t.Cleanup(func() { claudeSummarizeFunc = prev })
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return nil, errors.New("timeout")
+	}
+	_, err := summarizeTurns(context.Background(), []transcriptTurn{{Role: "user", Text: "hi"}})
+	if err == nil {
+		t.Fatal("want error propagated when claude fails")
+	}
+}
+
+func TestConversationCacheKeyDiffersOnMtime(t *testing.T) {
+	t1 := time.Now()
+	t2 := t1.Add(time.Second)
+	k1 := conversationCacheKey("", "sid", t1, 100)
+	k2 := conversationCacheKey("", "sid", t2, 100)
+	if k1 == k2 {
+		t.Error("keys should differ when mtime differs")
+	}
+}
+
+func TestFetchConversationSummaryLocalNoTranscript(t *testing.T) {
+	home := t.TempDir()
+	_, err := fetchConversationSummaryLocal(context.Background(), home, "no-such-session")
+	if err == nil {
+		t.Fatal("want error when no transcript is found")
+	}
+}
+
+func TestFetchConversationSummaryLocalSuccess(t *testing.T) {
+	prev := claudeSummarizeFunc
+	t.Cleanup(func() { claudeSummarizeFunc = prev })
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return []byte("what's happening"), nil
+	}
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", "proj1")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sid := "sess-local-1"
+	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"),
+		[]byte(`{"type":"user","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conversationCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 256) // fresh cache, isolated from other tests
+	got, err := fetchConversationSummaryLocal(context.Background(), home, sid)
+	if err != nil || got.Content != "what's happening" {
+		t.Errorf("got (%+v, %v)", got, err)
 	}
 }

@@ -3,10 +3,13 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 // transcriptTurn is one user/assistant text turn. json tags are load-bearing:
@@ -157,4 +160,82 @@ func extractConversationTail(path string, n int) ([]transcriptTurn, error) {
 		b.add(e.Type, text, dedupKey)
 	}
 	return b.turns, nil
+}
+
+const (
+	conversationSummaryInstruction = "what's happening in this conversation right now? short version like i am 25"
+	conversationTailTurns          = 5
+	conversationTurnCap            = 1500           // chars kept per turn before piping
+	conversationPromptCap          = 6000           // total chars fed to claude -p
+	conversationCacheTTL           = 24 * time.Hour // safety-net upper bound; a content change already changes the cache key via mtime/size
+	conversationCacheFailTTL       = 15 * time.Second
+	conversationCacheFetchTimeout  = 20 * time.Second
+	conversationCacheMax           = 256
+)
+
+var conversationCache = newSummaryCache(conversationCacheTTL, conversationCacheFailTTL, conversationCacheFetchTimeout, conversationCacheMax)
+
+var errTranscriptNotFound = fmt.Errorf("transcript not found")
+
+func formatTurnsForPrompt(turns []transcriptTurn) string {
+	var b strings.Builder
+	for _, t := range turns {
+		fmt.Fprintf(&b, "%s: %s\n\n", t.Role, trunc(t.Text, conversationTurnCap))
+	}
+	s := b.String()
+	if len(s) > conversationPromptCap {
+		s = s[:conversationPromptCap]
+	}
+	return s
+}
+
+// summarizeTurns pipes turns into claude -p to produce a short summary.
+// Shared by the local and remote conversation pipelines (Task 8) — neither
+// cares how the turns were obtained.
+func summarizeTurns(ctx context.Context, turns []transcriptTurn) (PreviewResult, error) {
+	if len(turns) == 0 {
+		return PreviewResult{Source: "conversation", Content: "(no conversation turns yet)"}, nil
+	}
+	input := formatTurnsForPrompt(turns)
+	summary, err := claudeSummarizeFunc(ctx, conversationSummaryInstruction, []byte(input))
+	if err != nil {
+		return PreviewResult{}, fmt.Errorf("summarize conversation: %w", err)
+	}
+	// summary text is untrusted (it's derived from transcript content the
+	// user or another process wrote) and flows straight to the terminal
+	// viewer, so it gets the same sanitization as preview.go's other
+	// pipelines (see sanitizeTerminalText's doc comment).
+	return PreviewResult{Source: "conversation", Content: sanitizeTerminalText(strings.TrimSpace(string(summary)))}, nil
+}
+
+// conversationCacheKey identifies one revision of a session's transcript.
+// host is "" for local sessions, the remote server name otherwise — without
+// it, the same session id on two different hosts (unusual, but possible for
+// a resumed transcript) would collide.
+func conversationCacheKey(host, sessionID string, mtime time.Time, size int64) string {
+	return host + "\x00" + sessionID + "\x00" + mtime.UTC().Format(time.RFC3339Nano) + "\x00" + fmt.Sprint(size)
+}
+
+// fetchConversationSummaryLocal reads the session's own transcript directly
+// and summarizes it. The raw read (stat + extractConversationTail) happens
+// on every call; only the expensive claude -p step is cached, keyed by the
+// transcript's (mtime, size) so a new message invalidates the cache
+// automatically.
+func fetchConversationSummaryLocal(ctx context.Context, home, sessionID string) (PreviewResult, error) {
+	path := findTranscript(home, sessionID)
+	if path == "" {
+		return PreviewResult{}, errTranscriptNotFound
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return PreviewResult{}, fmt.Errorf("stat transcript: %w", err)
+	}
+	key := conversationCacheKey("", sessionID, st.ModTime(), st.Size())
+	return conversationCache.getOrFetch(ctx, key, func(fetchCtx context.Context) (PreviewResult, error) {
+		turns, err := extractConversationTail(path, conversationTailTurns)
+		if err != nil {
+			return PreviewResult{}, fmt.Errorf("read transcript: %w", err)
+		}
+		return summarizeTurns(fetchCtx, turns)
+	})
 }
