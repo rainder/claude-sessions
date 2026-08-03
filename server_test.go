@@ -4341,3 +4341,149 @@ func TestResizeBodyRejectsUnknownFieldsAndTrailingContent(t *testing.T) {
 		}
 	}
 }
+
+func TestResizeHandlerRequiresSessionID(t *testing.T) {
+	s := &server{token: "secret"}
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"cols":120,"rows":40}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.resizeHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestResizeHandlerRequiresPositiveColsRowsUnlessRevert(t *testing.T) {
+	s := &server{token: "secret"}
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"session_id":"sess-1","cols":0,"rows":40}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.resizeHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestResizeHandlerMismatchedSessionRefuses(t *testing.T) {
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 42, SessionID: "sess-current", Tmux: "work:0.0"}}, nil
+		},
+	}
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"session_id":"sess-stale","cols":120,"rows":40}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.resizeHandler(w, req)
+
+	var r actionResult
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("result = %+v, want refusal with codeSessionMismatch", r)
+	}
+}
+
+func TestResizeHandlerSuccessCallsResizeFn(t *testing.T) {
+	var gotSess Session
+	var gotCols, gotRows int
+	var gotRevert bool
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 42, SessionID: "sess-1", Tmux: "work:0.0"}}, nil
+		},
+		resizeFn: func(sess Session, cols, rows int, revert bool) error {
+			gotSess, gotCols, gotRows, gotRevert = sess, cols, rows, revert
+			return nil
+		},
+	}
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"session_id":"sess-1","cols":120,"rows":40}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.resizeHandler(w, req)
+
+	var r actionResult
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !r.OK {
+		t.Fatalf("result = %+v, want ok", r)
+	}
+	if gotSess.PID != 42 || gotCols != 120 || gotRows != 40 || gotRevert {
+		t.Fatalf("resizeFn called with (%+v, %d, %d, revert=%v), want (PID 42, 120, 40, false)", gotSess, gotCols, gotRows, gotRevert)
+	}
+}
+
+func TestResizeHandlerRevertCallsResizeFnWithRevertTrue(t *testing.T) {
+	var gotRevert bool
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 42, SessionID: "sess-1", Tmux: "work:0.0"}}, nil
+		},
+		resizeFn: func(sess Session, cols, rows int, revert bool) error {
+			gotRevert = revert
+			return nil
+		},
+	}
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"session_id":"sess-1","revert":true}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.resizeHandler(w, req)
+
+	var r actionResult
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !r.OK || !gotRevert {
+		t.Fatalf("result = %+v, gotRevert = %v, want ok with revert=true", r, gotRevert)
+	}
+}
+
+func TestResizeHandlerUnauthorized(t *testing.T) {
+	s := &server{token: "secret"}
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"session_id":"sess-1","cols":120,"rows":40}`))
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.resizeHandler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestResizeHandlerNotLiveRefuses(t *testing.T) {
+	s := &server{
+		token:   "secret",
+		collect: func() ([]Session, error) { return nil, nil },
+	}
+	req := httptest.NewRequest("POST", "/sessions/42/resize", strings.NewReader(`{"session_id":"sess-1","cols":120,"rows":40}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.resizeHandler(w, req)
+
+	var r actionResult
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if r.OK || r.Code != codeNotLive {
+		t.Fatalf("result = %+v, want refusal with codeNotLive", r)
+	}
+}
