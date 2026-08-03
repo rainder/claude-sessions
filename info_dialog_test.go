@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInfoDialogHeaderUsesUpdatedAtWhenPresent(t *testing.T) {
@@ -13,16 +14,19 @@ func TestInfoDialogHeaderUsesUpdatedAtWhenPresent(t *testing.T) {
 	if !strings.Contains(joined, "my-session") {
 		t.Errorf("header missing name: %v", lines)
 	}
-	if !strings.Contains(joined, "updated:") {
-		t.Errorf("header missing 'updated:' label: %v", lines)
+	want := time.UnixMilli(2000).Format("2006-01-02 15:04")
+	if !strings.Contains(joined, "updated: "+want) {
+		t.Errorf("header should use UpdatedAt (%s), got: %v", want, lines)
 	}
 }
 
 func TestInfoDialogHeaderFallsBackToStartedAt(t *testing.T) {
 	s := Session{Name: "s2", CWD: "/tmp/nogit", StartedAt: 1000, UpdatedAt: 0}
 	lines := infoDialogHeader(s)
-	if !strings.Contains(strings.Join(lines, "\n"), "updated:") {
-		t.Errorf("want 'updated:' label even when falling back to StartedAt: %v", lines)
+	joined := strings.Join(lines, "\n")
+	want := time.UnixMilli(1000).Format("2006-01-02 15:04")
+	if !strings.Contains(joined, "updated: "+want) {
+		t.Errorf("header should fall back to StartedAt (%s), got: %v", want, lines)
 	}
 }
 
@@ -70,3 +74,93 @@ func TestRenderInfoDialogShowsLoadingBeforeFetchLands(t *testing.T) {
 		t.Errorf("want a loading indicator before the fetch lands, got:\n%s", out)
 	}
 }
+
+func TestRenderInfoDialogHasOneDividerPerSection(t *testing.T) {
+	header := []string{"name", "dir"}
+	ticketSec := startAsyncSection("ticket", func(ctx context.Context) (PreviewResult, error) {
+		return PreviewResult{Content: "ticket body"}, nil
+	})
+	defer ticketSec.close()
+	convoSec := startAsyncSection("conversation", func(ctx context.Context) (PreviewResult, error) {
+		return PreviewResult{Content: "convo summary"}, nil
+	})
+	defer convoSec.close()
+
+	// Block until both sections have landed so the divider count isn't racy
+	// against the loading placeholder (which also renders correctly, but
+	// this test cares about the settled/loaded shape).
+	for i := 0; i < 1000; i++ {
+		t1, t2 := ticketSec.snapshot().Loaded, convoSec.snapshot().Loaded
+		if t1 && t2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	out := renderInfoDialog(header, ticketSec, convoSec, 80, 40)
+	// Match the divider as a full padded row, not a bare substring: the box's
+	// top/bottom border lines are also runs of confirmBoxH (just innerWidth+2
+	// long) and would otherwise contain the shorter divider as a substring.
+	dividerRow := confirmBoxV + " " + strings.Repeat(confirmBoxH, infoDialogInnerWidth) + " " + confirmBoxV
+	got := 0
+	for _, line := range strings.Split(out, "\n") {
+		if line == dividerRow {
+			got++
+		}
+	}
+	if got != 2 {
+		t.Errorf("want exactly 2 dividers (one before ticket, one before conversation), got %d:\n%s", got, out)
+	}
+}
+
+func TestRenderInfoDialogShowsSectionErr(t *testing.T) {
+	header := []string{"name"}
+	convoSec := startAsyncSection("conversation", func(ctx context.Context) (PreviewResult, error) {
+		return PreviewResult{}, errFakeFetch
+	})
+	defer convoSec.close()
+
+	for i := 0; i < 1000; i++ {
+		if convoSec.snapshot().Loaded {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	out := renderInfoDialog(header, nil, convoSec, 80, 24)
+	if !strings.Contains(out, "unavailable: "+errFakeFetch.Error()) {
+		t.Errorf("want the section's error reflected in output, got:\n%s", out)
+	}
+}
+
+func TestRenderInfoDialogWrapsLongContent(t *testing.T) {
+	header := []string{"name"}
+	longLine := strings.Repeat("word ", 60) // far wider than any reasonable inner width
+	convoSec := startAsyncSection("conversation", func(ctx context.Context) (PreviewResult, error) {
+		return PreviewResult{Content: longLine}, nil
+	})
+	defer convoSec.close()
+
+	for i := 0; i < 1000; i++ {
+		if convoSec.snapshot().Loaded {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	out := renderInfoDialog(header, nil, convoSec, 80, 40)
+	unwrappedLineCount := strings.Count(longLine, "\n") + 1
+	gotLineCount := strings.Count(out, "\n")
+	if gotLineCount <= unwrappedLineCount {
+		t.Errorf("want long content wrapped across multiple output lines, got %d lines (unwrapped would be %d):\n%s", gotLineCount, unwrappedLineCount, out)
+	}
+	if !strings.Contains(out, "word word") {
+		t.Errorf("want wrapped content still present, got:\n%s", out)
+	}
+}
+
+var errFakeFetch = errFake("fake fetch failure")
+
+type errFake string
+
+func (e errFake) Error() string { return string(e) }

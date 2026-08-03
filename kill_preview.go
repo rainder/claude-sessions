@@ -17,6 +17,7 @@ import (
 type overlayPreview struct {
 	Title  string   // "repo:branch · pid 48221" (host-qualified when remote)
 	Source string   // "tmux" | "transcript"; empty while loading
+	Label  string   // human-readable origin id (e.g. ticket id); empty when not applicable
 	Lines  []string // sanitized pane lines, oldest first, unclipped
 	Err    error    // fetch failure; Lines is nil
 	Loaded bool     // false while the fetch is still in flight
@@ -139,6 +140,7 @@ func startPreviewPane(title string, fetch previewFetch) *previewPane {
 			p.snap.Err = err
 		} else {
 			p.snap.Source = res.Source
+			p.snap.Label = res.Label
 			p.snap.Lines = strings.Split(res.Content, "\n")
 		}
 		// The write happens under the same lock that close() takes, so the fd

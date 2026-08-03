@@ -2,7 +2,6 @@ package main
 
 import (
 	"strings"
-	"time"
 )
 
 func infoDialogHeader(s Session) []string {
@@ -13,17 +12,17 @@ func infoDialogHeader(s Session) []string {
 	if s.Host != "" {
 		lines = append(lines, "host: "+s.Host)
 	}
-	updated := s.StartedAt
-	if s.UpdatedAt != 0 {
-		updated = s.UpdatedAt
-	}
-	lines = append(lines, "updated: "+time.UnixMilli(updated).Format("2006-01-02 15:04"))
+	lines = append(lines, "updated: "+s.Updated().Format("2006-01-02 15:04"))
 	return lines
 }
 
 const (
 	infoDialogInnerWidth = 72 // default box width, clamped down on a narrow terminal
-	infoDialogChrome     = 6  // top/bottom border + padding rows, mirrors resumePromptsChrome's role
+	// infoDialogChrome accounts for renderInfoDialog's own fixed, non-body
+	// output rows: the top border line and the bottom border line (2 total).
+	// The extra headroom above that covers rounding slack when clamping to a
+	// narrow terminal height.
+	infoDialogChrome = 6
 )
 
 // infoDialogSectionLines renders one section's current state: a loading
@@ -36,18 +35,25 @@ func infoDialogSectionLines(title string, sec *asyncSection, width int) []string
 	}
 	snap := sec.snapshot()
 	var out []string
-	out = append(out, bold(title+":"))
+	heading := title + ":"
+	if snap.Label != "" {
+		heading = title + ": " + snap.Label + ":"
+	}
+	out = append(out, bold(heading))
 	switch {
 	case !snap.Loaded:
 		out = append(out, dim("loading…"))
 	case snap.Err != nil:
 		out = append(out, dim("unavailable: "+snap.Err.Error()))
-	case len(snap.Lines) == 0:
+	case len(trimTrailingBlank(snap.Lines)) == 0:
 		out = append(out, dim("(empty)"))
 	default:
-		text := strings.Join(snap.Lines, "\n")
-		for _, l := range wrapRunes(text, width) {
-			out = append(out, l)
+		for _, line := range snap.Lines {
+			if line == "" {
+				out = append(out, "")
+				continue
+			}
+			out = append(out, wrapRunes(line, width)...)
 		}
 	}
 	return out
