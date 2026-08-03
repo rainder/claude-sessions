@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -182,6 +183,70 @@ func TestHandleInspectorComposeIgnoresNonPrintableBytes(t *testing.T) {
 	}
 }
 
+// TestHandleInspectorComposeStopsAppendingAtMaxLen confirms the local compose
+// box enforces the same sendKeysMaxLen cap the server's own validator does,
+// so a long paste fails the same way locally as it would over the network
+// instead of succeeding locally and then 400ing on submit.
+func TestHandleInspectorComposeStopsAppendingAtMaxLen(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{
+		composing:   true,
+		composeText: strings.Repeat("x", sendKeysMaxLen),
+	}}
+	submit, cancel := s.handleInspectorCompose("y")
+	if submit || cancel {
+		t.Fatalf("handleInspectorCompose(append at cap) = (%v,%v), want (false,false)", submit, cancel)
+	}
+	if len(s.inspector.composeText) != sendKeysMaxLen {
+		t.Fatalf("composeText len = %d, want %d (append past cap must be a no-op)", len(s.inspector.composeText), sendKeysMaxLen)
+	}
+}
+
+// TestHandleInspectorComposeCancelClearsStaleStatus confirms Esc/Ctrl-C wipe
+// a leftover composeStatus/composeStatusUntil from a prior failed send, so
+// the footer doesn't keep showing a stale failure message after the user has
+// already cancelled and moved on.
+func TestHandleInspectorComposeCancelClearsStaleStatus(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{
+		composing:          true,
+		composeText:        "hello",
+		composeStatus:      "send failed: broken pipe",
+		composeStatusUntil: time.Now().Add(4 * time.Second),
+	}}
+	s.handleInspectorCompose(KeyEsc)
+	if s.inspector.composeStatus != "" {
+		t.Fatalf("composeStatus after Esc = %q, want empty", s.inspector.composeStatus)
+	}
+	if !s.inspector.composeStatusUntil.IsZero() {
+		t.Fatalf("composeStatusUntil after Esc = %v, want zero", s.inspector.composeStatusUntil)
+	}
+}
+
+// TestArmComposeArmsWithTmuxAndHintsWithout covers the shared helper both the
+// 'i' keypress and the footer's clickable Compose control now route through.
+func TestArmComposeArmsWithTmuxAndHintsWithout(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{
+		snapshot: InspectorSnapshot{Session: Session{Tmux: "work:0.0"}},
+	}}
+	s.armCompose()
+	if !s.inspector.composing {
+		t.Fatal("armCompose with Tmux set: composing = false, want true")
+	}
+
+	s2 := &tuiState{inspector: inspectorViewState{
+		snapshot: InspectorSnapshot{Session: Session{Tmux: ""}},
+	}}
+	s2.armCompose()
+	if s2.inspector.composing {
+		t.Fatal("armCompose with no Tmux: composing = true, want false")
+	}
+	if s2.inspector.composeStatus != "no tmux pane" {
+		t.Fatalf("composeStatus = %q, want %q", s2.inspector.composeStatus, "no tmux pane")
+	}
+	if !s2.inspector.composeStatusUntil.After(time.Now()) {
+		t.Fatal("composeStatusUntil not set to a future deadline")
+	}
+}
+
 func TestInspectorMouseHandlers(t *testing.T) {
 	s := newTUIState()
 	s.inspector = newInspectorViewState("42")
@@ -206,6 +271,7 @@ func TestInspectorMouseHandlers(t *testing.T) {
 		{x0: 0, y0: 0, x1: 4, y1: 0, action: hitInspectorBack},
 		{x0: 6, y0: 0, x1: 12, y1: 0, action: hitInspectorRefresh},
 		{x0: 14, y0: 0, x1: 20, y1: 0, action: hitInspectorFollow},
+		{x0: 22, y0: 0, x1: 29, y1: 0, action: hitInspectorCompose},
 	}
 	if cmd := s.handleInspectorMouse(mouseEvent{x: 2, y: 0, button: mouseLeft}); cmd != commandBack {
 		t.Fatalf("back button: cmd=%v", cmd)
@@ -215,6 +281,9 @@ func TestInspectorMouseHandlers(t *testing.T) {
 	}
 	if cmd := s.handleInspectorMouse(mouseEvent{x: 16, y: 0, button: mouseLeft}); cmd != commandFollowInspector {
 		t.Fatalf("follow button: cmd=%v", cmd)
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{x: 24, y: 0, button: mouseLeft}); cmd != commandComposeInspector {
+		t.Fatalf("compose button: cmd=%v", cmd)
 	}
 	if cmd := s.handleInspectorMouse(mouseEvent{x: 40, y: 0, button: mouseLeft}); cmd != commandNone {
 		t.Fatalf("click outside hit: cmd=%v", cmd)

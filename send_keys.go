@@ -42,7 +42,7 @@ func sendKeys(s Session, text string) error {
 }
 
 // resolveLivePIDLocal is the local-TUI-process counterpart of the server's
-// resolveLivePID (server.go:691): a fresh CollectLocal() so the returned
+// resolveLivePID (server.go:739): a fresh CollectLocal() so the returned
 // Session.Tmux is current, not the possibly-stale pane address an inspector
 // snapshot may still be holding. wantSessionID is mandatory — the TUI always
 // has a real one from the live inspector snapshot, so unlike localReattest

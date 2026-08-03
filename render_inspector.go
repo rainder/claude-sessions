@@ -29,6 +29,7 @@ var footerLabels = []struct {
 	{"Back", hitInspectorBack},
 	{"Refresh", hitInspectorRefresh},
 	{"Follow", hitInspectorFollow},
+	{"Compose", hitInspectorCompose},
 }
 
 const footerGap = "  "
@@ -230,12 +231,18 @@ func inspectorComposeBar(w io.Writer, view inspectorViewState, cols int) []hitRe
 }
 
 // inspectorFooterRight is the source-plus-freshness-status text shown on the
-// footer's right when it fits, e.g. "tmux · LIVE ↓". A recent compose-send
+// footer's right when it fits, e.g. "tmux · LIVE ↓". A recent compose-status
 // result (composeStatus, while composeStatusUntil hasn't passed) takes
-// priority over the normal freshness text, so "sent" or a failure message is
-// what the user sees right after pressing Enter — then it falls back to the
-// ordinary status once the deadline passes, without needing a separate
-// render path.
+// priority over the normal freshness text — but this path is only ever
+// reached while composing is false, so it can only show the two statuses set
+// under that condition: "sent" (a successful submit clears composing before
+// setting it) and "no tmux pane" (armCompose's hint when 'i' is pressed on a
+// session with no pane to send into, tui_state.go). Every other status —
+// "sending…" and a failure message, both set while composing stays true so
+// the buffer survives for a retry — is rendered inside inspectorComposeBar
+// instead, since RenderInspector skips this footer entirely while composing.
+// Once composeStatusUntil passes, this falls back to the ordinary freshness
+// status.
 func inspectorFooterRight(view inspectorViewState) string {
 	if view.composeStatus != "" && time.Now().Before(view.composeStatusUntil) {
 		return view.composeStatus

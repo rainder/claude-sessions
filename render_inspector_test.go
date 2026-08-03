@@ -64,12 +64,12 @@ func TestRenderInspectorMetadataAndLiveFooter(t *testing.T) {
 	var b strings.Builder
 	hits := RenderInspector(&b, v, 100, 20)
 	out := b.String()
-	for _, want := range []string{"api-refactor", "PID 42", "dev", "opus", "busy", "LIVE", "Back", "Refresh", "Follow"} {
+	for _, want := range []string{"api-refactor", "PID 42", "dev", "opus", "busy", "LIVE", "Back", "Refresh", "Follow", "Compose"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	if !hasHit(hits, hitInspectorBack) || !hasHit(hits, hitInspectorRefresh) || !hasHit(hits, hitInspectorFollow) {
+	if !hasHit(hits, hitInspectorBack) || !hasHit(hits, hitInspectorRefresh) || !hasHit(hits, hitInspectorFollow) || !hasHit(hits, hitInspectorCompose) {
 		t.Fatalf("footer hits = %#v", hits)
 	}
 }

@@ -795,19 +795,26 @@ func RunTUI(interval time.Duration) error {
 // intercepts a bare Ctrl-C as cancel, not quit). absorbBatch is true exactly
 // when this event ended compose mode (a successful submit or a cancel): the
 // caller must then drop any remaining events already queued from the same
-// input read, because a paste containing an embedded newline mid-buffer would
-// otherwise submit on that newline and let its trailing bytes fall through to
+// input read (i.e. the rest of the current Feed()/decode batch — not
+// necessarily the rest of a paste: a remote send can block on sendText for up
+// to remoteRequest's ~30s timeout, and any key typed during that wait arrives
+// in a later, separate read after compose mode has already ended, so it is
+// NOT covered by this and dispatches as a normal hotkey instead of being
+// discarded). Without this, a paste containing an embedded newline mid-buffer
+// would submit on that newline and let its trailing bytes fall through to
 // this screen's normal hotkeys (e.g. 'k' triggering kill) instead of being
-// discarded along with the rest of the paste. Back commands close the
+// discarded along with the rest of the batch. Back commands close the
 // inspector; refresh/follow touch the hub or viewport; scrolling keys and the
 // wheel mutate the view and repaint. hubPtr is the loop's inspectorHub
 // variable so a Refresh reaches the live hub. Enter attaches to the session
 // (mirroring the session-list Enter binding) and closes the inspector — but
 // only outside compose mode, where Enter instead submits the compose buffer.
 // 'k'/'K' opens the kill confirmation (mirroring the session-list 'k'
-// binding) and closes the inspector. sendText performs the actual send
-// (local vs. remote is the caller's concern, not this function's) and is
-// only ever invoked with a non-empty compose buffer.
+// binding) and closes the inspector. 'i' and a click on the footer's Compose
+// control both arm compose mode via state.armCompose(), which no-ops with a
+// dim "no tmux pane" hint when the session has no pane to send into. sendText
+// performs the actual send (local vs. remote is the caller's concern, not
+// this function's) and is only ever invoked with a non-empty compose buffer.
 func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach, kill func(), sendText func(Session, string) (bool, string)) (quit, absorbBatch bool) {
 	if ev.kind == eventMouse {
 		switch state.handleInspectorMouse(ev.mouse) {
@@ -819,6 +826,9 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 			}
 		case commandFollowInspector:
 			state.inspector.followBottom()
+			render()
+		case commandComposeInspector:
+			state.armCompose()
 			render()
 		case commandRender:
 			render()
@@ -863,10 +873,8 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 		return false, false
 	}
 
-	if ev.key == "i" && state.inspector.snapshot.Session.Tmux != "" {
-		state.inspector.composing = true
-		state.inspector.composeText = ""
-		state.inspector.composeStatus = ""
+	if ev.key == "i" {
+		state.armCompose()
 		render()
 		return false, false
 	}

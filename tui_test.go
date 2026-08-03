@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSessionScreenOpenKeys(t *testing.T) {
@@ -54,6 +55,12 @@ func TestHandleInspectorEventIgnoresIWhenNoTmux(t *testing.T) {
 
 	if state.inspector.composing {
 		t.Fatal("composing = true, want false (no tmux pane to send into)")
+	}
+	if state.inspector.composeStatus != "no tmux pane" {
+		t.Fatalf("composeStatus = %q, want %q (hint explaining why 'i' no-opped)", state.inspector.composeStatus, "no tmux pane")
+	}
+	if !state.inspector.composeStatusUntil.After(time.Now()) {
+		t.Fatal("composeStatusUntil not set to a future deadline")
 	}
 }
 
