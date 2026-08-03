@@ -120,6 +120,51 @@ func TestPostDisableRemoteSurfacesRefusal(t *testing.T) {
 	}
 }
 
+func TestSendKeysRemoteSendsSessionIDAndText(t *testing.T) {
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := sendKeysRemote("box", 42, "sess-1", "hello")
+	if err != nil || !r.OK {
+		t.Fatalf("sendKeysRemote = (%#v, %v)", r, err)
+	}
+	if string(gotBody) != `{"session_id":"sess-1","text":"hello"}` {
+		t.Fatalf("body = %s, want session_id and text", gotBody)
+	}
+}
+
+func TestSendKeysRemotePropagatesRefusal(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"error":"PID 42 is a different session now","code":"session_mismatch"}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := sendKeysRemote("box", 42, "sess-stale", "hello")
+	if err != nil {
+		t.Fatalf("sendKeysRemote err = %v", err)
+	}
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("result = %+v, want refusal with codeSessionMismatch", r)
+	}
+}
+
 func TestKillRemoteSendsSessionIDWhenKnown(t *testing.T) {
 	var gotBody []byte
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

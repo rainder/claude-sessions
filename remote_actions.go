@@ -443,6 +443,26 @@ func killRemote(host string, pid int, sessionID string) (actionResult, error) {
 	return r, nil
 }
 
+// sendKeysRemote asks host's server to send text as literal keystrokes plus
+// Enter into pid's tmux pane. Unlike killRemote/migrateRemote, sessionID is
+// never optional here — there is no legacy caller this must stay compatible
+// with (see sendKeysBody, server.go), so there is no bare-{} fallback body.
+func sendKeysRemote(host string, pid int, sessionID, text string) (actionResult, error) {
+	body, err := json.Marshal(map[string]string{"session_id": sessionID, "text": text})
+	if err != nil {
+		return actionResult{}, err
+	}
+	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/send-keys", pid), "POST", body)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var r actionResult
+	if err := json.Unmarshal(resp, &r); err != nil {
+		return actionResult{}, err
+	}
+	return r, nil
+}
+
 // migrateRemote asks host's server to migrate pid, same sessionID contract
 // as killRemote.
 func migrateRemote(host string, pid int, sessionID string) (actionResult, error) {
