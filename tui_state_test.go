@@ -120,6 +120,68 @@ func TestInspectorKeyHandlers(t *testing.T) {
 	}
 }
 
+func TestHandleInspectorComposeAppendsPrintableAndBackspaces(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{composing: true}}
+	for _, k := range []string{"h", "i"} {
+		if submit, cancel := s.handleInspectorCompose(k); submit || cancel {
+			t.Fatalf("handleInspectorCompose(%q) = (%v,%v), want (false,false)", k, submit, cancel)
+		}
+	}
+	if s.inspector.composeText != "hi" {
+		t.Fatalf("composeText = %q, want hi", s.inspector.composeText)
+	}
+	s.handleInspectorCompose("\x7f")
+	if s.inspector.composeText != "h" {
+		t.Fatalf("composeText after backspace = %q, want h", s.inspector.composeText)
+	}
+}
+
+func TestHandleInspectorComposeEnterOnEmptyIsNoop(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{composing: true}}
+	submit, cancel := s.handleInspectorCompose(KeyEnter)
+	if submit || cancel {
+		t.Fatalf("handleInspectorCompose(Enter on empty) = (%v,%v), want (false,false)", submit, cancel)
+	}
+}
+
+func TestHandleInspectorComposeEnterOnNonEmptySubmitsAndPreservesText(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{composing: true, composeText: "hello"}}
+	submit, cancel := s.handleInspectorCompose(KeyEnter)
+	if !submit || cancel {
+		t.Fatalf("handleInspectorCompose(Enter on \"hello\") = (%v,%v), want (true,false)", submit, cancel)
+	}
+	if !s.inspector.composing || s.inspector.composeText != "hello" {
+		t.Fatalf("state after submit = composing=%v text=%q, want composing=true text=\"hello\" (caller clears on success)", s.inspector.composing, s.inspector.composeText)
+	}
+}
+
+func TestHandleInspectorComposeEscCancelsAndDiscards(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{composing: true, composeText: "hello"}}
+	submit, cancel := s.handleInspectorCompose(KeyEsc)
+	if submit || !cancel {
+		t.Fatalf("handleInspectorCompose(Esc) = (%v,%v), want (false,true)", submit, cancel)
+	}
+	if s.inspector.composing || s.inspector.composeText != "" {
+		t.Fatalf("state after Esc = composing=%v text=%q, want composing=false text=\"\"", s.inspector.composing, s.inspector.composeText)
+	}
+}
+
+func TestHandleInspectorComposeCtrlCCancelsAndDiscards(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{composing: true, composeText: "hello"}}
+	submit, cancel := s.handleInspectorCompose("\x03")
+	if submit || !cancel {
+		t.Fatalf("handleInspectorCompose(Ctrl-C) = (%v,%v), want (false,true)", submit, cancel)
+	}
+}
+
+func TestHandleInspectorComposeIgnoresNonPrintableBytes(t *testing.T) {
+	s := &tuiState{inspector: inspectorViewState{composing: true}}
+	s.handleInspectorCompose("\x01")
+	if s.inspector.composeText != "" {
+		t.Fatalf("composeText = %q, want empty (control byte ignored)", s.inspector.composeText)
+	}
+}
+
 func TestInspectorMouseHandlers(t *testing.T) {
 	s := newTUIState()
 	s.inspector = newInspectorViewState("42")

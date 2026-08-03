@@ -403,6 +403,39 @@ func (s *tuiState) handleInspectorKey(key string) tuiCommand {
 	}
 }
 
+// handleInspectorCompose applies one key event while the inspector's send-keys
+// compose box is active, editing composeText. Byte-level edit rule matches
+// newPickerState.handlePrompt (new_picker.go:101-121): single-byte printable
+// ASCII (0x20-0x7e) appends, DEL/BS (\x7f/\x08) backspaces. Enter on a
+// non-empty buffer returns submit=true but does NOT itself clear composing or
+// composeText — the caller (handleInspectorEvent) owns that, because a failed
+// send must leave both in place for the user to retry. Enter on an empty
+// buffer is a no-op, mirroring handlePrompt's own empty-Prompt Enter rule.
+// Esc and Ctrl-C both cancel: composing is cleared and composeText discarded
+// immediately, since a cancel has nothing left to retry.
+func (s *tuiState) handleInspectorCompose(key string) (submit, cancel bool) {
+	switch key {
+	case "\r", "\n", KeyEnter:
+		if s.inspector.composeText == "" {
+			return false, false
+		}
+		return true, false
+	case KeyEsc, "\x03":
+		s.inspector.composing = false
+		s.inspector.composeText = ""
+		return false, true
+	case "\x7f", "\x08":
+		if s.inspector.composeText != "" {
+			s.inspector.composeText = s.inspector.composeText[:len(s.inspector.composeText)-1]
+		}
+	default:
+		if len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e {
+			s.inspector.composeText += key
+		}
+	}
+	return false, false
+}
+
 // handleInspectorMouse applies a mouse event to the inspector viewport. Release
 // events are ignored; the wheel scrolls three lines; a left click on a control
 // region returns that control's command (Back, Refresh, or Follow).
