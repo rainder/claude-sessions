@@ -100,13 +100,6 @@ func TestParseKillFlags(t *testing.T) {
 	}
 }
 
-func TestWorktreeRemovalQuestionNamesWorktree(t *testing.T) {
-	got := worktreeRemovalQuestion("/repo/.claude/worktrees/DR-860")
-	if !strings.Contains(got, "DR-860") {
-		t.Fatalf("question = %q, want it to name the worktree", got)
-	}
-}
-
 func TestParseAccountArgs(t *testing.T) {
 	tests := []struct {
 		name       string

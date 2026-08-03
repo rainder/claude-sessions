@@ -154,8 +154,9 @@ func TestHandleInspectorEventCtrlDStillQuitsWhileComposing(t *testing.T) {
 }
 
 func TestHandleInspectorEventPlainCharWhileComposingDoesNotDispatchHotkey(t *testing.T) {
-	// 'k' is the kill hotkey outside compose mode. While composing it must be
-	// buffered as text, not trigger kill.
+	// A plain printable letter must be buffered as compose text, not
+	// dispatched as a hotkey (even one that shares its letter with the
+	// Ctrl+K kill binding, e.g. 'k').
 	killCalled := false
 	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{composing: true}}
 	var hub *InspectorHub

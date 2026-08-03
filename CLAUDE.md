@@ -196,13 +196,15 @@ that a live process is sitting in the checkout. And removal is plain `git
 worktree remove` from the main checkout — never `--force`, so a dirty worktree
 survives and git's refusal is what the user sees. The branch is never deleted.
 
-Three entry points: `actKill` (local TUI, second `confirmOverlay` — note it
-needs raw mode back, since `prepareLineOutput` left cooked mode for the kill),
-`cmdKill` (`--remove-worktree`, or a prompt when interactive; a bare `-y` run
-keeps the worktree), and the server, which puts a `worktree` object in the kill
-response and removes via authed `POST /worktree/remove`. That endpoint takes a
-client-supplied path, so `validateWorktreePath` gates it (absolute, clean,
-worktree root, real worktree) and the handler re-checks the live session list.
+Three entry points: `actKill` (local TUI — the kill itself is confirmed, but a
+worktree left idle by it is removed outright, no second confirm), the TUI's
+remote kill path (`actKillRemote`, same no-second-confirm rule against the
+server's `worktree` response), `cmdKill` (`--remove-worktree`, or a prompt when
+interactive; a bare `-y` run keeps the worktree), and the server, which puts a
+`worktree` object in the kill response and removes via authed
+`POST /worktree/remove`. That endpoint takes a client-supplied path, so
+`validateWorktreePath` gates it (absolute, clean, worktree root, real
+worktree) and the handler re-checks the live session list.
 
 The worktree decision is made *after* the kill's optional `session_id`
 precondition (below), so a refused kill never offers a worktree that is still

@@ -340,9 +340,6 @@ func actKillRemote(c *actCtx) {
 	}
 	pane := startRemotePreview(*s)
 	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())
-	// Explicit call, not a defer: this frees the wake pipe before the remote
-	// kill request and before the second (preview-less) worktree confirmOverlay
-	// further down — the pane's raw fd is only safe while this loop is live.
 	pane.close()
 	if !confirmed {
 		return
@@ -365,12 +362,7 @@ func actKillRemote(c *actCtx) {
 	if r.Worktree == nil {
 		return
 	}
-	// The server decided this kill emptied a worktree; ask, then have it remove.
-	c.enterRaw() // confirmOverlay owns a fullscreen modal
-	if !confirmOverlay(worktreeRemovalQuestion(r.Worktree.Path), c.modalWakes) {
-		return
-	}
-	c.prepareLineOutput()
+	// The server decided this kill emptied a worktree; remove it outright.
 	fmt.Print("\nremoving worktree... ")
 	if err := removeRemoteWorktree(host, r.Worktree.Path); err != nil {
 		fmt.Printf("failed: %v\n", err)

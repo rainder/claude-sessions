@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"golang.org/x/term"
@@ -197,9 +196,6 @@ func actKill(c *actCtx) {
 	}
 	pane := startLocalPreview(*s)
 	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())
-	// Deliberately not deferred: the pane's wake fd must be released before the
-	// kill runs and before the second, preview-less worktree dialog below —
-	// its raw fd is only safe to hold open while this modal loop owns it.
 	pane.close()
 	if !confirmed {
 		return
@@ -220,26 +216,15 @@ func actKill(c *actCtx) {
 		c.enterRaw()
 		return
 	}
-	// confirmOverlay owns a fullscreen modal and needs raw mode back.
-	c.enterRaw()
+	defer c.enterRaw()
 	if worktree == "" {
 		return
 	}
-	if !confirmOverlay(worktreeRemovalQuestion(worktree), c.modalWakes) {
-		return
-	}
-	c.prepareLineOutput()
-	defer c.enterRaw()
+	fmt.Print("\nremoving worktree... ")
 	if err := RemoveWorktree(worktree); err != nil {
-		fmt.Printf("\n%v\n", err)
+		fmt.Printf("failed: %v\n", err)
 		pauseForKey(c.fd, c.oldState)
 	}
-}
-
-// worktreeRemovalQuestion is the second confirmation shown once a kill leaves a
-// worktree with no live sessions.
-func worktreeRemovalQuestion(root string) string {
-	return fmt.Sprintf("last session in worktree %q — remove it?", filepath.Base(root))
 }
 
 // actAttach attaches to the tmux session containing the selected pid. If the
