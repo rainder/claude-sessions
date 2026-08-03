@@ -269,3 +269,16 @@ func fetchConversationSummaryLocal(ctx context.Context, home, sessionID string) 
 		return summarizeTurns(fetchCtx, turns)
 	})
 }
+
+// fetchConversationSummaryRemote fetches raw turns from host's server and
+// summarizes them locally — summarization never runs on the remote host.
+func fetchConversationSummaryRemote(ctx context.Context, host, sessionID string) (PreviewResult, error) {
+	turns, mtime, size, err := fetchRemoteTranscriptTail(host, sessionID, conversationTailTurns)
+	if err != nil {
+		return PreviewResult{}, fmt.Errorf("fetch remote transcript: %w", err)
+	}
+	key := conversationCacheKey(host, sessionID, mtime, size)
+	return conversationCache.getOrFetch(ctx, key, func(fetchCtx context.Context) (PreviewResult, error) {
+		return summarizeTurns(fetchCtx, turns)
+	})
+}

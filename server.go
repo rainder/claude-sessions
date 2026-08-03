@@ -1026,6 +1026,62 @@ func (s *server) preview(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(result.Content))
 }
 
+type transcriptTailResponse struct {
+	Turns      []transcriptTurn `json:"turns"`
+	ModifiedAt time.Time        `json:"modifiedAt"`
+	Size       int64            `json:"size"`
+}
+
+// transcriptTail serves the raw last-n user/assistant turns of a session's
+// transcript, for the info dialog's remote conversation pipeline.
+// Summarization never happens here — only on the client, so remote hosts
+// never need `claude`/`cu` installed and never spend their own tokens.
+func (s *server) transcriptTail(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	if !resumeSessionIDRe.MatchString(sessionID) {
+		http.Error(w, "bad session_id", http.StatusBadRequest)
+		return
+	}
+	n := 5
+	if v := r.URL.Query().Get("n"); v != "" {
+		parsed, err := strconv.Atoi(v)
+		if err != nil || parsed < 1 || parsed > 10 {
+			http.Error(w, "bad n value: "+v, http.StatusBadRequest)
+			return
+		}
+		n = parsed
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		http.Error(w, "no home dir", http.StatusInternalServerError)
+		return
+	}
+	path := findTranscript(home, sessionID)
+	if path == "" {
+		http.Error(w, "transcript not found", http.StatusNotFound)
+		return
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		http.Error(w, "transcript not found", http.StatusNotFound)
+		return
+	}
+	turns, err := extractConversationTail(path, n)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, transcriptTailResponse{
+		Turns:      turns,
+		ModifiedAt: st.ModTime(),
+		Size:       st.Size(),
+	})
+}
+
 // previewLimitsFromRequest reads optional lines/bytes query params, defaulting
 // to DefaultPreviewLimits. Values are accepted only within 1..2000 lines and
 // 1024..524288 bytes; anything else (non-numeric, negative, out of range) is an
@@ -1844,6 +1900,7 @@ func cmdServer(args []string) int {
 	mux.HandleFunc("GET /resumable", s.resumable)
 	mux.HandleFunc("POST /sessions/resume", s.resume)
 	mux.HandleFunc("GET /sessions/{pid}/preview", s.preview)
+	mux.HandleFunc("GET /transcript-tail", s.transcriptTail)
 	mux.HandleFunc("GET /sessions/{pid}/tmux-info", s.tmuxInfo)
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)
 	mux.HandleFunc("POST /sessions/{pid}/migrate", s.migrate)

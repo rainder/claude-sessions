@@ -3,8 +3,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -396,5 +400,34 @@ func TestSummarizeTurnsSanitizesOutput(t *testing.T) {
 	}
 	if !strings.Contains(got.Content, "visible text") {
 		t.Errorf("Content = %q, want it to still contain the visible text", got.Content)
+	}
+}
+
+func TestFetchConversationSummaryRemote(t *testing.T) {
+	prevClaude := claudeSummarizeFunc
+	t.Cleanup(func() { claudeSummarizeFunc = prevClaude })
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return []byte("remote summary"), nil
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(transcriptTailResponse{
+			Turns:      []transcriptTurn{{Role: "user", Text: "hi"}},
+			ModifiedAt: time.Unix(2000, 0).UTC(),
+			Size:       10,
+		})
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "remote-host", u.Hostname(), u.Port(), "secret")
+
+	conversationCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 256) // fresh cache
+	got, err := fetchConversationSummaryRemote(context.Background(), "remote-host", "sid1")
+	if err != nil || got.Content != "remote summary" {
+		t.Errorf("got (%+v, %v)", got, err)
 	}
 }
