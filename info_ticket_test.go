@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -209,5 +210,119 @@ func TestFetchTicketSummaryCachedDegradedUsesFailTTL(t *testing.T) {
 	}
 	if entry.expires.After(time.Now().Add(time.Hour - time.Minute)) {
 		t.Errorf("entry.expires looks like successTTL (1h) was used instead of failTTL")
+	}
+}
+
+// waitForTicketPrefetchIdle blocks until id's prefetch goroutine (if any) has
+// finished and removed itself from ticketPrefetchInFlight, or fails the test
+// after 2s.
+func waitForTicketPrefetchIdle(t *testing.T, id string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := ticketPrefetchInFlight.Load(id); !ok {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("prefetch for %q never completed", id)
+}
+
+func TestPrefetchTicketSummarySkipsWhenFresh(t *testing.T) {
+	prevCache := ticketCache
+	t.Cleanup(func() { ticketCache = prevCache })
+	ticketCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 64)
+
+	prevCu, prevClaude := cuFetchFunc, claudeSummarizeFunc
+	t.Cleanup(func() { cuFetchFunc, claudeSummarizeFunc = prevCu, prevClaude })
+	var calls int32
+	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
+		atomic.AddInt32(&calls, 1)
+		return []byte("raw"), nil
+	}
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return []byte("summary"), nil
+	}
+
+	// Pre-warm the cache directly, bypassing prefetchTicketSummary.
+	fetchTicketSummaryCached(context.Background(), "DR-500")
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("setup: cu fetch called %d times, want 1", n)
+	}
+
+	prefetchTicketSummary("DR-500") // fresh() should short-circuit before spawning anything
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("cu fetch called %d times after prefetching an already-fresh id, want still 1", n)
+	}
+}
+
+func TestPrefetchTicketSummaryDedupesConcurrentCalls(t *testing.T) {
+	prevCache := ticketCache
+	t.Cleanup(func() { ticketCache = prevCache })
+	ticketCache = newSummaryCache(time.Hour, 15*time.Second, time.Second, 64)
+
+	prevCu, prevClaude := cuFetchFunc, claudeSummarizeFunc
+	t.Cleanup(func() { cuFetchFunc, claudeSummarizeFunc = prevCu, prevClaude })
+	var calls int32
+	start := make(chan struct{})
+	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
+		atomic.AddInt32(&calls, 1)
+		<-start
+		return []byte("raw"), nil
+	}
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return []byte("summary"), nil
+	}
+
+	prefetchTicketSummary("DR-501")
+	prefetchTicketSummary("DR-501")
+	prefetchTicketSummary("DR-501")
+	time.Sleep(10 * time.Millisecond) // let the first goroutine reach cuFetchFunc and block
+	close(start)
+	waitForTicketPrefetchIdle(t, "DR-501")
+
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("cu fetch called %d times, want 1 (dedup across concurrent prefetch calls for the same id)", n)
+	}
+}
+
+func TestPrefetchTicketSummaryRespectsConcurrencyCap(t *testing.T) {
+	prevCache := ticketCache
+	t.Cleanup(func() { ticketCache = prevCache })
+	ticketCache = newSummaryCache(time.Hour, 15*time.Second, time.Second, 64)
+
+	prevCu, prevClaude := cuFetchFunc, claudeSummarizeFunc
+	t.Cleanup(func() { cuFetchFunc, claudeSummarizeFunc = prevCu, prevClaude })
+
+	start := make(chan struct{})
+	var current, peak int32
+	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
+		n := atomic.AddInt32(&current, 1)
+		for {
+			p := atomic.LoadInt32(&peak)
+			if n <= p || atomic.CompareAndSwapInt32(&peak, p, n) {
+				break
+			}
+		}
+		<-start
+		atomic.AddInt32(&current, -1)
+		return []byte("raw"), nil
+	}
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return []byte("summary"), nil
+	}
+
+	ids := []string{"DR-601", "DR-602", "DR-603", "DR-604", "DR-605"}
+	for _, id := range ids {
+		prefetchTicketSummary(id)
+	}
+	time.Sleep(30 * time.Millisecond) // let everything that can start, start
+	close(start)
+	for _, id := range ids {
+		waitForTicketPrefetchIdle(t, id)
+	}
+
+	if peak > ticketPrefetchConcurrency {
+		t.Errorf("peak concurrent prefetches = %d, want <= %d", peak, ticketPrefetchConcurrency)
 	}
 }

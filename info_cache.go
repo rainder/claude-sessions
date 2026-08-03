@@ -125,6 +125,26 @@ func (c *summaryCache) getOrFetch(ctx context.Context, key string, fetch func(co
 	return e.result, e.err
 }
 
+// fresh reports whether key already has a live entry — in flight, or
+// completed and not yet past its TTL — so a caller deciding whether to kick
+// a background fetch (see prefetchTicketSummary, info_ticket.go) can skip
+// one that would just join or duplicate work already in the cache. An
+// in-flight entry counts as fresh: it is already being fetched.
+func (c *summaryCache) fresh(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return false
+	}
+	select {
+	case <-e.done:
+		return time.Now().Before(e.expires)
+	default:
+		return true
+	}
+}
+
 // prune drops expired entries, then — if still over capacity — evicts
 // completed entries with the soonest expiry until back at c.max. An
 // in-flight entry (done not yet closed) is never evicted: its key is the

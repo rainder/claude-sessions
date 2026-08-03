@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -107,4 +108,47 @@ func fetchTicketSummaryCached(ctx context.Context, ticketID string) (PreviewResu
 		return result, nil
 	}
 	return result, err
+}
+
+// ticketPrefetchConcurrency bounds how many cu+claude pipelines
+// prefetchTicketSummary runs at once. A TUI launch can find many distinct
+// DR-XXXX ids across local+remote rows in a single settleRows pass (tui.go);
+// without a cap, that pass would burst one claude -p process per id, landing
+// on the exact shared-account-budget problem CLAUDE.md's usage-polling
+// section documents at length (the endpoint "429s readily" because every
+// session shares one account's per-token budget).
+const ticketPrefetchConcurrency = 3
+
+var (
+	ticketPrefetchSem = make(chan struct{}, ticketPrefetchConcurrency)
+	// ticketPrefetchInFlight dedupes concurrent prefetch attempts for the
+	// same id — e.g. one already queued behind ticketPrefetchSem, whose
+	// ticketCache entry (the source fresh() checks) doesn't exist yet since
+	// its fetch hasn't started. Without this, every settleRows tick before
+	// that queued fetch actually starts would spawn another goroutine for
+	// the same id.
+	ticketPrefetchInFlight sync.Map // ticketID (string) -> struct{}
+)
+
+// prefetchTicketSummary warms ticketCache for id in the background, unless a
+// live (in-flight or unexpired) entry already covers it or a prefetch for it
+// is already queued or running. Errors are discarded — same as any other
+// best-effort cache warm — the summary is simply re-fetched live if the
+// user opens it before this lands, or retried on a later call once
+// ticketCache's own failTTL/successTTL lets fresh() go false again.
+func prefetchTicketSummary(id string) {
+	if ticketCache.fresh(id) {
+		return
+	}
+	if _, alreadyQueued := ticketPrefetchInFlight.LoadOrStore(id, struct{}{}); alreadyQueued {
+		return
+	}
+	go func() {
+		defer ticketPrefetchInFlight.Delete(id)
+		ticketPrefetchSem <- struct{}{}
+		defer func() { <-ticketPrefetchSem }()
+		ctx, cancel := context.WithTimeout(context.Background(), ticketCacheFetchTimeout)
+		defer cancel()
+		fetchTicketSummaryCached(ctx, id)
+	}()
 }
