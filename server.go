@@ -175,6 +175,42 @@ func sessionIDPrecondition(w http.ResponseWriter, r *http.Request) (string, erro
 	return id, nil
 }
 
+// sendKeysBody reads the required {"session_id","text"} body for POST
+// /sessions/{pid}/send-keys. Unlike sessionIDPrecondition, session_id is
+// mandatory: this endpoint has no legacy caller predating the identity
+// guard, so there is no reason to allow an unguarded send. text is bounded
+// and rejected if empty or if it contains a CR, LF, or NUL byte — send-keys
+// is single-line by design; a caller wanting those bytes belongs on the
+// tmux-key-name surface sendKeys's -l flag deliberately avoids, not in
+// message content.
+func sendKeysBody(w http.ResponseWriter, r *http.Request) (sessionID, text string, err error) {
+	var body struct {
+		SessionID string `json:"session_id"`
+		Text      string `json:"text"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(sendKeysMaxLen)+256))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		return "", "", err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return "", "", fmt.Errorf("unexpected trailing json")
+	}
+	if body.SessionID == "" {
+		return "", "", fmt.Errorf("session_id is required")
+	}
+	if body.Text == "" {
+		return "", "", fmt.Errorf("text must not be empty")
+	}
+	if len(body.Text) > sendKeysMaxLen {
+		return "", "", fmt.Errorf("text exceeds %d bytes", sendKeysMaxLen)
+	}
+	if strings.ContainsAny(body.Text, "\r\n\x00") {
+		return "", "", fmt.Errorf("text must not contain control characters")
+	}
+	return body.SessionID, body.Text, nil
+}
+
 // decodeDisableRequest strictly decodes the required {"session_id": "...",
 // "disabled": true} body for POST /sessions/{pid}/disable. Unlike
 // sessionIDPrecondition (kill/migrate's optional precondition), both fields
@@ -470,6 +506,10 @@ type server struct {
 	// possible read — no tmux mapping, no transcript scan, nothing that would
 	// reintroduce the staleness it exists to close.
 	attest func(int) (Session, bool)
+	// sendKeysFn is an injectable seam for tests; nil in production, where it
+	// falls back to the package-level sendKeys (send_keys.go). Same pattern as
+	// collect/terminate above.
+	sendKeysFn func(Session, string) error
 
 	// disabled is this host's persisted disabled-session flag store (see
 	// disabled_store.go). Nil only in tests that don't exercise it — Overlay
@@ -1180,6 +1220,42 @@ func (s *server) kill(w http.ResponseWriter, r *http.Request) {
 		result.Worktree = &worktreeInfo{Path: worktree, Name: filepath.Base(worktree)}
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// sendKeysHandler handles POST /sessions/{pid}/send-keys: send text as
+// literal keystrokes plus Enter into pid's tmux pane. session_id is required
+// (sendKeysBody), then resolved the same way kill resolves its target
+// (s.resolveLivePID, server.go:691) so the pane address is current, not
+// whatever the client's inspector snapshot last saw.
+func (s *server) sendKeysHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	pid, err := strconv.Atoi(r.PathValue("pid"))
+	if err != nil {
+		http.Error(w, "bad pid", http.StatusBadRequest)
+		return
+	}
+	sessionID, text, err := sendKeysBody(w, r)
+	if err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	target, _, refusal := s.resolveLivePID(pid, sessionID)
+	if refusal != nil {
+		writeJSON(w, http.StatusOK, *refusal)
+		return
+	}
+	fn := s.sendKeysFn
+	if fn == nil {
+		fn = sendKeys
+	}
+	if err := fn(*target, text); err != nil {
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, actionResult{OK: true})
 }
 
 // removeWorktree handles POST /worktree/remove. The path arrives from a client,
@@ -1910,6 +1986,7 @@ func cmdServer(args []string) int {
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)
 	mux.HandleFunc("POST /sessions/{pid}/migrate", s.migrate)
 	mux.HandleFunc("POST /sessions/{pid}/disable", s.disableSession)
+	mux.HandleFunc("POST /sessions/{pid}/send-keys", s.sendKeysHandler)
 	mux.HandleFunc("POST /sessions/new", s.newSession)
 	mux.HandleFunc("POST /worktree/remove", s.removeWorktree)
 	mux.HandleFunc("POST /account/switch", s.accountSwitch)

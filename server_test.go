@@ -4106,3 +4106,149 @@ func TestTranscriptTailHandlerUnauthorized(t *testing.T) {
 		t.Errorf("status = %d, want 401", rec.Code)
 	}
 }
+
+func TestSendKeysHandlerRequiresSessionID(t *testing.T) {
+	s := &server{token: "secret"}
+	req := httptest.NewRequest("POST", "/sessions/42/send-keys", strings.NewReader(`{"text":"hello"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.sendKeysHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestSendKeysHandlerRequiresText(t *testing.T) {
+	s := &server{token: "secret"}
+	req := httptest.NewRequest("POST", "/sessions/42/send-keys", strings.NewReader(`{"session_id":"sess-1"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.sendKeysHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestSendKeysHandlerMismatchedSessionRefuses(t *testing.T) {
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 42, SessionID: "sess-current", Tmux: "work:0.0"}}, nil
+		},
+	}
+	req := httptest.NewRequest("POST", "/sessions/42/send-keys", strings.NewReader(`{"session_id":"sess-stale","text":"hello"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.sendKeysHandler(w, req)
+
+	var r actionResult
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("result = %+v, want refusal with codeSessionMismatch", r)
+	}
+}
+
+func TestSendKeysHandlerSuccessCallsSendKeysFn(t *testing.T) {
+	var gotSess Session
+	var gotText string
+	s := &server{
+		token: "secret",
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 42, SessionID: "sess-1", Tmux: "work:0.0"}}, nil
+		},
+		sendKeysFn: func(sess Session, text string) error {
+			gotSess, gotText = sess, text
+			return nil
+		},
+	}
+	req := httptest.NewRequest("POST", "/sessions/42/send-keys", strings.NewReader(`{"session_id":"sess-1","text":"hello"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.sendKeysHandler(w, req)
+
+	var r actionResult
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !r.OK {
+		t.Fatalf("result = %+v, want ok", r)
+	}
+	if gotSess.PID != 42 || gotText != "hello" {
+		t.Fatalf("sendKeysFn called with (%+v, %q), want (PID 42, \"hello\")", gotSess, gotText)
+	}
+}
+
+func TestSendKeysHandlerUnauthorized(t *testing.T) {
+	s := &server{token: "secret"}
+	req := httptest.NewRequest("POST", "/sessions/42/send-keys", strings.NewReader(`{"session_id":"sess-1","text":"hello"}`))
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.sendKeysHandler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestSendKeysHandlerRejectsControlCharacters(t *testing.T) {
+	s := &server{token: "secret"}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"newline", `{"session_id":"sess-1","text":"hello\nworld"}`},
+		{"carriage return", `{"session_id":"sess-1","text":"hello\rworld"}`},
+		{"nul byte", `{"session_id":"sess-1","text":"hello\u0000world"}`},
+		{"unknown field", `{"session_id":"sess-1","text":"hi","extra":1}`},
+		{"trailing content", `{"session_id":"sess-1","text":"hi"}{}`},
+		{"empty text", `{"session_id":"sess-1","text":""}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/sessions/42/send-keys", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer secret")
+			req.SetPathValue("pid", "42")
+			w := httptest.NewRecorder()
+
+			s.sendKeysHandler(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", w.Code)
+			}
+		})
+	}
+}
+
+func TestSendKeysHandlerNotLiveRefuses(t *testing.T) {
+	s := &server{
+		token:   "secret",
+		collect: func() ([]Session, error) { return nil, nil },
+	}
+	req := httptest.NewRequest("POST", "/sessions/42/send-keys", strings.NewReader(`{"session_id":"sess-1","text":"hello"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.sendKeysHandler(w, req)
+
+	var r actionResult
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if r.OK || r.Code != codeNotLive {
+		t.Fatalf("result = %+v, want refusal with codeNotLive", r)
+	}
+}
