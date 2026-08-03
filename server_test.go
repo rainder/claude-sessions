@@ -4212,6 +4212,9 @@ func TestSendKeysHandlerRejectsControlCharacters(t *testing.T) {
 		{"newline", `{"session_id":"sess-1","text":"hello\nworld"}`},
 		{"carriage return", `{"session_id":"sess-1","text":"hello\rworld"}`},
 		{"nul byte", `{"session_id":"sess-1","text":"hello\u0000world"}`},
+		{"escape byte", `{"session_id":"sess-1","text":"hello\u001bworld"}`},
+		{"delete byte", `{"session_id":"sess-1","text":"hello\u007fworld"}`},
+		{"tab byte passes JSON but not the C0 filter", `{"session_id":"sess-1","text":"hello\tworld"}`},
 		{"unknown field", `{"session_id":"sess-1","text":"hi","extra":1}`},
 		{"trailing content", `{"session_id":"sess-1","text":"hi"}{}`},
 		{"empty text", `{"session_id":"sess-1","text":""}`},
@@ -4250,5 +4253,27 @@ func TestSendKeysHandlerNotLiveRefuses(t *testing.T) {
 	}
 	if r.OK || r.Code != codeNotLive {
 		t.Fatalf("result = %+v, want refusal with codeNotLive", r)
+	}
+}
+
+func TestSendKeysHandlerRejectsOverLengthText(t *testing.T) {
+	s := &server{token: "secret"}
+	longText := strings.Repeat("a", sendKeysMaxLen+1)
+	bodyBytes, err := json.Marshal(struct {
+		SessionID string `json:"session_id"`
+		Text      string `json:"text"`
+	}{SessionID: "sess-1", Text: longText})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/sessions/42/send-keys", strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.SetPathValue("pid", "42")
+	w := httptest.NewRecorder()
+
+	s.sendKeysHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for text exceeding sendKeysMaxLen", w.Code)
 	}
 }

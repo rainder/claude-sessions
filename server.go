@@ -179,10 +179,10 @@ func sessionIDPrecondition(w http.ResponseWriter, r *http.Request) (string, erro
 // /sessions/{pid}/send-keys. Unlike sessionIDPrecondition, session_id is
 // mandatory: this endpoint has no legacy caller predating the identity
 // guard, so there is no reason to allow an unguarded send. text is bounded
-// and rejected if empty or if it contains a CR, LF, or NUL byte — send-keys
-// is single-line by design; a caller wanting those bytes belongs on the
-// tmux-key-name surface sendKeys's -l flag deliberately avoids, not in
-// message content.
+// and rejected if empty or if it contains any C0 control byte (0x00-0x1f) or
+// DEL (0x7f) — send-keys is single-line by design; a caller wanting those
+// bytes belongs on the tmux-key-name surface sendKeys's -l flag deliberately
+// avoids, not in message content.
 func sendKeysBody(w http.ResponseWriter, r *http.Request) (sessionID, text string, err error) {
 	var body struct {
 		SessionID string `json:"session_id"`
@@ -205,8 +205,16 @@ func sendKeysBody(w http.ResponseWriter, r *http.Request) (sessionID, text strin
 	if len(body.Text) > sendKeysMaxLen {
 		return "", "", fmt.Errorf("text exceeds %d bytes", sendKeysMaxLen)
 	}
-	if strings.ContainsAny(body.Text, "\r\n\x00") {
-		return "", "", fmt.Errorf("text must not contain control characters")
+	// Every C0 control byte, not just CR/LF/NUL: send-keys is single-line by
+	// design, and sendKeys's -l flag only keeps tmux itself from parsing text
+	// as key names. It says nothing about the receiving pty — an embedded ESC
+	// (0x1b) reaches the pane as a literal byte and can still be interpreted
+	// there as the start of a terminal escape sequence. DEL (0x7f) is rejected
+	// alongside it for the same reason: neither belongs in message content.
+	for i := 0; i < len(body.Text); i++ {
+		if b := body.Text[i]; b < 0x20 || b == 0x7f {
+			return "", "", fmt.Errorf("text must not contain control characters")
+		}
 	}
 	return body.SessionID, body.Text, nil
 }
@@ -1225,7 +1233,7 @@ func (s *server) kill(w http.ResponseWriter, r *http.Request) {
 // sendKeysHandler handles POST /sessions/{pid}/send-keys: send text as
 // literal keystrokes plus Enter into pid's tmux pane. session_id is required
 // (sendKeysBody), then resolved the same way kill resolves its target
-// (s.resolveLivePID, server.go:691) so the pane address is current, not
+// (s.resolveLivePID, server.go:739) so the pane address is current, not
 // whatever the client's inspector snapshot last saw.
 func (s *server) sendKeysHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
