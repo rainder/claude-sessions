@@ -19,6 +19,23 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote. The window is un-pinned again when you leave preview — including
   when you quit the TUI outright with the inspector still open, and before an
   Enter-to-attach hands you the real session.
+- `GET /sessions` now carries an `api` object — `{"schema": 2, "capabilities":
+  […]}` — so a client can tell an old host from a misconfigured one without
+  probing endpoints. Until now nothing in any answer distinguished a server
+  that enforced the `session_id` and `request_id` preconditions from one that
+  silently ignored them, and every new endpoint would otherwise need its own
+  "was that 404 an old server or a bad request?" dance. `schema` is bumped only
+  when the payload changes in a way an older client cannot read past; adding an
+  optional field is not that. `capabilities` is a flat list of action names a
+  client gates its UI on. The object is emitted unconditionally and never
+  omitted when empty: its **absence** is the signal that the host predates the
+  handshake, which a client reads as schema 1 with the phase-B action set — so
+  an old server stays healthy and simply shows an "update this host" hint where
+  a name it needs is missing. The list lives in one function (`capabilities()`)
+  which hands out a fresh slice per call, and clients must treat the names as
+  permanent: append, never rename or reorder. A name is added by the same change
+  that lands the route serving it — never ahead of one — so a name present here
+  is a promise this build can keep.
 - `POST /sessions/{pid}/kill` and `POST /sessions/{pid}/migrate` accept an
   optional `{"session_id": "…"}` precondition. A PID on its own proves nothing
   once a tmux pane has been recycled and handed that number to a different

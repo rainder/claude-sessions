@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -747,6 +748,63 @@ func TestSessionsReportsANewIdentityWithoutRestarting(t *testing.T) {
 	second := fetchHostID()
 	if second == first {
 		t.Fatalf("host_id unchanged after identity file removed: %q", second)
+	}
+}
+
+// TestSessionsAdvertisesAPIHandshake pins the capability handshake a client uses
+// to tell an old host from a misconfigured one. The list is asserted literally,
+// not against capabilities(), because comparing the payload to its own source
+// would pass whatever the source said. Every name here is a promise a client
+// gates a control on, so a rename or a reorder is a wire break: change this test
+// only together with the clients that read it.
+func TestSessionsAdvertisesAPIHandshake(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{token: "secret", host: "devbox"}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+
+	// A pointer: an absent "api" object decodes to nil, which is what an old
+	// server looks like on the wire and must not be confused with an empty one.
+	var got struct {
+		API *struct {
+			Schema       int      `json:"schema"`
+			Capabilities []string `json:"capabilities"`
+		} `json:"api"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.API == nil {
+		t.Fatalf("no api object in the payload — a client cannot tell this host from an un-upgraded one")
+	}
+	if got.API.Schema != 2 {
+		t.Fatalf("api.schema = %d, want 2", got.API.Schema)
+	}
+	// Only routes that answer today. A name is added here by the change that
+	// lands its endpoint, so this literal failing is the intended alarm when a
+	// capability is advertised ahead of the handler that serves it.
+	want := []string{"kill", "migrate", "spawn", "resume", "worktree-remove"}
+	if !slices.Equal(got.API.Capabilities, want) {
+		t.Fatalf("api.capabilities = %v, want %v", got.API.Capabilities, want)
+	}
+}
+
+// TestCapabilitiesIsNotSharedState guards the one place the list lives: it is a
+// wire contract, and a caller that trims or appends to the returned slice must
+// not be able to change what the next response advertises.
+func TestCapabilitiesIsNotSharedState(t *testing.T) {
+	first := capabilities()
+	if len(first) == 0 {
+		t.Fatal("capabilities() is empty")
+	}
+	first[0] = "clobbered"
+	if second := capabilities(); second[0] == "clobbered" {
+		t.Fatalf("capabilities() hands out shared state: %v", second)
 	}
 }
 

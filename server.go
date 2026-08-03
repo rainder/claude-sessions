@@ -804,6 +804,43 @@ func writeJSON(w http.ResponseWriter, code int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
+// apiSchema is the version of the GET /sessions payload. Bump it only when the
+// shape changes in a way an older client cannot read past — adding an optional
+// field is not that. A client that sees no "api" object at all is talking to a
+// server from before this handshake existed and treats it as schema 1.
+const apiSchema = 2
+
+// capabilities is the single place naming what this host can be asked to do.
+// It is a wire contract clients gate their UI on, so a name here is permanent
+// once shipped: add, never rename or reorder.
+//
+// A name may be appended only by the change that lands the route serving it —
+// never ahead of it. Advertising a capability this build cannot serve inverts
+// the point of the handshake: the client enables a control that meets a 404
+// instead of the graceful "host needs an update" this exists to give it, and
+// because the names are permanent, a host running that binary keeps making the
+// false promise for as long as it is deployed. A planned endpoint is not a
+// capability until its handler answers.
+//
+// Returns a fresh slice per call: the caller must not be able to edit what the
+// next response says.
+func capabilities() []string {
+	return []string{
+		// Shipped in phase B, enforced today.
+		"kill",
+		"migrate",
+		"spawn",
+		"resume",
+		"worktree-remove",
+	}
+}
+
+// apiInfo is the handshake object every GET /sessions carries.
+type apiInfo struct {
+	Schema       int      `json:"schema"`
+	Capabilities []string `json:"capabilities"`
+}
+
 func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -829,7 +866,11 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 		"ts":       time.Now().Unix(),
 		// Uncached on purpose: LoadHostID reads the host-id file per call, so an
 		// identity change is visible on the next poll without a restart.
-		"host_id":   LoadHostID(),
+		"host_id": LoadHostID(),
+		// Unconditional, and never omitempty: absence is itself the signal that
+		// this host predates the handshake, so an empty capability list and a
+		// missing "api" object must stay distinguishable.
+		"api":       apiInfo{Schema: apiSchema, Capabilities: capabilities()},
 		"hostUsage": hostUsage,
 		"sessions":  sessions,
 	}
