@@ -148,3 +148,42 @@ func TestAccountSwitchedLine(t *testing.T) {
 		t.Fatalf("line = %q, want the name and the new email", got)
 	}
 }
+
+func TestCmdSummary(t *testing.T) {
+	t.Run("no args prints current backend without changing it", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if code := cmdSummary(nil); code != 0 {
+			t.Fatalf("cmdSummary(nil) = %d, want 0", code)
+		}
+		if got := LoadSummaryBackend(); got != "claude" {
+			t.Errorf("LoadSummaryBackend() after a bare `summary` call = %q, want unchanged %q", got, "claude")
+		}
+	})
+
+	t.Run("valid backend persists", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if code := cmdSummary([]string{"codex"}); code != 0 {
+			t.Fatalf("cmdSummary([codex]) = %d, want 0", code)
+		}
+		if got := LoadSummaryBackend(); got != "codex" {
+			t.Errorf("LoadSummaryBackend() after `summary codex` = %q, want %q", got, "codex")
+		}
+	})
+
+	t.Run("unknown backend is rejected and leaves config unchanged", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if code := cmdSummary([]string{"bogus"}); code != 2 {
+			t.Fatalf("cmdSummary([bogus]) = %d, want 2", code)
+		}
+		if got := LoadSummaryBackend(); got != "claude" {
+			t.Errorf("LoadSummaryBackend() after a rejected `summary bogus` = %q, want unchanged %q", got, "claude")
+		}
+	})
+
+	t.Run("too many args is rejected", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if code := cmdSummary([]string{"claude", "extra"}); code != 2 {
+			t.Fatalf("cmdSummary([claude extra]) = %d, want 2", code)
+		}
+	})
+}

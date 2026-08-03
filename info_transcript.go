@@ -230,7 +230,7 @@ func summarizeTurns(ctx context.Context, turns []transcriptTurn) (PreviewResult,
 		return PreviewResult{Source: "conversation", Content: "(no conversation turns yet)"}, nil
 	}
 	input := formatTurnsForPrompt(turns)
-	summary, err := claudeSummarizeFunc(ctx, conversationSummaryInstruction, []byte(input))
+	summary, err := resolveSummarizeFunc()(ctx, conversationSummaryInstruction, []byte(input))
 	if err != nil {
 		return PreviewResult{}, fmt.Errorf("summarize conversation: %w", err)
 	}

@@ -181,3 +181,89 @@ func TestClaudeSummarizeCmdArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestCodexSummarizeCmdArgs verifies the real argv `codex exec --sandbox
+// read-only --skip-git-repo-check --ephemeral -C <dir> -m gpt-5.6-luna -c
+// model_reasoning_effort=low -o <outPath> <preamble+instruction>` constructed
+// by codexSummarizeCmd — the codex counterpart to TestClaudeSummarizeCmdArgs.
+func TestCodexSummarizeCmdArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		instruction string
+		input       []byte
+		outPath     string
+	}{
+		{
+			name:        "summarize instruction",
+			instruction: "summarize this ticket",
+			input:       []byte("ticket body"),
+			outPath:     "/tmp/out-1.txt",
+		},
+		{
+			name:        "empty input",
+			instruction: "instr",
+			input:       []byte(""),
+			outPath:     "/tmp/out-2.txt",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := codexSummarizeCmd(context.Background(), tt.instruction, tt.input, tt.outPath)
+			wantArgs := []string{"codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+				"--ephemeral", "-C", os.TempDir(), "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=low",
+				"-o", tt.outPath, codexSystemPreamble + tt.instruction}
+			if !reflect.DeepEqual(cmd.Args, wantArgs) {
+				t.Errorf("Args = %v, want %v", cmd.Args, wantArgs)
+			}
+			wantDir := os.TempDir()
+			if cmd.Dir != wantDir {
+				t.Errorf("Dir = %q, want %q (neutral dir, not the invoking project's cwd)", cmd.Dir, wantDir)
+			}
+			if cmd.WaitDelay != subprocessWaitDelay {
+				t.Errorf("WaitDelay = %v, want %v", cmd.WaitDelay, subprocessWaitDelay)
+			}
+			gotStdin, err := io.ReadAll(cmd.Stdin)
+			if err != nil {
+				t.Fatalf("reading cmd.Stdin: %v", err)
+			}
+			if !bytes.Equal(gotStdin, tt.input) {
+				t.Errorf("Stdin = %q, want %q", gotStdin, tt.input)
+			}
+		})
+	}
+}
+
+// TestResolveSummarizeFunc covers both branches of the summary-backend
+// switch (config.go's LoadSummaryBackend/SaveSummaryBackend) — the reason
+// resolveSummarizeFunc exists at all.
+func TestResolveSummarizeFunc(t *testing.T) {
+	prevBackend := summaryBackendFunc
+	t.Cleanup(func() { summaryBackendFunc = prevBackend })
+
+	t.Run("codex backend", func(t *testing.T) {
+		summaryBackendFunc = func() string { return "codex" }
+		got := reflect.ValueOf(resolveSummarizeFunc()).Pointer()
+		want := reflect.ValueOf(codexSummarizeFunc).Pointer()
+		if got != want {
+			t.Errorf("resolveSummarizeFunc() with backend=codex did not return codexSummarizeFunc")
+		}
+	})
+
+	t.Run("claude backend (default)", func(t *testing.T) {
+		summaryBackendFunc = func() string { return "claude" }
+		got := reflect.ValueOf(resolveSummarizeFunc()).Pointer()
+		want := reflect.ValueOf(claudeSummarizeFunc).Pointer()
+		if got != want {
+			t.Errorf("resolveSummarizeFunc() with backend=claude did not return claudeSummarizeFunc")
+		}
+	})
+
+	t.Run("unrecognized value falls back to claude", func(t *testing.T) {
+		summaryBackendFunc = func() string { return "bogus" }
+		got := reflect.ValueOf(resolveSummarizeFunc()).Pointer()
+		want := reflect.ValueOf(claudeSummarizeFunc).Pointer()
+		if got != want {
+			t.Errorf("resolveSummarizeFunc() with an unrecognized backend did not fall back to claudeSummarizeFunc")
+		}
+	})
+}

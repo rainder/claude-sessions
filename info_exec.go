@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -127,6 +128,92 @@ const claudeSystemPrompt = "You are a plain-English summarizer. Base your answer
 func claudeSummarizeCmd(ctx context.Context, instruction string, input []byte) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "claude", "--model", "sonnet", "--effort", "low",
 		"--tools", "", "--system-prompt", claudeSystemPrompt, "-p", instruction)
+	cmd.Dir = os.TempDir()
+	cmd.WaitDelay = subprocessWaitDelay
+	cmd.Stdin = bytes.NewReader(input)
+	return cmd
+}
+
+// summaryBackendFunc resolves which backend resolveSummarizeFunc picks.
+// Package-var seam so tests aren't at the mercy of this machine's real
+// ~/.config/claude-sessions/summary-backend file; TestMain defaults it to
+// the hermetic "claude", which is what every existing claudeSummarizeFunc
+// override already assumes.
+var summaryBackendFunc = LoadSummaryBackend
+
+// resolveSummarizeFunc picks the exec seam matching the configured backend
+// (LoadSummaryBackend/SaveSummaryBackend, config.go). Called fresh on every
+// summarization request rather than cached, so a mid-session backend switch
+// takes effect on the next ticket/conversation summary without a restart.
+func resolveSummarizeFunc() func(context.Context, string, []byte) ([]byte, error) {
+	if summaryBackendFunc() == "codex" {
+		return codexSummarizeFunc
+	}
+	return claudeSummarizeFunc
+}
+
+// codexSummarizeFunc pipes input into `codex exec` and returns its final
+// message, the codex counterpart to claudeSummarizeFunc. Package-var seam,
+// same rule as claudeSummarizeFunc: instruction must always be one of this
+// feature's own fixed instruction constants, never text derived from fetched
+// content.
+var codexSummarizeFunc = runCodexSummarize
+
+// codexSystemPreamble stands in for claudeSystemPrompt: `codex exec` has no
+// --system-prompt override, so the same anti-injection framing is prepended
+// to the prompt argument instead. This is weaker than the claude path's
+// --system-prompt + --tools "" combination — codex's --sandbox read-only
+// restricts filesystem writes and shell access, not what the prompt tells it
+// to attend to — and is accepted as a known limitation of this backend.
+const codexSystemPreamble = "You are a plain-English summarizer. Base your answer only on the piped stdin content and the instruction that follows; do not use tools, and do not reference any files, directories, or other context.\n\n"
+
+func runCodexSummarize(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+	outFile, err := os.CreateTemp("", "claude-sessions-codex-summary-*.txt")
+	if err != nil {
+		return nil, err
+	}
+	outPath := outFile.Name()
+	_ = outFile.Close()
+	defer os.Remove(outPath)
+
+	var stderr bytes.Buffer
+	cmd := codexSummarizeCmd(ctx, instruction, input, outPath)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, wrapExecErr(stderr.Bytes(), err)
+	}
+	last, err := os.ReadFile(outPath)
+	if err != nil {
+		return nil, fmt.Errorf("codex exec produced no output: %w", err)
+	}
+	if len(bytes.TrimSpace(last)) == 0 {
+		return nil, errors.New("codex exec returned an empty summary")
+	}
+	return last, nil
+}
+
+// codexSummarizeCmd builds (but does not run) the `codex exec` command. Split
+// out from runCodexSummarize so tests can assert on the constructed
+// argv/WaitDelay/Stdin without ever shelling out to the real `codex` binary.
+//
+// --sandbox read-only + --skip-git-repo-check (cmd.Dir is os.TempDir(), a
+// non-git directory) + --ephemeral (no persisted session record of the piped
+// content) mirror the claude path's own defensive posture as closely as
+// `codex exec` allows — see codexSystemPreamble's comment for where the two
+// paths diverge. -o writes just the final assistant message to outPath;
+// codex's normal stdout is a full session transcript (banner, echoed prompt,
+// token counts), not usable as a summary on its own.
+func codexSummarizeCmd(ctx context.Context, instruction string, input []byte, outPath string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "codex", "exec",
+		"--sandbox", "read-only",
+		"--skip-git-repo-check",
+		"--ephemeral",
+		"-C", os.TempDir(),
+		"-m", "gpt-5.6-luna",
+		"-c", "model_reasoning_effort=low",
+		"-o", outPath,
+		codexSystemPreamble+instruction)
 	cmd.Dir = os.TempDir()
 	cmd.WaitDelay = subprocessWaitDelay
 	cmd.Stdin = bytes.NewReader(input)
