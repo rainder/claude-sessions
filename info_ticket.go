@@ -30,8 +30,21 @@ func detectTicketID(cwd, name string) string {
 
 const (
 	ticketSummaryInstruction = "what is being fixed? short version like i am 25"
-	ticketRawCap             = 4000 // chars of raw `cu fetch` text kept on a summarization failure
+	// ticketRawCap bounds the number of bytes of raw `cu fetch` text kept on
+	// a summarization failure. A cut at this cap can split a multi-byte
+	// rune — accepted, since this is a display fallback, not data we parse.
+	ticketRawCap = 4000
 )
+
+// truncRawBytes cuts s to n bytes, keeping the head, with no gutter markers
+// or newline rewriting — unlike trunc (preview.go), which is built for the
+// transcript-preview gutter and would corrupt plain ticket text.
+func truncRawBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + dim(fmt.Sprintf("  …(+%d bytes)", len(s)-n))
+}
 
 // fetchTicketSummary runs `cu fetch --with-comments <id>` piped into
 // `claude -p` to produce a short plain-English summary. Three outcomes:
@@ -48,8 +61,8 @@ func fetchTicketSummary(ctx context.Context, ticketID string) (PreviewResult, er
 	}
 	summary, err := claudeSummarizeFunc(ctx, ticketSummaryInstruction, raw)
 	if err != nil {
-		content := fmt.Sprintf("[summary unavailable: %s]\n\n%s", err, trunc(string(raw), ticketRawCap))
-		return PreviewResult{Source: "ticket", Label: ticketID, Content: content}, nil
+		content := fmt.Sprintf("[summary unavailable: %s]\n\n%s", err, truncRawBytes(string(raw), ticketRawCap))
+		return PreviewResult{Source: "ticket", Label: ticketID, Content: sanitizeTerminalText(content)}, nil
 	}
-	return PreviewResult{Source: "ticket", Label: ticketID, Content: strings.TrimSpace(string(summary))}, nil
+	return PreviewResult{Source: "ticket", Label: ticketID, Content: sanitizeTerminalText(strings.TrimSpace(string(summary)))}, nil
 }
