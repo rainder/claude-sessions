@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -35,7 +36,18 @@ const (
 	// a summarization failure. A cut at this cap can split a multi-byte
 	// rune — accepted, since this is a display fallback, not data we parse.
 	ticketRawCap = 4000
+	// ticketSummaryDegradedSource marks a PreviewResult where cu fetch
+	// succeeded but claude summarization failed — used by
+	// fetchTicketSummaryCached to route this outcome to the cache's short
+	// failTTL instead of its hour-long successTTL, even though
+	// fetchTicketSummary itself returns a nil error for it.
+	ticketSummaryDegradedSource = "ticket-degraded"
 )
+
+// errTicketSummaryDegraded is an internal sentinel used only to steer
+// ticketCache's TTL selection for a degraded-but-nil-error result. It must
+// never leak past fetchTicketSummaryCached.
+var errTicketSummaryDegraded = errors.New("ticket summary degraded")
 
 // truncRawBytes cuts s to n bytes, keeping the head, with no gutter markers
 // or newline rewriting — unlike trunc (preview.go), which is built for the
@@ -63,7 +75,7 @@ func fetchTicketSummary(ctx context.Context, ticketID string) (PreviewResult, er
 	summary, err := claudeSummarizeFunc(ctx, ticketSummaryInstruction, raw)
 	if err != nil {
 		content := fmt.Sprintf("[summary unavailable: %s]\n\n%s", err, truncRawBytes(string(raw), ticketRawCap))
-		return PreviewResult{Source: "ticket", Label: ticketID, Content: sanitizeTerminalText(content)}, nil
+		return PreviewResult{Source: ticketSummaryDegradedSource, Label: ticketID, Content: sanitizeTerminalText(content)}, nil
 	}
 	return PreviewResult{Source: "ticket", Label: ticketID, Content: sanitizeTerminalText(strings.TrimSpace(string(summary)))}, nil
 }
@@ -82,7 +94,17 @@ var ticketCache = newSummaryCache(ticketCacheTTL, ticketCacheFailTTL, ticketCach
 // there's no cheap separate "has this ticket changed" check worth doing
 // before deciding to refetch.
 func fetchTicketSummaryCached(ctx context.Context, ticketID string) (PreviewResult, error) {
-	return ticketCache.getOrFetch(ctx, ticketID, func(fetchCtx context.Context) (PreviewResult, error) {
-		return fetchTicketSummary(fetchCtx, ticketID)
+	result, err := ticketCache.getOrFetch(ctx, ticketID, func(fetchCtx context.Context) (PreviewResult, error) {
+		r, err := fetchTicketSummary(fetchCtx, ticketID)
+		if err == nil && r.Source == ticketSummaryDegradedSource {
+			// Steer getOrFetch to failTTL instead of successTTL — the
+			// caller below strips this back to a nil error.
+			return r, errTicketSummaryDegraded
+		}
+		return r, err
 	})
+	if errors.Is(err, errTicketSummaryDegraded) {
+		return result, nil
+	}
+	return result, err
 }

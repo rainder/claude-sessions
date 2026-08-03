@@ -146,6 +146,8 @@ func TestFetchTicketSummaryRawFallbackTruncatesMultilineWithoutGutter(t *testing
 func TestFetchTicketSummaryCachedAvoidsRefetch(t *testing.T) {
 	prevCu, prevClaude := cuFetchFunc, claudeSummarizeFunc
 	t.Cleanup(func() { cuFetchFunc, claudeSummarizeFunc = prevCu, prevClaude })
+	prevCache := ticketCache
+	t.Cleanup(func() { ticketCache = prevCache })
 	var calls int
 	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
 		calls++
@@ -156,8 +158,56 @@ func TestFetchTicketSummaryCachedAvoidsRefetch(t *testing.T) {
 	}
 	ticketCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 64) // fresh cache, isolated from other tests
 	fetchTicketSummaryCached(context.Background(), "DR-99")
-	fetchTicketSummaryCached(context.Background(), "DR-99")
+	result, err := fetchTicketSummaryCached(context.Background(), "DR-99")
 	if calls != 1 {
 		t.Errorf("cu fetch called %d times, want 1", calls)
+	}
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result.Content != "summary" {
+		t.Errorf("Content = %q, want %q", result.Content, "summary")
+	}
+}
+
+// TestFetchTicketSummaryCachedDegradedUsesFailTTL proves a claude-leg
+// failure (cu fetch succeeds, claude summarize fails) is cached under the
+// short failTTL rather than the hour-long successTTL, so a rate-limited
+// claude leg can be retried within seconds instead of being stuck showing
+// the stale placeholder for an hour. It also proves the internal
+// errTicketSummaryDegraded sentinel never leaks out of
+// fetchTicketSummaryCached to its own caller.
+func TestFetchTicketSummaryCachedDegradedUsesFailTTL(t *testing.T) {
+	prevCu, prevClaude := cuFetchFunc, claudeSummarizeFunc
+	t.Cleanup(func() { cuFetchFunc, claudeSummarizeFunc = prevCu, prevClaude })
+	prevCache := ticketCache
+	t.Cleanup(func() { ticketCache = prevCache })
+	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
+		return []byte("raw ticket text"), nil
+	}
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return nil, errors.New("rate limited")
+	}
+	const failTTL = 15 * time.Second
+	ticketCache = newSummaryCache(time.Hour, failTTL, 20*time.Second, 64)
+
+	result, err := fetchTicketSummaryCached(context.Background(), "DR-100")
+	if err != nil {
+		t.Fatalf("fetchTicketSummaryCached returned error %v, want nil (sentinel must not leak)", err)
+	}
+	if !strings.Contains(result.Content, "summary unavailable") {
+		t.Errorf("Content = %q, want it to mention summary unavailable", result.Content)
+	}
+
+	entry, ok := ticketCache.entries["DR-100"]
+	if !ok {
+		t.Fatalf("expected a cache entry for DR-100")
+	}
+	wantExpires := time.Now().Add(failTTL)
+	if diff := entry.expires.Sub(wantExpires); diff > 2*time.Second || diff < -2*time.Second {
+		t.Errorf("entry.expires = %v, want close to %v (failTTL), got diff %v", entry.expires, wantExpires, diff)
+	}
+	if entry.expires.After(time.Now().Add(time.Hour - time.Minute)) {
+		t.Errorf("entry.expires looks like successTTL (1h) was used instead of failTTL")
 	}
 }
