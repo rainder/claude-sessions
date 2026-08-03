@@ -740,7 +740,7 @@ func RunTUI(interval time.Duration) error {
 			case "\t":
 				state.selectID(firstIdleTarget(targets))
 				render()
-			case "\x0b": // Ctrl+K
+			case "\x18": // Ctrl+X
 				screen.Invalidate()
 				actKill(makeCtx())
 				refresh(true)
@@ -890,7 +890,7 @@ func RunTUI(interval time.Duration) error {
 // NOT covered by this and dispatches as a normal hotkey instead of being
 // discarded). Without this, a paste containing an embedded newline mid-buffer
 // would submit on that newline and let its trailing bytes fall through to
-// this screen's normal hotkeys (e.g. Ctrl+K triggering kill) instead of being
+// this screen's normal hotkeys (e.g. Ctrl+X triggering kill) instead of being
 // discarded along with the rest of the batch. Back commands close the
 // inspector; refresh/follow touch the hub or viewport; scrolling keys and the
 // wheel mutate the view and repaint. hubPtr is the loop's inspectorHub
@@ -898,7 +898,7 @@ func RunTUI(interval time.Duration) error {
 // variable so a Refresh reaches the live hub. Enter attaches to the session
 // (mirroring the session-list Enter binding) and closes the inspector — but
 // only outside compose mode, where Enter instead submits the compose buffer.
-// Ctrl+K opens the kill confirmation (mirroring the session-list Ctrl+K
+// Ctrl+X opens the kill confirmation (mirroring the session-list Ctrl+X
 // binding) and closes the inspector. 'i' and a click on the footer's Compose
 // control both arm compose mode via state.armCompose(), which no-ops with a
 // dim "no tmux pane" hint when the session has no pane to send into. sendText
@@ -1265,7 +1265,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    r            resume a past session (searchable · local + remote)")
 	fmt.Fprintln(&b, "    - / +        disable / enable session")
 	fmt.Fprintln(&b, "    Shift-1..9   assign session to group ①..⑨ (same group again ungroups)")
-	fmt.Fprintln(&b, "    Ctrl-K       kill the session (tmux-aware)")
+	fmt.Fprintln(&b, "    Ctrl-X       kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
 	fmt.Fprintln(&b, "    i            show session info (ticket + conversation summary)")
@@ -1275,7 +1275,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    Home / End   oldest output / resume live follow")
 	fmt.Fprintln(&b, "    PgUp / PgDn  scroll inspector by page")
 	fmt.Fprintln(&b, "    r            refresh now")
-	fmt.Fprintln(&b, "    Ctrl-K       kill the session (tmux-aware)")
+	fmt.Fprintln(&b, "    Ctrl-X       kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    Esc / q / p  return from inspector")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("VIEW"))

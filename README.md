@@ -109,7 +109,7 @@ claude-sessions tmux-info PID              # tmux session name for a pid
 | ------- | ----------------------------------------------- |
 | ↑/↓     | navigate                                        |
 | n       | new tmux session (↑/↓ cwd · ←/→ command)        |
-| Ctrl-K  | kill (tmux-aware)                               |
+| Ctrl-X  | kill (tmux-aware)                               |
 | a       | attach (or migrate to tmux first)               |
 | Enter/p | open fullscreen inspector                       |
 | m       | toggle view mode (full ↔ minimal, persisted)    |

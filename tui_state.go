@@ -386,7 +386,7 @@ func (s *tuiState) handleInspectorKey(key string) tuiCommand {
 	case "g", KeyHome:
 		s.inspector.home()
 		return commandRender
-	case "\x0b": // Ctrl+K
+	case "\x18": // Ctrl+X
 		return commandKillInspector
 	case KeyUp:
 		s.inspector.scroll(-1)

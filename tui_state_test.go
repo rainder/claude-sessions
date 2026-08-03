@@ -107,11 +107,11 @@ func TestInspectorKeyHandlers(t *testing.T) {
 		t.Fatalf("unmapped key: cmd=%v", cmd)
 	}
 
-	// Ctrl+K defers to the render loop to open the kill confirmation, and
+	// Ctrl+X defers to the render loop to open the kill confirmation, and
 	// plain j/k no longer scroll (removed in favor of arrows only).
 	s = setup()
-	if cmd := s.handleInspectorKey("\x0b"); cmd != commandKillInspector || s.inspector.top != 3 {
-		t.Fatalf("ctrl+k: cmd=%v view=%#v", cmd, s.inspector)
+	if cmd := s.handleInspectorKey("\x18"); cmd != commandKillInspector || s.inspector.top != 3 {
+		t.Fatalf("ctrl+x: cmd=%v view=%#v", cmd, s.inspector)
 	}
 	if cmd := s.handleInspectorKey("k"); cmd != commandNone {
 		t.Fatalf("k: cmd=%v", cmd)
