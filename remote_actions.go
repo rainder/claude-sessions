@@ -172,6 +172,30 @@ func fetchRemotePreview(host string, pid int, limits PreviewLimits) (PreviewResu
 
 const transcriptTailMaxBytes = 256 * 1024
 
+// sanitizeTranscriptTailErrExcerpt caps and single-lines a remote error body
+// before it's embedded in an error string. fetchRemoteTranscriptTail's
+// response body can be up to transcriptTailMaxBytes and is otherwise
+// unsanitized; that error flows into the rendered info dialog via
+// snap.Err.Error(), and embedded newlines/control characters there break
+// the dialog's box-border rendering.
+func sanitizeTranscriptTailErrExcerpt(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		}
+		if r < 0x20 {
+			return ' '
+		}
+		return r
+	}, s)
+	const maxLen = 200
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	return s
+}
+
 // fetchRemoteTranscriptTail retrieves the raw last-n conversation turns from
 // the named server, modeled directly on fetchRemotePreview. A 404 (no
 // transcript for that session) maps to errTranscriptNotFound.
@@ -202,10 +226,10 @@ func fetchRemoteTranscriptTail(host, sessionID string, n int) ([]transcriptTurn,
 		if strings.TrimSpace(string(data)) == "transcript not found" {
 			return nil, time.Time{}, 0, errTranscriptNotFound
 		}
-		return nil, time.Time{}, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, time.Time{}, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, sanitizeTranscriptTailErrExcerpt(strings.TrimSpace(string(data))))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, time.Time{}, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, time.Time{}, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, sanitizeTranscriptTailErrExcerpt(strings.TrimSpace(string(data))))
 	}
 	if len(data) > transcriptTailMaxBytes {
 		return nil, time.Time{}, 0, fmt.Errorf("transcript-tail response exceeds %d bytes", transcriptTailMaxBytes)

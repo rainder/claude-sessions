@@ -5,21 +5,31 @@ import (
 	"time"
 )
 
-// infoDialogTimeout bounds a single fetch pipeline (cu+claude, or
-// transcript-read/fetch+claude) even if the dialog is never closed —
-// e.g. a wedged subprocess whose pipe close() can't force shut immediately
-// (see info_exec.go's subprocessWaitDelay doc comment for why close() alone
-// isn't a hard guarantee).
+// infoDialogTimeout bounds how long the caller waits to join a fetch — an
+// in-flight one or a cache-served one — not the underlying subprocess/fetch
+// pipeline's own lifetime: both the ticket and conversation pipelines route
+// through a summaryCache.getOrFetch (info_cache.go), which runs the actual
+// fetch under a context the cache itself owns, bounded by that cache's own
+// fetchTimeout (ticketCacheFetchTimeout / conversationCacheFetchTimeout, see
+// info_ticket.go / info_transcript.go) — never this ctx. Keep
+// infoDialogTimeout >= the largest of those fetchTimeouts: if the caller
+// gives up before the fetch it's joined on could possibly finish, that's a
+// caller-side timeout wired shorter than the thing it's waiting on, not a
+// safety bound. (See info_exec.go's subprocessWaitDelay doc comment for why
+// a subprocess close() alone isn't a hard guarantee of termination.)
 const infoDialogTimeout = 20 * time.Second
 
 // asyncSection wraps previewPane (kill_preview.go) — reused for its
 // wake-pipe + snapshot mechanics, not its rendering (previewBlock/
 // renderConfirmOverlay are single-block and preview-specific; the info
 // dialog's own renderer is new, see info_dialog.go) — with an owned
-// context.CancelFunc, so closing the dialog actually signals the
-// underlying subprocess(es) to stop instead of just tearing down the wake
-// pipe. close() is idempotent and nil-receiver-safe, matching previewPane's
-// own contract, so callers never need to nil-check before calling it.
+// context.CancelFunc. That CancelFunc bounds how long the caller
+// (asyncSection) waits for a result; it does NOT reach into or cancel the
+// underlying subprocess — that lifetime is owned by whichever
+// summaryCache's own fetchTimeout the pipeline routes through (see
+// info_cache.go and infoDialogTimeout's doc comment). close() is idempotent
+// and nil-receiver-safe, matching previewPane's own contract, so callers
+// never need to nil-check before calling it.
 type asyncSection struct {
 	*previewPane
 	cancel context.CancelFunc

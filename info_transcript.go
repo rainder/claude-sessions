@@ -152,6 +152,10 @@ func extractConversationTail(path string, n int) ([]transcriptTurn, error) {
 		if !ok {
 			continue
 		}
+		// Tradeoff, accepted: this also drops a genuine user message that
+		// happens to start with pasted XML/HTML/diff content, not just
+		// command/wrapper noise — if a prompt is missing from the summary,
+		// check here first.
 		if e.Type == "user" && strings.HasPrefix(strings.TrimSpace(text), "<") {
 			continue
 		}
@@ -272,6 +276,9 @@ func fetchConversationSummaryLocal(ctx context.Context, home, sessionID string) 
 
 // fetchConversationSummaryRemote fetches raw turns from host's server and
 // summarizes them locally — summarization never runs on the remote host.
+// The raw fetch itself is intentionally uncached — it's a cheap LAN round
+// trip on every dialog open; only the subsequent summarization step (the
+// token-spending `claude` call) goes through conversationCache below.
 func fetchConversationSummaryRemote(ctx context.Context, host, sessionID string) (PreviewResult, error) {
 	turns, mtime, size, err := fetchRemoteTranscriptTail(host, sessionID, conversationTailTurns)
 	if err != nil {

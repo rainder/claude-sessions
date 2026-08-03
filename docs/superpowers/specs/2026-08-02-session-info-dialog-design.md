@@ -196,6 +196,18 @@ func (a *asyncSection) close() {
 }
 ```
 
+**Post-implementation correction (fix round 2):** the `asyncSection.close()`
+snippet above and its surrounding text still describe the owned
+`context.CancelFunc` as reaching into and canceling the underlying
+subprocess(es). That is not how the implemented pipeline works: both the
+ticket and conversation pipelines route through `summaryCache.getOrFetch`
+(info_cache.go), which runs the actual fetch under a context the cache
+itself owns, bounded by that cache's own `fetchTimeout` — never
+`asyncSection`'s ctx. `asyncSection`'s context only bounds how long the
+*caller* waits to join an in-flight or cache-served result; it never reaches
+the subprocess. See `info_async.go`'s `infoDialogTimeout`/`asyncSection` doc
+comments for the corrected, final account.
+
 `run` wires the context into `exec.CommandContext` for every subprocess in
 that section's pipeline (both local calls and, for the remote conversation
 fetch, `http.NewRequestWithContext` — not a bare `http.Get`), so closing the

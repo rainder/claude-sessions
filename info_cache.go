@@ -94,17 +94,26 @@ func (c *summaryCache) getOrFetch(ctx context.Context, key string, fetch func(co
 				e.result = PreviewResult{}
 				e.err = fmt.Errorf("fetch panicked: %v", r)
 			}
+			// Publication must live in this same defer, not after this
+			// func() returns: a runtime.Goexit() inside fetch (e.g. from a
+			// failed test helper called transitively, or t.Fatal-style
+			// helpers misused in production code) skips the rest of this
+			// closure's body but still runs its defers, so putting
+			// expires/close(e.done) after the call() below would leave
+			// them unreached and orphan this cache key forever — an
+			// in-flight entry with nobody left to finish it, never evicted
+			// by prune().
+			if e.err == nil {
+				e.expires = time.Now().Add(c.successTTL)
+			} else {
+				e.expires = time.Now().Add(c.failTTL)
+			}
+			close(e.done)
 		}()
 		fetchCtx, cancel := context.WithTimeout(context.Background(), c.fetchTimeout)
 		defer cancel()
 		e.result, e.err = fetch(fetchCtx)
 	}()
-	if e.err == nil {
-		e.expires = time.Now().Add(c.successTTL)
-	} else {
-		e.expires = time.Now().Add(c.failTTL)
-	}
-	close(e.done)
 
 	// The fetch already completed synchronously above; this is just a
 	// final check so the owning caller — like every joiner — honors its
