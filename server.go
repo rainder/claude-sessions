@@ -1046,7 +1046,7 @@ func (s *server) transcriptTail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad session_id", http.StatusBadRequest)
 		return
 	}
-	n := 5
+	n := conversationTailTurns
 	if v := r.URL.Query().Get("n"); v != "" {
 		parsed, err := strconv.Atoi(v)
 		if err != nil || parsed < 1 || parsed > 10 {
@@ -1075,8 +1075,13 @@ func (s *server) transcriptTail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	truncated := make([]transcriptTurn, len(turns))
+	for i, t := range turns {
+		t.Text = truncBytesHead(t.Text, conversationTurnCap)
+		truncated[i] = t
+	}
 	writeJSON(w, http.StatusOK, transcriptTailResponse{
-		Turns:      turns,
+		Turns:      truncated,
 		ModifiedAt: st.ModTime(),
 		Size:       st.Size(),
 	})

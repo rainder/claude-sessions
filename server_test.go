@@ -4079,6 +4079,9 @@ func TestTranscriptTailHandlerNClamped(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for out-of-range n", rec.Code)
 	}
+	if !strings.Contains(rec.Body.String(), "bad n value") {
+		t.Errorf("body = %q, want it to contain %q", rec.Body.String(), "bad n value")
+	}
 }
 
 func TestTranscriptTailHandlerNotFound(t *testing.T) {

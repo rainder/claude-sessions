@@ -194,12 +194,15 @@ func fetchRemoteTranscriptTail(host, sessionID string, n int) ([]transcriptTurn,
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, time.Time{}, 0, errTranscriptNotFound
-	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, transcriptTailMaxBytes+1))
 	if err != nil {
 		return nil, time.Time{}, 0, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		if strings.TrimSpace(string(data)) == "transcript not found" {
+			return nil, time.Time{}, 0, errTranscriptNotFound
+		}
+		return nil, time.Time{}, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, time.Time{}, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))

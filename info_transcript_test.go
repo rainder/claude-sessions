@@ -425,6 +425,8 @@ func TestFetchConversationSummaryRemote(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeServerYAML(t, home, "remote-host", u.Hostname(), u.Port(), "secret")
 
+	prevCache := conversationCache
+	t.Cleanup(func() { conversationCache = prevCache })
 	conversationCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 256) // fresh cache
 	got, err := fetchConversationSummaryRemote(context.Background(), "remote-host", "sid1")
 	if err != nil || got.Content != "remote summary" {
