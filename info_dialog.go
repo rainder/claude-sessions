@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 func infoDialogHeader(s Session) []string {
@@ -114,4 +119,70 @@ func renderInfoDialog(header []string, ticketSec, convoSec *asyncSection, cols, 
 	}
 	b.WriteString(confirmBoxBL + strings.Repeat(confirmBoxH, innerWidth+2) + confirmBoxBR + "\n")
 	return b.String()
+}
+
+// showInfoDialog opens the 'i'-hotkey info modal for s: a deterministic
+// header, an optional ticket summary (only if a DR-XXXX id is detected),
+// and a conversation summary. Modeled directly on resumePromptsOverlay
+// (resume.go:954-972) — same self-contained renderer/decoder/loop shape,
+// same close-key set.
+func showInfoDialog(s Session, wakes []wakeFD) {
+	header := infoDialogHeader(s)
+	ticketID := detectTicketID(s.CWD, s.Name)
+
+	var ticketSec *asyncSection
+	if ticketID != "" {
+		ticketSec = startAsyncSection("ticket", func(ctx context.Context) (PreviewResult, error) {
+			return fetchTicketSummaryCached(ctx, ticketID)
+		})
+	}
+
+	convoSec := startAsyncSection("conversation", func(ctx context.Context) (PreviewResult, error) {
+		if s.Host == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return PreviewResult{}, fmt.Errorf("resolve home dir: %w", err)
+			}
+			return fetchConversationSummaryLocal(ctx, home, s.SessionID)
+		}
+		return fetchConversationSummaryRemote(ctx, s.Host, s.SessionID)
+	})
+
+	defer func() {
+		ticketSec.close() // nil-safe when no ticket id was detected
+		convoSec.close()
+	}()
+
+	renderer := newScreenRenderer(os.Stdout)
+	decoder := newInputDecoder()
+	fd := int(os.Stdin.Fd())
+
+	for {
+		cols, rows, err := term.GetSize(fd)
+		if err != nil {
+			cols, rows = 0, 0
+		}
+		_ = renderer.Draw(renderInfoDialog(header, ticketSec, convoSec, cols, rows), cols, rows)
+		// modalWakesWithAll takes *asyncSection directly (post-Task-9-fix-round
+		// signature) — nil-safe, so ticketSec being nil here needs no guard.
+		modalW := modalWakesWithAll(wakes, ticketSec, convoSec)
+		keys, _ := readModalEvents(decoder, modalW)
+		for _, key := range keys {
+			if resumePromptsClose(key) {
+				return
+			}
+		}
+	}
+}
+
+// actInfo is the action-handler wrapper showInfoDialog needs to fit this
+// codebase's established convention (actKill/actAttach/actResume all take
+// *actCtx and resolve the selected row via c.selected() — see actions.go).
+// A no-op when nothing is selected, same as those.
+func actInfo(c *actCtx) {
+	s := c.selected()
+	if s == nil {
+		return
+	}
+	showInfoDialog(*s, c.modalWakes)
 }

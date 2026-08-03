@@ -616,6 +616,11 @@ func RunTUI(interval time.Duration) error {
 				actKill(makeCtx())
 				refresh(true)
 				render()
+			case "i", "I":
+				screen.Invalidate()
+				actInfo(makeCtx())
+				screen.Invalidate()
+				render()
 			case "a", "A":
 				screen.Invalidate()
 				actAttach(makeCtx())
