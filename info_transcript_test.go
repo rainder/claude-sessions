@@ -102,39 +102,58 @@ func TestExtractConversationTailMissingFile(t *testing.T) {
 // than infoTailBytes and asserts the scan starts near the tail: text from
 // the very first line (well before the seek point) must not survive, while
 // the last few real turns must.
+//
+// This test has to actually discriminate between "seek then scan" and "scan
+// everything, let FIFO eviction do the work" — those two implementations
+// produce identical output if the only real (countable) turns in the file
+// are the head marker plus a handful of tail turns and n is large enough
+// that eviction never triggers. So the padding between the head marker and
+// the tail markers is built entirely out of lines the turn-filter excludes
+// regardless of seeking (type != "user"/"assistant"), and n is set well
+// above the real turn count. If the seek logic were deleted entirely, the
+// scan would still reach the head marker (a real, countable "user" turn)
+// and it would show up in the result — only the seek prevents that.
 func TestExtractConversationTailSeeksPastLeadingJunk(t *testing.T) {
 	lines := []string{
-		`{"type":"user","message":{"role":"user","content":"UNIQUE_HEAD_MARKER first line"}}`,
+		`{"type":"user","message":{"role":"user","content":"HEAD-MARKER-UNIQUE-TEXT first line"}}`,
 	}
-	// Pad well past infoTailBytes with junk lines so the seek point lands
-	// after the head marker above.
-	padLine := `{"type":"user","message":{"role":"user","content":"` + strings.Repeat("x", 500) + `"}}`
-	for len(strings.Join(lines, "\n")) < infoTailBytes*2 {
-		lines = append(lines, padLine)
+	// Filler uses type "system", which extractConversationTail's turn filter
+	// excludes unconditionally (e.Type != "user" && e.Type != "assistant") —
+	// so it never becomes a counted turn whether or not the seek runs, and
+	// can't be mistaken for eviction doing the seek's job.
+	fillerLine := `{"type":"system","message":{"role":"system","content":"` + strings.Repeat("x", 2000) + `"}}`
+	for len(strings.Join(lines, "\n")) < infoTailBytes+64*1024 {
+		lines = append(lines, fillerLine)
 	}
 	lines = append(lines,
-		`{"type":"user","message":{"role":"user","content":"UNIQUE_TAIL_MARKER question"}}`,
-		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"UNIQUE_TAIL_MARKER answer"}]}}`,
+		`{"type":"user","message":{"role":"user","content":"TAIL-MARKER-1"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"TAIL-MARKER-2"}]}}`,
+		`{"type":"user","message":{"role":"user","content":"TAIL-MARKER-3"}}`,
 	)
 	p := writeTranscript(t, lines...)
 
-	turns, err := extractConversationTail(p, 5)
+	// n=10 is comfortably larger than the real turn count (4: the head
+	// marker plus 3 tail turns), so FIFO eviction never engages either way —
+	// only the seek can be responsible for the head marker's absence.
+	turns, err := extractConversationTail(p, 10)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	for _, tu := range turns {
-		if strings.Contains(tu.Text, "UNIQUE_HEAD_MARKER") {
+		if strings.Contains(tu.Text, "HEAD-MARKER-UNIQUE-TEXT") {
 			t.Fatalf("head marker survived the seek: %+v", turns)
 		}
 	}
-	var sawTail bool
-	for _, tu := range turns {
-		if strings.Contains(tu.Text, "UNIQUE_TAIL_MARKER") {
-			sawTail = true
+	for _, want := range []string{"TAIL-MARKER-1", "TAIL-MARKER-2", "TAIL-MARKER-3"} {
+		var found bool
+		for _, tu := range turns {
+			if strings.Contains(tu.Text, want) {
+				found = true
+			}
 		}
-	}
-	if !sawTail {
-		t.Fatalf("expected a tail-marker turn in result, got %+v", turns)
+		if !found {
+			t.Fatalf("expected %s in result, got %+v", want, turns)
+		}
 	}
 }
 
