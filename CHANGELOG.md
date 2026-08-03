@@ -13,6 +13,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keystrokes (`tmux send-keys -l`) into the selected session's tmux pane,
   local or remote. Disabled with a "no tmux pane" hint when the session has
   none; a failed send keeps the buffer so it can be corrected and resent.
+- Inspector: opening preview on a session resizes that session's tmux window
+  to match the inspector's viewport, so its output wraps to your terminal's
+  width instead of the width whoever last attached happened to have. Local or
+  remote. The window is un-pinned again when you leave preview — including
+  when you quit the TUI outright with the inspector still open, and before an
+  Enter-to-attach hands you the real session.
 - `POST /sessions/{pid}/kill` and `POST /sessions/{pid}/migrate` accept an
   optional `{"session_id": "…"}` precondition. A PID on its own proves nothing
   once a tmux pane has been recycled and handed that number to a different

@@ -224,10 +224,25 @@ func RunTUI(interval time.Duration) error {
 	// preview content renders via capture-pane regardless of the pane's
 	// current size (see docs/superpowers/specs/
 	// 2026-08-03-preview-resize-design.md).
+	//
+	// A **revert** whose fresh resolve fails falls back to sess.Tmux, the pane
+	// address the snapshot was built with. Without it, a session that exits
+	// while it is being previewed takes its resolveLivePIDLocal entry with it,
+	// the revert silently returns, and a hand-managed tmux window that outlives
+	// the claude process stays pinned to window-size=manual forever — the one
+	// failure mode this whole feature exists to avoid. A stale address here can
+	// only un-pin a window that is already gone or has been reused, which is
+	// why the same fallback would be wrong for send-keys (it types text) and is
+	// deliberately not taken on the **entry** resize: a wrong pane resized is a
+	// fresh pin on a stranger's window, and there is no stuck state for an
+	// entry resize to recover in the first place.
 	resizeInspected := func(sess Session, cols, rows int, revert bool) {
 		if sess.Host == "" {
 			live, err := resolveLivePIDLocal(sess.PID, sess.SessionID)
 			if err != nil {
+				if revert {
+					_ = revertTmuxTarget(sess)
+				}
 				return
 			}
 			_ = resizeSession(live, cols, rows, revert)

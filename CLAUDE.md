@@ -313,6 +313,46 @@ time and never stored on disk — a plain `session_id`-only reattestation like
 `localReattest` would revalidate identity but still hand back a stale pane
 address.
 
+`POST /sessions/{pid}/resize` (`{"session_id", "cols", "rows", "revert"}`,
+resize.go/server.go) is the inspector's preview-resize feature: entering
+preview resizes the previewed session's tmux **window** to the inspector's
+inner viewport, and leaving preview un-pins it again. `session_id` is
+**required** for the same reason send-keys requires it — a new endpoint with
+no legacy caller to stay compatible with, so there is no reason to allow an
+unguarded one — and `resizeHandler` resolves its target with the same single
+fresh `resolveLivePID` immediately before acting, with the same reasoning: a
+resize's worst case is one recycled pane briefly changing size, not a
+destroyed session, which doesn't justify kill's second `CollectLocal()` walk.
+The revert is `tmux set-window-option -u window-size`, **not** `resize-window
+-A`. That distinction is the whole reason this endpoint has a `revert` flag
+rather than just resizing back: `-A` recalculates the size once but leaves
+`window-size` explicitly set to `manual` (verified directly against a live
+tmux session — `show-window-options` still reports `manual` afterwards), so a
+window "reverted" that way never auto-adjusts to an attaching client again
+and stays silently frozen at the last preview's dimensions. `-u` (unset) is
+the only thing that actually clears the override. Every call site is
+best-effort: errors are discarded, never logged, since preview renders via
+`capture-pane` at any pane size — nothing about a failed resize should block
+entering or leaving preview.
+
+Reverting is the direction that matters, because a missed revert is silent
+and permanent, so `RunTUI` reverts from a top-level `defer` too (quitting
+outright never reaches `closeInspector`). One gap survives that, and it is
+**local-only closed**: both paths resolve the pane fresh, so a session that
+*exits during preview* no longer resolves and the revert finds nothing to act
+on. Locally `resizeInspected` (tui.go) then falls back to `revertTmuxTarget`
+against the inspector snapshot's own `sess.Tmux` — a last-known-good address
+whose worst case is un-pinning a window that has already gone or been reused,
+which is why the same fallback is right here and wrong for send-keys (that
+one types text) and wrong for the **entry** resize (pinning a stranger's
+window, with no stuck state to recover in the first place). The remote path
+cannot do this: `resizeHandler` resolves the pane itself and takes no
+client-supplied pane address, so a remote session ending mid-preview can
+still leave its window pinned to `manual` — accepted, since closing it means
+trusting a client-supplied pane address on the wire, and it only bites a
+hand-managed window that outlives its claude process (a window this tool
+spawned dies with the session).
+
 ### Usage polling
 
 Two different things live here and they cost wildly different amounts, which is
