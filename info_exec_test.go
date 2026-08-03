@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -75,8 +76,12 @@ func TestCuFetchCmdArgs(t *testing.T) {
 }
 
 // TestClaudeSummarizeCmdArgs verifies the real argv
-// `claude --model sonnet --effort low --bare -p <instruction>` constructed by
-// claudeSummarizeCmd, its Stdin wiring, and its WaitDelay.
+// `claude --model sonnet --effort low --tools "" --system-prompt <prompt> -p
+// <instruction>` constructed by claudeSummarizeCmd, its Stdin wiring, its Dir
+// (neutral, not --bare — see claudeSummarizeCmd's doc comment for why --bare
+// broke OAuth auth, and claudeSystemPrompt's doc comment for why --tools ""
+// and --system-prompt are both required to stop ambient cwd/git context from
+// leaking into a summary), and its WaitDelay.
 func TestClaudeSummarizeCmdArgs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -88,13 +93,13 @@ func TestClaudeSummarizeCmdArgs(t *testing.T) {
 			name:        "summarize instruction",
 			instruction: "summarize this ticket",
 			input:       []byte("ticket body"),
-			wantArgs:    []string{"claude", "--model", "sonnet", "--effort", "low", "--bare", "-p", "summarize this ticket"},
+			wantArgs:    []string{"claude", "--model", "sonnet", "--effort", "low", "--tools", "", "--system-prompt", claudeSystemPrompt, "-p", "summarize this ticket"},
 		},
 		{
 			name:        "empty input",
 			instruction: "instr",
 			input:       []byte(""),
-			wantArgs:    []string{"claude", "--model", "sonnet", "--effort", "low", "--bare", "-p", "instr"},
+			wantArgs:    []string{"claude", "--model", "sonnet", "--effort", "low", "--tools", "", "--system-prompt", claudeSystemPrompt, "-p", "instr"},
 		},
 	}
 	for _, tt := range tests {
@@ -102,6 +107,10 @@ func TestClaudeSummarizeCmdArgs(t *testing.T) {
 			cmd := claudeSummarizeCmd(context.Background(), tt.instruction, tt.input)
 			if !reflect.DeepEqual(cmd.Args, tt.wantArgs) {
 				t.Errorf("Args = %v, want %v", cmd.Args, tt.wantArgs)
+			}
+			wantDir := os.TempDir()
+			if cmd.Dir != wantDir {
+				t.Errorf("Dir = %q, want %q (neutral dir, not the invoking project's cwd)", cmd.Dir, wantDir)
 			}
 			if cmd.WaitDelay != subprocessWaitDelay {
 				t.Errorf("WaitDelay = %v, want %v", cmd.WaitDelay, subprocessWaitDelay)

@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an `i`/`I` hotkey that opens a modal showing a session's ticket summary and conversation summary, both generated via `claude -p --bare`.
+**Goal:** Add an `i`/`I` hotkey that opens a modal showing a session's ticket summary and conversation summary, both generated via `claude -p`.
+
+**Post-implementation correction (post-merge hotfix, branch `fix-bare-auth`):** every `--bare` reference below (Global Constraints, Task 2, Task 5's design-doc snippet) reflects the original plan, not the shipped code. Two rounds, both confirmed against the real CLI: (1) `--bare` forces Anthropic auth to strictly `ANTHROPIC_API_KEY`/`apiKeyHelper` and never reads OAuth/Keychain — every summarization call failed closed with "Not logged in" (exit 1) for this repo's actual (OAuth) users, reproduced directly right after deploy. (2) Dropping `--bare` alone was insufficient: a one-shot `-p` call retains full tool access by default (can wander the filesystem instead of processing stdin) and Claude Code's default system prompt injects per-machine context (cwd, env info, memory paths, git status) regardless of `cmd.Dir` — both reproduced directly (piping trivial input from this worktree produced a response describing its git state, not "nothing to summarize"). Final fix: drop `--bare`, add `--tools ""` and `--system-prompt '<fixed prompt>'`, keep `cmd.Dir = os.TempDir()` as defense-in-depth. See `info_exec.go`'s `claudeSummarizeCmd`/`claudeSystemPrompt` for the final, correct implementation.
 
 **Architecture:** Two independent async fetch pipelines (ticket via `cu`+`claude`, conversation via transcript-read-or-remote-fetch+`claude`) each wrapped in a new `asyncSection` (a `previewPane` plus an owned `context.CancelFunc`), rendered in a new bordered modal modeled on `resumePromptsOverlay`. Both pipelines route their expensive step (the `claude -p` call) through a small bounded single-flight+TTL cache. Remote sessions fetch raw transcript text from a new server endpoint; summarization always happens locally.
 
@@ -10,7 +12,7 @@
 
 ## Global Constraints
 
-- All `claude -p` invocations use `--model sonnet --effort low --bare` exactly.
+- All `claude -p` invocations use `--model sonnet --effort low --tools "" --system-prompt <claudeSystemPrompt>` exactly, run with `cmd.Dir` set to a neutral directory (`os.TempDir()`) — not `--bare` (see the post-implementation correction note above this section: `--bare` breaks OAuth auth, and `cmd.Dir` alone doesn't stop tool-access wandering or default-system-prompt context injection).
 - All subprocess calls use `exec.Command`/`exec.CommandContext` with argv arguments — never `sh -c`, never a hand-built shell string.
 - Untrusted fetched content (ticket text, transcript excerpts) is always passed to `claude -p` via **stdin**, never concatenated into the `-p` argument string. The `-p` argument is always one of the two fixed instruction constants defined in Task 1/Task 4.
 - Every external CLI invocation (`cu`, `claude`) goes through a package-var seam (`cuFetchFunc`, `claudeSummarizeFunc`) so no test ever shells out for real. `TestMain` (account_test.go) defaults both to panic, matching the existing `keychainRead`/`keychainWrite`/`usageInfoFetch` seams.
