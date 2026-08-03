@@ -297,6 +297,22 @@ when all `spawnDedupeMax` are in flight the handler answers **503** rather than
 growing past the bound. `s.spawn` and `s.attest` are the injectable seams
 alongside `collect`/`terminate`/`removeTree`.
 
+`POST /sessions/{pid}/send-keys` (`{"session_id", "text"}`, send_keys.go) is
+the inspector's `i`-to-compose feature: it types `text` into `pid`'s tmux pane
+as literal keystrokes plus Enter. Unlike kill/migrate's legacy optional
+precondition, `session_id` is **required** here — there is no pre-existing
+caller to stay compatible with, so there's no reason to allow an unguarded
+send. It resolves its target with a single fresh `resolveLivePID` check
+immediately before sending, not kill's extra late `reattest`: the design
+reasoning (refined during final review) is that a send's worst case is one
+line of text landing in a recycled pane, not a destroyed session, which
+doesn't justify a second `CollectLocal()` walk. The local TUI path mirrors
+this with `resolveLivePIDLocal` (send_keys.go), a fresh `CollectLocal()` plus
+the same `SessionID` check, since `Session.Tmux` is derived at collection
+time and never stored on disk — a plain `session_id`-only reattestation like
+`localReattest` would revalidate identity but still hand back a stale pane
+address.
+
 ### Usage polling
 
 Two different things live here and they cost wildly different amounts, which is

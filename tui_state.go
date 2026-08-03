@@ -22,6 +22,7 @@ const (
 	hitInspectorBack
 	hitInspectorRefresh
 	hitInspectorFollow
+	hitInspectorCompose
 )
 
 // hitRegion is a rectangular clickable area on the current screen, addressed in
@@ -147,6 +148,7 @@ const (
 	commandRefreshInspector
 	commandFollowInspector
 	commandKillInspector
+	commandComposeInspector
 	commandQuit
 )
 
@@ -403,9 +405,68 @@ func (s *tuiState) handleInspectorKey(key string) tuiCommand {
 	}
 }
 
+// handleInspectorCompose applies one key event while the inspector's send-keys
+// compose box is active, editing composeText. Byte-level edit rule matches
+// newPickerState.handlePrompt (new_picker.go:101-121): single-byte printable
+// ASCII (0x20-0x7e) appends (capped at sendKeysMaxLen, the same limit the
+// server's own validator enforces, so a long local paste fails the same way a
+// remote send would instead of succeeding locally and 400ing on submit),
+// DEL/BS (\x7f/\x08) backspaces. Enter on a non-empty buffer returns
+// submit=true but does NOT itself clear composing or composeText — the caller
+// (handleInspectorEvent) owns that, because a failed send must leave both in
+// place for the user to retry. Enter on an empty buffer is a no-op, mirroring
+// handlePrompt's own empty-Prompt Enter rule. Esc and Ctrl-C both cancel:
+// composing, composeText, and any leftover composeStatus/composeStatusUntil
+// from a prior failed send are all cleared immediately, since a cancel has
+// nothing left to retry and a stale failure message must not linger past it.
+func (s *tuiState) handleInspectorCompose(key string) (submit, cancel bool) {
+	switch key {
+	case "\r", "\n", KeyEnter:
+		if s.inspector.composeText == "" {
+			return false, false
+		}
+		return true, false
+	case KeyEsc, "\x03":
+		s.inspector.composing = false
+		s.inspector.composeText = ""
+		s.inspector.composeStatus = ""
+		s.inspector.composeStatusUntil = time.Time{}
+		return false, true
+	case "\x7f", "\x08":
+		if s.inspector.composeText != "" {
+			s.inspector.composeText = s.inspector.composeText[:len(s.inspector.composeText)-1]
+		}
+	default:
+		if len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e {
+			if len(s.inspector.composeText) < sendKeysMaxLen {
+				s.inspector.composeText += key
+			}
+		}
+	}
+	return false, false
+}
+
+// armCompose starts the send-keys compose box when the inspected session has
+// a live tmux pane to send into ('i' keypress and the footer's clickable
+// Compose control both route through this, so keyboard and mouse stay
+// consistent). When there is no pane (Session.Tmux == "") it leaves compose
+// mode alone and instead shows a brief "no tmux pane" hint via the same
+// composeStatus/composeStatusUntil fields a completed send uses, so the user
+// isn't left believing 'i' silently did nothing.
+func (s *tuiState) armCompose() {
+	if s.inspector.snapshot.Session.Tmux != "" {
+		s.inspector.composing = true
+		s.inspector.composeText = ""
+		s.inspector.composeStatus = ""
+		return
+	}
+	s.inspector.composeStatus = "no tmux pane"
+	s.inspector.composeStatusUntil = time.Now().Add(4 * time.Second)
+}
+
 // handleInspectorMouse applies a mouse event to the inspector viewport. Release
 // events are ignored; the wheel scrolls three lines; a left click on a control
-// region returns that control's command (Back, Refresh, or Follow).
+// region returns that control's command (Back, Refresh, Follow, or Compose).
 func (s *tuiState) handleInspectorMouse(m mouseEvent) tuiCommand {
 	if m.release {
 		return commandNone
@@ -429,6 +490,8 @@ func (s *tuiState) handleInspectorMouse(m mouseEvent) tuiCommand {
 			return commandRefreshInspector
 		case hitInspectorFollow:
 			return commandFollowInspector
+		case hitInspectorCompose:
+			return commandComposeInspector
 		}
 		return commandNone
 	default:

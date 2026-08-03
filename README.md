@@ -132,6 +132,7 @@ pane.
 | PgUp/PgDn | scroll one page                      |
 | Home/End  | jump to oldest / resume live follow  |
 | r         | refresh now                          |
+| i         | compose and send text into the session's tmux pane |
 | Esc/q/p   | back to the list                     |
 
 Mouse works throughout: wheel scrolls, and the footer's Back/Refresh/Follow

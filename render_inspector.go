@@ -5,6 +5,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -20,7 +21,11 @@ const (
 
 // footerLabels are the inspector's clickable controls, laid left-to-right with a
 // two-space gap. Their order fixes both the visible columns and the hit-region
-// ordering returned to the render loop.
+// ordering returned to the render loop. It also fixes which label gets dropped
+// first when width is tight: inspectorFooter's drop logic always trims from the
+// end (footerLabels[:len(footerLabels)-1]), so whichever entry is added last is
+// the least essential one and must be the last in this slice — a 5th label
+// added anywhere but the end would get dropped in Compose's place.
 var footerLabels = []struct {
 	text   string
 	action hitAction
@@ -28,9 +33,25 @@ var footerLabels = []struct {
 	{"Back", hitInspectorBack},
 	{"Refresh", hitInspectorRefresh},
 	{"Follow", hitInspectorFollow},
+	{"Compose", hitInspectorCompose},
 }
 
 const footerGap = "  "
+
+// footerLeftWidth returns the visible column width of the first n footer
+// labels (in footerLabels order) plus their separating gaps — the same
+// arithmetic inspectorFooter's render loop performs, factored out so it can
+// be checked against cols before deciding which labels to draw.
+func footerLeftWidth(n int) int {
+	w := 0
+	for i := 0; i < n && i < len(footerLabels); i++ {
+		if i > 0 {
+			w += len(footerGap)
+		}
+		w += len(footerLabels[i].text)
+	}
+	return w
+}
 
 // RenderInspector writes the fullscreen session inspector to w as plain lines
 // (no cursor movement or alternate-screen escapes — RunTUI owns positioning) and
@@ -39,10 +60,11 @@ const footerGap = "  "
 // Layout, top to bottom: a title (name, PID, host), a width-responsive metadata
 // line (model, status, context, cost — dropping cost below 80 cols, context
 // below 64, everything but status below 48), a separator, the content body from
-// view.top, and a footer whose left carries the Back/Refresh/Follow controls and
-// whose right shows the source and live-freshness status when space allows.
-// Below the min-size floor it emits a concise "terminal too small" notice with a
-// Back control. Every emitted line is clipped to cols.
+// view.top, and a footer whose left carries the Back/Refresh/Follow/Compose
+// controls and whose right shows the source and live-freshness status when
+// space allows (dropping Compose first if width is too tight for both — see
+// inspectorFooter). Below the min-size floor it emits a concise "terminal too
+// small" notice with a Back control. Every emitted line is clipped to cols.
 func RenderInspector(w io.Writer, view inspectorViewState, cols, rows int) []hitRegion {
 	if rows < minInspectorRows || cols < minInspectorCols {
 		return renderInspectorTooSmall(w, cols, rows)
@@ -61,7 +83,11 @@ func RenderInspector(w io.Writer, view inspectorViewState, cols, rows int) []hit
 	bodyRows := rows - 4
 	inspectorBody(w, view, bodyRows, cols)
 
-	// Row rows-1: footer with clickable controls.
+	// Row rows-1: footer — the compose input bar while composing, otherwise
+	// the normal Back/Refresh/Follow/Compose controls.
+	if view.composing {
+		return inspectorComposeBar(w, view, cols)
+	}
 	return inspectorFooter(w, view, cols, rows-1)
 }
 
@@ -163,14 +189,44 @@ func inspectorEmptyBody(snap InspectorSnapshot) string {
 }
 
 // inspectorFooter writes the final row and returns the hit regions for its
-// controls. The Back/Refresh/Follow labels sit on the left at fixed columns
-// (each clickable, Follow included even while already following); the source and
-// freshness status sit right-aligned when the remaining width admits them.
+// controls. The Back/Refresh/Follow/Compose labels sit on the left at fixed
+// columns (each clickable, Follow included even while already following); the
+// source and freshness status sit right-aligned when the remaining width
+// admits them. The footer-right text carries actionable status — the
+// "no tmux pane" hint, a "sent" confirmation, or live/stale/ended freshness —
+// so when width is too tight for both, Compose (the newest and least
+// essential label; its 'i' keybinding still works with the button hidden) is
+// dropped first to make room, mirroring the width-based prioritization
+// inspectorMetadata uses above. Dropping Compose is conditional on it actually
+// helping: at some widths the right text won't fit even with the 3-label
+// footer, and dropping Compose there would lose the button for nothing, so it
+// only drops when doing so crosses the fit threshold. Back/Refresh/Follow is
+// the floor either way, never dropped further.
 func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []hitRegion {
+	right := inspectorFooterRight(view)
+	rightVis := utf8.RuneCountInString(right)
+
+	labels := footerLabels
+	fullW := footerLeftWidth(len(footerLabels))
+	shortW := footerLeftWidth(len(footerLabels) - 1)
+	// rightVis is 0 only if inspectorFooterRight ever returned "", which it
+	// currently never does (inspectorStatusText's default case always yields
+	// "LIVE ↓"); cols < fullW is kept as a defensive floor for that case
+	// anyway, so the label line itself is never clipped mid-word even if a
+	// future change made the right side legitimately empty. The second clause
+	// is the active path: only drop Compose when the full label set doesn't
+	// fit the right text (cols-fullW-rightVis < 2) AND dropping to 3 labels
+	// actually creates room (cols-shortW-rightVis >= 2) — otherwise the right
+	// text won't fit either way and Compose stays, since losing it would gain
+	// nothing.
+	if cols < fullW || (rightVis > 0 && cols-fullW-rightVis < 2 && cols-shortW-rightVis >= 2) {
+		labels = footerLabels[:len(footerLabels)-1]
+	}
+
 	var left strings.Builder
 	var hits []hitRegion
 	col := 0
-	for i, l := range footerLabels {
+	for i, l := range labels {
 		if i > 0 {
 			left.WriteString(footerGap)
 			col += len(footerGap)
@@ -185,9 +241,6 @@ func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []
 	}
 	leftVis := col
 
-	right := inspectorFooterRight(view)
-	rightVis := utf8.RuneCountInString(right)
-
 	line := left.String()
 	if rightVis > 0 && cols-leftVis-rightVis >= 2 {
 		pad := cols - leftVis - rightVis
@@ -200,9 +253,50 @@ func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []
 	return hits
 }
 
+// inspectorComposeBar draws the send-keys compose row in place of the normal
+// footer while view.composing is true: a "> text_" prompt on the same
+// reverse-video bar the footer uses, styled after new_picker.go's
+// renderPromptInput (new_picker.go:221-230). No hit regions — clicking during
+// compose is out of scope; the box only responds to the keyboard.
+//
+// composeStatus is appended whenever non-empty, with no composeStatusUntil
+// expiry check: handleInspectorEvent (tui.go) sets it to "sending…" while
+// composing is still true, and on a failed send leaves composing true (by
+// design, so the text survives for a retry) with the failure message in
+// composeStatus. Neither of those is ever otherwise visible, since
+// inspectorFooter/inspectorFooterRight — the only other place composeStatus
+// renders, with the expiry check — is skipped entirely while composing. The
+// status stays until either the user's next submit attempt overwrites it with
+// a new "sending…", or cancels out of compose entirely: handleInspectorCompose
+// (tui_state.go) clears composeStatus/composeStatusUntil on Esc/Ctrl-C, since a
+// cancelled compose has nothing left to retry and a stale failure message must
+// not linger past it.
+func inspectorComposeBar(w io.Writer, view inspectorViewState, cols int) []hitRegion {
+	line := "> " + view.composeText + dim("_")
+	if view.composeStatus != "" {
+		line += "  " + dim(view.composeStatus)
+	}
+	fmt.Fprintln(w, ansiPreviewBar+clipLine(line, cols)+ansiReset)
+	return nil
+}
+
 // inspectorFooterRight is the source-plus-freshness-status text shown on the
-// footer's right when it fits, e.g. "tmux · LIVE ↓".
+// footer's right when it fits, e.g. "tmux · LIVE ↓". A recent compose-status
+// result (composeStatus, while composeStatusUntil hasn't passed) takes
+// priority over the normal freshness text — but this path is only ever
+// reached while composing is false, so it can only show the two statuses set
+// under that condition: "sent" (a successful submit clears composing before
+// setting it) and "no tmux pane" (armCompose's hint when 'i' is pressed on a
+// session with no pane to send into, tui_state.go). Every other status —
+// "sending…" and a failure message, both set while composing stays true so
+// the buffer survives for a retry — is rendered inside inspectorComposeBar
+// instead, since RenderInspector skips this footer entirely while composing.
+// Once composeStatusUntil passes, this falls back to the ordinary freshness
+// status.
 func inspectorFooterRight(view inspectorViewState) string {
+	if view.composeStatus != "" && time.Now().Before(view.composeStatusUntil) {
+		return view.composeStatus
+	}
 	status := inspectorStatusText(view)
 	src := view.snapshot.Source
 	switch {

@@ -457,6 +457,33 @@ func RunTUI(interval time.Duration) error {
 		render()
 	}
 
+	// sendKeysToInspected sends text into the currently-inspected session's
+	// tmux pane, dispatching local vs. remote exactly like every other action
+	// in this loop (target.Host != ""). Local goes through a fresh
+	// resolveLivePIDLocal (send_keys.go) so the pane address is current, not
+	// whatever this Session snapshot last polled; remote goes through the
+	// authed POST /sessions/{pid}/send-keys endpoint (server.go).
+	sendKeysToInspected := func(sess Session, text string) (bool, string) {
+		if sess.Host == "" {
+			live, err := resolveLivePIDLocal(sess.PID, sess.SessionID)
+			if err != nil {
+				return false, err.Error()
+			}
+			if err := sendKeys(live, text); err != nil {
+				return false, err.Error()
+			}
+			return true, ""
+		}
+		r, err := sendKeysRemote(sess.Host, sess.PID, sess.SessionID, text)
+		if err != nil {
+			return false, err.Error()
+		}
+		if !r.OK {
+			return false, r.Error
+		}
+		return true, ""
+	}
+
 	refresh(false)
 	render()
 
@@ -467,11 +494,16 @@ func RunTUI(interval time.Duration) error {
 
 	for {
 		timeout := time.Until(nextTick)
-		// While a toast is showing, wake at its deadline so the bottom line
+		// While a toast (session-list screen) or a compose-send status
+		// (inspector screen) is showing, wake at its deadline so the message
 		// clears on time. toastTick marks a wait capped for that reason: its
 		// expiry repaints only, leaving the wall-clock cadence untouched.
+		statusUntil := toastUntil
+		if state.mode == screenInspector {
+			statusUntil = state.inspector.composeStatusUntil
+		}
 		toastTick := false
-		if until := time.Until(toastUntil); until > 0 && until < timeout {
+		if until := time.Until(statusUntil); until > 0 && until < timeout {
 			timeout = until
 			toastTick = true
 		}
@@ -530,7 +562,7 @@ func RunTUI(interval time.Duration) error {
 		}
 		for _, ev := range events {
 			if state.mode == screenInspector {
-				if handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render, func() {
+				quit, absorb := handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render, func() {
 					screen.Invalidate()
 					actAttach(makeCtx())
 					refresh(true)
@@ -538,8 +570,17 @@ func RunTUI(interval time.Duration) error {
 					screen.Invalidate()
 					actKill(makeCtx())
 					refresh(true)
-				}) {
+				}, sendKeysToInspected)
+				if quit {
 					return nil
+				}
+				if absorb {
+					// A paste's trailing bytes after the newline that just
+					// submitted (or cancelled) compose mode belong to the
+					// compose box, not this screen's hotkeys — drop them
+					// rather than let e.g. a trailing 'k' fall through to
+					// kill. See handleInspectorEvent's doc comment.
+					break
 				}
 				continue
 			}
@@ -749,14 +790,32 @@ func RunTUI(interval time.Duration) error {
 }
 
 // handleInspectorEvent dispatches one decoded event while the inspector screen
-// is active. It returns true when the app should quit (Ctrl-C/Ctrl-D). Back
-// commands close the inspector; refresh/follow touch the hub or viewport;
-// scrolling keys and the wheel mutate the view and repaint. hubPtr is the loop's
-// inspectorHub variable so a Refresh reaches the live hub. Enter attaches to the
-// session (mirroring the session-list Enter binding) and closes the inspector.
-// 'k'/'K' opens the kill confirmation (mirroring the session-list 'k' binding)
-// and closes the inspector.
-func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach, kill func()) (quit bool) {
+// is active. It returns quit=true when the app should exit (Ctrl-C/Ctrl-D
+// outside compose mode, or Ctrl-D while composing — composing itself
+// intercepts a bare Ctrl-C as cancel, not quit). absorbBatch is true exactly
+// when this event ended compose mode (a successful submit or a cancel): the
+// caller must then drop any remaining events already queued from the same
+// input read (i.e. the rest of the current Feed()/decode batch — not
+// necessarily the rest of a paste: a remote send can block on sendText for up
+// to remoteRequest's ~30s timeout, and any key typed during that wait arrives
+// in a later, separate read after compose mode has already ended, so it is
+// NOT covered by this and dispatches as a normal hotkey instead of being
+// discarded). Without this, a paste containing an embedded newline mid-buffer
+// would submit on that newline and let its trailing bytes fall through to
+// this screen's normal hotkeys (e.g. 'k' triggering kill) instead of being
+// discarded along with the rest of the batch. Back commands close the
+// inspector; refresh/follow touch the hub or viewport; scrolling keys and the
+// wheel mutate the view and repaint. hubPtr is the loop's inspectorHub
+// variable so a Refresh reaches the live hub. Enter attaches to the session
+// (mirroring the session-list Enter binding) and closes the inspector — but
+// only outside compose mode, where Enter instead submits the compose buffer.
+// 'k'/'K' opens the kill confirmation (mirroring the session-list 'k'
+// binding) and closes the inspector. 'i' and a click on the footer's Compose
+// control both arm compose mode via state.armCompose(), which no-ops with a
+// dim "no tmux pane" hint when the session has no pane to send into. sendText
+// performs the actual send (local vs. remote is the caller's concern, not
+// this function's) and is only ever invoked with a non-empty compose buffer.
+func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach, kill func(), sendText func(Session, string) (bool, string)) (quit, absorbBatch bool) {
 	if ev.kind == eventMouse {
 		switch state.handleInspectorMouse(ev.mouse) {
 		case commandBack:
@@ -768,24 +827,64 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 		case commandFollowInspector:
 			state.inspector.followBottom()
 			render()
+		case commandComposeInspector:
+			state.armCompose()
+			render()
 		case commandRender:
 			render()
 		}
-		return false
+		return false, false
+	}
+
+	if state.inspector.composing {
+		if ev.key == "\x04" {
+			return true, false
+		}
+		submit, cancel := state.handleInspectorCompose(ev.key)
+		switch {
+		case cancel:
+			render()
+			return false, true
+		case submit:
+			text := state.inspector.composeText
+			sess := state.inspector.snapshot.Session
+			state.inspector.composeStatus = "sending…"
+			render()
+			ok, msg := sendText(sess, text)
+			state.inspector.composeStatusUntil = time.Now().Add(4 * time.Second)
+			if ok {
+				state.inspector.composing = false
+				state.inspector.composeText = ""
+				state.inspector.composeStatus = "sent"
+			} else {
+				state.inspector.composeStatus = msg
+			}
+			render()
+			return false, !state.inspector.composing
+		default:
+			render()
+			return false, false
+		}
 	}
 
 	if ev.key == KeyEnter {
 		attach()
 		closeInspector()
-		return false
+		return false, false
+	}
+
+	if ev.key == "i" {
+		state.armCompose()
+		render()
+		return false, false
 	}
 
 	switch inspectorKeyCommand(ev.key) {
 	case commandQuit:
-		return true
+		return true, false
 	case commandBack:
 		closeInspector()
-		return false
+		return false, false
 	}
 
 	switch state.handleInspectorKey(ev.key) {
@@ -804,7 +903,7 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 	case commandRender:
 		render()
 	}
-	return false
+	return false, false
 }
 
 // sortRemotes returns a copy of the hub snapshot with each section's sessions

@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -63,12 +64,12 @@ func TestRenderInspectorMetadataAndLiveFooter(t *testing.T) {
 	var b strings.Builder
 	hits := RenderInspector(&b, v, 100, 20)
 	out := b.String()
-	for _, want := range []string{"api-refactor", "PID 42", "dev", "opus", "busy", "LIVE", "Back", "Refresh", "Follow"} {
+	for _, want := range []string{"api-refactor", "PID 42", "dev", "opus", "busy", "LIVE", "Back", "Refresh", "Follow", "Compose"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	if !hasHit(hits, hitInspectorBack) || !hasHit(hits, hitInspectorRefresh) || !hasHit(hits, hitInspectorFollow) {
+	if !hasHit(hits, hitInspectorBack) || !hasHit(hits, hitInspectorRefresh) || !hasHit(hits, hitInspectorFollow) || !hasHit(hits, hitInspectorCompose) {
 		t.Fatalf("footer hits = %#v", hits)
 	}
 }
@@ -254,8 +255,175 @@ func TestRenderInspectorClipsEveryLine(t *testing.T) {
 	}
 }
 
+func TestRenderInspectorComposingShowsInputBar(t *testing.T) {
+	var buf strings.Builder
+	view := inspectorViewState{
+		viewportRows: 10,
+		composing:    true,
+		composeText:  "hello",
+		snapshot:     InspectorSnapshot{Session: Session{PID: 1}},
+	}
+	RenderInspector(&buf, view, 80, 14)
+	if !strings.Contains(buf.String(), "> hello") {
+		t.Fatalf("output = %q, want it to contain the compose prompt", buf.String())
+	}
+}
+
+func TestRenderInspectorComposingShowsSendingStatus(t *testing.T) {
+	var buf strings.Builder
+	view := inspectorViewState{
+		viewportRows:  10,
+		composing:     true,
+		composeText:   "hello",
+		composeStatus: "sending…",
+		snapshot:      InspectorSnapshot{Session: Session{PID: 1}},
+	}
+	RenderInspector(&buf, view, 80, 14)
+	out := buf.String()
+	if !strings.Contains(out, "> hello") {
+		t.Fatalf("output = %q, want it to contain the compose prompt", out)
+	}
+	if !strings.Contains(out, "sending…") {
+		t.Fatalf("output = %q, want it to contain the in-flight send status", out)
+	}
+}
+
+func TestRenderInspectorComposingShowsFailureStatus(t *testing.T) {
+	var buf strings.Builder
+	view := inspectorViewState{
+		viewportRows:  10,
+		composing:     true,
+		composeText:   "hello",
+		composeStatus: "send failed: broken pipe",
+		snapshot:      InspectorSnapshot{Session: Session{PID: 1}},
+	}
+	RenderInspector(&buf, view, 80, 14)
+	out := buf.String()
+	if !strings.Contains(out, "> hello") {
+		t.Fatalf("output = %q, want it to still contain the compose prompt so the user can retry", out)
+	}
+	if !strings.Contains(out, "send failed: broken pipe") {
+		t.Fatalf("output = %q, want it to contain the failure message", out)
+	}
+}
+
+func TestInspectorFooterRightShowsComposeStatusBeforeExpiry(t *testing.T) {
+	view := inspectorViewState{
+		composeStatus:      "sent",
+		composeStatusUntil: time.Now().Add(1 * time.Minute),
+	}
+	if got := inspectorFooterRight(view); got != "sent" {
+		t.Fatalf("inspectorFooterRight = %q, want sent", got)
+	}
+}
+
+func TestInspectorFooterRightFallsBackAfterExpiry(t *testing.T) {
+	view := inspectorViewState{
+		composeStatus:      "sent",
+		composeStatusUntil: time.Now().Add(-1 * time.Minute),
+		follow:             true,
+	}
+	if got := inspectorFooterRight(view); got != "LIVE ↓" {
+		t.Fatalf("inspectorFooterRight = %q, want LIVE ↓ (status expired, fall back to freshness text)", got)
+	}
+}
+
+// TestRenderInspectorFooterRightWinsOverComposeWhenNarrow is a regression test
+// for the width-threshold bug: adding the "Compose" footer-left label grew the
+// left side from 21 to 30 visible columns, which pushed every footer-right
+// threshold up by 9 and re-hid text — including the "no tmux pane" hint — at
+// widths (like 35) where it used to fit. cols=35 fits the pre-Compose 3-label
+// footer ("Back  Refresh  Follow" = 21 cols) plus "no tmux pane" (12 runes)
+// with room to spare (21+12+2=35), but does not fit the 4-label footer
+// (30+12+2=44). Compose must be the one dropped so the hint stays visible.
+func TestRenderInspectorFooterRightWinsOverComposeWhenNarrow(t *testing.T) {
+	v := populatedInspectorView()
+	v.composeStatus = "no tmux pane"
+	v.composeStatusUntil = time.Now().Add(4 * time.Second)
+	var b strings.Builder
+	hits := RenderInspector(&b, v, 35, 20)
+	out := b.String()
+
+	if !strings.Contains(out, "no tmux pane") {
+		t.Fatalf("footer-right hint dropped at cols=35:\n%s", out)
+	}
+	if strings.Contains(out, "Compose") {
+		t.Fatalf("Compose label should have been dropped to make room at cols=35:\n%s", out)
+	}
+	for _, want := range []string{"Back", "Refresh", "Follow"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("footer-left label %q missing at cols=35:\n%s", want, out)
+		}
+	}
+	if !hasHit(hits, hitInspectorBack) || !hasHit(hits, hitInspectorRefresh) || !hasHit(hits, hitInspectorFollow) {
+		t.Fatalf("footer hits missing a floor control at cols=35: %#v", hits)
+	}
+	if hasHit(hits, hitInspectorCompose) {
+		t.Fatalf("Compose hit region should not exist when its label is dropped: %#v", hits)
+	}
+	for _, ln := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if visibleWidth(ln) > 35 {
+			t.Fatalf("line exceeds width: %q (%d cols)", ln, visibleWidth(ln))
+		}
+	}
+}
+
+// TestRenderInspectorFooterAtMinColsNeverOverflows exercises the floor of the
+// drop logic: cols=24 is minInspectorCols, and the longest realistic
+// footer-right text ("tmux · SESSION ENDED", 20 runes) can't fit alongside
+// even the 3-label floor (21+20+2=43 > 24). Compose must still be dropped
+// (its label would otherwise clip mid-word, since the full 4-label footer is
+// 30 cols on its own), the floor controls must still render and stay
+// clickable, and — the actual regression class this guards against — no
+// emitted line may exceed cols regardless of how the drop math falls out.
+func TestRenderInspectorFooterAtMinColsNeverOverflows(t *testing.T) {
+	v := populatedInspectorView()
+	v.snapshot.Ended = true // longest footer-right text: "tmux · SESSION ENDED"
+	var b strings.Builder
+	hits := RenderInspector(&b, v, minInspectorCols, 20)
+	out := b.String()
+
+	if strings.Contains(out, "Compose") {
+		t.Fatalf("Compose label should have been dropped at cols=%d:\n%s", minInspectorCols, out)
+	}
+	if hasHit(hits, hitInspectorCompose) {
+		t.Fatalf("Compose hit region should not exist when its label is dropped at cols=%d: %#v", minInspectorCols, hits)
+	}
+	if !hasHit(hits, hitInspectorBack) || !hasHit(hits, hitInspectorRefresh) || !hasHit(hits, hitInspectorFollow) {
+		t.Fatalf("footer hits missing a floor control at cols=%d: %#v", minInspectorCols, hits)
+	}
+	for _, ln := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if visibleWidth(ln) > minInspectorCols {
+			t.Fatalf("line exceeds width: %q (%d cols, want <= %d)", ln, visibleWidth(ln), minInspectorCols)
+		}
+	}
+}
+
+// TestRenderInspectorFooterShowsComposeWhenRoomAllows confirms Compose is not
+// dropped unconditionally — once cols is wide enough for both the full
+// 4-label footer-left and the footer-right text (44 cols for a 12-rune hint:
+// 30+12+2), both render together.
+func TestRenderInspectorFooterShowsComposeWhenRoomAllows(t *testing.T) {
+	v := populatedInspectorView()
+	v.composeStatus = "no tmux pane"
+	v.composeStatusUntil = time.Now().Add(4 * time.Second)
+	var b strings.Builder
+	hits := RenderInspector(&b, v, 44, 20)
+	out := b.String()
+
+	if !strings.Contains(out, "no tmux pane") {
+		t.Fatalf("footer-right hint missing at cols=44:\n%s", out)
+	}
+	if !strings.Contains(out, "Compose") {
+		t.Fatalf("Compose label unnecessarily dropped at cols=44:\n%s", out)
+	}
+	if !hasHit(hits, hitInspectorCompose) {
+		t.Fatalf("Compose hit region missing at cols=44: %#v", hits)
+	}
+}
+
 // TestRenderInspectorFooterHitColumns checks the footer hit regions land on the
-// visible label columns of "Back  Refresh  Follow".
+// visible label columns of "Back  Refresh  Follow  Compose".
 func TestRenderInspectorFooterHitColumns(t *testing.T) {
 	v := populatedInspectorView()
 	var b strings.Builder
@@ -265,6 +433,7 @@ func TestRenderInspectorFooterHitColumns(t *testing.T) {
 		hitInspectorBack:    {0, 3},   // "Back"
 		hitInspectorRefresh: {6, 12},  // "Refresh"
 		hitInspectorFollow:  {15, 20}, // "Follow"
+		hitInspectorCompose: {23, 29}, // "Compose"
 	}
 	footerY := 20 - 1
 	for _, h := range hits {

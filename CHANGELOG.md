@@ -9,6 +9,10 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Inspector: press `i` to compose a line of text and send it as literal
+  keystrokes (`tmux send-keys -l`) into the selected session's tmux pane,
+  local or remote. Disabled with a "no tmux pane" hint when the session has
+  none; a failed send keeps the buffer so it can be corrected and resent.
 - `POST /sessions/{pid}/kill` and `POST /sessions/{pid}/migrate` accept an
   optional `{"session_id": "…"}` precondition. A PID on its own proves nothing
   once a tmux pane has been recycled and handed that number to a different
