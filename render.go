@@ -588,9 +588,11 @@ type accountUsageLine struct {
 	// session, so rendering it bare would let snapshot data pass as the local
 	// account's current state — the same masquerade this flag exists to stop.
 	mine bool
-	// stale marks a line whose info was carried forward from an earlier poll
-	// because the latest one failed transiently. It still renders bars — old
-	// numbers beat no numbers — plus a dim marker so they can't pass as live.
+	// stale marks a line whose info was carried forward from an earlier poll:
+	// a pass-2 snapshot account whose latest attempt failed transiently, or a
+	// pass-1 live account whose latest pass was skipped outright by an armed
+	// backoff. It still renders bars — old numbers beat no numbers — plus a dim
+	// marker so they can't pass as live.
 	stale bool
 	// placeholder is the dim text a known account with no numbers renders
 	// instead of bars: "auth expired" for a dead credential (the actionable
@@ -654,7 +656,10 @@ func accountLocalPart(email string) string {
 // distinct accounts that happen to share a local-part (andy@trecs.aero,
 // andy@avisoma.com) would otherwise render identical, indistinguishable
 // labels, so a final pass promotes any colliding known-account labels to the
-// full email.
+// full email. A live line whose numbers were carried forward (AccountUsage.Stale
+// — newUsageFetcher re-serving through a throttle) keeps its bars and takes the
+// same dim "stale" marker a snapshot line does; it is purely a marker, and
+// changes neither which line wins an email collision nor what mine means.
 //
 // A second pass then appends the accounts no host is currently logged into: the
 // credential snapshots claude-switch left behind (localKnown, then each
@@ -672,13 +677,13 @@ func accountLocalPart(email string) string {
 func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes []RemoteResult) []accountUsageLine {
 	var lines []accountUsageLine
 	seen := make(map[string]bool)
-	add := func(account, host string, info *UsageInfo, isLocal bool) {
+	add := func(account, host string, info *UsageInfo, stale, isLocal bool) {
 		if info == nil {
 			return
 		}
 		mine := isLocal || (account != "" && strings.EqualFold(account, local.Account))
 		if account == "" {
-			lines = append(lines, accountUsageLine{label: host, info: info, mine: mine})
+			lines = append(lines, accountUsageLine{label: host, info: info, mine: mine, stale: stale})
 			return
 		}
 		key := strings.ToLower(account)
@@ -686,12 +691,12 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 			return
 		}
 		seen[key] = true
-		lines = append(lines, accountUsageLine{label: accountLocalPart(account), email: account, info: info, mine: mine})
+		lines = append(lines, accountUsageLine{label: accountLocalPart(account), email: account, info: info, mine: mine, stale: stale})
 	}
-	add(local.Account, "local", local.Info, true)
+	add(local.Account, "local", local.Info, local.Stale, true)
 	for _, r := range remotes {
 		if r.Usage != nil {
-			add(r.Usage.Account, r.Name, r.Usage.Info, false)
+			add(r.Usage.Account, r.Name, r.Usage.Info, r.Usage.Stale, false)
 		}
 	}
 	// Pass 2: known (snapshot-derived) accounts. knownSeen maps each key (namespaced

@@ -631,6 +631,48 @@ func TestDedupeAccountsKnownAccounts(t *testing.T) {
 		}
 	})
 
+	t.Run("a stale live line is marked but still wins its slot", func(t *testing.T) {
+		// newUsageFetcher re-serves the live account's numbers through a throttle,
+		// so a pass-1 line can be carried-forward now too. The marker is the only
+		// change: precedence is untouched, so this line still beats any host's
+		// snapshot copy of the same account — showing your OWN account's
+		// last-known reading is the point of that rule, however old it is.
+		local := AccountUsage{Account: "andy@trecs.aero", Info: info(), Stale: true}
+		localKnown := []KnownAccountUsage{{
+			Name: "trecs", Account: "andy@trecs.aero", Info: info(),
+		}}
+		got := dedupeAccounts(local, localKnown, nil)
+		if len(got) != 1 {
+			t.Fatalf("labels = %v, want the snapshot copy still shadowed by the live line", labels(got))
+		}
+		if !got[0].stale {
+			t.Error("carried-forward live numbers must be marked, or they pass as live")
+		}
+		if !got[0].mine {
+			t.Error("staleness must not cost the live line its mine flag")
+		}
+		if got[0].info == nil || got[0].placeholder != "" {
+			t.Errorf("got %#v, want the carried-forward bars", got[0])
+		}
+	})
+
+	t.Run("a stale remote live line keeps its marker", func(t *testing.T) {
+		remotes := []RemoteResult{{Name: "pi", Usage: &AccountUsage{
+			Account: "andy@spare.dev", Info: info(), Stale: true,
+		}}}
+		got := dedupeAccounts(AccountUsage{}, nil, remotes)
+		if len(got) != 1 || !got[0].stale {
+			t.Fatalf("got %#v, want the remote's carried-forward numbers marked", got)
+		}
+	})
+
+	t.Run("a fresh live line is not marked", func(t *testing.T) {
+		got := dedupeAccounts(AccountUsage{Account: "andy@trecs.aero", Info: info()}, nil, nil)
+		if len(got) != 1 || got[0].stale {
+			t.Fatalf("got %#v, want an unmarked line", got)
+		}
+	})
+
 	t.Run("an entry with no info, no expiry and no reason is dropped", func(t *testing.T) {
 		// This is the ignored account: /usage reports every account it was told
 		// to skip with bare identity and no numbers, so the Ctrl+W picker keeps
@@ -770,6 +812,40 @@ func TestWriteUsageHeaderMarksStaleNumbers(t *testing.T) {
 	}
 	if strings.Contains(lines[0], usageStaleText) {
 		t.Fatalf("fresh line picked up the marker: %q", lines[0])
+	}
+}
+
+// A sole line attributable to this machine renders bare — no label at all — and
+// that is now a shape a carried-forward reading can take, since newUsageFetcher
+// re-serves the live account through a throttle. The marker hangs off the last
+// segment while also feeding suffixW into the shared bar width, so the bare
+// layout is the one place a sizing surprise could swallow it.
+func TestWriteUsageHeaderMarksASoleBareLocalLine(t *testing.T) {
+	stale := []accountUsageLine{{
+		label: "avisoma", email: "andy@avisoma.com",
+		info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, mine: true, stale: true,
+	}}
+	fresh := []accountUsageLine{{
+		label: "avisoma", email: "andy@avisoma.com",
+		info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, mine: true,
+	}}
+	var a, b strings.Builder
+	writeUsageHeader(&a, fresh, nil, 100)
+	writeUsageHeader(&b, stale, nil, 100)
+	freshLine := strings.TrimRight(a.String(), "\n")
+	staleLine := strings.TrimRight(b.String(), "\n")
+
+	if !strings.Contains(staleLine, "5h") || !strings.Contains(staleLine, "63%") {
+		t.Fatalf("bare stale line lost its bars: %q", staleLine)
+	}
+	if !strings.HasSuffix(staleLine, " "+dim(usageStaleText)) {
+		t.Fatalf("bare stale line = %q, want the marker at the end", staleLine)
+	}
+	if strings.Contains(freshLine, usageStaleText) {
+		t.Fatalf("fresh bare line picked up the marker: %q", freshLine)
+	}
+	if strings.Contains(staleLine, "avisoma") {
+		t.Fatalf("the marker cost the sole local line its bare layout: %q", staleLine)
 	}
 }
 

@@ -61,6 +61,22 @@ type UsageInfo struct {
 type AccountUsage struct {
 	Account string     `json:"account"` // email, "" when unknown
 	Info    *UsageInfo `json:"info"`
+	// Stale marks numbers carried forward from an earlier poll because the
+	// latest one was skipped by the backoff, mirroring KnownAccountUsage.Stale:
+	// the bars still render (old numbers beat no numbers) beside a dim marker,
+	// and localFreshAccountEmails treats the account as one this machine cannot
+	// currently vouch for.
+	Stale bool `json:"stale,omitempty"`
+	// FetchedAt is when Info was actually fetched, not when this struct was
+	// built — a carried-forward reading keeps the original timestamp, which is
+	// what bounds how long staleness may accumulate (usageCacheMaxAge). Only
+	// fetchUsage sets it; the server's on-demand /usage handler has no memory to
+	// carry anything forward, so it never produces a Stale reading either.
+	//
+	// omitzero, not omitempty: encoding/json never considers a struct empty, so
+	// omitempty on a time.Time does nothing and every snapshot with no numbers
+	// would ship a "0001-01-01T00:00:00Z".
+	FetchedAt time.Time `json:"fetchedAt,omitzero"`
 }
 
 // parseUsage decodes the /api/oauth/usage response body. The overall
@@ -213,6 +229,10 @@ func parseOAuthCredentials(data []byte) (string, error) {
 // fetch time, like the token; an unreadable email yields Account "" (not an
 // error). The HTTP leg has a 5s timeout; token loading (macOS Keychain) and the
 // email read are off the render path in the poller's background goroutine.
+//
+// This is the only place AccountUsage.FetchedAt is stamped: it dates the numbers
+// themselves, so everything that re-serves them (newUsageFetcher) carries the
+// original timestamp forward rather than restamping it.
 func fetchUsage() (*AccountUsage, error) {
 	tok, err := loadOAuthToken()
 	if err != nil {
@@ -222,7 +242,7 @@ func fetchUsage() (*AccountUsage, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &AccountUsage{Account: loadAccountEmail(), Info: info}, nil
+	return &AccountUsage{Account: loadAccountEmail(), Info: info, FetchedAt: time.Now()}, nil
 }
 
 // fetchUsageInfo is the HTTP leg alone: one usage fetch for an arbitrary OAuth
@@ -515,6 +535,30 @@ func loadUsageCache() *AccountUsage {
 // Snapshot, Pause, Resume, Kick, Shutdown — is unchanged.
 type UsageHub = usagePoller[AccountUsage]
 
+// liveCarryable reports whether the live account's last good reading may be
+// re-served in place of a fetch the backoff is holding. It is carryable
+// (known_accounts.go) in the one-account shape: same numbers-and-age test as
+// fresh, plus the same identity test, against the email that is live right now.
+//
+// The identity half is what carryable documents at length — last is keyed by
+// nothing at all, it is simply "whoever was live last time", and fetchUsage
+// re-reads the email every fetch precisely so a switch re-attributes the
+// limits. An unconfirmable email on either side never carries: putting an
+// account's bars on screen means knowing whose they are.
+//
+// The age half is what stops a throttle that never lifts from showing hours-old
+// percentages as current, and it is what localFreshAccountEmails needs in order
+// to stop telling every remote host to skip an account nobody has current
+// numbers for. The explicit zero check is also how a disk seed written before
+// AccountUsage carried a timestamp reads as non-carryable rather than eternally
+// young — the same one-time drop loadKnownAccountsCache takes for its own
+// pre-timestamp entries.
+func liveCarryable(last *AccountUsage, live string) bool {
+	return last != nil && last.Info != nil && !last.FetchedAt.IsZero() &&
+		time.Since(last.FetchedAt) <= usageCacheMaxAge &&
+		last.Account != "" && live != "" && strings.EqualFold(last.Account, live)
+}
+
 // newUsageFetcher wraps a live-account usage fetch with the same consecutive-429
 // backoff newKnownAccountsFetcher applies per snapshot account — the one-account
 // shape of it, so a single usageBackoff replaces that closure's map. The live
@@ -533,21 +577,33 @@ type UsageHub = usagePoller[AccountUsage]
 // round trip. Nothing observable changes for the header either way — the poller
 // already keeps the previous value visible across a failed refresh.
 //
-// last is nil until the first success (seeded from the disk cache, so a restart
-// mid-throttle can re-serve too). While it is nil there is nothing to serve
-// instead, so a backed-off pass falls through and attempts the fetch anyway:
-// fabricating a success with no numbers is not an option, and the error that
-// comes back is exactly the pre-existing behaviour for that case.
+// A re-serve is gated on liveCarryable — the account must still be the one that
+// is live, and its numbers must still be young enough to inform. Re-serving is a
+// *copy* marked Stale, so the stored last keeps its original FetchedAt and the
+// carry stays bounded (restamping it would let a permanently throttled account
+// look permanently fresh, the failure KnownAccountUsage avoids the same way),
+// and downstream can tell carried numbers from live ones.
 //
-// A re-serve is gated on identity for the reason carryable (known_accounts.go)
-// documents: last is keyed by nothing at all — it is simply "whoever was live
-// last time" — and fetchUsage's whole point is that it re-reads the account
-// email every fetch, so a switch (Ctrl+W, a relogin, a warm start from a cache
-// written before either) would otherwise keep the previous account's bars on
-// screen under its own email for the length of the wait. Misattributing usage
-// across accounts is worse than the round trip skipping it saves. A changed
-// identity drops both memories: the wait was armed against another account's
-// budget, and its numbers are not this one's.
+// When there is nothing safe to re-serve — no last at all (a cold start, or an
+// account that has never once succeeded), an identity that cannot be confirmed,
+// or numbers past usageCacheMaxAge — an armed wait returns a bare identity
+// placeholder (the live email, no Info) as a success, and still does not fetch.
+// This is the whole point of the wait: falling through to a real fetch here was
+// a no-op backoff, and it fired in exactly the case the mechanism exists for —
+// a fresh TUI launch against an already-throttled account, where the 429 became
+// an error and usagePoller.run answered it with its own 5s-doubling retry, the
+// burst this is meant to prevent. That path had no equivalent on the
+// known-accounts side, whose batch fetch never returns an error for one
+// account's failure and so can never wake the generic retry.
+//
+// An unconfirmable identity used to fetch rather than re-serve, on the grounds
+// that showing an account's bars means knowing whose they are. The placeholder
+// is a third option that did not exist then and dominates both: it shows no
+// numbers at all, so there is nothing to misattribute, and it costs no request.
+// A *confirmed* switch is the one case that still forces a fetch — the wait was
+// armed against the previous account's budget and the numbers on hand are not
+// this one's, so both memories are dropped and this pass has nothing whatsoever
+// to say about the new account until it asks.
 //
 // fetch is a parameter rather than a package var so a test can drive the whole
 // state machine with a counter and no seam into the network or the Keychain
@@ -561,21 +617,33 @@ func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) fu
 	var backoff usageBackoff
 	return func() (*AccountUsage, error) {
 		now := time.Now()
-		if !backoff.due(now) && last != nil {
+		// An explicit flag, not backoff's zero value: the confirmed-switch branch
+		// below has to force a real fetch even though the wait is armed, since the
+		// wait says nothing about the account that just arrived.
+		attempt := backoff.due(now)
+		if !attempt {
 			live := loadAccountEmail()
 			switch {
-			case live != "" && last.Account != "" && strings.EqualFold(last.Account, live):
-				return last, nil
-			case live != "" && last.Account != "":
+			case live != "" && last != nil && last.Account != "" && !strings.EqualFold(last.Account, live):
 				// A different account is logged in now: the wait was armed against
 				// the previous one's budget and those numbers are not this one's, so
 				// neither memory survives the switch.
 				last, backoff = nil, usageBackoff{}
+				attempt = true
+			case liveCarryable(last, live):
+				// A copy, never the stored pointer: last must keep its original
+				// FetchedAt so the carry stays bounded, and must not itself become
+				// stale — a later real fetch replaces it wholesale anyway.
+				carried := *last
+				carried.Stale = true
+				return &carried, nil
+			default:
+				// Nothing safe to re-serve. Identity only, no numbers, and no
+				// request — see the doc comment. last is deliberately left where it
+				// is: a too-old reading is not a wrong one, a success overwrites it,
+				// and clearing it would buy nothing.
+				return &AccountUsage{Account: live}, nil
 			}
-			// Identity unconfirmable (either side unreadable): fetch rather than
-			// re-serve, since putting an account's bars on screen means knowing it is
-			// still the account on screen — but keep the memory, because a file that
-			// could not be read this pass says nothing about whose numbers these are.
 		}
 		u, err := fetch()
 		if err != nil {
@@ -604,16 +672,21 @@ func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) fu
 // failure KnownAccountUsage avoids by carrying prev's *original* FetchedAt
 // forward rather than restamping it.
 //
-// Identity, not equality, is the test: the skip path returns the very pointer it
-// was handed, so pointer comparison separates "re-served" from "fetched again"
-// exactly, with no assumption about whether two fetches that happen to agree
-// should count as one. seed is the same snapshot the fetcher starts as its last,
-// so a first pass that lands mid-throttle re-serves it without rewriting the
-// cache entry it came from.
+// Only a genuinely fetched reading reaches disk, which takes three tests. A
+// carried-forward reading is a fresh *copy* each pass, so pointer identity alone
+// no longer recognises it — Stale is what names it, and persisting one would
+// restamp the envelope with numbers that never moved, exactly the failure above.
+// A placeholder (no Info) is worse than useless on disk: loadUsageCache reads a
+// nil-Info entry as a miss, so writing one over a good cache file would not just
+// stale the warm start but destroy it. And identity still separates a re-served
+// pointer from a fetched one with no assumption about whether two fetches that
+// happen to agree should count as one; seed is the same snapshot the fetcher
+// starts as its last, so a first pass that lands mid-throttle re-serves it
+// without rewriting the cache entry it came from.
 func saveOnceUsage(seed *AccountUsage, save func(*AccountUsage)) func(*AccountUsage) {
 	saved := seed
 	return func(u *AccountUsage) {
-		if u == saved {
+		if u == saved || u == nil || u.Info == nil || u.Stale {
 			return
 		}
 		saved = u

@@ -194,6 +194,12 @@ func (h *RemoteUsageHub) Snapshot() map[string]usageResponse {
 // numbers for, turning one transient 429 here into a blank (or "auth expired")
 // bar everywhere — the opposite of what fewer pollers is meant to achieve. Same
 // for an account with no email: an empty ignore entry names nothing.
+//
+// Stale is excluded on both sides for that identical reason. Carried-forward
+// numbers are this machine's memory of an account it currently cannot reach, not
+// numbers it can vouch for, and a host that CAN reach the account must not be
+// told to skip it. The live account earns the rule the same way a snapshot
+// account does, now that newUsageFetcher carries its numbers forward too.
 func localFreshAccountEmails(live *AccountUsage, known []KnownAccountUsage) []string {
 	seen := make(map[string]bool)
 	var out []string
@@ -205,14 +211,10 @@ func localFreshAccountEmails(live *AccountUsage, known []KnownAccountUsage) []st
 		seen[key] = true
 		out = append(out, key)
 	}
-	if live != nil && live.Info != nil {
+	if live != nil && live.Info != nil && !live.Stale {
 		add(live.Account)
 	}
 	for _, k := range known {
-		// Stale counts as "cannot vouch for it", exactly like expired: carried-
-		// forward numbers are this machine's memory of an account it currently
-		// cannot reach, and telling every remote to skip it would spread one
-		// local blip everywhere instead of letting a healthy host answer.
 		if k.Expired || k.Stale || k.Info == nil {
 			continue
 		}
