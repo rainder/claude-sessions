@@ -463,6 +463,31 @@ func sendKeysRemote(host string, pid int, sessionID, text string) (actionResult,
 	return r, nil
 }
 
+// resizeRemote asks host's server to resize (revert=false) or un-pin
+// (revert=true) pid's tmux window. Mirrors sendKeysRemote: sessionID is
+// never optional, since this is a new endpoint with no legacy caller to
+// stay compatible with (see resizeBody, server.go).
+func resizeRemote(host string, pid int, sessionID string, cols, rows int, revert bool) (actionResult, error) {
+	body, err := json.Marshal(map[string]any{
+		"session_id": sessionID,
+		"cols":       cols,
+		"rows":       rows,
+		"revert":     revert,
+	})
+	if err != nil {
+		return actionResult{}, err
+	}
+	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/resize", pid), "POST", body)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var r actionResult
+	if err := json.Unmarshal(resp, &r); err != nil {
+		return actionResult{}, err
+	}
+	return r, nil
+}
+
 // migrateRemote asks host's server to migrate pid, same sessionID contract
 // as killRemote.
 func migrateRemote(host string, pid int, sessionID string) (actionResult, error) {

@@ -165,6 +165,51 @@ func TestSendKeysRemotePropagatesRefusal(t *testing.T) {
 	}
 }
 
+func TestResizeRemoteSendsSessionIDColsRowsRevert(t *testing.T) {
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := resizeRemote("box", 42, "sess-1", 120, 40, false)
+	if err != nil || !r.OK {
+		t.Fatalf("resizeRemote = (%#v, %v)", r, err)
+	}
+	if string(gotBody) != `{"cols":120,"revert":false,"rows":40,"session_id":"sess-1"}` {
+		t.Fatalf("body = %s, want session_id/cols/rows/revert", gotBody)
+	}
+}
+
+func TestResizeRemotePropagatesRefusal(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"error":"PID 42 is a different session now","code":"session_mismatch"}`))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	r, err := resizeRemote("box", 42, "sess-stale", 120, 40, false)
+	if err != nil {
+		t.Fatalf("resizeRemote err = %v", err)
+	}
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("result = %+v, want refusal with codeSessionMismatch", r)
+	}
+}
+
 func TestKillRemoteSendsSessionIDWhenKnown(t *testing.T) {
 	var gotBody []byte
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
