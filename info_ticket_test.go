@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestDetectTicketID(t *testing.T) {
 	cases := []struct {
@@ -23,5 +28,67 @@ func TestDetectTicketID(t *testing.T) {
 				t.Errorf("detectTicketID(%q, %q) = %q, want %q", c.cwd, c.sess, got, c.want)
 			}
 		})
+	}
+}
+
+func TestFetchTicketSummarySuccess(t *testing.T) {
+	prevCu, prevClaude := cuFetchFunc, claudeSummarizeFunc
+	t.Cleanup(func() { cuFetchFunc, claudeSummarizeFunc = prevCu, prevClaude })
+
+	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
+		return []byte("raw ticket text"), nil
+	}
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		if instruction != ticketSummaryInstruction {
+			t.Errorf("instruction = %q", instruction)
+		}
+		if string(input) != "raw ticket text" {
+			t.Errorf("input = %q", input)
+		}
+		return []byte("  short summary  \n"), nil
+	}
+
+	got, err := fetchTicketSummary(context.Background(), "DR-1")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got.Content != "short summary" {
+		t.Errorf("Content = %q, want trimmed summary", got.Content)
+	}
+	if got.Label != "DR-1" {
+		t.Errorf("Label = %q", got.Label)
+	}
+}
+
+func TestFetchTicketSummaryCuFails(t *testing.T) {
+	prevCu := cuFetchFunc
+	t.Cleanup(func() { cuFetchFunc = prevCu })
+	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
+		return nil, errors.New("network down")
+	}
+	_, err := fetchTicketSummary(context.Background(), "DR-1")
+	if err == nil {
+		t.Fatal("want non-nil error when cu fetch fails")
+	}
+}
+
+func TestFetchTicketSummaryClaudeFailsFallsBackToRaw(t *testing.T) {
+	prevCu, prevClaude := cuFetchFunc, claudeSummarizeFunc
+	t.Cleanup(func() { cuFetchFunc, claudeSummarizeFunc = prevCu, prevClaude })
+	cuFetchFunc = func(ctx context.Context, id string) ([]byte, error) {
+		return []byte("raw ticket text"), nil
+	}
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return nil, errors.New("rate limited")
+	}
+	got, err := fetchTicketSummary(context.Background(), "DR-1")
+	if err != nil {
+		t.Fatalf("err = %v, want nil (raw fallback is not an error)", err)
+	}
+	if !strings.Contains(got.Content, "raw ticket text") {
+		t.Errorf("Content = %q, want it to contain the raw text", got.Content)
+	}
+	if !strings.Contains(got.Content, "summary unavailable") {
+		t.Errorf("Content = %q, want a summary-unavailable note", got.Content)
 	}
 }
