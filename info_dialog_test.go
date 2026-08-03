@@ -8,23 +8,30 @@ import (
 )
 
 func TestInfoDialogHeaderUsesUpdatedAtWhenPresent(t *testing.T) {
-	s := Session{Name: "my-session", CWD: "/tmp/nogit", StartedAt: 1000, UpdatedAt: 2000}
+	started := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC).UnixMilli()
+	updated := time.Date(2026, 1, 1, 10, 15, 0, 0, time.UTC).UnixMilli()
+	s := Session{Name: "my-session", CWD: "/tmp/nogit", StartedAt: started, UpdatedAt: updated}
 	lines := infoDialogHeader(s)
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "my-session") {
 		t.Errorf("header missing name: %v", lines)
 	}
-	want := time.UnixMilli(2000).Format("2006-01-02 15:04")
-	if !strings.Contains(joined, "updated: "+want) {
-		t.Errorf("header should use UpdatedAt (%s), got: %v", want, lines)
+	wantUpdated := time.UnixMilli(updated).Format("2006-01-02 15:04")
+	wantStarted := time.UnixMilli(started).Format("2006-01-02 15:04")
+	if !strings.Contains(joined, "updated: "+wantUpdated) {
+		t.Errorf("header should use UpdatedAt (%s), got: %v", wantUpdated, lines)
+	}
+	if strings.Contains(joined, "updated: "+wantStarted) {
+		t.Errorf("header should not use StartedAt (%s) when UpdatedAt is present, got: %v", wantStarted, lines)
 	}
 }
 
 func TestInfoDialogHeaderFallsBackToStartedAt(t *testing.T) {
-	s := Session{Name: "s2", CWD: "/tmp/nogit", StartedAt: 1000, UpdatedAt: 0}
+	started := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC).UnixMilli()
+	s := Session{Name: "s2", CWD: "/tmp/nogit", StartedAt: started, UpdatedAt: 0}
 	lines := infoDialogHeader(s)
 	joined := strings.Join(lines, "\n")
-	want := time.UnixMilli(1000).Format("2006-01-02 15:04")
+	want := time.UnixMilli(started).Format("2006-01-02 15:04")
 	if !strings.Contains(joined, "updated: "+want) {
 		t.Errorf("header should fall back to StartedAt (%s), got: %v", want, lines)
 	}
@@ -135,27 +142,35 @@ func TestRenderInfoDialogShowsSectionErr(t *testing.T) {
 
 func TestRenderInfoDialogWrapsLongContent(t *testing.T) {
 	header := []string{"name"}
+	shortLine := "short"
 	longLine := strings.Repeat("word ", 60) // far wider than any reasonable inner width
-	convoSec := startAsyncSection("conversation", func(ctx context.Context) (PreviewResult, error) {
+
+	convoSecShort := startAsyncSection("conversation", func(ctx context.Context) (PreviewResult, error) {
+		return PreviewResult{Content: shortLine}, nil
+	})
+	defer convoSecShort.close()
+	convoSecLong := startAsyncSection("conversation", func(ctx context.Context) (PreviewResult, error) {
 		return PreviewResult{Content: longLine}, nil
 	})
-	defer convoSec.close()
+	defer convoSecLong.close()
 
 	for i := 0; i < 1000; i++ {
-		if convoSec.snapshot().Loaded {
+		t1, t2 := convoSecShort.snapshot().Loaded, convoSecLong.snapshot().Loaded
+		if t1 && t2 {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
 
-	out := renderInfoDialog(header, nil, convoSec, 80, 40)
-	unwrappedLineCount := strings.Count(longLine, "\n") + 1
-	gotLineCount := strings.Count(out, "\n")
-	if gotLineCount <= unwrappedLineCount {
-		t.Errorf("want long content wrapped across multiple output lines, got %d lines (unwrapped would be %d):\n%s", gotLineCount, unwrappedLineCount, out)
+	shortOut := renderInfoDialog(header, nil, convoSecShort, 80, 40)
+	longOut := renderInfoDialog(header, nil, convoSecLong, 80, 40)
+	shortLines := strings.Count(shortOut, "\n")
+	longLines := strings.Count(longOut, "\n")
+	if longLines <= shortLines {
+		t.Errorf("want long content wrapped across more output lines than short content, got long=%d short=%d:\nlong:\n%s\nshort:\n%s", longLines, shortLines, longOut, shortOut)
 	}
-	if !strings.Contains(out, "word word") {
-		t.Errorf("want wrapped content still present, got:\n%s", out)
+	if !strings.Contains(longOut, "word word") {
+		t.Errorf("want wrapped content still present, got:\n%s", longOut)
 	}
 }
 
