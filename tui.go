@@ -701,15 +701,15 @@ func RunTUI(interval time.Duration) error {
 				SaveViewMode(viewMode)
 				render()
 			case "s", "S":
-				delta := 1 // s cycles forward, shift-s backward
-				if k == "S" {
-					delta = -1
+				screen.Invalidate()
+				if picked, ok := pickSortMode(sortMode, modalWakes); ok && picked != sortMode {
+					sortMode = picked
+					SaveSortMode(sortMode)
+					toast = "sort: " + sortDesc(sortMode)
+					toastUntil = time.Now().Add(4 * time.Second)
+					refresh(false)
 				}
-				sortMode = cycleSortMode(sortMode, delta)
-				SaveSortMode(sortMode)
-				toast = "sort: " + sortDesc(sortMode)
-				toastUntil = time.Now().Add(4 * time.Second)
-				refresh(false)
+				screen.Invalidate()
 				render()
 			case "r", "R":
 				screen.Invalidate()
@@ -805,25 +805,12 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 // sortRemotes returns a copy of the hub snapshot with each section's sessions
 // sorted per mode. The snapshot's Session slices are shared with the hub
 // goroutine, so the sort runs on fresh copies to avoid a data race.
-// sortModeOrder is the 's'-key cycle; shift-s walks it backward.
+// sortModeOrder is the row order of the 's' sort picker (sort_picker.go).
 var sortModeOrder = []string{"dir", "status", "created", "created-asc", "updated", "updated-asc"}
 
-// cycleSortMode returns the mode delta steps away in sortModeOrder, wrapping
-// at both ends. An unknown mode is treated as "dir" (index 0).
-func cycleSortMode(mode string, delta int) string {
-	i := 0
-	for j, m := range sortModeOrder {
-		if m == mode {
-			i = j
-			break
-		}
-	}
-	n := len(sortModeOrder)
-	return sortModeOrder[((i+delta)%n+n)%n]
-}
-
-// sortDesc is the human-readable label shown in the toast after cycling the
-// sort mode with 's'.
+// sortDesc is the human-readable label for a sort mode: the toast after a
+// change, and every row of the sort picker — where its width also sizes the
+// dialog box.
 func sortDesc(mode string) string {
 	switch mode {
 	case "status":
@@ -1103,7 +1090,7 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    h then 1..9  hide group(s) (repeat to add/remove · last one shows all)")
 	fmt.Fprintln(&b, "    d            hide/show disabled sessions")
 	fmt.Fprintln(&b, "    /            filter rows by text (type to narrow · Enter commits · Esc clears)")
-	fmt.Fprintln(&b, "    s / S        cycle sort forward / back (dir → status → created → updated, +asc)")
+	fmt.Fprintln(&b, "    s / S        open sort-by dialog (↑/↓ select · ⏎ confirm · esc cancel)")
 	fmt.Fprintln(&b, "                 current sort: "+sortMode)
 	fmt.Fprintln(&b, "    q / Ctrl-C   quit")
 	fmt.Fprintln(&b, "    ?            this help")

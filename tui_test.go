@@ -24,28 +24,6 @@ func TestInspectorBackAndQuitKeys(t *testing.T) {
 	}
 }
 
-func TestCycleSortMode(t *testing.T) {
-	cases := []struct {
-		mode  string
-		delta int
-		want  string
-	}{
-		{"dir", 1, "status"},
-		{"status", 1, "created"},
-		{"created", -1, "status"},
-		{"updated-asc", 1, "dir"},
-		{"dir", -1, "updated-asc"},
-		{"created-asc", -1, "created"},
-		{"bogus", 1, "status"},
-		{"bogus", -1, "updated-asc"},
-	}
-	for _, c := range cases {
-		if got := cycleSortMode(c.mode, c.delta); got != c.want {
-			t.Errorf("cycleSortMode(%q, %d) = %q, want %q", c.mode, c.delta, got, c.want)
-		}
-	}
-}
-
 func TestSortDescStatus(t *testing.T) {
 	if got := sortDesc("status"); got != "status (waiting → idle → busy)" {
 		t.Fatalf("sortDesc(status) = %q", got)

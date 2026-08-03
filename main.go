@@ -111,7 +111,7 @@ live-view keys:
   ↑/↓  navigate     n  new
   k    kill         a  attach (or migrate)
   p    preview      m  cycle view mode
-  s    cycle sort   r  refresh
+  s    sort menu    r  refresh
   ^W   account      ?  help
   q    quit`
 
