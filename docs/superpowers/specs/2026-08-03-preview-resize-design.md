@@ -175,9 +175,14 @@ with no wasted or cut-off width.
 
 ## Testing plan
 
-- Unit tests for `resizeTmuxTarget`/`revertTmuxTarget` against a fake tmux
-  command runner (injectable seam, not the real `tmux` binary — same style as
-  `keychainRead`/`keychainWrite`).
+- Unit tests for `resizeTmuxTarget`/`revertTmuxTarget`. The fake-tmux
+  injectable seam this bullet originally planned (same style as
+  `keychainRead`/`keychainWrite`) was **not** built: `resize.go` calls
+  `exec.Command` directly, and `resize_test.go` covers the guards that return
+  *before* it — empty `Tmux`, invalid size, and which primitive
+  `resizeSession` dispatches to — so the suite never shells out to a real
+  `tmux`. What that leaves uncovered is the argument construction itself; the
+  seam is worth adding if this file grows a third command.
 - Server handler test: `s.resizeFn` seam, body decode/validation,
   `resolveLivePID` failure paths (400/409-style codes).
 - Manual check: open preview on a remote session from a narrow and a wide
