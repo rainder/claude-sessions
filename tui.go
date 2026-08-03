@@ -457,6 +457,33 @@ func RunTUI(interval time.Duration) error {
 		render()
 	}
 
+	// sendKeysToInspected sends text into the currently-inspected session's
+	// tmux pane, dispatching local vs. remote exactly like every other action
+	// in this loop (target.Host != ""). Local goes through a fresh
+	// resolveLivePIDLocal (send_keys.go) so the pane address is current, not
+	// whatever this Session snapshot last polled; remote goes through the
+	// authed POST /sessions/{pid}/send-keys endpoint (server.go).
+	sendKeysToInspected := func(sess Session, text string) (bool, string) {
+		if sess.Host == "" {
+			live, err := resolveLivePIDLocal(sess.PID, sess.SessionID)
+			if err != nil {
+				return false, err.Error()
+			}
+			if err := sendKeys(live, text); err != nil {
+				return false, err.Error()
+			}
+			return true, ""
+		}
+		r, err := sendKeysRemote(sess.Host, sess.PID, sess.SessionID, text)
+		if err != nil {
+			return false, err.Error()
+		}
+		if !r.OK {
+			return false, r.Error
+		}
+		return true, ""
+	}
+
 	refresh(false)
 	render()
 
@@ -467,11 +494,16 @@ func RunTUI(interval time.Duration) error {
 
 	for {
 		timeout := time.Until(nextTick)
-		// While a toast is showing, wake at its deadline so the bottom line
+		// While a toast (session-list screen) or a compose-send status
+		// (inspector screen) is showing, wake at its deadline so the message
 		// clears on time. toastTick marks a wait capped for that reason: its
 		// expiry repaints only, leaving the wall-clock cadence untouched.
+		statusUntil := toastUntil
+		if state.mode == screenInspector {
+			statusUntil = state.inspector.composeStatusUntil
+		}
 		toastTick := false
-		if until := time.Until(toastUntil); until > 0 && until < timeout {
+		if until := time.Until(statusUntil); until > 0 && until < timeout {
 			timeout = until
 			toastTick = true
 		}
@@ -530,7 +562,7 @@ func RunTUI(interval time.Duration) error {
 		}
 		for _, ev := range events {
 			if state.mode == screenInspector {
-				if handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render, func() {
+				quit, absorb := handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render, func() {
 					screen.Invalidate()
 					actAttach(makeCtx())
 					refresh(true)
@@ -538,8 +570,17 @@ func RunTUI(interval time.Duration) error {
 					screen.Invalidate()
 					actKill(makeCtx())
 					refresh(true)
-				}) {
+				}, sendKeysToInspected)
+				if quit {
 					return nil
+				}
+				if absorb {
+					// A paste's trailing bytes after the newline that just
+					// submitted (or cancelled) compose mode belong to the
+					// compose box, not this screen's hotkeys — drop them
+					// rather than let e.g. a trailing 'k' fall through to
+					// kill. See handleInspectorEvent's doc comment.
+					break
 				}
 				continue
 			}
