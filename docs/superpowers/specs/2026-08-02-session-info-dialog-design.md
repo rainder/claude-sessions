@@ -196,25 +196,47 @@ func (a *asyncSection) close() {
 }
 ```
 
-`run` wires the context into `exec.CommandContext` for every subprocess in
-that section's pipeline (both local calls and, for the remote conversation
-fetch, `http.NewRequestWithContext` — not a bare `http.Get`), so closing the
-modal or the timeout firing signals every step of the pipeline to stop.
-`infoDialogTimeout` bounds a wedged subprocess even if the modal is never
-closed (suggest 20s).
+**Post-implementation correction (fix round 2), superseding the two
+paragraphs this note originally left in place below (now rewritten in
+place, not just flagged):** the `asyncSection.close()` snippet above and
+this section's original text described the owned `context.CancelFunc` as
+reaching into and canceling the underlying subprocess(es). That is not how
+the implemented pipeline works: both the ticket and conversation pipelines
+route through `summaryCache.getOrFetch` (info_cache.go), which runs the
+actual fetch under a context the *cache* itself owns, bounded by that
+cache's own `fetchTimeout` — never `asyncSection`'s ctx. `asyncSection`'s
+context only bounds how long the *caller* waits to join an in-flight or
+cache-served result; it never reaches the subprocess. See `info_async.go`'s
+`infoDialogTimeout`/`asyncSection` doc comments for the corrected, final
+account.
 
-**Residual limitation, accepted**: canceling the context reliably tells a
-running `exec.CommandContext` process to die, but Go's `exec.Cmd` has a
-`WaitDelay` of zero by default — if a subprocess's stdout/stderr pipe is
-still held open by a grandchild process after the context is canceled,
-`cmd.Wait()` can still block, and `close()` does not join the fetch
-goroutine to guarantee it has actually returned. Each pipeline sets an
+`run`'s ctx parameter is still wired into `exec.CommandContext` for every
+subprocess in a pipeline (both local calls and, for the remote conversation
+fetch, `http.NewRequestWithContext` — not a bare `http.Get`) — but that ctx
+is the cache's `fetchTimeout`-bounded one (`context.WithTimeout(context.
+Background(), c.fetchTimeout)`, info_cache.go), not `asyncSection`'s.
+Closing the modal cancels `asyncSection`'s ctx, which stops the *caller*
+from waiting further — it does not stop the fetch, which keeps running
+under the cache's own context to finish populating the cache for the next
+lookup. `infoDialogTimeout` (20s) bounds that caller-side wait; each cache's
+own `fetchTimeout` (also 20s, see `info_ticket.go`/`info_transcript.go`)
+independently bounds the fetch itself. Keep `infoDialogTimeout` >= the
+largest `fetchTimeout` it fronts, or a caller could give up on a fetch that
+was never going to take that long in the first place.
+
+**Residual limitation, accepted**: canceling a cache-owned fetch context
+reliably tells a running `exec.CommandContext` process to die, but Go's
+`exec.Cmd` has a `WaitDelay` of zero by default — if a subprocess's
+stdout/stderr pipe is still held open by a grandchild process after the
+context is canceled, `cmd.Wait()` can still block. Each pipeline sets an
 explicit `cmd.WaitDelay` (a few seconds) so a wedged pipe forces a hard kill
 instead of hanging indefinitely. This narrows the window to "bounded by
 `WaitDelay`," the same "narrow the race, never guess" tradeoff this repo
 already accepts elsewhere (see CLAUDE.md's kill/migrate precondition
-"Known residual windows, accepted" section) — it does not claim the
-goroutine is guaranteed gone the instant the modal closes.
+"Known residual windows, accepted" section) — it does not claim the fetch
+goroutine is guaranteed gone the instant the modal closes, since by design
+it may still be running (see the correction above) to finish warming the
+cache.
 
 ## Rendering
 

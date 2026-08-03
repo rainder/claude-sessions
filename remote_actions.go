@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,6 +168,77 @@ func fetchRemotePreview(host string, pid int, limits PreviewLimits) (PreviewResu
 		Label:   resp.Header.Get("X-Claude-Sessions-Preview-Label"),
 		Content: sanitizeTerminalText(string(data)),
 	}, nil
+}
+
+const transcriptTailMaxBytes = 256 * 1024
+
+// sanitizeTranscriptTailErrExcerpt caps and single-lines a remote error body
+// before it's embedded in an error string. fetchRemoteTranscriptTail's
+// response body can be up to transcriptTailMaxBytes and is otherwise
+// unsanitized; that error flows into the rendered info dialog via
+// snap.Err.Error(), and embedded newlines/control characters there break
+// the dialog's box-border rendering.
+func sanitizeTranscriptTailErrExcerpt(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		}
+		if r < 0x20 {
+			return ' '
+		}
+		return r
+	}, s)
+	const maxLen = 200
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	return s
+}
+
+// fetchRemoteTranscriptTail retrieves the raw last-n conversation turns from
+// the named server, modeled directly on fetchRemotePreview. A 404 (no
+// transcript for that session) maps to errTranscriptNotFound.
+func fetchRemoteTranscriptTail(host, sessionID string, n int) ([]transcriptTurn, time.Time, int64, error) {
+	srv, ok := LookupServer(host)
+	if !ok {
+		return nil, time.Time{}, 0, fmt.Errorf("unknown server: %s", host)
+	}
+	endpoint := fmt.Sprintf("http://%s:%d/transcript-tail?session_id=%s&n=%d",
+		srv.Host, srv.Port, url.QueryEscape(sessionID), n)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, time.Time{}, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+srv.Token)
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, time.Time{}, 0, err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, transcriptTailMaxBytes+1))
+	if err != nil {
+		return nil, time.Time{}, 0, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		if strings.TrimSpace(string(data)) == "transcript not found" {
+			return nil, time.Time{}, 0, errTranscriptNotFound
+		}
+		return nil, time.Time{}, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, sanitizeTranscriptTailErrExcerpt(strings.TrimSpace(string(data))))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, time.Time{}, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, sanitizeTranscriptTailErrExcerpt(strings.TrimSpace(string(data))))
+	}
+	if len(data) > transcriptTailMaxBytes {
+		return nil, time.Time{}, 0, fmt.Errorf("transcript-tail response exceeds %d bytes", transcriptTailMaxBytes)
+	}
+	var body transcriptTailResponse
+	if err := json.Unmarshal(data, &body); err != nil {
+		return nil, time.Time{}, 0, fmt.Errorf("bad response: %w", err)
+	}
+	return body.Turns, body.ModifiedAt, body.Size, nil
 }
 
 // fetchRemoteCwdSuggestions retrieves the ranked cwd history from the named

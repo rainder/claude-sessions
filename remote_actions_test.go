@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestFetchRemotePreviewSanitizesBody proves the client re-sanitizes the body it
@@ -272,5 +273,53 @@ func TestSwitchAccountRemoteRefusal(t *testing.T) {
 	}
 	if got.OK || got.Code != codeUnknownAccount || !strings.Contains(got.Message, "avisoma") {
 		t.Fatalf("result = %+v, want the host's own message", got)
+	}
+}
+
+func TestFetchRemoteTranscriptTail(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Query().Get("session_id") != "sid1" || r.URL.Query().Get("n") != "5" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(transcriptTailResponse{
+			Turns:      []transcriptTurn{{Role: "user", Text: "hi"}},
+			ModifiedAt: time.Unix(1000, 0).UTC(),
+			Size:       42,
+		})
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "test-host", u.Hostname(), u.Port(), "secret")
+
+	turns, mtime, size, err := fetchRemoteTranscriptTail("test-host", "sid1", 5)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(turns) != 1 || turns[0].Text != "hi" {
+		t.Errorf("Turns = %+v", turns)
+	}
+	if size != 42 {
+		t.Errorf("Size = %d, want 42", size)
+	}
+	if !mtime.Equal(time.Unix(1000, 0).UTC()) {
+		t.Errorf("ModifiedAt = %v", mtime)
+	}
+}
+
+func TestFetchRemoteTranscriptTailUnknownServer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	_, _, _, err := fetchRemoteTranscriptTail("no-such-server", "sid1", 5)
+	if err == nil {
+		t.Fatal("want error for unknown server")
 	}
 }

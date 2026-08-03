@@ -698,7 +698,7 @@ git commit -m "feat: bounded-tail conversation turn extractor"
 
 **Interfaces:**
 - Consumes: `PreviewResult` (preview.go:42-50).
-- Produces: `type summaryCache struct{...}`, `func newSummaryCache(ttl time.Duration, max int) *summaryCache`, `func (c *summaryCache) getOrFetch(ctx context.Context, key string, fetch func(context.Context) (PreviewResult, error)) (PreviewResult, error)` — consumed by Task 6 (`fetchTicketSummaryCached`) and Task 7 (`fetchConversationSummaryLocal`/`Remote`).
+- Produces: `type summaryCache struct{...}`, `func newSummaryCache(successTTL, failTTL, fetchTimeout time.Duration, max int) *summaryCache` (see the post-implementation correction note at the end of this task — the initial TDD steps below build a 2-arg version that fix round 1 replaces), `func (c *summaryCache) getOrFetch(ctx context.Context, key string, fetch func(context.Context) (PreviewResult, error)) (PreviewResult, error)` — consumed by Task 6 (`fetchTicketSummaryCached`) and Task 7 (`fetchConversationSummaryLocal`/`Remote`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -935,6 +935,14 @@ git add info_cache.go info_cache_test.go
 git commit -m "feat: bounded single-flight cache for info dialog summaries"
 ```
 
+**Post-implementation correction (fix round 1, commit 9843d5d):** the TDD steps above show the *initial* reference code. Review found the initiating caller's `ctx` wrongly governed the shared flight's lifetime — the fetch must run under a context the cache owns itself, or one caller closing its dialog can kill a fetch a different caller (or a fast reopen of the same dialog) is joined on. The actual, final constructor is:
+
+```go
+func newSummaryCache(successTTL, failTTL, fetchTimeout time.Duration, max int) *summaryCache
+```
+
+`successTTL`/`failTTL` replace the single `ttl` field (a failed fetch is cached for a shorter window than a success, mirroring `usage_cache.go`'s `usageCacheTTL`/`usageCacheFailTTL` split). `fetchTimeout` bounds the cache-owned context the actual `fetch(...)` call runs under — never the caller's own `ctx`, which now only bounds how long that caller *waits*. Publication is also now panic-safe (wrapped in a `defer`/`recover`), and `prune`'s never-evict-in-flight invariant has direct test coverage. Every call site below uses this final signature.
+
 ---
 
 ### Task 6: Wire the ticket cache
@@ -962,7 +970,7 @@ func TestFetchTicketSummaryCachedAvoidsRefetch(t *testing.T) {
 	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
 		return []byte("summary"), nil
 	}
-	ticketCache = newSummaryCache(time.Hour, 64) // fresh cache, isolated from other tests
+	ticketCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 64) // fresh cache, isolated from other tests
 	fetchTicketSummaryCached(context.Background(), "DR-99")
 	fetchTicketSummaryCached(context.Background(), "DR-99")
 	if calls != 1 {
@@ -985,11 +993,13 @@ Expected: FAIL — `fetchTicketSummaryCached`/`ticketCache` undefined.
 import "time"
 
 const (
-	ticketCacheTTL = time.Hour // ticket text rarely changes turn to turn
-	ticketCacheMax = 64
+	ticketCacheTTL         = time.Hour // ticket text rarely changes turn to turn
+	ticketCacheFailTTL     = 15 * time.Second
+	ticketCacheFetchTimeout = 20 * time.Second
+	ticketCacheMax         = 64
 )
 
-var ticketCache = newSummaryCache(ticketCacheTTL, ticketCacheMax)
+var ticketCache = newSummaryCache(ticketCacheTTL, ticketCacheFailTTL, ticketCacheFetchTimeout, ticketCacheMax)
 
 // fetchTicketSummaryCached wraps fetchTicketSummary in ticketCache, keyed by
 // ticket id — the whole cu+claude pipeline is cached as one unit, since
@@ -1104,7 +1114,7 @@ func TestFetchConversationSummaryLocalSuccess(t *testing.T) {
 		[]byte(`{"type":"user","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	conversationCache = newSummaryCache(time.Hour, 256) // fresh cache, isolated from other tests
+	conversationCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 256) // fresh cache, isolated from other tests
 	got, err := fetchConversationSummaryLocal(context.Background(), home, sid)
 	if err != nil || got.Content != "what's happening" {
 		t.Errorf("got (%+v, %v)", got, err)
@@ -1130,15 +1140,17 @@ import (
 )
 
 const (
-	conversationSummaryInstruction = "what's happening in this conversation right now? short version like i am 25"
-	conversationTailTurns          = 5
-	conversationTurnCap            = 1500 // chars kept per turn before piping
-	conversationPromptCap          = 6000 // total chars fed to claude -p
-	conversationCacheTTL           = 24 * time.Hour // safety-net upper bound; a content change already changes the cache key via mtime/size
-	conversationCacheMax           = 256
+	conversationSummaryInstruction  = "what's happening in this conversation right now? short version like i am 25"
+	conversationTailTurns           = 5
+	conversationTurnCap             = 1500 // chars kept per turn before piping
+	conversationPromptCap           = 6000 // total chars fed to claude -p
+	conversationCacheTTL            = 24 * time.Hour // safety-net upper bound; a content change already changes the cache key via mtime/size
+	conversationCacheFailTTL        = 15 * time.Second
+	conversationCacheFetchTimeout   = 20 * time.Second
+	conversationCacheMax            = 256
 )
 
-var conversationCache = newSummaryCache(conversationCacheTTL, conversationCacheMax)
+var conversationCache = newSummaryCache(conversationCacheTTL, conversationCacheFailTTL, conversationCacheFetchTimeout, conversationCacheMax)
 
 var errTranscriptNotFound = fmt.Errorf("transcript not found")
 
@@ -1537,7 +1549,7 @@ func TestFetchConversationSummaryRemote(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeServerYAML(t, home, "remote-host", u.Hostname(), u.Port(), "secret")
 
-	conversationCache = newSummaryCache(time.Hour, 256) // fresh cache
+	conversationCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 256) // fresh cache
 	got, err := fetchConversationSummaryRemote(context.Background(), "remote-host", "sid1")
 	if err != nil || got.Content != "remote summary" {
 		t.Errorf("got (%+v, %v)", got, err)
@@ -1597,7 +1609,7 @@ git commit -m "feat: remote transcript-tail endpoint and client pipeline"
 
 **Interfaces:**
 - Consumes: `previewPane`, `startPreviewPane`, `previewFetch` (kill_preview.go:101,109-152), `modalWakesWith` (confirm_overlay.go:189-201), `wakeFD` (tui_events.go:341-346), `PreviewResult` (preview.go:42-50).
-- Produces: `const infoDialogTimeout`, `type asyncSection struct{...}`, `func startAsyncSection(title string, run func(context.Context) (PreviewResult, error)) *asyncSection`, `func (a *asyncSection) close()`, `func modalWakesWithAll(wakes []wakeFD, panes ...*previewPane) []wakeFD` — all consumed by Task 10.
+- Produces: `const infoDialogTimeout`, `type asyncSection struct{...}`, `func startAsyncSection(title string, run func(context.Context) (PreviewResult, error)) *asyncSection`, `func (a *asyncSection) close()`, `func (a *asyncSection) pane() *previewPane` (nil-safe accessor, added in fix round 1 — see the post-implementation note at the end of this task), `func modalWakesWithAll(wakes []wakeFD, sections ...*asyncSection) []wakeFD` — all consumed by Task 10/11.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1761,6 +1773,26 @@ Expected: PASS
 git add info_async.go info_async_test.go
 git commit -m "feat: asyncSection wraps previewPane with cancel-on-close"
 ```
+
+**Post-implementation correction (fix round 1, commit fa0aef9):** review found that `modalWakesWithAll(wakes []wakeFD, panes ...*previewPane)` forced every call site to extract `.previewPane` from a possibly-nil `*asyncSection` — panicking before the function's own nil-safety could help, defeating the whole point for Task 11's nil ticket section. Final signature:
+
+```go
+func (a *asyncSection) pane() *previewPane {
+	if a == nil {
+		return nil
+	}
+	return a.previewPane
+}
+
+func modalWakesWithAll(wakes []wakeFD, sections ...*asyncSection) []wakeFD {
+	for _, sec := range sections {
+		wakes = modalWakesWith(wakes, sec.pane())
+	}
+	return wakes
+}
+```
+
+Callers now pass `*asyncSection` values directly — `modalWakesWithAll(wakes, ticketSec, convoSec)` — with no per-call-site nil check, even when `ticketSec` is nil. `close()` also gained a nil guard on `a.cancel` for hand-built values. Task 11's usage below reflects this final signature.
 
 ---
 
@@ -2054,18 +2086,15 @@ func showInfoDialog(s Session, wakes []wakeFD) {
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
 
-	panes := []*previewPane{convoSec.previewPane}
-	if ticketSec != nil {
-		panes = append(panes, ticketSec.previewPane)
-	}
-
 	for {
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
 			cols, rows = 0, 0
 		}
 		_ = renderer.Draw(renderInfoDialog(header, ticketSec, convoSec, cols, rows), cols, rows)
-		modalW := modalWakesWithAll(wakes, panes...)
+		// modalWakesWithAll takes *asyncSection directly (post-Task-9-fix-round
+		// signature) — nil-safe, so ticketSec being nil here needs no guard.
+		modalW := modalWakesWithAll(wakes, ticketSec, convoSec)
 		keys, _ := readModalEvents(decoder, modalW)
 		for _, key := range keys {
 			if resumePromptsClose(key) {

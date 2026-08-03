@@ -4024,3 +4024,85 @@ func TestAccountSwitchHandlerBadJSON(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
+
+func TestTranscriptTailHandler(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude", "projects", "proj1")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sid := "sess-remote-1"
+	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"),
+		[]byte(`{"type":"user","message":{"role":"user","content":"remote hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &server{token: "test-token"}
+	req := httptest.NewRequest("GET", "/transcript-tail?session_id="+sid+"&n=5", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	s.transcriptTail(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body transcriptTailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Turns) != 1 || body.Turns[0].Text != "remote hi" {
+		t.Errorf("Turns = %+v", body.Turns)
+	}
+	if body.Size == 0 {
+		t.Error("Size should be non-zero")
+	}
+}
+
+func TestTranscriptTailHandlerBadSessionID(t *testing.T) {
+	s := &server{token: "test-token"}
+	req := httptest.NewRequest("GET", "/transcript-tail?session_id=../../etc/passwd&n=5", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	s.transcriptTail(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestTranscriptTailHandlerNClamped(t *testing.T) {
+	s := &server{token: "test-token"}
+	req := httptest.NewRequest("GET", "/transcript-tail?session_id=abc&n=999", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	s.transcriptTail(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for out-of-range n", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "bad n value") {
+		t.Errorf("body = %q, want it to contain %q", rec.Body.String(), "bad n value")
+	}
+}
+
+func TestTranscriptTailHandlerNotFound(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := &server{token: "test-token"}
+	req := httptest.NewRequest("GET", "/transcript-tail?session_id=nope&n=5", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	s.transcriptTail(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestTranscriptTailHandlerUnauthorized(t *testing.T) {
+	s := &server{token: "test-token"}
+	req := httptest.NewRequest("GET", "/transcript-tail?session_id=abc&n=5", nil)
+	rec := httptest.NewRecorder()
+	s.transcriptTail(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
