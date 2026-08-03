@@ -1609,7 +1609,7 @@ git commit -m "feat: remote transcript-tail endpoint and client pipeline"
 
 **Interfaces:**
 - Consumes: `previewPane`, `startPreviewPane`, `previewFetch` (kill_preview.go:101,109-152), `modalWakesWith` (confirm_overlay.go:189-201), `wakeFD` (tui_events.go:341-346), `PreviewResult` (preview.go:42-50).
-- Produces: `const infoDialogTimeout`, `type asyncSection struct{...}`, `func startAsyncSection(title string, run func(context.Context) (PreviewResult, error)) *asyncSection`, `func (a *asyncSection) close()`, `func modalWakesWithAll(wakes []wakeFD, panes ...*previewPane) []wakeFD` — all consumed by Task 10.
+- Produces: `const infoDialogTimeout`, `type asyncSection struct{...}`, `func startAsyncSection(title string, run func(context.Context) (PreviewResult, error)) *asyncSection`, `func (a *asyncSection) close()`, `func (a *asyncSection) pane() *previewPane` (nil-safe accessor, added in fix round 1 — see the post-implementation note at the end of this task), `func modalWakesWithAll(wakes []wakeFD, sections ...*asyncSection) []wakeFD` — all consumed by Task 10/11.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1773,6 +1773,26 @@ Expected: PASS
 git add info_async.go info_async_test.go
 git commit -m "feat: asyncSection wraps previewPane with cancel-on-close"
 ```
+
+**Post-implementation correction (fix round 1, commit fa0aef9):** review found that `modalWakesWithAll(wakes []wakeFD, panes ...*previewPane)` forced every call site to extract `.previewPane` from a possibly-nil `*asyncSection` — panicking before the function's own nil-safety could help, defeating the whole point for Task 11's nil ticket section. Final signature:
+
+```go
+func (a *asyncSection) pane() *previewPane {
+	if a == nil {
+		return nil
+	}
+	return a.previewPane
+}
+
+func modalWakesWithAll(wakes []wakeFD, sections ...*asyncSection) []wakeFD {
+	for _, sec := range sections {
+		wakes = modalWakesWith(wakes, sec.pane())
+	}
+	return wakes
+}
+```
+
+Callers now pass `*asyncSection` values directly — `modalWakesWithAll(wakes, ticketSec, convoSec)` — with no per-call-site nil check, even when `ticketSec` is nil. `close()` also gained a nil guard on `a.cancel` for hand-built values. Task 11's usage below reflects this final signature.
 
 ---
 
@@ -2066,18 +2086,15 @@ func showInfoDialog(s Session, wakes []wakeFD) {
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
 
-	panes := []*previewPane{convoSec.previewPane}
-	if ticketSec != nil {
-		panes = append(panes, ticketSec.previewPane)
-	}
-
 	for {
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
 			cols, rows = 0, 0
 		}
 		_ = renderer.Draw(renderInfoDialog(header, ticketSec, convoSec, cols, rows), cols, rows)
-		modalW := modalWakesWithAll(wakes, panes...)
+		// modalWakesWithAll takes *asyncSection directly (post-Task-9-fix-round
+		// signature) — nil-safe, so ticketSec being nil here needs no guard.
+		modalW := modalWakesWithAll(wakes, ticketSec, convoSec)
 		keys, _ := readModalEvents(decoder, modalW)
 		for _, key := range keys {
 			if resumePromptsClose(key) {
