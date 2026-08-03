@@ -749,14 +749,25 @@ func RunTUI(interval time.Duration) error {
 }
 
 // handleInspectorEvent dispatches one decoded event while the inspector screen
-// is active. It returns true when the app should quit (Ctrl-C/Ctrl-D). Back
-// commands close the inspector; refresh/follow touch the hub or viewport;
-// scrolling keys and the wheel mutate the view and repaint. hubPtr is the loop's
-// inspectorHub variable so a Refresh reaches the live hub. Enter attaches to the
-// session (mirroring the session-list Enter binding) and closes the inspector.
-// 'k'/'K' opens the kill confirmation (mirroring the session-list 'k' binding)
-// and closes the inspector.
-func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach, kill func()) (quit bool) {
+// is active. It returns quit=true when the app should exit (Ctrl-C/Ctrl-D
+// outside compose mode, or Ctrl-D while composing — composing itself
+// intercepts a bare Ctrl-C as cancel, not quit). absorbBatch is true exactly
+// when this event ended compose mode (a successful submit or a cancel): the
+// caller must then drop any remaining events already queued from the same
+// input read, because a paste containing an embedded newline mid-buffer would
+// otherwise submit on that newline and let its trailing bytes fall through to
+// this screen's normal hotkeys (e.g. 'k' triggering kill) instead of being
+// discarded along with the rest of the paste. Back commands close the
+// inspector; refresh/follow touch the hub or viewport; scrolling keys and the
+// wheel mutate the view and repaint. hubPtr is the loop's inspectorHub
+// variable so a Refresh reaches the live hub. Enter attaches to the session
+// (mirroring the session-list Enter binding) and closes the inspector — but
+// only outside compose mode, where Enter instead submits the compose buffer.
+// 'k'/'K' opens the kill confirmation (mirroring the session-list 'k'
+// binding) and closes the inspector. sendText performs the actual send
+// (local vs. remote is the caller's concern, not this function's) and is
+// only ever invoked with a non-empty compose buffer.
+func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach, kill func(), sendText func(Session, string) (bool, string)) (quit, absorbBatch bool) {
 	if ev.kind == eventMouse {
 		switch state.handleInspectorMouse(ev.mouse) {
 		case commandBack:
@@ -771,21 +782,60 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 		case commandRender:
 			render()
 		}
-		return false
+		return false, false
+	}
+
+	if state.inspector.composing {
+		if ev.key == "\x04" {
+			return true, false
+		}
+		submit, cancel := state.handleInspectorCompose(ev.key)
+		switch {
+		case cancel:
+			render()
+			return false, true
+		case submit:
+			text := state.inspector.composeText
+			sess := state.inspector.snapshot.Session
+			state.inspector.composeStatus = "sending…"
+			render()
+			ok, msg := sendText(sess, text)
+			state.inspector.composeStatusUntil = time.Now().Add(4 * time.Second)
+			if ok {
+				state.inspector.composing = false
+				state.inspector.composeText = ""
+				state.inspector.composeStatus = "sent"
+			} else {
+				state.inspector.composeStatus = msg
+			}
+			render()
+			return false, !state.inspector.composing
+		default:
+			render()
+			return false, false
+		}
 	}
 
 	if ev.key == KeyEnter {
 		attach()
 		closeInspector()
-		return false
+		return false, false
+	}
+
+	if ev.key == "i" && state.inspector.snapshot.Session.Tmux != "" {
+		state.inspector.composing = true
+		state.inspector.composeText = ""
+		state.inspector.composeStatus = ""
+		render()
+		return false, false
 	}
 
 	switch inspectorKeyCommand(ev.key) {
 	case commandQuit:
-		return true
+		return true, false
 	case commandBack:
 		closeInspector()
-		return false
+		return false, false
 	}
 
 	switch state.handleInspectorKey(ev.key) {
@@ -804,7 +854,7 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 	case commandRender:
 		render()
 	}
-	return false
+	return false, false
 }
 
 // sortRemotes returns a copy of the hub snapshot with each section's sessions

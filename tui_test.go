@@ -24,6 +24,148 @@ func TestInspectorBackAndQuitKeys(t *testing.T) {
 	}
 }
 
+func TestHandleInspectorEventArmsComposeOnIWhenTmuxPresent(t *testing.T) {
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
+		snapshot: InspectorSnapshot{Session: Session{Tmux: "work:0.0"}},
+	}}
+	var hub *InspectorHub
+	noop := func() {}
+	ev := inputEvent{kind: eventKey, key: "i"}
+
+	quit, absorb := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, nil)
+
+	if quit || absorb {
+		t.Fatalf("handleInspectorEvent('i') = (%v,%v), want (false,false)", quit, absorb)
+	}
+	if !state.inspector.composing {
+		t.Fatal("composing = false, want true")
+	}
+}
+
+func TestHandleInspectorEventIgnoresIWhenNoTmux(t *testing.T) {
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
+		snapshot: InspectorSnapshot{Session: Session{Tmux: ""}},
+	}}
+	var hub *InspectorHub
+	noop := func() {}
+	ev := inputEvent{kind: eventKey, key: "i"}
+
+	handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, nil)
+
+	if state.inspector.composing {
+		t.Fatal("composing = true, want false (no tmux pane to send into)")
+	}
+}
+
+func TestHandleInspectorEventSubmitCallsSendTextAndClearsOnSuccess(t *testing.T) {
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
+		composing:   true,
+		composeText: "hello",
+		snapshot:    InspectorSnapshot{Session: Session{PID: 42, Tmux: "work:0.0"}},
+	}}
+	var hub *InspectorHub
+	noop := func() {}
+	var gotText string
+	sendText := func(sess Session, text string) (bool, string) {
+		gotText = text
+		return true, ""
+	}
+	ev := inputEvent{kind: eventKey, key: KeyEnter}
+
+	quit, absorb := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, sendText)
+
+	if quit || !absorb {
+		t.Fatalf("handleInspectorEvent(Enter submit) = (%v,%v), want (false,true)", quit, absorb)
+	}
+	if gotText != "hello" {
+		t.Fatalf("sendText got %q, want hello", gotText)
+	}
+	if state.inspector.composing || state.inspector.composeText != "" {
+		t.Fatalf("state after success = composing=%v text=%q, want cleared", state.inspector.composing, state.inspector.composeText)
+	}
+	if state.inspector.composeStatus != "sent" {
+		t.Fatalf("composeStatus = %q, want sent", state.inspector.composeStatus)
+	}
+}
+
+func TestHandleInspectorEventSubmitPreservesTextOnFailure(t *testing.T) {
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
+		composing:   true,
+		composeText: "hello",
+		snapshot:    InspectorSnapshot{Session: Session{PID: 42, Tmux: "work:0.0"}},
+	}}
+	var hub *InspectorHub
+	noop := func() {}
+	sendText := func(sess Session, text string) (bool, string) {
+		return false, "PID 42 is a different session now"
+	}
+	ev := inputEvent{kind: eventKey, key: KeyEnter}
+
+	quit, absorb := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, sendText)
+
+	if quit || absorb {
+		t.Fatalf("handleInspectorEvent(Enter, failed send) = (%v,%v), want (false,false) — still composing, nothing to absorb", quit, absorb)
+	}
+	if !state.inspector.composing || state.inspector.composeText != "hello" {
+		t.Fatalf("state after failure = composing=%v text=%q, want composing=true text=hello (preserved for retry)", state.inspector.composing, state.inspector.composeText)
+	}
+	if state.inspector.composeStatus != "PID 42 is a different session now" {
+		t.Fatalf("composeStatus = %q, want the failure message", state.inspector.composeStatus)
+	}
+}
+
+func TestHandleInspectorEventEscCancelsCompose(t *testing.T) {
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
+		composing:   true,
+		composeText: "hello",
+	}}
+	var hub *InspectorHub
+	noop := func() {}
+	ev := inputEvent{kind: eventKey, key: KeyEsc}
+
+	quit, absorb := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, nil)
+
+	if quit || !absorb {
+		t.Fatalf("handleInspectorEvent(Esc cancel) = (%v,%v), want (false,true)", quit, absorb)
+	}
+	if state.inspector.composing || state.inspector.composeText != "" {
+		t.Fatalf("state after cancel = composing=%v text=%q, want cleared", state.inspector.composing, state.inspector.composeText)
+	}
+}
+
+func TestHandleInspectorEventCtrlDStillQuitsWhileComposing(t *testing.T) {
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{composing: true, composeText: "hello"}}
+	var hub *InspectorHub
+	noop := func() {}
+	ev := inputEvent{kind: eventKey, key: "\x04"}
+
+	quit, _ := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, nil)
+
+	if !quit {
+		t.Fatal("quit = false, want true (Ctrl-D quits even while composing)")
+	}
+}
+
+func TestHandleInspectorEventPlainCharWhileComposingDoesNotDispatchHotkey(t *testing.T) {
+	// 'k' is the kill hotkey outside compose mode. While composing it must be
+	// buffered as text, not trigger kill.
+	killCalled := false
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{composing: true}}
+	var hub *InspectorHub
+	noop := func() {}
+	kill := func() { killCalled = true }
+	ev := inputEvent{kind: eventKey, key: "k"}
+
+	handleInspectorEvent(ev, state, &hub, noop, noop, noop, kill, nil)
+
+	if killCalled {
+		t.Fatal("kill was called for 'k' typed while composing, want buffered as text")
+	}
+	if state.inspector.composeText != "k" {
+		t.Fatalf("composeText = %q, want k", state.inspector.composeText)
+	}
+}
+
 func TestSortDescStatus(t *testing.T) {
 	if got := sortDesc("status"); got != "status (waiting → idle → busy)" {
 		t.Fatalf("sortDesc(status) = %q", got)
