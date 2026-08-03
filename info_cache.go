@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -35,14 +36,22 @@ type summaryCacheEntry struct {
 // shape CLAUDE.md documents for this repo's kill/migrate preconditions —
 // not a leak, since it always terminates and its result is useful.
 type summaryCache struct {
-	mu      sync.Mutex
-	entries map[string]*summaryCacheEntry
-	ttl     time.Duration
-	max     int
+	mu           sync.Mutex
+	entries      map[string]*summaryCacheEntry
+	successTTL   time.Duration
+	failTTL      time.Duration
+	fetchTimeout time.Duration
+	max          int
 }
 
-func newSummaryCache(ttl time.Duration, max int) *summaryCache {
-	return &summaryCache{entries: make(map[string]*summaryCacheEntry), ttl: ttl, max: max}
+func newSummaryCache(successTTL, failTTL, fetchTimeout time.Duration, max int) *summaryCache {
+	return &summaryCache{
+		entries:      make(map[string]*summaryCacheEntry),
+		successTTL:   successTTL,
+		failTTL:      failTTL,
+		fetchTimeout: fetchTimeout,
+		max:          max,
+	}
 }
 
 func (c *summaryCache) getOrFetch(ctx context.Context, key string, fetch func(context.Context) (PreviewResult, error)) (PreviewResult, error) {
@@ -73,9 +82,37 @@ func (c *summaryCache) getOrFetch(ctx context.Context, key string, fetch func(co
 	c.prune()
 	c.mu.Unlock()
 
-	e.result, e.err = fetch(ctx)
-	e.expires = time.Now().Add(c.ttl)
+	// The fetch runs under a context this cache owns — bounded by
+	// fetchTimeout — never the initiating caller's ctx. A caller that
+	// closes (e.g. a dialog cancels its own ctx) must never kill the
+	// shared flight out from under a different caller who joined it.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// A panicking fetch must still publish, or every joiner
+				// blocks on <-e.done forever.
+				e.result = PreviewResult{}
+				e.err = fmt.Errorf("fetch panicked: %v", r)
+			}
+		}()
+		fetchCtx, cancel := context.WithTimeout(context.Background(), c.fetchTimeout)
+		defer cancel()
+		e.result, e.err = fetch(fetchCtx)
+	}()
+	if e.err == nil {
+		e.expires = time.Now().Add(c.successTTL)
+	} else {
+		e.expires = time.Now().Add(c.failTTL)
+	}
 	close(e.done)
+
+	// The fetch already completed synchronously above; this is just a
+	// final check so the owning caller — like every joiner — honors its
+	// own ctx rather than always returning the result even if its ctx
+	// was canceled while the fetch was running.
+	if ctx.Err() != nil {
+		return PreviewResult{}, ctx.Err()
+	}
 	return e.result, e.err
 }
 
