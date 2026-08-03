@@ -5,11 +5,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // transcriptTurn is one user/assistant text turn. json tags are load-bearing:
@@ -175,16 +177,43 @@ const (
 
 var conversationCache = newSummaryCache(conversationCacheTTL, conversationCacheFailTTL, conversationCacheFetchTimeout, conversationCacheMax)
 
-var errTranscriptNotFound = fmt.Errorf("transcript not found")
+var errTranscriptNotFound = errors.New("transcript not found")
+
+// truncBytesHead returns the first n bytes of s, trimmed back to the
+// nearest rune boundary if a straight byte cut would split one. Unlike
+// trunc (preview.go), this adds no ANSI marker or gutter — the caller is
+// building an LLM prompt, not a terminal display.
+func truncBytesHead(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// truncBytesTail returns the last n bytes of s, trimmed forward to the
+// nearest rune boundary if a straight byte cut would split one.
+func truncBytesTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	start := len(s) - n
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return s[start:]
+}
 
 func formatTurnsForPrompt(turns []transcriptTurn) string {
 	var b strings.Builder
 	for _, t := range turns {
-		fmt.Fprintf(&b, "%s: %s\n\n", t.Role, trunc(t.Text, conversationTurnCap))
+		fmt.Fprintf(&b, "%s: %s\n\n", t.Role, truncBytesHead(t.Text, conversationTurnCap))
 	}
 	s := b.String()
 	if len(s) > conversationPromptCap {
-		s = s[:conversationPromptCap]
+		s = truncBytesTail(s, conversationPromptCap)
 	}
 	return s
 }
@@ -217,10 +246,11 @@ func conversationCacheKey(host, sessionID string, mtime time.Time, size int64) s
 }
 
 // fetchConversationSummaryLocal reads the session's own transcript directly
-// and summarizes it. The raw read (stat + extractConversationTail) happens
-// on every call; only the expensive claude -p step is cached, keyed by the
-// transcript's (mtime, size) so a new message invalidates the cache
-// automatically.
+// and summarizes it. os.Stat happens on every call to build the cache key;
+// extractConversationTail and the expensive claude -p step both run inside
+// the cached closure, keyed by the transcript's (mtime, size), so a cache
+// hit skips re-parsing the transcript entirely and only a new message
+// (which changes mtime/size) triggers a re-read.
 func fetchConversationSummaryLocal(ctx context.Context, home, sessionID string) (PreviewResult, error) {
 	path := findTranscript(home, sessionID)
 	if path == "" {

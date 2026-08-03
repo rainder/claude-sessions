@@ -309,9 +309,92 @@ func TestFetchConversationSummaryLocalSuccess(t *testing.T) {
 		[]byte(`{"type":"user","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	prevCache := conversationCache
+	t.Cleanup(func() { conversationCache = prevCache })
 	conversationCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 256) // fresh cache, isolated from other tests
 	got, err := fetchConversationSummaryLocal(context.Background(), home, sid)
 	if err != nil || got.Content != "what's happening" {
 		t.Errorf("got (%+v, %v)", got, err)
+	}
+}
+
+// TestFetchConversationSummaryLocalCacheInvalidation covers the main point
+// of Task 7's cache wiring: an unchanged transcript is a cache hit (claude
+// is invoked once for two identical calls), and a transcript that changes
+// on disk invalidates the cache key (mtime/size change) so claude is
+// invoked again.
+func TestFetchConversationSummaryLocalCacheInvalidation(t *testing.T) {
+	prevFunc := claudeSummarizeFunc
+	t.Cleanup(func() { claudeSummarizeFunc = prevFunc })
+	var calls int
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		calls++
+		return []byte("placeholder summary"), nil
+	}
+
+	prevCache := conversationCache
+	t.Cleanup(func() { conversationCache = prevCache })
+	conversationCache = newSummaryCache(time.Hour, 15*time.Second, 20*time.Second, 256) // fresh cache, isolated from other tests
+
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", "proj1")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sid := "sess-local-cache"
+	path := filepath.Join(dir, sid+".jsonl")
+	if err := os.WriteFile(path,
+		[]byte(`{"type":"user","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fetchConversationSummaryLocal(context.Background(), home, sid); err != nil {
+		t.Fatalf("call 1: %v", err)
+	}
+	if _, err := fetchConversationSummaryLocal(context.Background(), home, sid); err != nil {
+		t.Fatalf("call 2: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls after two identical fetches = %d, want 1 (second should be a cache hit)", calls)
+	}
+
+	// Append a line so the transcript's mtime and size both change.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"user","message":{"role":"user","content":"another message"}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fetchConversationSummaryLocal(context.Background(), home, sid); err != nil {
+		t.Fatalf("call 3: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls after transcript change = %d, want 2 (cache miss due to new mtime/size)", calls)
+	}
+}
+
+// TestSummarizeTurnsSanitizesOutput asserts summarizeTurns runs claude's
+// output through sanitizeTerminalText — the summary text is untrusted and
+// flows straight into a terminal-rendered PreviewResult.Content.
+func TestSummarizeTurnsSanitizesOutput(t *testing.T) {
+	prev := claudeSummarizeFunc
+	t.Cleanup(func() { claudeSummarizeFunc = prev })
+	claudeSummarizeFunc = func(ctx context.Context, instruction string, input []byte) ([]byte, error) {
+		return []byte("\x1b]0;title\x07visible text"), nil
+	}
+	got, err := summarizeTurns(context.Background(), []transcriptTurn{{Role: "user", Text: "hello"}})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(got.Content, "\x1b]0;title\x07") {
+		t.Errorf("Content = %q, want the OSC escape sequence stripped", got.Content)
+	}
+	if !strings.Contains(got.Content, "visible text") {
+		t.Errorf("Content = %q, want it to still contain the visible text", got.Content)
 	}
 }
