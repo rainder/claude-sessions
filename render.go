@@ -1980,10 +1980,10 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			rowIndent(gv)+"%-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s ",
+			rowIndent(gv)+"%-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s  %5s ",
 			nameW, "NAME", dirW, dirLabel, statusW, statusLabel,
 			modelW, "MODEL", costW, "COST",
-			"CTX", ageLabel,
+			"CTX", "CPU%", ageLabel,
 		)
 	}
 	hdr := buildHdr()
@@ -2010,14 +2010,14 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %5s ",
+			body := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %5s  %5s ",
 				nameCell,
 				marqueeCell(r.cwdStr, dirW, step),
 				statusCell,
 				modelCell(r.modelStr, modelW, plainCells),
 				costCell(r.costStr, costW),
 				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
-				r.ageStr,
+				r.s.CPU, r.ageStr,
 			)
 			row := decorateSessionRow(r.s, selected, body, gv)
 			w.record(r.s.ID(), true)
