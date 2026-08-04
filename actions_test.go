@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/term"
 )
 
 func TestActToggleDisabledTogglesStore(t *testing.T) {
@@ -18,22 +22,22 @@ func TestActToggleDisabledTogglesStore(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// An empty path makes DisabledStore writes no-ops (mutateLocked
-			// bails on d.path == ""), so this needs a real file to actually
+			// An empty path makes FlagsStore writes no-ops (mutateLocked
+			// bails on s.path == ""), so this needs a real file to actually
 			// exercise SetDisabled/Disabled round-tripping.
-			disabled := newDisabledStore(filepath.Join(t.TempDir(), "disabled.json"), nil)
+			flags := newFlagsStore(filepath.Join(t.TempDir(), flagsFileName), nil, noResolver)
 			if tc.session.Disabled {
-				disabled.SetDisabled(tc.session.SessionID, true)
+				flags.SetDisabled(tc.session.SessionID, true)
 			}
 			target := sessionSelectionTarget(tc.session)
-			c := &actCtx{targets: []selectionTarget{target}, sel: target.id, disabled: disabled}
+			c := &actCtx{targets: []selectionTarget{target}, sel: target.id, flags: flags}
 			if !actToggleDisabled(c) {
 				t.Fatal("actToggleDisabled = false, want true")
 			}
 			// The store is the sole authority — the live rows pick the value up
 			// via the caller's settleRows()/refresh() re-overlay, not an
 			// in-place patch.
-			if got := disabled.Disabled(tc.session.SessionID); got != tc.want {
+			if got := flags.Disabled(tc.session.SessionID); got != tc.want {
 				t.Fatalf("store.Disabled = %v, want %v", got, tc.want)
 			}
 		})
@@ -41,21 +45,21 @@ func TestActToggleDisabledTogglesStore(t *testing.T) {
 }
 
 func TestActToggleDisabledIgnoresEmptyHostAndMissingID(t *testing.T) {
-	disabled := newDisabledStore(filepath.Join(t.TempDir(), "disabled.json"), nil)
+	flags := newFlagsStore(filepath.Join(t.TempDir(), flagsFileName), nil, noResolver)
 
 	empty := emptyHostSelectionTarget("orca")
-	c := &actCtx{targets: []selectionTarget{empty}, sel: empty.id, disabled: disabled}
+	c := &actCtx{targets: []selectionTarget{empty}, sel: empty.id, flags: flags}
 	if actToggleDisabled(c) {
 		t.Fatal("empty-host target toggled")
 	}
 
 	missingID := sessionSelectionTarget(Session{PID: 2})
-	c = &actCtx{targets: []selectionTarget{missingID}, sel: missingID.id, disabled: disabled}
+	c = &actCtx{targets: []selectionTarget{missingID}, sel: missingID.id, flags: flags}
 	if actToggleDisabled(c) {
 		t.Fatal("missing-SessionID target toggled")
 	}
-	if len(disabled.entries) != 0 {
-		t.Fatalf("store mutated on ignored toggles: %#v", disabled.entries)
+	if len(flags.entries) != 0 {
+		t.Fatalf("store mutated on ignored toggles: %#v", flags.entries)
 	}
 }
 
@@ -275,5 +279,138 @@ func TestRemoteNewRowsCollapsesHome(t *testing.T) {
 	rawLines, _, _ := remoteNewRows("", suggestions, "")
 	if !strings.Contains(rawLines[0], inside) {
 		t.Fatalf("blank home should leave path raw: %q", rawLines[0])
+	}
+}
+
+func TestActSetGroupWritesStore(t *testing.T) {
+	cases := []struct {
+		name    string
+		session Session
+		press   int
+		want    int // group expected in the store after the keypress
+	}{
+		{"ungrouped takes the group", Session{PID: 10, SessionID: "a"}, 3, 3},
+		{"same group again ungroups", Session{PID: 11, SessionID: "b", Group: 3}, 3, 0},
+		{"another group replaces it", Session{PID: 12, SessionID: "c", Group: 3}, 5, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := newFlagsStore(filepath.Join(t.TempDir(), flagsFileName), nil, noResolver)
+			if tc.session.Group != 0 {
+				flags.SetGroup(tc.session.SessionID, tc.session.Group)
+			}
+			target := sessionSelectionTarget(tc.session)
+			c := &actCtx{targets: []selectionTarget{target}, sel: target.id, flags: flags}
+			if !actSetGroup(c, tc.press) {
+				t.Fatal("actSetGroup = false, want true")
+			}
+			// The store is the sole authority — the live rows pick the value up
+			// via the caller's refresh() re-overlay, not an in-place patch.
+			if got := flags.Group(tc.session.SessionID); got != tc.want {
+				t.Fatalf("store.Group = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestActSetGroupLeavesDisabledAlone: the two flags share a file now, so a
+// group keypress must not resurrect or clear a session's disabled mark.
+func TestActSetGroupLeavesDisabledAlone(t *testing.T) {
+	flags := newFlagsStore(filepath.Join(t.TempDir(), flagsFileName), nil, noResolver)
+	flags.SetDisabled("a", true)
+
+	target := sessionSelectionTarget(Session{PID: 10, SessionID: "a", Disabled: true})
+	c := &actCtx{targets: []selectionTarget{target}, sel: target.id, flags: flags}
+	if !actSetGroup(c, 2) {
+		t.Fatal("actSetGroup = false, want true")
+	}
+
+	if got := flags.Flags("a"); got.Group != 2 || !got.Disabled {
+		t.Fatalf("flags = %#v, want group 2 and still disabled", got)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what
+// it printed. showActionError writes there directly rather than through
+// terminalOutput, so this is the only way to see whether the user was told
+// anything at all.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	fn()
+	os.Stdout = orig
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
+}
+
+// TestActFlagKeysReportAStoreThatCannotSave: a session-flags.json that failed
+// to parse latches the store read-only for the rest of the process, so a local
+// row's -/+ and ⇧1..9 must say so instead of looking dead forever — the same
+// one-line action error a remote row already gets when its host refuses.
+func TestActFlagKeysReportAStoreThatCannotSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), flagsFileName)
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flags := newFlagsStore(path, nil, noResolver)
+	target := sessionSelectionTarget(Session{PID: 10, SessionID: "alpha"})
+
+	for _, tc := range []struct {
+		label string
+		act   func(*actCtx) bool
+	}{
+		{"disable", actToggleDisabled},
+		{"group", func(c *actCtx) bool { return actSetGroup(c, 3) }},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			var sink bytes.Buffer
+			terminalOutput = &sink
+			t.Cleanup(func() { terminalOutput = os.Stdout })
+			// A real (zero) state: enterCooked hands it to term.Restore, which
+			// dereferences it.
+			c := &actCtx{targets: []selectionTarget{target}, sel: target.id, flags: flags, oldState: &term.State{}}
+
+			var changed bool
+			out := captureStdout(t, func() { changed = tc.act(c) })
+
+			if changed {
+				t.Fatalf("%s reported success while the store refused to write", tc.label)
+			}
+			if !strings.Contains(out, tc.label) || !strings.Contains(out, "corrupt") {
+				t.Fatalf("%s printed no usable error, got %q", tc.label, out)
+			}
+		})
+	}
+}
+
+func TestActSetGroupIgnoresEmptyHostAndMissingID(t *testing.T) {
+	flags := newFlagsStore(filepath.Join(t.TempDir(), flagsFileName), nil, noResolver)
+
+	empty := emptyHostSelectionTarget("orca")
+	c := &actCtx{targets: []selectionTarget{empty}, sel: empty.id, flags: flags}
+	if actSetGroup(c, 1) {
+		t.Fatal("empty-host target grouped")
+	}
+
+	missingID := sessionSelectionTarget(Session{PID: 2})
+	c = &actCtx{targets: []selectionTarget{missingID}, sel: missingID.id, flags: flags}
+	if actSetGroup(c, 1) {
+		t.Fatal("missing-SessionID target grouped")
+	}
+	if len(flags.entries) != 0 {
+		t.Fatalf("store mutated on ignored keypresses: %#v", flags.entries)
 	}
 }

@@ -7,6 +7,29 @@ import (
 	"time"
 )
 
+// testPushRequest builds the one push a "is my phone actually receiving these"
+// check sends. It lives here, called by both `notify-test` and the server's
+// POST /devices/{token}/test, so the CLI and the phone exercise the same push
+// rather than two copies that drift apart.
+//
+// The device's own environment rides along: a sandbox token registered against
+// the production gateway reads as a dead token, and reproducing the registered
+// value is the only way the test reveals it.
+func testPushRequest(hostName, hostID, bundleID string, d Device) pushRequest {
+	return pushRequest{
+		DeviceToken: d.Token,
+		Topic:       bundleID,
+		CollapseID:  hostID + ":notify-test",
+		PushType:    "alert",
+		Priority:    "10",
+		Environment: d.Environment,
+		Payload: buildAlertPayload(hostName, hostID, notifyEvent{
+			Kind: notifyAlert, SessionID: "notify-test", Name: "notify-test",
+			WaitingFor: "test notification",
+		}),
+	}
+}
+
 // cmdNotifyTest pushes a test notification to every registered device.
 //
 // The worst failure mode of a watchdog is dying silently — a dead server and a
@@ -31,25 +54,14 @@ func cmdNotifyTest(args []string) int {
 		return 1
 	}
 	hostID := LoadHostID()
-	payload := buildAlertPayload(shortHostname(), hostID, notifyEvent{
-		Kind: notifyAlert, SessionID: "notify-test", Name: "notify-test",
-		WaitingFor: "test notification",
-	})
+	hostName := shortHostname()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	failed := 0
 	for _, d := range devices {
-		err := client.Send(ctx, pushRequest{
-			DeviceToken: d.Token,
-			Topic:       cfg.BundleID,
-			CollapseID:  hostID + ":notify-test",
-			PushType:    "alert",
-			Priority:    "10",
-			Environment: d.Environment,
-			Payload:     payload,
-		})
+		err := client.Send(ctx, testPushRequest(hostName, hostID, cfg.BundleID, d))
 		if err != nil {
 			failed++
 			fmt.Printf("%s  FAILED  %v\n", shortToken(d.Token), err)

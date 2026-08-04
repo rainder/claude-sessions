@@ -362,3 +362,35 @@ func TestRenderHelpIsPureContent(t *testing.T) {
 		t.Fatalf("help contains terminal positioning or clear: %q", out)
 	}
 }
+
+// TestGroupsOfRows pins where badges come from now that groups are per-host
+// shared state: each row's own assignment, whether it was overlaid from this
+// host's store (local) or arrived on the wire (remote). Ungrouped rows and
+// rows with no stable id stay out of the map, so its zero value keeps meaning
+// "no badge".
+func TestGroupsOfRows(t *testing.T) {
+	local := []Session{
+		{PID: 1, SessionID: "local-grouped", Group: 3},
+		{PID: 2, SessionID: "local-plain"},
+		{PID: 3, Group: 4}, // no SessionID: cannot be keyed
+	}
+	remotes := []RemoteResult{
+		{Name: "box", Sessions: []Session{
+			{PID: 10, SessionID: "remote-grouped", Group: 7, Host: "box"},
+			{PID: 11, SessionID: "remote-plain", Host: "box"},
+		}},
+		{Name: "unreachable", Error: "dial tcp: refused"},
+	}
+
+	groups := groupsOfRows(local, remotes)
+
+	want := map[string]int{"local-grouped": 3, "remote-grouped": 7}
+	if len(groups) != len(want) {
+		t.Fatalf("groups = %#v, want %#v", groups, want)
+	}
+	for id, g := range want {
+		if groups[id] != g {
+			t.Fatalf("groups[%q] = %d, want %d", id, groups[id], g)
+		}
+	}
+}

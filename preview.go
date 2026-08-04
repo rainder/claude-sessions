@@ -23,7 +23,9 @@ var errSessionEnded = errors.New("session ended")
 var errNoTmuxPane = errors.New("no tmux pane for pid")
 
 // transcriptTailEntries is how many trailing user/assistant entries the
-// transcript fallback renders before the byte/line bounds are applied.
+// transcript fallback renders before the byte/line bounds are applied. It is
+// the depth of the live tail only: a paged request (PreviewLimits.Offset)
+// reaches as far back as it needs to.
 const transcriptTailEntries = 8
 
 // PreviewLimits bounds a rendered preview so a single request can never pull an
@@ -31,6 +33,29 @@ const transcriptTailEntries = 8
 type PreviewLimits struct {
 	MaxLines int
 	MaxBytes int
+	// Offset pages backwards through history: how many lines to skip from the
+	// newest end of the source before MaxLines/MaxBytes apply. Zero — the only
+	// value anything sent before the "preview-range" capability — is the live
+	// tail, byte for byte the request this made before paging existed.
+	//
+	// The unit is rendered lines for both sources (pane scrollback and
+	// transcript tail), so one number means one thing whatever the source
+	// header says.
+	//
+	// A client pages by adding the number of lines it actually RECEIVED, not
+	// the number it asked for: a page can come back short because MaxBytes
+	// trimmed it or history ran out, and only the received count keeps the
+	// next window contiguous. Reading it as "offset += lines" leaves gaps.
+	//
+	// Paging needs MaxLines > 0 to size the window: the server never accepts a
+	// request without it (lines is validated 1..2000), and a caller that builds
+	// these by hand and sets an Offset without a MaxLines gets the live tail.
+	//
+	// The pane is a live thing and this is a plain offset, not a snapshot
+	// cursor: a pane that keeps printing shifts its own history under a fixed
+	// offset, so a page taken while output flows can repeat or skip lines. A
+	// paused or finished session pages exactly.
+	Offset int
 }
 
 // DefaultPreviewLimits is the standard bound: 2000 lines and 512 KiB. These are
@@ -53,6 +78,10 @@ type PreviewResult struct {
 var (
 	previewTmuxCapture   = captureTmuxPreview
 	previewSessionLookup = readSessionByPID
+	previewPaneGeometry  = tmuxPaneGeometry
+	previewTmuxRun       = func(args ...string) ([]byte, error) {
+		return exec.Command("tmux", args...).Output()
+	}
 )
 
 // LoadPreview builds a bounded, sanitized preview for a local pid. It prefers a
@@ -82,7 +111,7 @@ func LoadPreview(pid int, limits PreviewLimits) (PreviewResult, error) {
 	if path == "" {
 		return PreviewResult{}, errSessionEnded
 	}
-	raw, err := formatTranscriptTail(path, transcriptTailEntries)
+	raw, err := formatTranscriptTail(path, transcriptTailEntries, limits)
 	if err != nil {
 		return PreviewResult{}, err
 	}
@@ -94,9 +123,10 @@ func LoadPreview(pid int, limits PreviewLimits) (PreviewResult, error) {
 }
 
 // captureTmuxPreview locates the tmux pane hosting pid and returns its raw
-// (unsanitized) scrollback capped at limits.MaxLines lines. Returns
-// errNoTmuxPane when pid is not in tmux so the caller can fall back; any other
-// error is a genuine capture failure.
+// (unsanitized) scrollback capped at limits.MaxLines lines, ending
+// limits.Offset lines above the newest line. Returns errNoTmuxPane when pid is
+// not in tmux so the caller can fall back; any other error is a genuine capture
+// failure.
 func captureTmuxPreview(pid int, limits PreviewLimits) (label, content string, err error) {
 	panes, _ := tmuxPaneMap()
 	ppid, _ := ppidMap()
@@ -104,12 +134,99 @@ func captureTmuxPreview(pid int, limits PreviewLimits) (label, content string, e
 	if !found {
 		return "", "", errNoTmuxPane
 	}
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-e",
-		"-S", "-"+strconv.Itoa(limits.MaxLines), "-t", pane.Location).Output()
+	content, err = capturePaneContent(pane.Location, limits)
 	if err != nil {
-		return "", "", fmt.Errorf("tmux capture-pane: %w", err)
+		return "", "", err
 	}
-	return "tmux pane " + pane.Location, string(out), nil
+	return "tmux pane " + pane.Location, content, nil
+}
+
+// capturePaneContent runs capture-pane for the window limits describes.
+//
+// Unpaged (Offset 0) it sends exactly the argv it always sent — no -E, no
+// geometry lookup, one exec — because every existing caller is unpaged and none
+// of them may pay for or notice paging. A page-back needs the pane's geometry
+// first: tmux numbers the first VISIBLE line 0, so where the newest line sits
+// (height-1) and how far back the history goes are both properties of the pane,
+// not constants.
+//
+// A window entirely older than the history is an empty page, not an error: the
+// caller keeps the tmux source and the client reads "no more history".
+func capturePaneContent(location string, limits PreviewLimits) (string, error) {
+	args := []string{"capture-pane", "-p", "-e"}
+	if limits.Offset > 0 && limits.MaxLines > 0 {
+		height, history, err := previewPaneGeometry(location)
+		if err != nil {
+			return "", err
+		}
+		start, end, ok := capturePaneRange(limits, height, history)
+		if !ok {
+			return "", nil
+		}
+		args = append(args, "-S", strconv.Itoa(start), "-E", strconv.Itoa(end))
+	} else {
+		args = append(args, "-S", "-"+strconv.Itoa(limits.MaxLines))
+	}
+	args = append(args, "-t", location)
+	out, err := previewTmuxRun(args...)
+	if err != nil {
+		return "", fmt.Errorf("tmux capture-pane: %w", err)
+	}
+	return string(out), nil
+}
+
+// capturePaneRange converts an offset in lines-from-the-newest-line into tmux
+// capture-pane -S/-E line numbers for a pane `height` rows tall with `history`
+// lines of scrollback. Line 0 is the first visible row, so the newest line is
+// height-1 and the history runs -1..-history.
+//
+// The unpaged capture (-S -MaxLines, no -E) returns MaxLines+height rows and
+// limitPreview keeps the newest MaxLines of them, so page 0 effectively ends at
+// height-1. Ending page n at height-1-Offset therefore makes consecutive pages
+// contiguous: no gap the size of the pane, no repeated block.
+//
+// ok is false when the whole window is older than the history — an empty page.
+func capturePaneRange(limits PreviewLimits, height, history int) (start, end int, ok bool) {
+	end = height - 1 - limits.Offset
+	if end < -history {
+		return 0, 0, false
+	}
+	start = end - limits.MaxLines + 1
+	if start < -history {
+		start = -history
+	}
+	return start, end, true
+}
+
+// tmuxPaneGeometry returns a pane's visible height and the number of lines in
+// its scrollback.
+//
+// The format is two numeric fields separated by a space and carries no free
+// text, so it parses identically under any locale — the same discipline
+// tmuxPaneMap documents. It is only ever run for a paged request.
+func tmuxPaneGeometry(location string) (height, history int, err error) {
+	out, err := previewTmuxRun("-u", "display-message", "-p", "-t", location,
+		"-F", "#{pane_height} #{history_size}")
+	if err != nil {
+		return 0, 0, fmt.Errorf("tmux display-message: %w", err)
+	}
+	return parseTmuxPaneGeometry(string(out))
+}
+
+func parseTmuxPaneGeometry(out string) (height, history int, err error) {
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("tmux pane geometry: %q", strings.TrimSpace(out))
+	}
+	height, err = strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, 0, fmt.Errorf("tmux pane height: %q", fields[0])
+	}
+	history, err = strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("tmux history size: %q", fields[1])
+	}
+	return height, history, nil
 }
 
 // sanitizeTerminalText strips control sequences that could hijack the viewer's
@@ -277,25 +394,29 @@ func PreviewContent(pid int) string {
 	return head + "\n\n" + res.Content
 }
 
+// transcriptEntry is one user/assistant line of a JSONL transcript, kept raw
+// until it is rendered so paging can decide how deep to render.
+type transcriptEntry struct {
+	Type    string          `json:"type"`
+	Message json.RawMessage `json:"message"`
+}
+
 // formatTranscriptTail reads the JSONL transcript and renders the last n
-// user/assistant entries. It returns an error for read failures rather than
-// embedding the message in the output.
-func formatTranscriptTail(path string, n int) (string, error) {
+// user/assistant entries, or — when limits.Offset pages back — the window of
+// rendered lines ending Offset lines above the newest one. It returns an error
+// for read failures rather than embedding the message in the output.
+func formatTranscriptTail(path string, n int, limits PreviewLimits) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("open transcript: %w", err)
 	}
 	defer f.Close()
 
-	type entry struct {
-		Type    string          `json:"type"`
-		Message json.RawMessage `json:"message"`
-	}
-	var convo []entry
+	var convo []transcriptEntry
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024) // some entries are huge
 	for scanner.Scan() {
-		var e entry
+		var e transcriptEntry
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue
 		}
@@ -303,6 +424,9 @@ func formatTranscriptTail(path string, n int) (string, error) {
 			continue
 		}
 		convo = append(convo, e)
+	}
+	if limits.Offset > 0 {
+		return transcriptPage(convo, limits), nil
 	}
 	if len(convo) == 0 {
 		return "(no user/assistant entries in transcript)\n", nil
@@ -316,6 +440,54 @@ func formatTranscriptTail(path string, n int) (string, error) {
 		renderEntry(&b, e.Type, e.Message)
 	}
 	return b.String(), nil
+}
+
+// transcriptPage renders the window of rendered lines that ends limits.Offset
+// lines above the newest line. It renders entries newest-first and stops as soon
+// as it holds Offset+MaxLines lines, so a page costs the same whether the
+// transcript has fifty entries or five thousand.
+//
+// Paging past the first entry is an empty page — the same "no more history" a
+// pane at the top of its scrollback gives, and never the
+// "(no user/assistant entries)" notice, which describes the live tail rather
+// than a stretch of history.
+func transcriptPage(convo []transcriptEntry, limits PreviewLimits) string {
+	want := -1 // MaxLines unset: no line ceiling, so render everything
+	if limits.MaxLines > 0 {
+		want = limits.Offset + limits.MaxLines
+	}
+	var rendered []string
+	lines := 0
+	for i := len(convo) - 1; i >= 0 && (want < 0 || lines < want); i-- {
+		var b strings.Builder
+		renderEntry(&b, convo[i].Type, convo[i].Message)
+		s := b.String()
+		rendered = append(rendered, s)
+		lines += strings.Count(s, "\n")
+	}
+	var b strings.Builder
+	for i := len(rendered) - 1; i >= 0; i-- { // back into transcript order
+		b.WriteString(rendered[i])
+	}
+	return dropTrailingLines(b.String(), limits.Offset)
+}
+
+// dropTrailingLines removes the newest n lines from s, a line being everything
+// through its "\n" (the same notion limitPreview counts). Dropping as many lines
+// as s has, or more, leaves "": paging past the start of history is an empty
+// page, not the oldest line served over and over.
+func dropTrailingLines(s string, n int) string {
+	if n <= 0 || s == "" {
+		return s
+	}
+	lines := strings.SplitAfter(s, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1] // trailing newline is not a line of its own
+	}
+	if n >= len(lines) {
+		return ""
+	}
+	return strings.Join(lines[:len(lines)-n], "")
 }
 
 func renderEntry(w *strings.Builder, typ string, msgRaw json.RawMessage) {

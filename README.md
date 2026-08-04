@@ -275,6 +275,10 @@ Notes:
 - Run `claude-sessions notify-test` to confirm delivery end to end. It prints
   Apple's own reason string per device, which is the difference between "not
   working" and "not working *because* the key id is wrong".
+- `POST /devices/{token}/test` is the same check for one device, so a phone can
+  run it on itself from its own settings screen. It answers
+  `{"ok":true}` or `{"ok":false,"error":"<Apple's reason>"}`, and `404` for a
+  token this host has never registered.
 
 An alert fires when a session has been waiting for two consecutive polls, so a
 prompt you answer at the keyboard within a couple of seconds never reaches your

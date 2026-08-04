@@ -22,12 +22,20 @@ type clientState struct {
 // stateMaxAge is how long an unseen entry survives before load-time GC drops it.
 const stateMaxAge = 30 * 24 * time.Hour
 
-// SessionStore is the client-machine-local persisted group assignment at
-// ~/.config/claude-sessions/state.json (alongside servers.yaml). It is only
-// touched from the TUI's single-threaded event loop — and read-only by the
-// `list` subcommand — so it carries no locking. Mutations save atomically (temp
-// file + rename in the same directory). Two concurrent TUIs race last-writer-
-// wins, which is accepted.
+// SessionStore is the superseded, client-machine-local group assignment at
+// ~/.config/claude-sessions/state.json (alongside servers.yaml).
+//
+// Groups are per-host shared state now, living beside the disabled bit in
+// session-flags.json (session_flags.go) so the desktop and every phone
+// polling that host see the same badges. This store survives as the reader
+// migrateLegacyFlags folds state.json into that file with, once, before
+// renaming it `.bak`; nothing writes it any more.
+//
+// Its own contract, unchanged, for as long as it is still read: touched only
+// from the TUI's single-threaded event loop — and read-only by the `list`
+// subcommand — so it carries no locking. Mutations save atomically (temp file
+// + rename in the same directory). Two concurrent TUIs race last-writer-wins,
+// which is accepted.
 type SessionStore struct {
 	entries map[string]sessionState
 	path    string

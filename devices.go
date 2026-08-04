@@ -147,6 +147,17 @@ func (s *DeviceStore) Has(token string) bool {
 	return ok
 }
 
+// Get returns one registered device. Separate from Has because a caller
+// pushing to a single named device needs that device's environment — pushing
+// a sandbox token at the production gateway is the exact failure a per-device
+// test push exists to reveal, so the stored value must be the one used.
+func (s *DeviceStore) Get(token string) (Device, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.devices[token]
+	return d, ok
+}
+
 // clockLocked reads the injectable clock. Callers hold s.mu.
 func (s *DeviceStore) clockLocked() time.Time {
 	if s.now == nil {

@@ -96,9 +96,9 @@ func RunTUI(interval time.Duration) error {
 
 	viewMode := LoadViewMode()
 	sortMode := LoadSortMode()
-	// store holds client-side group assignments only (state.go); disabled
-	// state lives in disabledStore (disabled_store.go), host-owned and
-	// persisted separately. groupFilterState (zero value = no filter) is
+	// flagsStore holds this host's shared per-session flags — group assignment
+	// and disabled state both (session_flags.go), host-owned and visible to
+	// every client polling this host. groupFilterState (zero value = no filter) is
 	// runtime-only — never persisted. pendingHide arms the inverse-filter
 	// binding: 'h' sets it and the next keystroke resolves it (see
 	// groupFilterTransition). textFilter is the '/'-driven free-text filter
@@ -107,14 +107,15 @@ func RunTUI(interval time.Duration) error {
 	// reused for badge rendering and the filter predicate. hideDisabled is the
 	// 'd' toggle (also runtime-only) that composes (AND) with the group
 	// filter and text query.
-	store := LoadSessionStore()
-	disabledStore := LoadDisabledStore()
+	// The store's one-time migration notice is taken rather than printed: this
+	// runs on the alternate screen, so a stderr line here is painted over by
+	// the very first repaint. It becomes the opening toast instead (below).
+	flagsStore, migrationNotice := LoadFlagsStoreWithNotice()
 	var groupFilterState groupFilter
 	var pendingHide bool
 	var textFilter textFilterState
 	var hideDisabled bool
 	var groups map[string]int
-	var lastStateTouch time.Time
 	var local []Session
 	var remotes []RemoteResult
 	var targets []selectionTarget
@@ -270,6 +271,13 @@ func RunTUI(interval time.Duration) error {
 	// wait at the deadline so the line vanishes on time.
 	var toast string
 	var toastUntil time.Time
+	if migrationNotice != "" {
+		// The legacy stores were just merged. Held far longer than an action
+		// toast: it is said exactly once on this machine, ever, and it asks the
+		// user to go re-set the groups the merge could not carry over.
+		toast = migrationNotice
+		toastUntil = time.Now().Add(20 * time.Second)
+	}
 
 	// prefetchTicketSummaries warms ticketCache for every DR-XXXX id visible
 	// in the current local+remote rows, so openInspector's own fetch below
@@ -299,13 +307,13 @@ func RunTUI(interval time.Duration) error {
 	// selection. It chases a pending post-spawn landing until its tmux pane
 	// appears, otherwise falling back if a vanished selected row needs replacing.
 	settleRows := func() {
-		// Refresh the group snapshot and overlay this host's disabled flags
-		// onto local sessions before sorting — the sort orders disabled rows
-		// last. Remote sessions already carry authoritative Disabled from the
-		// wire (each remote host's own DisabledStore, applied server-side in
-		// GET /sessions), so no client-side overlay is needed for them.
-		groups = store.GroupsMap()
-		disabledStore.Overlay(local)
+		// Overlay this host's shared flags onto local sessions before sorting —
+		// the sort orders disabled rows last. Remote sessions already carry
+		// authoritative flags from the wire (each remote host's own FlagsStore,
+		// applied server-side in GET /sessions), so no client-side overlay is
+		// needed for them; the badge map below is then built from the rows
+		// themselves, whichever host each one's flags came from.
+		flagsStore.Overlay(local)
 		SortSessions(local, sortMode)
 		// Snapshot() returns the hub's shared slices; sort remotes on copies so
 		// we never race the hub goroutine that owns them.
@@ -315,15 +323,12 @@ func RunTUI(interval time.Duration) error {
 		// them here — before anything reads `remotes`, whether that is the header's
 		// rate-limit bars, a host heading's account label, or the Ctrl+W picker.
 		remotes = overlayRemoteUsage(remotes, remoteUsageHub.Snapshot())
-		// Keep long-lived group entries alive under plain viewing: refresh
-		// their last_seen about hourly so the 30-day load-time GC never drops
-		// state for a session that's still on screen. Disabled's own
-		// keepalive is handled separately by DisabledStore.Overlay's
-		// opportunistic touch above, not by this TouchVisible call.
-		if now := time.Now(); now.Sub(lastStateTouch) >= time.Hour {
-			lastStateTouch = now
-			store.TouchVisible(visibleSessionIDs(local, remotes))
-		}
+		// Badges and the group filter read one map keyed by session id, built
+		// from the rows now that every row carries its own host's assignment.
+		// Keeping long-lived entries alive under plain viewing is the store's
+		// job, handled by Overlay's opportunistic hourly touch — here for local
+		// rows, and on each remote host for its own.
+		groups = groupsOfRows(local, remotes)
 		// Targets mirror exactly what the frame renders: filtered by the active
 		// group and text query so a filtered-out selection falls back via
 		// validateTargetSel.
@@ -459,7 +464,7 @@ func RunTUI(interval time.Duration) error {
 			targets:    targets,
 			sel:        state.sel,
 			modalWakes: modalWakes,
-			disabled:   disabledStore,
+			flags:      flagsStore,
 			// Straight from the pollers' latest snapshots (and, for a remote row,
 			// the last /sessions poll this loop already has in `remotes`), so
 			// Ctrl+W opens instantly and never fetches.
@@ -832,10 +837,13 @@ func RunTUI(interval time.Duration) error {
 			case "!", "@", "#", "$", "%", "^", "&", "*", "(":
 				// Shift+1..9 assign the selected session's group (single membership;
 				// same group again ungroups). Sessions with no SessionID are ignored.
+				// The group is written on the host that owns the session, so a
+				// remote row goes over HTTP — hence the same refresh(true) kick
+				// the disable toggle uses, rather than a bare settleRows().
 				if group := shiftDigitGroup(k); group != 0 {
-					if s := findSelectionTarget(targets, state.sel); s != nil && s.session != nil && s.session.SessionID != "" {
-						store.SetGroup(s.session.SessionID, group, visibleSessionIDs(local, remotes))
-						settleRows()
+					screen.Invalidate()
+					if actSetGroup(makeCtx(), group) {
+						refresh(true)
 						state.requestSelectionAnchor()
 						render()
 					}
@@ -1252,24 +1260,28 @@ func textFilterPrompt(buffer string, cols int) string {
 	return "/" + buffer + "▌"
 }
 
-// visibleSessionIDs collects the SessionIDs of every session currently in view
-// (local + all remotes), for refreshing the store's last_seen on save. Blank
-// IDs are skipped.
-func visibleSessionIDs(local []Session, remotes []RemoteResult) []string {
-	ids := make([]string, 0, len(local))
-	for _, s := range local {
-		if s.SessionID != "" {
-			ids = append(ids, s.SessionID)
+// groupsOfRows collects the sessionID→group map the render path and the group
+// filter read, from every session currently in view (local + all remotes).
+// Each row's group is its owning host's: local rows were just overlaid from
+// this host's FlagsStore, remote rows carry theirs from the wire. Blank IDs
+// and ungrouped sessions are skipped, so the map's zero value keeps meaning
+// "no badge".
+func groupsOfRows(local []Session, remotes []RemoteResult) map[string]int {
+	groups := make(map[string]int, len(local))
+	add := func(s Session) {
+		if s.SessionID != "" && s.Group != 0 {
+			groups[s.SessionID] = s.Group
 		}
+	}
+	for _, s := range local {
+		add(s)
 	}
 	for _, r := range remotes {
 		for _, s := range r.Sessions {
-			if s.SessionID != "" {
-				ids = append(ids, s.SessionID)
-			}
+			add(s)
 		}
 	}
-	return ids
+	return groups
 }
 
 func sessionFooter() string {

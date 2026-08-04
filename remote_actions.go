@@ -141,6 +141,11 @@ func fetchRemotePreview(host string, pid int, limits PreviewLimits) (PreviewResu
 	}
 	url := fmt.Sprintf("http://%s:%d/sessions/%d/preview?lines=%d&bytes=%d",
 		srv.Host, srv.Port, pid, limits.MaxLines, limits.MaxBytes)
+	// Only when paging: an unpaged fetch keeps sending the exact query it sent
+	// before offset existed, so a server too old to know the param never sees it.
+	if limits.Offset > 0 {
+		url += fmt.Sprintf("&offset=%d", limits.Offset)
+	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return PreviewResult{}, err
@@ -411,6 +416,28 @@ func postDisableRemote(host string, pid int, sessionID string, disabled bool) (a
 	return r, nil
 }
 
+// postFlagsRemote asks host's server to set pid's shared flags, and returns
+// the state it actually applied — the server's own resolved SessionID and the
+// values it wrote. group is sent as-is (0 clears the assignment); disabled is
+// left out of the body entirely, which the endpoint reads as "leave it
+// alone". Same plain-function shape as postDisableRemote, so the
+// network+parse logic is unit-testable without a terminal.
+func postFlagsRemote(host string, pid int, sessionID string, group int) (actionResult, error) {
+	body, err := json.Marshal(map[string]any{"session_id": sessionID, "group": group})
+	if err != nil {
+		return actionResult{}, err
+	}
+	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/flags", pid), "POST", body)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var r actionResult
+	if err := json.Unmarshal(resp, &r); err != nil {
+		return actionResult{}, err
+	}
+	return r, nil
+}
+
 // killRemote asks host's server to kill pid, sending sessionID as the
 // precondition when known so the server's reattest (server.go:618) actually
 // fires — an empty sessionID falls back to the bare {} body, matching
@@ -552,6 +579,29 @@ func actToggleDisabledRemote(c *actCtx) bool {
 	}
 	if !r.OK {
 		showActionError(c, "disable", fmt.Errorf("%s", r.Error))
+		return false
+	}
+	return true
+}
+
+// actSetGroupRemote handles Shift+1..9 on a remote-selected row: the group
+// belongs to the host that owns the session, so it is written there rather
+// than locally. No confirmation dialog — grouping isn't destructive. Reports
+// whether anything changed, matching actSetGroup's local-path contract. A host
+// running a build without the "flags" capability answers 404, which surfaces
+// as the same one-line action error every other remote refusal uses.
+func actSetGroupRemote(c *actCtx, group int) bool {
+	s := c.selected()
+	if s == nil || s.SessionID == "" {
+		return false
+	}
+	r, err := postFlagsRemote(s.Host, s.PID, s.SessionID, toggleGroup(s.Group, group))
+	if err != nil {
+		showActionError(c, "group", err)
+		return false
+	}
+	if !r.OK {
+		showActionError(c, "group", fmt.Errorf("%s", r.Error))
 		return false
 	}
 	return true

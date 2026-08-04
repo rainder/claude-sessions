@@ -629,16 +629,16 @@ func TestSessionsIncludesHostUsage(t *testing.T) {
 }
 
 // TestSessionsHandlerOverlaysDisabledState proves GET /sessions no longer
-// hardcodes Disabled=false: it reflects the host's own DisabledStore, and
+// hardcodes Disabled=false: it reflects the host's own FlagsStore, and
 // does not mutate the shared session cache in the process.
 func TestSessionsHandlerOverlaysDisabledState(t *testing.T) {
 	dir := t.TempDir()
-	disabled := newDisabledStore(filepath.Join(dir, "disabled.json"), fixedClock(time.Now()))
-	disabled.SetDisabled("dis-1", true)
+	flags := newFlagsStore(filepath.Join(dir, flagsFileName), fixedClock(time.Now()), noResolver)
+	flags.SetDisabled("dis-1", true)
 
 	s := &server{
-		token:    "secret",
-		disabled: disabled,
+		token: "secret",
+		flags: flags,
 		collect: func() ([]Session, error) {
 			return []Session{
 				{PID: 1, SessionID: "dis-1"},
@@ -788,7 +788,7 @@ func TestSessionsAdvertisesAPIHandshake(t *testing.T) {
 	// Only routes that answer today. A name is added here by the change that
 	// lands its endpoint, so this literal failing is the intended alarm when a
 	// capability is advertised ahead of the handler that serves it.
-	want := []string{"kill", "migrate", "spawn", "resume", "worktree-remove"}
+	want := []string{"kill", "migrate", "spawn", "resume", "worktree-remove", "preview-range", "attach", "flags", "test-push"}
 	if !slices.Equal(got.API.Capabilities, want) {
 		t.Fatalf("api.capabilities = %v, want %v", got.API.Capabilities, want)
 	}
@@ -2028,6 +2028,190 @@ func TestDeviceRoutesWithoutRegistry(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	s.registerDevice(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/devices/"+testDeviceToken+"/test", nil)
+	req.SetPathValue("token", testDeviceToken)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+
+	s.sendTestPush(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("test-push status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// testPushServer builds a server whose push path ends in a fake sender, wired
+// exactly as cmdServer wires the real one.
+func testPushServer(t *testing.T, sender pushSender, devices ...Device) (*server, *DeviceStore) {
+	t.Helper()
+	store := loadDeviceStore("", fixedClock(time.Now()))
+	for _, d := range devices {
+		store.Upsert(d)
+	}
+	return &server{
+		token:    "secret",
+		host:     "delta",
+		hostID:   "host-1",
+		bundleID: "com.skerla.claude-sessions",
+		devices:  store,
+		pusher:   sender,
+	}, store
+}
+
+func postTestPush(s *server, token string, auth bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/devices/"+token+"/test", nil)
+	req.SetPathValue("token", token)
+	if auth {
+		req.Header.Set("Authorization", "Bearer secret")
+	}
+	rec := httptest.NewRecorder()
+	s.sendTestPush(rec, req)
+	return rec
+}
+
+// The happy path: one push, to the named device only, carrying the same topic,
+// push type, priority, collapse id and per-device environment a real alert from
+// this host would carry.
+func TestSendTestPushSendsToOneDevice(t *testing.T) {
+	sender := &fakeSender{}
+	other := strings.Repeat("a", 64)
+	s, _ := testPushServer(t, sender,
+		Device{Token: testDeviceToken, Environment: "sandbox", Platform: "ios"},
+		Device{Token: other, Environment: "production", Platform: "ios"},
+	)
+
+	rec := postTestPush(s, testDeviceToken, true)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got, want := strings.TrimSpace(rec.Body.String()), `{"ok":true}`; got != want {
+		t.Fatalf("body = %s, want %s", got, want)
+	}
+	sent := sender.requests()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d pushes, want exactly one (the named device)", len(sent))
+	}
+	req := sent[0]
+	if req.DeviceToken != testDeviceToken {
+		t.Fatalf("DeviceToken = %q, want %q", req.DeviceToken, testDeviceToken)
+	}
+	// The stored environment, not a request-supplied one: a sandbox token
+	// registered against a production gateway is the failure this endpoint
+	// exists to diagnose, so it must be reproduced faithfully.
+	if req.Environment != "sandbox" {
+		t.Fatalf("Environment = %q, want the registered %q", req.Environment, "sandbox")
+	}
+	if req.Topic != "com.skerla.claude-sessions" {
+		t.Fatalf("Topic = %q, want the configured bundle id", req.Topic)
+	}
+	if req.PushType != "alert" || req.Priority != "10" {
+		t.Fatalf("PushType/Priority = %q/%q, want alert/10", req.PushType, req.Priority)
+	}
+	if want := "host-1:notify-test"; req.CollapseID != want {
+		t.Fatalf("CollapseID = %q, want %q", req.CollapseID, want)
+	}
+	if !strings.Contains(string(req.Payload), "notify-test") {
+		t.Fatalf("payload does not look like the notify-test alert: %s", req.Payload)
+	}
+}
+
+// Apple's reason string is the diagnosis. It reaches the client exactly as the
+// sender produced it — no wrapping, no rephrasing, no "push failed" prefix.
+func TestSendTestPushPassesApplesReasonThrough(t *testing.T) {
+	reason := "apns: 400 BadDeviceToken"
+	sender := &fakeSender{err: errors.New(reason)}
+	s, _ := testPushServer(t, sender, Device{Token: testDeviceToken, Environment: "production"})
+
+	rec := postTestPush(s, testDeviceToken, true)
+
+	// A failed push is a reported outcome, not a broken request: 200 with the
+	// {ok,error} envelope, same as every other action on this server.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var got actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, rec.Body.String())
+	}
+	if got.OK {
+		t.Fatalf("ok = true after a failed send")
+	}
+	if got.Error != reason {
+		t.Fatalf("error = %q, want the sender's own string %q", got.Error, reason)
+	}
+}
+
+// A device Apple calls dead stays registered. Removing it here would make the
+// next diagnostic call answer 404 "unknown token" when the truth was "Apple
+// rejected a token this host has" — the endpoint would destroy the evidence it
+// exists to produce. A sandbox/production mismatch reads as exactly this.
+func TestSendTestPushKeepsAGoneDevice(t *testing.T) {
+	sender := &fakeSender{err: fmt.Errorf("%w (%s)", errDeviceGone, "BadDeviceToken")}
+	s, store := testPushServer(t, sender, Device{Token: testDeviceToken, Environment: "sandbox"})
+
+	rec := postTestPush(s, testDeviceToken, true)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var got actionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := "apns: device token no longer valid (BadDeviceToken)"; got.Error != want {
+		t.Fatalf("error = %q, want %q", got.Error, want)
+	}
+	if len(store.List()) != 1 {
+		t.Fatalf("a test push pruned the device it was diagnosing: %+v", store.List())
+	}
+}
+
+// An unknown token is a 404, and nothing is sent. A malformed token lands here
+// too — it cannot be in the registry — so there is no separate 400 path.
+func TestSendTestPushUnknownTokenIs404(t *testing.T) {
+	sender := &fakeSender{}
+	s, _ := testPushServer(t, sender, Device{Token: testDeviceToken, Environment: "sandbox"})
+
+	for _, token := range []string{strings.Repeat("b", 64), "nonsense"} {
+		rec := postTestPush(s, token, true)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d for token %q, want %d", rec.Code, token, http.StatusNotFound)
+		}
+	}
+	if len(sender.requests()) != 0 {
+		t.Fatalf("pushed to an unregistered token: %+v", sender.requests())
+	}
+}
+
+func TestSendTestPushUnauthorized(t *testing.T) {
+	sender := &fakeSender{}
+	s, _ := testPushServer(t, sender, Device{Token: testDeviceToken})
+
+	rec := postTestPush(s, testDeviceToken, false)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if len(sender.requests()) != 0 {
+		t.Fatalf("pushed without auth: %+v", sender.requests())
+	}
+}
+
+// A host with a device registry but no APNs key — the common unconfigured
+// case, and the one the settings screen hits — reports 503 rather than a
+// failed push.
+func TestSendTestPushWithoutAPNsClient(t *testing.T) {
+	store := loadDeviceStore("", fixedClock(time.Now()))
+	store.Upsert(Device{Token: testDeviceToken})
+	s := &server{token: "secret", devices: store}
+
+	rec := postTestPush(s, testDeviceToken, true)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
@@ -3836,10 +4020,10 @@ func TestCompletedSpawnFreesItsSlotBeforeTheResponseIsWritten(t *testing.T) {
 
 func TestDisableHandlerSetsDisabledState(t *testing.T) {
 	dir := t.TempDir()
-	disabled := newDisabledStore(filepath.Join(dir, "disabled.json"), fixedClock(time.Now()))
+	flags := newFlagsStore(filepath.Join(dir, flagsFileName), fixedClock(time.Now()), noResolver)
 	s := &server{
-		token:    "secret",
-		disabled: disabled,
+		token: "secret",
+		flags: flags,
 		collect: func() ([]Session, error) {
 			return []Session{{PID: 55, SessionID: "sess-55"}}, nil
 		},
@@ -3859,17 +4043,17 @@ func TestDisableHandlerSetsDisabledState(t *testing.T) {
 	if !r.OK || r.SessionID != "sess-55" || r.Disabled == nil || !*r.Disabled {
 		t.Fatalf("response = %#v, want OK with sess-55 disabled", r)
 	}
-	if !disabled.Disabled("sess-55") {
+	if !flags.Disabled("sess-55") {
 		t.Fatal("store not updated")
 	}
 }
 
 func TestDisableHandlerSessionMismatchRefusesWithoutMutating(t *testing.T) {
 	dir := t.TempDir()
-	disabled := newDisabledStore(filepath.Join(dir, "disabled.json"), fixedClock(time.Now()))
+	flags := newFlagsStore(filepath.Join(dir, flagsFileName), fixedClock(time.Now()), noResolver)
 	s := &server{
-		token:    "secret",
-		disabled: disabled,
+		token: "secret",
+		flags: flags,
 		collect: func() ([]Session, error) {
 			return []Session{{PID: 55, SessionID: "new-session"}}, nil
 		},
@@ -3889,18 +4073,18 @@ func TestDisableHandlerSessionMismatchRefusesWithoutMutating(t *testing.T) {
 	if r.OK || r.Code != codeSessionMismatch {
 		t.Fatalf("response = %#v, want session_mismatch refusal", r)
 	}
-	if disabled.Disabled("new-session") || disabled.Disabled("stale-session") {
+	if flags.Disabled("new-session") || flags.Disabled("stale-session") {
 		t.Fatal("store mutated on a refused request")
 	}
 }
 
 func TestDisableHandlerNotLiveRefusesWithoutMutating(t *testing.T) {
 	dir := t.TempDir()
-	disabled := newDisabledStore(filepath.Join(dir, "disabled.json"), fixedClock(time.Now()))
+	flags := newFlagsStore(filepath.Join(dir, flagsFileName), fixedClock(time.Now()), noResolver)
 	s := &server{
-		token:    "secret",
-		disabled: disabled,
-		collect:  func() ([]Session, error) { return nil, nil },
+		token:   "secret",
+		flags:   flags,
+		collect: func() ([]Session, error) { return nil, nil },
 	}
 	body := strings.NewReader(`{"session_id":"ghost","disabled":true}`)
 	req := httptest.NewRequest("POST", "/sessions/55/disable", body)
@@ -4545,5 +4729,371 @@ func TestResizeHandlerNotLiveRefuses(t *testing.T) {
 	}
 	if r.OK || r.Code != codeNotLive {
 		t.Fatalf("result = %+v, want refusal with codeNotLive", r)
+	}
+}
+
+// TestPreviewHandlerParsesOffset covers the paging param: it rides alongside
+// lines/bytes rather than replacing them, and 0 is the same request as none.
+func TestPreviewHandlerParsesOffset(t *testing.T) {
+	var got PreviewLimits
+	s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+		got = limits
+		return PreviewResult{Source: "tmux", Content: "x"}, nil
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview?lines=40&bytes=4096&offset=120", nil)
+	req.SetPathValue("pid", "42")
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	s.preview(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got != (PreviewLimits{MaxLines: 40, MaxBytes: 4096, Offset: 120}) {
+		t.Fatalf("limits = %#v", got)
+	}
+}
+
+// TestPreviewHandlerOffsetZeroMatchesNoOffset: a client that always sends the
+// param must reach the byte-for-byte old request when it is paged to the live
+// tail.
+func TestPreviewHandlerOffsetZeroMatchesNoOffset(t *testing.T) {
+	var got PreviewLimits
+	s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+		got = limits
+		return PreviewResult{Source: "tmux", Content: "x"}, nil
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview?offset=0", nil)
+	req.SetPathValue("pid", "42")
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	s.preview(rec, req)
+	if got != DefaultPreviewLimits() {
+		t.Fatalf("limits = %#v, want the unpaged defaults", got)
+	}
+}
+
+func TestPreviewHandlerRejectsBadOffset(t *testing.T) {
+	for _, q := range []string{"offset=-1", "offset=abc", "offset=1000001", "offset=1e6"} {
+		s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+			t.Fatalf("loader must not run for %q", q)
+			return PreviewResult{}, nil
+		}}
+		req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview?"+q, nil)
+		req.SetPathValue("pid", "42")
+		req.Header.Set("Authorization", "Bearer test")
+		rec := httptest.NewRecorder()
+		s.preview(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("query %q: status = %d, want 400", q, rec.Code)
+		}
+	}
+}
+
+// TestPreviewHandlerServesAnEmptyPageAsOK: an exhausted page-back is a 200 with
+// an empty body — the client reads "no more history", not an error.
+func TestPreviewHandlerServesAnEmptyPageAsOK(t *testing.T) {
+	s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+		return PreviewResult{Source: "tmux", Label: "tmux pane dev:0.0"}, nil
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview?offset=9000", nil)
+	req.SetPathValue("pid", "42")
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	s.preview(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "" {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Claude-Sessions-Preview-Source") != "tmux" {
+		t.Fatalf("source header = %q", rec.Header().Get("X-Claude-Sessions-Preview-Source"))
+	}
+}
+
+// TestFetchRemotePreviewOmitsOffsetWhenUnpaged keeps the TUI's own remote
+// request identical to what it sent before paging existed.
+func TestFetchRemotePreviewOmitsOffsetWhenUnpaged(t *testing.T) {
+	var raw string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw = r.URL.RawQuery
+		_, _ = w.Write([]byte("hi\n"))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	if _, err := fetchRemotePreview("box", 42, DefaultPreviewLimits()); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if raw != "lines=2000&bytes=524288" {
+		t.Fatalf("query = %q, want the pre-paging query", raw)
+	}
+}
+
+func TestFetchRemotePreviewSendsOffsetWhenPaged(t *testing.T) {
+	var raw string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw = r.URL.RawQuery
+		_, _ = w.Write([]byte("hi\n"))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	limits := PreviewLimits{MaxLines: 100, MaxBytes: 4096, Offset: 300}
+	if _, err := fetchRemotePreview("box", 42, limits); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if raw != "lines=100&bytes=4096&offset=300" {
+		t.Fatalf("query = %q", raw)
+	}
+}
+
+// flagsRequestFor builds an authorized POST /sessions/{pid}/flags request.
+func flagsRequestFor(pid int, body string) *http.Request {
+	req := httptest.NewRequest("POST", fmt.Sprintf("/sessions/%d/flags", pid), strings.NewReader(body))
+	req.SetPathValue("pid", strconv.Itoa(pid))
+	req.Header.Set("Authorization", "Bearer secret")
+	return req
+}
+
+// flagsServer is a server whose only live session is sess-55 at PID 55, with a
+// real store behind it.
+func flagsServer(t *testing.T) (*server, *FlagsStore) {
+	t.Helper()
+	store := newFlagsStore(filepath.Join(t.TempDir(), flagsFileName), fixedClock(time.Now()), noResolver)
+	return &server{
+		token: "secret",
+		flags: store,
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 55, SessionID: "sess-55"}}, nil
+		},
+	}, store
+}
+
+func TestFlagsHandlerSetsGroupAndDisabled(t *testing.T) {
+	s, store := flagsServer(t)
+	rec := httptest.NewRecorder()
+
+	s.sessionFlagsHandler(rec, flagsRequestFor(55, `{"session_id":"sess-55","group":4,"disabled":true}`))
+
+	r := decodeAction(t, rec)
+	if !r.OK || r.SessionID != "sess-55" {
+		t.Fatalf("response = %#v, want OK for sess-55", r)
+	}
+	if r.Group == nil || *r.Group != 4 || r.Disabled == nil || !*r.Disabled {
+		t.Fatalf("response = %#v, want group 4 and disabled echoed back", r)
+	}
+	if store.Group("sess-55") != 4 || !store.Disabled("sess-55") {
+		t.Fatalf("store = %#v, want group 4 and disabled", store.Flags("sess-55"))
+	}
+}
+
+// TestFlagsHandlerAbsentFieldLeavesFlagUnchanged is the distinction the whole
+// pointer-decoding dance exists for: `group: 0` clears the assignment, while a
+// group key missing from the JSON entirely means "leave it alone" — and the
+// same for disabled.
+func TestFlagsHandlerAbsentFieldLeavesFlagUnchanged(t *testing.T) {
+	s, store := flagsServer(t)
+	_, _ = store.SetFlags("sess-55", intPtr(4), boolPtr(true))
+
+	// Only disabled named: the group survives.
+	rec := httptest.NewRecorder()
+	s.sessionFlagsHandler(rec, flagsRequestFor(55, `{"session_id":"sess-55","disabled":false}`))
+	if r := decodeAction(t, rec); !r.OK || r.Group == nil || *r.Group != 4 {
+		t.Fatalf("response = %#v, want group 4 untouched by a disabled-only write", r)
+	}
+	if store.Group("sess-55") != 4 || store.Disabled("sess-55") {
+		t.Fatalf("store = %#v, want group 4 kept and enabled", store.Flags("sess-55"))
+	}
+
+	// Explicit 0 clears the group, and says nothing about disabled.
+	store.SetDisabled("sess-55", true)
+	rec = httptest.NewRecorder()
+	s.sessionFlagsHandler(rec, flagsRequestFor(55, `{"session_id":"sess-55","group":0}`))
+	if r := decodeAction(t, rec); !r.OK || r.Group == nil || *r.Group != 0 || r.Disabled == nil || !*r.Disabled {
+		t.Fatalf("response = %#v, want group cleared and still disabled", r)
+	}
+	if store.Group("sess-55") != 0 || !store.Disabled("sess-55") {
+		t.Fatalf("store = %#v, want ungrouped and still disabled", store.Flags("sess-55"))
+	}
+}
+
+// TestFlagsHandlerWithNoFlagsChangesNothing: a body naming only the
+// precondition is accepted and reports what the session carries, which is what
+// a client re-reading after a race wants.
+func TestFlagsHandlerWithNoFlagsChangesNothing(t *testing.T) {
+	s, store := flagsServer(t)
+	_, _ = store.SetFlags("sess-55", intPtr(7), boolPtr(true))
+
+	rec := httptest.NewRecorder()
+	s.sessionFlagsHandler(rec, flagsRequestFor(55, `{"session_id":"sess-55"}`))
+
+	r := decodeAction(t, rec)
+	if !r.OK || r.Group == nil || *r.Group != 7 || r.Disabled == nil || !*r.Disabled {
+		t.Fatalf("response = %#v, want the unchanged state echoed back", r)
+	}
+	if store.Group("sess-55") != 7 || !store.Disabled("sess-55") {
+		t.Fatalf("store = %#v, want it untouched", store.Flags("sess-55"))
+	}
+}
+
+func TestFlagsHandlerSessionMismatchRefusesWithoutMutating(t *testing.T) {
+	s, store := flagsServer(t)
+	rec := httptest.NewRecorder()
+
+	s.sessionFlagsHandler(rec, flagsRequestFor(55, `{"session_id":"stale-session","group":3}`))
+
+	r := decodeAction(t, rec)
+	if r.OK || r.Code != codeSessionMismatch {
+		t.Fatalf("response = %#v, want session_mismatch refusal", r)
+	}
+	if store.Group("sess-55") != 0 || store.Group("stale-session") != 0 {
+		t.Fatal("store mutated on a refused request")
+	}
+}
+
+func TestFlagsHandlerNotLiveRefusesWithoutMutating(t *testing.T) {
+	s, store := flagsServer(t)
+	s.collect = func() ([]Session, error) { return nil, nil }
+	rec := httptest.NewRecorder()
+
+	s.sessionFlagsHandler(rec, flagsRequestFor(55, `{"session_id":"ghost","group":3}`))
+
+	r := decodeAction(t, rec)
+	if r.OK || r.Code != codeNotLive {
+		t.Fatalf("response = %#v, want not_live refusal", r)
+	}
+	if store.Group("ghost") != 0 {
+		t.Fatal("store mutated on a refused request")
+	}
+}
+
+func TestFlagsHandlerRejectsMalformedBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty body", ``},
+		{"missing session_id", `{"group":3}`},
+		{"null session_id", `{"session_id":null,"group":3}`},
+		{"empty session_id", `{"session_id":"","group":3}`},
+		{"session_id not a string", `{"session_id":42,"group":3}`},
+		{"null body", `null`},
+		{"unknown field", `{"session_id":"sess-55","extra":1}`},
+		{"trailing content", `{"session_id":"sess-55"}{}`},
+		{"null group", `{"session_id":"sess-55","group":null}`},
+		{"group too high", `{"session_id":"sess-55","group":10}`},
+		{"group negative", `{"session_id":"sess-55","group":-1}`},
+		{"group not a number", `{"session_id":"sess-55","group":"3"}`},
+		{"null disabled", `{"session_id":"sess-55","disabled":null}`},
+		{"disabled not a bool", `{"session_id":"sess-55","disabled":"yes"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store := flagsServer(t)
+			rec := httptest.NewRecorder()
+
+			s.sessionFlagsHandler(rec, flagsRequestFor(55, tc.body))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", rec.Code, tc.body)
+			}
+			if store.Group("sess-55") != 0 || store.Disabled("sess-55") {
+				t.Fatalf("store mutated by a rejected body: %#v", store.Flags("sess-55"))
+			}
+		})
+	}
+}
+
+func TestFlagsHandlerRequiresAuth(t *testing.T) {
+	s, store := flagsServer(t)
+	req := flagsRequestFor(55, `{"session_id":"sess-55","group":3}`)
+	req.Header.Del("Authorization")
+	rec := httptest.NewRecorder()
+
+	s.sessionFlagsHandler(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if store.Group("sess-55") != 0 {
+		t.Fatal("store mutated by an unauthenticated request")
+	}
+}
+
+// TestSessionsHandlerEmbedsGroup is the read half of the shared state: a badge
+// set on this host has to reach every client polling it, in the same row the
+// disabled bit rides in.
+func TestSessionsHandlerEmbedsGroup(t *testing.T) {
+	store := newFlagsStore(filepath.Join(t.TempDir(), flagsFileName), fixedClock(time.Now()), noResolver)
+	store.SetGroup("grp-1", 6)
+	s := &server{
+		token: "secret",
+		flags: store,
+		collect: func() ([]Session, error) {
+			return []Session{{PID: 1, SessionID: "grp-1"}, {PID: 2, SessionID: "grp-2"}}, nil
+		},
+	}
+	req := httptest.NewRequest("GET", "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	s.sessions(rec, req)
+
+	var resp struct {
+		Sessions []Session `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Sessions) != 2 {
+		t.Fatalf("got %d sessions, want 2", len(resp.Sessions))
+	}
+	if resp.Sessions[0].Group != 6 {
+		t.Fatalf("grp-1 group = %d, want 6", resp.Sessions[0].Group)
+	}
+	if resp.Sessions[1].Group != 0 {
+		t.Fatalf("grp-2 group = %d, want 0 with no entry", resp.Sessions[1].Group)
+	}
+	// An ungrouped session must not carry the key at all — that absence is
+	// what an older client reads as "no groups here".
+	if strings.Contains(rec.Body.String(), `"group":0`) {
+		t.Fatalf("ungrouped row emitted an explicit zero: %s", rec.Body.String())
+	}
+}
+
+// TestFlagsHandlerReportsAStoreItCannotWrite: a session-flags.json this host
+// refuses to touch (it failed to parse) must produce a refusal, not a success
+// the client's next poll contradicts.
+func TestFlagsHandlerReportsAStoreItCannotWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, flagsFileName)
+	corrupt := []byte("{not json")
+	if err := os.WriteFile(path, corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{
+		token:   "secret",
+		flags:   newFlagsStore(path, fixedClock(time.Now()), noResolver),
+		collect: func() ([]Session, error) { return []Session{{PID: 55, SessionID: "sess-55"}}, nil },
+	}
+	rec := httptest.NewRecorder()
+
+	s.sessionFlagsHandler(rec, flagsRequestFor(55, `{"session_id":"sess-55","group":4}`))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with an envelope", rec.Code)
+	}
+	r := decodeAction(t, rec)
+	if r.OK || r.Error == "" {
+		t.Fatalf("response = %#v, want a refusal naming the failure", r)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(corrupt) {
+		t.Fatalf("corrupt store was rewritten (err=%v):\n%s", err, got)
 	}
 }

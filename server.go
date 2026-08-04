@@ -60,6 +60,11 @@ type actionResult struct {
 	// false is distinguishable from "field absent" under omitempty.
 	SessionID string `json:"session_id,omitempty"`
 	Disabled  *bool  `json:"disabled,omitempty"`
+	// Group is set alongside Disabled by sessionFlags' success response, for
+	// the same reason and with the same pointer discipline: an explicit 0
+	// (ungrouped) has to stay distinguishable from a field this endpoint
+	// never sets.
+	Group *int `json:"group,omitempty"`
 }
 
 // accountSwitchResult is POST /account/switch's response envelope. It is
@@ -290,8 +295,130 @@ func decodeDisableRequest(w http.ResponseWriter, r *http.Request) (sessionID str
 	return sessionID, disabled, nil
 }
 
+// flagsRequest is one decoded POST /sessions/{pid}/flags body. Group and
+// Disabled are pointers because this endpoint has to tell three states apart:
+// a field absent from the JSON leaves that flag alone, `0`/`false` clears it,
+// and any other value sets it.
+type flagsRequest struct {
+	SessionID string
+	Group     *int
+	Disabled  *bool
+}
+
+// decodeFlagsRequest strictly decodes POST /sessions/{pid}/flags' body:
+// {"session_id": "...", "group": 0-9, "disabled": true}. session_id is
+// mandatory — there is no legacy caller to keep working, and a flag write with
+// no precondition would act on whatever session happens to hold that PID now,
+// the same reasoning attach and send-keys settled on. group and disabled are
+// each optional and independent, but an explicit null is not the way to omit
+// one: per the tolerant-decoding rule an absent field is an older client and
+// stays healthy, while an explicit null is version skew and is reported.
+func decodeFlagsRequest(w http.ResponseWriter, r *http.Request) (flagsRequest, error) {
+	var body *struct {
+		SessionID json.RawMessage `json:"session_id"`
+		Group     json.RawMessage `json:"group"`
+		Disabled  json.RawMessage `json:"disabled"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		return flagsRequest{}, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return flagsRequest{}, fmt.Errorf("unexpected trailing json")
+	}
+	if body == nil {
+		return flagsRequest{}, fmt.Errorf("body must be an object")
+	}
+	if len(body.SessionID) == 0 || string(body.SessionID) == "null" {
+		return flagsRequest{}, fmt.Errorf("session_id is required")
+	}
+	var req flagsRequest
+	if err := json.Unmarshal(body.SessionID, &req.SessionID); err != nil {
+		return flagsRequest{}, fmt.Errorf("session_id must be a string")
+	}
+	if req.SessionID == "" {
+		return flagsRequest{}, fmt.Errorf("session_id must not be empty")
+	}
+	if len(body.Group) > 0 {
+		if string(body.Group) == "null" {
+			return flagsRequest{}, fmt.Errorf("group must be a number 0-9")
+		}
+		var group int
+		if err := json.Unmarshal(body.Group, &group); err != nil {
+			return flagsRequest{}, fmt.Errorf("group must be a number 0-9")
+		}
+		if group < 0 || group > 9 {
+			return flagsRequest{}, fmt.Errorf("group must be a number 0-9")
+		}
+		req.Group = &group
+	}
+	if len(body.Disabled) > 0 {
+		if string(body.Disabled) == "null" {
+			return flagsRequest{}, fmt.Errorf("disabled must be a boolean")
+		}
+		var disabled bool
+		if err := json.Unmarshal(body.Disabled, &disabled); err != nil {
+			return flagsRequest{}, fmt.Errorf("disabled must be a boolean")
+		}
+		req.Disabled = &disabled
+	}
+	return req, nil
+}
+
+// sessionFlagsHandler handles POST /sessions/{pid}/flags: sets a live
+// session's group and/or disabled bit on this host, persisted in s.flags and
+// shared with every other client of this host. A body naming neither flag is
+// accepted and changes nothing — the response still reports what the session
+// carries, which is what a client refreshing after a race wants.
+//
+// Identity resolution follows kill/migrate/disable's resolveLivePID
+// convention: the request can only narrow the target (via session_id), never
+// widen it.
+func (s *server) sessionFlagsHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	pid, err := strconv.Atoi(r.PathValue("pid"))
+	if err != nil {
+		http.Error(w, "bad pid", http.StatusBadRequest)
+		return
+	}
+	req, err := decodeFlagsRequest(w, r)
+	if err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	target, _, refusal := s.resolveLivePID(pid, req.SessionID)
+	if refusal != nil {
+		writeJSON(w, http.StatusOK, *refusal)
+		return
+	}
+	result := actionResult{OK: true, SessionID: target.SessionID}
+	if s.flags != nil {
+		applied, ok := s.flags.SetFlags(target.SessionID, req.Group, req.Disabled)
+		if !ok {
+			// The store refused to write — no config directory, or a
+			// session-flags.json this host is deliberately not touching
+			// because it failed to parse. Saying so beats reporting a badge
+			// that vanishes on the client's next poll.
+			writeJSON(w, http.StatusOK, actionResult{
+				Error: "this host could not save the change (see its logs)",
+			})
+			return
+		}
+		// Both fields are echoed as the store now holds them, not as the
+		// request asked for them: a client that named only one flag still
+		// learns the other, and never has to guess what its write left behind.
+		group, disabled := applied.Group, applied.Disabled
+		result.Group, result.Disabled = &group, &disabled
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // disableSession handles POST /sessions/{pid}/disable: marks a live session
-// disabled or enabled on this host, persisted in s.disabled. session_id and
+// disabled or enabled on this host, persisted in s.flags. session_id and
 // disabled are both required — see decodeDisableRequest. Identity resolution
 // follows kill/migrate's resolveLivePID convention: the request can only
 // narrow the target (via session_id), never widen it.
@@ -315,8 +442,14 @@ func (s *server) disableSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, *refusal)
 		return
 	}
-	if s.disabled != nil {
-		s.disabled.SetDisabled(target.SessionID, disabled)
+	if s.flags != nil && !s.flags.SetDisabled(target.SessionID, disabled) {
+		// Same refusal the flags endpoint gives when the store cannot persist:
+		// an unwritable or corrupt session-flags.json is reported, not papered
+		// over with a success the next poll contradicts.
+		writeJSON(w, http.StatusOK, actionResult{
+			Error: "this host could not save the change (see its logs)",
+		})
+		return
 	}
 	d := disabled
 	writeJSON(w, http.StatusOK, actionResult{OK: true, SessionID: target.SessionID, Disabled: &d})
@@ -553,17 +686,41 @@ type server struct {
 	// as sendKeysFn above.
 	resizeFn func(Session, int, int, bool) error
 
-	// disabled is this host's persisted disabled-session flag store (see
-	// disabled_store.go). Nil only in tests that don't exercise it — Overlay
-	// on a nil pointer would panic, so callers below guard for that case only
-	// where a test constructs a bare &server{} without one; production always
-	// sets it in cmdServer.
-	disabled *DisabledStore
+	// startAttach starts one terminal-attach client (see attach.go); nil falls
+	// back to startTmuxAttach. The same seam pattern as spawn/terminate, and
+	// needed for the same reason: without it every pump test — resize, readonly,
+	// idle, disconnect — would need a real tmux server to run against.
+	startAttach func(target string, readonly bool, size attachSize) (attachClient, error)
+	// attachIdle overrides attachIdleTimeout; zero means the constant. Only
+	// tests set it — thirty real minutes is not a thing a test can wait for.
+	attachIdle time.Duration
+
+	// attaches caps concurrent attaches, per session id and across the host.
+	attaches attachLimiter
+
+	// flags is this host's persisted per-session flag store — group assignment
+	// and the disabled bit (see session_flags.go). Nil only in tests that
+	// don't exercise it — Overlay on a nil pointer would panic, so callers
+	// below guard for that case only where a test constructs a bare &server{}
+	// without one; production always sets it in cmdServer.
+	flags *FlagsStore
 
 	// devices is the push registry; nil when this server was built without
 	// notification support, in which case the /devices routes report 503 rather
 	// than panicking.
 	devices *DeviceStore
+
+	// pusher sends one push to one device, for the on-demand test push only —
+	// the notification fan-out has its own hub and does not go through here.
+	// Nil when this host has no APNs key, which is the ordinary state of a host
+	// nobody has configured push on, so the test route reports 503 rather than
+	// failing a send. Tests inject a fake; nothing else does.
+	pusher pushSender
+	// hostID and bundleID are the two values a push needs beyond the device
+	// itself: the collapse-id prefix and the APNs topic. Set alongside pusher,
+	// empty without it.
+	hostID   string
+	bundleID string
 
 	// pairing is the in-flight pairing offer, nil unless `pair` has armed one.
 	// Guarded because arm and exchange arrive on different connections.
@@ -596,9 +753,10 @@ func (s *server) collectLocalRaw() ([]Session, error) {
 }
 
 // collectLocal returns this host's live sessions, exactly as collected — it
-// never carries Disabled state. That's overlaid separately in the `sessions`
-// HTTP handler from this host's DisabledStore, so collectLocal's result stays
-// the same trusted-metadata source resolveLivePID and friends already use.
+// never carries the shared flags. Those are overlaid separately in the
+// `sessions` HTTP handler from this host's FlagsStore, so collectLocal's
+// result stays the same trusted-metadata source resolveLivePID and friends
+// already use.
 func (s *server) collectLocal() ([]Session, error) {
 	return s.collectLocalRaw()
 }
@@ -832,6 +990,23 @@ func capabilities() []string {
 		"spawn",
 		"resume",
 		"worktree-remove",
+		// GET /sessions/{pid}/preview takes ?offset=N — page back through pane
+		// scrollback or transcript history instead of only reading the tail.
+		"preview-range",
+		// GET /sessions/{pid}/attach upgrades to a WebSocket carrying a live
+		// terminal: raw PTY bytes as binary frames, JSON resize as text frames.
+		"attach",
+		// POST /sessions/{pid}/flags sets a session's group (1-9, 0 clears)
+		// and disabled bit, and GET /sessions carries both back per row —
+		// per-host shared state, so the desktop and every phone see the same
+		// badges.
+		"flags",
+		// POST /devices/{token}/test sends one test push to one registered
+		// device and reports Apple's own reason for a failure. Gated because
+		// its 404 already means "this host has no such token" — without the
+		// capability a client could not tell that apart from an old host with
+		// no such route, which is the one distinction the button depends on.
+		"test-push",
 	}
 }
 
@@ -854,8 +1029,8 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 	// Copy before overlaying: sessions is the shared cache slice, and another
 	// concurrent request encoding it must never see a partially-overlaid row.
 	sessions = append([]Session(nil), sessions...)
-	if s.disabled != nil {
-		s.disabled.Overlay(sessions)
+	if s.flags != nil {
+		s.flags.Overlay(sessions)
 	}
 	hostUsage := HostUsage{}
 	if s.hostSnapshot != nil {
@@ -1210,10 +1385,21 @@ func (s *server) transcriptTail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// previewLimitsFromRequest reads optional lines/bytes query params, defaulting
-// to DefaultPreviewLimits. Values are accepted only within 1..2000 lines and
-// 1024..524288 bytes; anything else (non-numeric, negative, out of range) is an
-// error the handler turns into 400.
+// maxPreviewOffset caps how far back a single request may page. Nothing keeps
+// this much scrollback, so a larger number is a client bug, not a deep scroll.
+const maxPreviewOffset = 1_000_000
+
+// previewLimitsFromRequest reads optional lines/bytes/offset query params,
+// defaulting to DefaultPreviewLimits. Values are accepted only within 1..2000
+// lines, 1024..524288 bytes and 0..maxPreviewOffset lines of offset; anything
+// else (non-numeric, negative, out of range) is an error the handler turns into
+// 400.
+//
+// offset is the paging param behind the "preview-range" capability: how many
+// lines to skip from the newest end before lines/bytes apply. It composes with
+// them rather than replacing them — lines still sizes the page, bytes still
+// caps it — and an absent or zero offset is the exact request every client sent
+// before paging existed.
 func previewLimitsFromRequest(r *http.Request) (PreviewLimits, error) {
 	limits := DefaultPreviewLimits()
 	q := r.URL.Query()
@@ -1230,6 +1416,13 @@ func previewLimitsFromRequest(r *http.Request) (PreviewLimits, error) {
 			return PreviewLimits{}, fmt.Errorf("bad bytes value: %s", v)
 		}
 		limits.MaxBytes = n
+	}
+	if v := q.Get("offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > maxPreviewOffset {
+			return PreviewLimits{}, fmt.Errorf("bad offset value: %s", v)
+		}
+		limits.Offset = n
 	}
 	return limits, nil
 }
@@ -1718,6 +1911,64 @@ func (s *server) unregisterDevice(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// testPushTimeout is the outer bound on one on-demand test push. The APNs
+// client's own http.Client already gives up after ten seconds (apns.go), so
+// this normally never fires; it exists so a hung send cannot outlive the
+// request, and it sits above that inner limit deliberately — Apple's real
+// answer is worth more to whoever is watching than our own "timed out".
+const testPushTimeout = 15 * time.Second
+
+// sendTestPush pushes one test notification to one registered device.
+// POST /devices/{token}/test → {"ok":true} or {"ok":false,"error":"..."}
+//
+// The same push `claude-sessions notify-test` sends, aimed at a single device
+// so a phone can ask "does the pipe to *me* work" from its own settings screen.
+// No request body is read: everything the push needs is the path token plus
+// what this host already knows, and letting a caller supply an environment or
+// a payload would make the test diverge from the real thing it stands in for.
+//
+// A failed send is an outcome, not a broken request: HTTP 200 with the
+// {ok,error} envelope, carrying the sender's error string exactly as produced.
+// Apple's reason — BadDeviceToken, TopicDisallowed, ExpiredProviderToken — *is*
+// the diagnosis, and rewording it into "push failed" throws away the only part
+// worth reading.
+//
+// A device Apple calls dead is deliberately NOT pruned here, unlike the
+// fan-out's send. Pruning would make the next test answer 404 "unknown token"
+// when the truth was "Apple rejected a token this host has registered" — the
+// endpoint would erase the evidence it exists to produce, and an
+// environment mismatch (the most common real cause) reads as exactly this.
+func (s *server) sendTestPush(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.devices == nil {
+		http.Error(w, "notifications not configured on this host", http.StatusServiceUnavailable)
+		return
+	}
+	if s.pusher == nil {
+		http.Error(w, "push notifications are not configured on this host", http.StatusServiceUnavailable)
+		return
+	}
+	// No shape check on the token: a malformed one cannot be in the registry,
+	// so it falls out here as "unknown" rather than as a third failure mode the
+	// client would have to tell apart from this one.
+	device, ok := s.devices.Get(r.PathValue("token"))
+	if !ok {
+		http.Error(w, "unknown device token", http.StatusNotFound)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), testPushTimeout)
+	defer cancel()
+	if err := s.pusher.Send(ctx, testPushRequest(s.host, s.hostID, s.bundleID, device)); err != nil {
+		writeJSON(w, http.StatusOK, actionResult{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, actionResult{OK: true})
+}
+
 // serverTokenPath is the on-disk location of the shared bearer token, or "" if
 // there's no home directory.
 func serverTokenPath() string {
@@ -2062,7 +2313,7 @@ func cmdServer(args []string) int {
 	// The registry is shared: the /devices handlers write it and the push hub
 	// reads it, so they must be the same store, not two views of one file.
 	devices := LoadDeviceStore()
-	disabledStore := LoadDisabledStore()
+	flagsStore := LoadFlagsStore()
 
 	s := &server{
 		token:              tok,
@@ -2070,7 +2321,7 @@ func cmdServer(args []string) int {
 		hostSnapshot:       hostUsageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
 		devices:            devices,
-		disabled:           disabledStore,
+		flags:              flagsStore,
 	}
 
 	// Push notifications are optional. Every failure here logs one line and
@@ -2081,15 +2332,19 @@ func cmdServer(args []string) int {
 	} else if client, err := newAPNsClient(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "push notifications disabled (%v)\n", err)
 	} else {
+		hostID := LoadHostID()
 		notifier := newNotifyHub(notifyHubOptions{
 			HostName: host,
-			HostID:   LoadHostID(),
+			HostID:   hostID,
 			BundleID: cfg.BundleID,
 			Devices:  devices,
 			Sender:   client,
 		})
 		notifier.Start()
 		defer notifier.Shutdown()
+		// The same client the hub pushes through, so a test push proves the
+		// real path: same key, same topic, same gateway selection.
+		s.pusher, s.hostID, s.bundleID = client, hostID, cfg.BundleID
 		fmt.Fprintf(os.Stderr, "push notifications enabled (%s, %d device(s))\n",
 			cfg.Environment, len(devices.List()))
 	}
@@ -2103,16 +2358,19 @@ func cmdServer(args []string) int {
 	mux.HandleFunc("GET /sessions/{pid}/preview", s.preview)
 	mux.HandleFunc("GET /transcript-tail", s.transcriptTail)
 	mux.HandleFunc("GET /sessions/{pid}/tmux-info", s.tmuxInfo)
+	mux.HandleFunc("GET /sessions/{pid}/attach", s.attach)
 	mux.HandleFunc("POST /sessions/{pid}/kill", s.kill)
 	mux.HandleFunc("POST /sessions/{pid}/migrate", s.migrate)
 	mux.HandleFunc("POST /sessions/{pid}/disable", s.disableSession)
 	mux.HandleFunc("POST /sessions/{pid}/send-keys", s.sendKeysHandler)
 	mux.HandleFunc("POST /sessions/{pid}/resize", s.resizeHandler)
+	mux.HandleFunc("POST /sessions/{pid}/flags", s.sessionFlagsHandler)
 	mux.HandleFunc("POST /sessions/new", s.newSession)
 	mux.HandleFunc("POST /worktree/remove", s.removeWorktree)
 	mux.HandleFunc("POST /account/switch", s.accountSwitch)
 	mux.HandleFunc("POST /devices", s.registerDevice)
 	mux.HandleFunc("DELETE /devices/{token}", s.unregisterDevice)
+	mux.HandleFunc("POST /devices/{token}/test", s.sendTestPush)
 	mux.HandleFunc("POST /pair/arm", s.armPairing)
 	mux.HandleFunc("POST /pair/disarm", s.disarmPairing)
 	mux.HandleFunc("POST /pair/exchange", s.pairExchange)

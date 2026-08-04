@@ -48,11 +48,11 @@ type actCtx struct {
 	// which case Ctrl+W does nothing.
 	accounts func(host string) accountSnapshot
 
-	// disabled is this host's DisabledStore, written directly for local rows
+	// flags is this host's FlagsStore, written directly for local rows
 	// (Host == ""). Remote rows never write it — they go through
-	// actToggleDisabledRemote instead. May be nil in tests that don't
-	// exercise it.
-	disabled *DisabledStore
+	// actToggleDisabledRemote / actSetGroupRemote instead. May be nil in tests
+	// that don't exercise it.
+	flags *FlagsStore
 }
 
 // runInteractive hands the terminal to prog with the pollers suspended,
@@ -135,7 +135,7 @@ func (c *actCtx) selectedRemoteNewTarget() (host, defaultCWD string, ok bool) {
 }
 
 // actToggleDisabled flips the disabled flag for the selected session. Local
-// rows (Host == "") write directly to this host's DisabledStore — an
+// rows (Host == "") write directly to this host's FlagsStore — an
 // instant local write with no HTTP, mirroring the local branch every other
 // action (actKill, actAttach) takes. Remote rows delegate to
 // actToggleDisabledRemote, which makes the same write over HTTP against the
@@ -143,7 +143,11 @@ func (c *actCtx) selectedRemoteNewTarget() (host, defaultCWD string, ok bool) {
 // in-memory is patched here (c.selected() points into a throwaway targets
 // copy), so the caller MUST settleRows()/refresh() afterwards to re-overlay
 // the new value onto the live rows. A row with no selection or no stable
-// SessionID is ignored (it can't be keyed). Reports whether anything changed.
+// SessionID is ignored (it can't be keyed). A store that cannot persist the
+// change (no config dir, a file that failed to parse) says so in the same
+// one-line action error the remote path uses — silence would leave the key
+// looking dead for the rest of the process's life. Reports whether anything
+// changed.
 func actToggleDisabled(c *actCtx) bool {
 	session := c.selected()
 	if session == nil || session.SessionID == "" {
@@ -152,8 +156,33 @@ func actToggleDisabled(c *actCtx) bool {
 	if session.Host != "" {
 		return actToggleDisabledRemote(c)
 	}
-	if c.disabled != nil {
-		c.disabled.SetDisabled(session.SessionID, !session.Disabled)
+	if c.flags != nil && !c.flags.SetDisabled(session.SessionID, !session.Disabled) {
+		showActionError(c, "disable", c.flags.saveError())
+		return false
+	}
+	return true
+}
+
+// actSetGroup assigns the selected session to group (1..9), or ungroups it
+// when it already carries that group — the single-membership toggle Shift+1..9
+// has always had, now resolved against the row's own flag rather than a
+// client-local store. Same split as actToggleDisabled, for the same reason:
+// the group lives on the host that owns the session, so a local row writes
+// this host's FlagsStore directly and a remote row goes over HTTP to its own
+// host. The write is authoritative; the caller must refresh to see it. A store
+// that cannot persist the change reports it the same way the remote path
+// reports a refusal from its host — one line, then back to the list.
+func actSetGroup(c *actCtx, group int) bool {
+	session := c.selected()
+	if session == nil || session.SessionID == "" {
+		return false
+	}
+	if session.Host != "" {
+		return actSetGroupRemote(c, group)
+	}
+	if c.flags != nil && !c.flags.SetGroup(session.SessionID, toggleGroup(session.Group, group)) {
+		showActionError(c, "group", c.flags.saveError())
+		return false
 	}
 	return true
 }

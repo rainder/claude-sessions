@@ -37,7 +37,13 @@ type Session struct {
 	CostUSD          float64 `json:"costUsd,omitempty"`
 	CostSubagentsUSD float64 `json:"costSubagentsUsd,omitempty"`
 
+	// Disabled and Group are this host's shared per-session flags, overlaid at
+	// serve/render time from its FlagsStore (session_flags.go) — never read
+	// from the session file Claude Code writes. Both ride the wire so a remote
+	// row shows its owning host's badge and greying; a host that predates them
+	// simply omits both, which decodes as ungrouped and enabled.
 	Disabled bool `json:"disabled,omitempty"`
+	Group    int  `json:"group,omitempty"` // 1..9, 0 = ungrouped
 
 	CPU          string `json:"cpu"`
 	Tmux         string `json:"tmux"` // "session:win.pane" or "" if not in tmux
@@ -314,7 +320,10 @@ func readSessionFile(path string) (Session, bool) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return Session{}, false
 	}
+	// The shared flags are the host's to set, not the session file's: zero them
+	// so a hand-edited session file cannot inject a badge or a greyed row.
 	s.Disabled = false
+	s.Group = 0
 	if s.PID == 0 {
 		return Session{}, false
 	}

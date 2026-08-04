@@ -472,12 +472,13 @@ func cmdListSessions(args []string) int {
 		return 1
 	}
 	remotes := FetchAllRemote()
-	// Disabled state is host-owned (disabled_store.go). Local sessions are
-	// this host, so overlay directly; remote sessions already carry
-	// authoritative Disabled from the wire (each remote host's own
-	// DisabledStore, applied server-side in GET /sessions). Groups don't
-	// affect this output.
-	LoadDisabledStore().Overlay(local)
+	// Disabled state and group assignments are host-owned (session_flags.go).
+	// Local sessions are this host, so overlay directly; remote sessions
+	// already carry authoritative flags from the wire (each remote host's own
+	// FlagsStore, applied server-side in GET /sessions). Disabled orders
+	// disabled rows last in both outputs; the group rides along too, and
+	// reaches `list-sessions --json` as each row's "group" key.
+	LoadFlagsStore().Overlay(local)
 	sortMode := LoadSortMode()
 	SortSessions(local, sortMode)
 	remotes = sortRemotes(remotes, sortMode)
