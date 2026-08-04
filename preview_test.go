@@ -295,6 +295,91 @@ func TestCapturePaneContentClampsStartToHistory(t *testing.T) {
 	}
 }
 
+// TestCapturePaneContentLastPageOfHistoryThenEmpty pins the exact edge of the
+// pane's history: the deepest offset that still names a line the pane holds
+// comes back with content, and one line deeper comes back empty. The tests
+// around it cover the middle of history and offsets far past its start; this is
+// the single line between the two, where an off-by-one would either serve the
+// oldest line twice or hide it.
+//
+// With height 40 the newest line is 39, so end = 39-Offset reaches the oldest
+// line of a 500-line history (-500) at Offset 539.
+func TestCapturePaneContentLastPageOfHistoryThenEmpty(t *testing.T) {
+	const height, history = 40, 500
+	limits := PreviewLimits{MaxLines: 100, MaxBytes: 512 << 10, Offset: height - 1 + history}
+
+	stubPaneGeometry(t, height, history)
+	calls := stubTmuxRun(t, "oldest line\n")
+	got, err := capturePaneContent("dev:0.0", limits)
+	if err != nil {
+		t.Fatalf("last page: err = %v", err)
+	}
+	if got != "oldest line\n" {
+		t.Fatalf("last page = %q, want the captured content", got)
+	}
+	// The window would start at -599; the history stops at -500.
+	want := []string{"capture-pane", "-p", "-e", "-S", "-500", "-E", "-500", "-t", "dev:0.0"}
+	if len(*calls) != 1 || !slices.Equal((*calls)[0], want) {
+		t.Fatalf("argv = %v, want one call %v", *calls, want)
+	}
+
+	limits.Offset++ // one line past the oldest line the pane kept
+	calls = stubTmuxRun(t, "must not be captured\n")
+	got, err = capturePaneContent("dev:0.0", limits)
+	if err != nil {
+		t.Fatalf("first empty page: err = %v, want nil", err)
+	}
+	if got != "" {
+		t.Fatalf("first empty page = %q, want empty", got)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("exhausted range still ran tmux: %v", *calls)
+	}
+}
+
+// TestCapturePaneContentSurvivesAClearedHistory covers the window between the
+// geometry probe and the capture, which tmux gives no way to close (see
+// capturePaneContent). A clear-history landing in that window leaves the
+// computed range naming lines the pane no longer holds; tmux clamps such a
+// range to whatever is left, so this pins the property that holds whatever it
+// hands back: a bounded page, and no error the handler would turn into a 500.
+//
+// The second half is why the window is survivable rather than merely survived:
+// the next request probes again, sees the emptied history, and answers the
+// honest empty page, so a stale row can never repeat.
+func TestCapturePaneContentSurvivesAClearedHistory(t *testing.T) {
+	limits := PreviewLimits{MaxLines: 100, MaxBytes: 512 << 10, Offset: 250}
+
+	// Every answer tmux could plausibly clamp a vanished range down to.
+	for _, clamped := range []string{"", "line-364\n", "line-364\nline-365\n"} {
+		stubPaneGeometry(t, 40, 5000) // the geometry as it read before the clear
+		calls := stubTmuxRun(t, clamped)
+		got, err := capturePaneContent("dev:0.0", limits)
+		if err != nil {
+			t.Fatalf("clamped capture %q: err = %v, want nil", clamped, err)
+		}
+		if n := countPreviewLines(limitPreview(got, limits)); n > limits.MaxLines {
+			t.Fatalf("clamped capture %q served %d lines, want at most %d",
+				clamped, n, limits.MaxLines)
+		}
+		if len(*calls) != 1 {
+			t.Fatalf("clamped capture %q ran tmux %d times", clamped, len(*calls))
+		}
+	}
+
+	// The request after the clear: history 0, so nothing below the visible
+	// screen is left to page into.
+	stubPaneGeometry(t, 40, 0)
+	calls := stubTmuxRun(t, "must not be captured\n")
+	got, err := capturePaneContent("dev:0.0", limits)
+	if err != nil || got != "" {
+		t.Fatalf("after the clear: content = %q, err = %v, want an empty page", got, err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("captured from a cleared history: %v", *calls)
+	}
+}
+
 func TestCapturePaneContentPropagatesGeometryError(t *testing.T) {
 	old := previewPaneGeometry
 	t.Cleanup(func() { previewPaneGeometry = old })
@@ -448,6 +533,46 @@ func TestFormatTranscriptTailPastStartIsEmpty(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("page past start = %q, want empty", got)
+	}
+}
+
+// TestFormatTranscriptTailLastPageOfHistoryThenEmpty is the transcript's half of
+// the edge TestCapturePaneContentLastPageOfHistoryThenEmpty pins for the pane:
+// the deepest offset that still names a rendered line returns exactly that line,
+// and one line deeper returns the empty page. The neighbouring tests page into
+// the middle of history or far past its start; neither would notice an
+// off-by-one that swallowed the oldest line or served it twice.
+//
+// The depth is derived from the render rather than written down: how many lines
+// an entry renders as is renderEntry's business, and a hard-coded total would
+// rot into a test that quietly no longer sits on the boundary.
+func TestFormatTranscriptTailLastPageOfHistoryThenEmpty(t *testing.T) {
+	path := writeNumberedTranscript(t, 20)
+	limits := PreviewLimits{MaxLines: 100, MaxBytes: 512 << 10}
+
+	full, err := formatTranscriptTail(path, 20, limits) // all 20 entries, unpaged
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	total := strings.Count(full, "\n") // every rendered line ends in one
+	oldest := full[:strings.IndexByte(full, '\n')+1]
+
+	limits.Offset = total - 1
+	got, err := formatTranscriptTail(path, transcriptTailEntries, limits)
+	if err != nil {
+		t.Fatalf("last page: err = %v", err)
+	}
+	if got != oldest {
+		t.Fatalf("last page = %q, want the oldest rendered line %q", got, oldest)
+	}
+
+	limits.Offset = total
+	got, err = formatTranscriptTail(path, transcriptTailEntries, limits)
+	if err != nil {
+		t.Fatalf("first empty page: err = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("first empty page = %q, want empty", got)
 	}
 }
 

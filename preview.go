@@ -152,6 +152,27 @@ func captureTmuxPreview(pid int, limits PreviewLimits) (label, content string, e
 //
 // A window entirely older than the history is an empty page, not an error: the
 // caller keeps the tmux source and the client reads "no more history".
+//
+// The probe and the capture are two separate tmux invocations and tmux offers
+// no way to make them one: capture-pane's -S/-E take plain numbers, so the
+// range cannot be expressed in terms of a geometry the same command would
+// resolve. The one geometry-free capture that would be atomic — -S
+// -(Offset+MaxLines) with no -E, then dropping the newest Offset lines locally
+// — asks tmux to hand over every line down to the newest on every page, so a
+// deep offset would ship megabytes to trim them away again. Paying O(Offset) of
+// transfer on every page to close a race that costs one page is the wrong
+// trade, so the window stays open and is made harmless instead:
+//
+// If the pane's history changes in between (a clear-history, or a burst of
+// output long enough to push lines out), the computed range names lines the
+// pane no longer holds. tmux clamps such a range to what is left rather than
+// failing — verified against tmux 3.7b: -S -310 -E -211 against a pane whose
+// history had just been cleared returned exit 0 and a single row, the pane's
+// top visible line. So the worst case is one already-visible row served as
+// history for one request, never an error, never an unbounded read, and never
+// sticky: the next page's own probe sees the new geometry and answers the empty
+// page that is now the truth. TestCapturePaneContentSurvivesAClearedHistory
+// pins both halves.
 func capturePaneContent(location string, limits PreviewLimits) (string, error) {
 	args := []string{"capture-pane", "-p", "-e"}
 	if limits.Offset > 0 && limits.MaxLines > 0 {
@@ -340,15 +361,35 @@ func skipToStringTerminator(s string, j int) int {
 	return n
 }
 
+// previewLines splits s the one way this server counts preview lines:
+// everything through its "\n" is a line, and a trailing newline ends the last
+// line rather than opening an empty one of its own.
+//
+// It exists so there is exactly one such rule. The number is a wire value —
+// the server reports it as X-Claude-Sessions-Preview-Lines and a client adds it
+// to its own offset for the next page — so a second count that disagreed by one
+// would not look like a bug, it would look like a gap or a repeat in the
+// history the user is scrolling through.
+func previewLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	lines := strings.SplitAfter(s, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1] // drop empty tail from a trailing newline
+	}
+	return lines
+}
+
+// countPreviewLines reports how many lines s holds under previewLines' rule.
+func countPreviewLines(s string) int { return len(previewLines(s)) }
+
 // limitPreview retains the newest MaxLines lines and then trims to MaxBytes,
 // dropping the oldest whole line at the byte boundary so the result never starts
 // mid-line. A single line longer than MaxBytes is hard-cut to its tail.
 func limitPreview(s string, limits PreviewLimits) string {
 	if limits.MaxLines > 0 {
-		lines := strings.SplitAfter(s, "\n")
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines = lines[:len(lines)-1] // drop empty tail from a trailing newline
-		}
+		lines := previewLines(s)
 		if len(lines) > limits.MaxLines {
 			lines = lines[len(lines)-limits.MaxLines:]
 		}
@@ -451,39 +492,58 @@ func formatTranscriptTail(path string, n int, limits PreviewLimits) (string, err
 // pane at the top of its scrollback gives, and never the
 // "(no user/assistant entries)" notice, which describes the live tail rather
 // than a stretch of history.
+//
+// What a deep offset costs, precisely, because it is the one thing here an
+// unfriendly client controls: the walk stops at Offset+MaxLines lines or at the
+// first entry, whichever comes first, so its ceiling is the transcript itself —
+// which formatTranscriptTail has already read off disk and JSON-scanned line by
+// line before this is called, so a deep page is a constant factor on work the
+// request was always going to do, not a new order of it. The offset cannot
+// outrun that: maxPreviewOffset caps it at the HTTP boundary, the only door
+// paging comes through (the other LoadPreview callers — the inspector and the
+// kill confirmation — never set one).
+//
+// Memory is bounded to the page instead, which is what the walk's ceiling
+// cannot do: an entry whose lines all sit inside the newest Offset — the block
+// dropTrailingLines discards below — is counted and then thrown away rather
+// than carried, so building one page never holds the whole rendered transcript.
+// Those entries are exactly the first ones walked (lines only grows as the walk
+// goes older), so the discarded block is contiguous with the newest end and
+// dropTrailingLines is left the remainder that is still present.
 func transcriptPage(convo []transcriptEntry, limits PreviewLimits) string {
 	want := -1 // MaxLines unset: no line ceiling, so render everything
 	if limits.MaxLines > 0 {
 		want = limits.Offset + limits.MaxLines
 	}
 	var rendered []string
-	lines := 0
+	lines, dropped := 0, 0
 	for i := len(convo) - 1; i >= 0 && (want < 0 || lines < want); i-- {
 		var b strings.Builder
 		renderEntry(&b, convo[i].Type, convo[i].Message)
 		s := b.String()
+		lines += countPreviewLines(s)
+		if lines <= limits.Offset {
+			dropped = lines // wholly inside the tail: the count is all we need
+			continue
+		}
 		rendered = append(rendered, s)
-		lines += strings.Count(s, "\n")
 	}
 	var b strings.Builder
 	for i := len(rendered) - 1; i >= 0; i-- { // back into transcript order
 		b.WriteString(rendered[i])
 	}
-	return dropTrailingLines(b.String(), limits.Offset)
+	return dropTrailingLines(b.String(), limits.Offset-dropped)
 }
 
 // dropTrailingLines removes the newest n lines from s, a line being everything
-// through its "\n" (the same notion limitPreview counts). Dropping as many lines
-// as s has, or more, leaves "": paging past the start of history is an empty
-// page, not the oldest line served over and over.
+// through its "\n" (previewLines' notion, the same one limitPreview counts).
+// Dropping as many lines as s has, or more, leaves "": paging past the start of
+// history is an empty page, not the oldest line served over and over.
 func dropTrailingLines(s string, n int) string {
 	if n <= 0 || s == "" {
 		return s
 	}
-	lines := strings.SplitAfter(s, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1] // trailing newline is not a line of its own
-	}
+	lines := previewLines(s)
 	if n >= len(lines) {
 		return ""
 	}

@@ -1321,6 +1321,18 @@ func (s *server) preview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Claude-Sessions-Preview-Source", result.Source)
 	w.Header().Set("X-Claude-Sessions-Preview-Label", result.Label)
+	// How many lines this body holds, counted by the server's own rule
+	// (previewLines: a trailing newline ends the last line rather than opening
+	// an empty one). A client pages by adding the lines it RECEIVED, so without
+	// this it has to reimplement that rule and keep it in step forever, and
+	// being one out does not read as a bug — it reads as a gap or a repeat in
+	// the history the user is scrolling.
+	//
+	// Set unconditionally, "0" included: absence has to keep meaning "this host
+	// predates the header", the same distinction the "api" object is emitted
+	// empty rather than omitted to preserve.
+	w.Header().Set("X-Claude-Sessions-Preview-Lines",
+		strconv.Itoa(countPreviewLines(result.Content)))
 	_, _ = w.Write([]byte(result.Content))
 }
 

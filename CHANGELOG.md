@@ -36,6 +36,129 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permanent: append, never rename or reorder. A name is added by the same change
   that lands the route serving it — never ahead of one — so a name present here
   is a promise this build can keep.
+- `GET /sessions/{pid}/preview` accepts `?offset=N` — the "preview-range"
+  capability — so a client can page back through pane scrollback or transcript
+  history instead of only ever reading the tail. `offset` counts rendered lines
+  to skip from the newest end, the same unit whichever source answers, and it
+  composes with `lines`/`bytes` rather than replacing them: those still size and
+  cap the page. Absent or zero is byte for byte the request every client sent
+  before paging existed — an unpaged capture sends the argv it always sent and
+  never asks tmux for the pane geometry a page-back needs — so nothing that does
+  not page pays for paging.
+
+  Every answer is a 200, the one past the start of history included: an
+  exhausted page is an empty body with the source header unchanged, never a 404
+  and never a 500, so a client learns history has run out without having to read
+  it out of an error. Paging is exact for a paused or finished session; a pane
+  that is still printing shifts its own history under a plain offset, so a page
+  taken mid-flow can repeat or skip lines.
+
+  Each response carries `X-Claude-Sessions-Preview-Lines`, the number of lines
+  in the body as the server itself counts them. A client pages by adding the
+  number of lines it **received**, not the number it asked for — a page comes
+  back short when `bytes` trims it or history runs out — so this is the number
+  the next `offset` is built from, and it saves every client reimplementing "a
+  trailing newline is not a line" and keeping that in step with the server
+  forever. It is always sent, `0` included: its absence means the host predates
+  the header, not that the page was empty.
+- `GET /sessions/{pid}/attach` upgrades to a WebSocket carrying a live
+  terminal, advertised as the `attach` capability. Every session already lives
+  in tmux, so a faithful remote terminal is cheap in concept: the server
+  allocates a PTY, runs `tmux attach-session` in it, and pumps bytes. Binary
+  frames are raw PTY bytes in both directions; client→server text frames are
+  JSON control, today only `{"resize":{"cols":C,"rows":R}}`, which becomes a
+  `TIOCSWINSZ` on the master and so resizes the tmux client itself. An optional
+  `?cols=&rows=` opens the PTY at the phone's own size, so the first frame it
+  ever sees is not a standard 80x24 that resizes a moment later — which, with
+  tmux sizing a window to its most recent client, the desktop user would watch
+  happen too.
+
+  `?readonly=1` runs the tmux client with `-r`, **and** drops every input frame
+  server-side. The flag alone would put the enforcement inside the process a
+  compromised or buggy client asked for; the drop is what actually holds, and
+  it is proven by a test that starts the tmux client read-write while the
+  connection stays readonly, so nothing but the server stands between a
+  readonly socket and a live shell.
+
+  Refusals happen before the upgrade, so nothing is started and no socket is
+  accepted unless the PID still holds the `session_id` the client named
+  (`session_mismatch` / `not_live`, the same precondition kill and migrate use)
+  and that session has a pane (`no_pane`). They answer with the action-contract
+  `{ok, error, code}` envelope but not with its HTTP 200 — a 200 in reply to an
+  upgrade request is a protocol lie, and a WebSocket client is told the status
+  and not the body — so a refused precondition is `409`, an over-cap session is
+  `429` with `attach_busy`, and the body carries the precise code for anything
+  that can read it. At most two terminals may be attached to one session at a
+  time.
+
+  A client hanging up closes the PTY and reaps the attach process, and nothing
+  else: tmux detaches, and the session, its pane process and its scrollback all
+  outlive the connection — the whole reason for attaching to tmux rather than
+  to the process. A connection nobody has typed into for 30 minutes is closed
+  with `1001 idle timeout`. Idleness counts client→server frames only, on
+  purpose: tmux redraws its status line every `status-interval` seconds whether
+  anybody is there or not, so a timer that terminal output could reset would
+  never fire.
+
+  The attach client's environment is built rather than inherited: `TERM` is
+  forced (launchd starts this server with none, and tmux refuses to attach
+  without one — and the PTY is read by the phone's emulator, never by the
+  server's own terminal), `LANG` is forced to UTF-8 unless what was inherited
+  already is, with a non-UTF-8 `LC_ALL`/`LC_CTYPE` dropped so it cannot undo
+  that, and `TMUX`/`TMUX_PANE` are dropped so a server started from inside tmux
+  does not produce a client that refuses to nest.
+- Group assignments and the disabled bit are now **per-host shared state**,
+  advertised as the `flags` capability. They live together in one file,
+  `~/.config/claude-sessions/session-flags.json`, keyed by session id:
+  `{"<session_id>": {"group": 3, "disabled": true}}`. `GET /sessions` carries
+  both per row, and `POST /sessions/{pid}/flags {session_id, group?,
+  disabled?}` sets them — action-contract envelope, `session_id` mandatory
+  (there is no legacy caller to keep working, and a flag write with no
+  precondition would act on whoever holds that PID now).
+
+  The point is that both screens see the same badges. A group set on the phone
+  shows up in the desktop's next poll, and one set in the TUI is visible to
+  every client of that host — where before, groups were a client-machine-local
+  file nobody else could read, so two desktops watching the same host disagreed
+  and a phone saw nothing at all. Which host owns a flag follows the session,
+  not the viewer: the TUI writes its own rows directly and sends a remote row's
+  change to that row's host, exactly as `-`/`+` already did for disabled.
+
+  `group: 0` clears an assignment; a field absent from the request body means
+  "leave that flag alone", so a client changing one flag never overwrites the
+  other from a stale view. An explicit `null` is rejected rather than read as
+  either, per the tolerant-decoding rule: an absent field is an older client,
+  a null one is version skew and is reported.
+
+  Both writers on a host — the TUI and the server — take an OS file lock around
+  a fresh read of the file, so neither ever writes back a copy made before the
+  other's change. Unlike the two stores this replaces, a file that fails to
+  parse is never overwritten: the store goes read-only, says so once on stderr,
+  and leaves the bytes for a human, because a silent wipe would now lose every
+  badge and disabled mark on the host at once. Entries are dropped when their
+  session no longer resolves to anything live or resumable, and after 30 days
+  with no sighting.
+- `POST /devices/{token}/test` sends one test push to one registered device —
+  the per-device form of `notify-test`, so a phone can test the push pipe from
+  its own settings screen instead of needing a shell on the host. It answers
+  `{"ok":true}` on delivery to Apple, `{"ok":false,"error":"..."}` carrying
+  Apple's own reason string **verbatim** on failure, and `404` for a token this
+  host has not registered. No request body is read.
+
+  Two deliberate differences from the notification fan-out. A failed send is
+  `200` with the `{ok,error}` envelope, not `5xx`: the send happened and its
+  answer is the result, and the reason string — `BadDeviceToken`,
+  `TopicDisallowed`, `ExpiredProviderToken` — is the whole point, so nothing
+  rewords it. And a device Apple calls dead is *not* pruned here, unlike a real
+  push: pruning would make the next test answer `404 unknown token` when the
+  truth was "Apple rejected a token this host has registered", which is exactly
+  how a sandbox/production mismatch reads. A diagnostic must not destroy the
+  evidence it exists to produce.
+
+  Advertised as the `test-push` capability, because that 404 already means
+  "this host has no such token" — without the handshake a client could not tell
+  it from an old host with no such route, and hiding the button on an old host
+  is precisely what it needs the answer for.
 - `POST /sessions/{pid}/kill` and `POST /sessions/{pid}/migrate` accept an
   optional `{"session_id": "…"}` precondition. A PID on its own proves nothing
   once a tmux pane has been recycled and handed that number to a different

@@ -4808,6 +4808,110 @@ func TestPreviewHandlerServesAnEmptyPageAsOK(t *testing.T) {
 	}
 }
 
+// TestPreviewHandlerCountsTheLinesItServed pins the line count the client pages
+// by. The rule it must never have to guess at: a trailing newline ends the last
+// line rather than opening an empty one, a body cut mid-line still served that
+// line, and a blank line is a line.
+func TestPreviewHandlerCountsTheLinesItServed(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{"", "0"},
+		{"\n", "1"},
+		{"one\n", "1"},
+		{"one\ntwo\n", "2"},
+		{"one\ntwo", "2"},
+		{"one\n\nthree\n", "3"},
+	}
+	for _, c := range cases {
+		body := c.body
+		s := &server{token: "test", previewLoader: func(pid int, limits PreviewLimits) (PreviewResult, error) {
+			return PreviewResult{Source: "tmux", Label: "dev:0.0", Content: body}, nil
+		}}
+		req := httptest.NewRequest(http.MethodGet, "/sessions/42/preview?offset=10", nil)
+		req.SetPathValue("pid", "42")
+		req.Header.Set("Authorization", "Bearer test")
+		rec := httptest.NewRecorder()
+		s.preview(rec, req)
+		if got := rec.Header().Get("X-Claude-Sessions-Preview-Lines"); got != c.want {
+			t.Fatalf("body %q: lines header = %q, want %q", c.body, got, c.want)
+		}
+	}
+}
+
+// TestPreviewHandlerLineCountAtTheEdgeOfHistory runs the count through the real
+// loader at the one place it decides something: the last line of a transcript.
+// The client is told it received one line, adds one to its offset, and the next
+// request is the empty page — a 200 with a count of zero, which is how it learns
+// history has run out. A count that was one out here would make it either skip
+// that line or ask for it forever.
+func TestPreviewHandlerLineCountAtTheEdgeOfHistory(t *testing.T) {
+	old := previewTmuxCapture
+	t.Cleanup(func() { previewTmuxCapture = old })
+	previewTmuxCapture = func(int, PreviewLimits) (string, string, error) {
+		return "", "", errNoTmuxPane
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sessDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "79.json"),
+		[]byte(`{"pid":79,"sessionId":"sid-preview-lines"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projDir := filepath.Join(home, ".claude", "projects", "-tmp-proj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&b, `{"type":"user","message":{"role":"user","content":"entry-%d"}}`+"\n", i)
+	}
+	path := filepath.Join(projDir, "sid-preview-lines.jsonl")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Derived, not written down: renderEntry owns how many lines an entry is.
+	full, err := formatTranscriptTail(path, 20, DefaultPreviewLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := strings.Count(full, "\n")
+
+	get := func(offset int) *httptest.ResponseRecorder {
+		t.Helper()
+		s := &server{token: "test"} // no injected loader: the real LoadPreview
+		req := httptest.NewRequest(http.MethodGet,
+			fmt.Sprintf("/sessions/79/preview?offset=%d", offset), nil)
+		req.SetPathValue("pid", "79")
+		req.Header.Set("Authorization", "Bearer test")
+		rec := httptest.NewRecorder()
+		s.preview(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("offset %d: status = %d", offset, rec.Code)
+		}
+		return rec
+	}
+
+	rec := get(total - 1)
+	if n := strings.Count(rec.Body.String(), "\n"); n != 1 || rec.Body.Len() == 0 {
+		t.Fatalf("last page = %q, want the one oldest line", rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Claude-Sessions-Preview-Lines"); got != "1" {
+		t.Fatalf("last page: lines header = %q, want 1", got)
+	}
+
+	rec = get(total)
+	if rec.Body.String() != "" {
+		t.Fatalf("first empty page = %q", rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Claude-Sessions-Preview-Lines"); got != "0" {
+		t.Fatalf("first empty page: lines header = %q, want 0", got)
+	}
+}
+
 // TestFetchRemotePreviewOmitsOffsetWhenUnpaged keeps the TUI's own remote
 // request identical to what it sent before paging existed.
 func TestFetchRemotePreviewOmitsOffsetWhenUnpaged(t *testing.T) {
