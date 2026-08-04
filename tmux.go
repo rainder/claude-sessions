@@ -108,6 +108,47 @@ func processInfo() (ppid map[int]int, cpu map[int]string, err error) {
 	return ppid, cpu, nil
 }
 
+// childrenMap inverts a pid→ppid map into ppid→[]pid, so descendants of a
+// given pid can be enumerated without rescanning the whole ppid map per call.
+func childrenMap(ppid map[int]int) map[int][]int {
+	children := make(map[int][]int, len(ppid))
+	for pid, pp := range ppid {
+		children[pp] = append(children[pp], pid)
+	}
+	return children
+}
+
+// sumProcessTreeCPU returns pid's %cpu plus that of every descendant (tool
+// subprocesses, subagent processes, etc.), formatted like ps's own %cpu
+// column. A session's own process is often near-idle while its children do
+// the work, so summing the tree is what makes the CPU column meaningful.
+// visited guards against a ppid cycle turning this into an infinite walk.
+func sumProcessTreeCPU(pid int, cpu map[int]string, children map[int][]int) (string, bool) {
+	total := 0.0
+	found := false
+	visited := map[int]bool{}
+	queue := []int{pid}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if c, ok := cpu[cur]; ok {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(c), 64); err == nil {
+				total += v
+				found = true
+			}
+		}
+		queue = append(queue, children[cur]...)
+	}
+	if !found {
+		return "", false
+	}
+	return strconv.FormatFloat(total, 'f', 1, 64), true
+}
+
 // walkTmuxPane returns tmux pane metadata if pid is a descendant of any tmux
 // pane process. It checks pid itself first because `tmux new-session
 // "claude ..."` makes claude the pane_pid directly.

@@ -170,6 +170,7 @@ func CollectLocal() ([]Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read process tree: %w", err)
 	}
+	children := childrenMap(ppid)
 
 	out := make([]Session, 0, len(matches))
 	for _, p := range matches {
@@ -186,7 +187,7 @@ func CollectLocal() ([]Session, error) {
 		if s.Headless() {
 			continue
 		}
-		if c, ok := cpu[s.PID]; ok {
+		if c, ok := sumProcessTreeCPU(s.PID, cpu, children); ok {
 			s.CPU = c
 		} else {
 			s.CPU = "-"
