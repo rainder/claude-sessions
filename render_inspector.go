@@ -63,8 +63,8 @@ const inspectorTicketSummaryMaxLines = 4
 // returns the zero-based clickable footer regions for the frame it drew.
 //
 // Layout, top to bottom: a title (name, PID, host), a width-responsive metadata
-// line (model, status, context, cost — dropping cost below 80 cols, context
-// below 64, everything but status below 48), a separator, an optional ticket
+// line (model, status, context, cost, cpu — dropping cpu below 93 cols, cost
+// below 80, context below 64, everything but status below 48), a separator, an optional ticket
 // summary block (summaryLines plus its own trailing separator, drawn only when
 // summaryLines is non-empty — so the chrome budget is 4 rows plus
 // inspectorSummaryExtraRows(summaryLines), not a fixed 4), the content body from
@@ -214,9 +214,9 @@ func inspectorTitle(snap InspectorSnapshot) string {
 	return title
 }
 
-// inspectorMetadata formats the model/status/context/cost strip, dropping fields
-// as the terminal narrows: below 80 cols cost goes, below 64 context goes, below
-// 48 only the status remains.
+// inspectorMetadata formats the model/status/context/cost/cpu strip, dropping
+// fields as the terminal narrows: below 93 cols cpu goes, below 80 cost goes,
+// below 64 context goes, below 48 only the status remains.
 func inspectorMetadata(snap InspectorSnapshot, cols int) string {
 	s := snap.Session
 	model := shortModel(s.Model)
@@ -226,6 +226,10 @@ func inspectorMetadata(snap InspectorSnapshot, cols int) string {
 	status := colorize(statusColor[s.Status], s.StatusDisplay())
 	ctx := "ctx " + formatTokens(s.ContextTokens)
 	cost := formatCost(s.CostUSD, s.CostSubagentsUSD)
+	cpu := "cpu " + s.CPU
+	if s.CPU != "" && s.CPU != "-" {
+		cpu += "%"
+	}
 
 	var parts []string
 	switch {
@@ -235,8 +239,10 @@ func inspectorMetadata(snap InspectorSnapshot, cols int) string {
 		parts = []string{model, status}
 	case cols < 80:
 		parts = []string{model, status, ctx}
-	default:
+	case cols < 93:
 		parts = []string{model, status, ctx, cost}
+	default:
+		parts = []string{model, status, ctx, cost, cpu}
 	}
 	return strings.Join(parts, dim("  ·  "))
 }
