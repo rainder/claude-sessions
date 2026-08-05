@@ -389,7 +389,45 @@ whole-batch backoff only ever fires on a host-level problem, never because one
 account is flaky. And only entries with numbers are cached, so a restart can
 seed a recently-good account but never resurrects an expired one.
 
-**A failed fetch has four outcomes, not two.** `Expired` used to mean "the last
+**Identity is bound to the token, not to a file.** Every usage fetch is paired
+with one profile fetch on the *same* token (`fetchProfileEmail`,
+`/api/oauth/profile` → `account.email`; the usage response carries no identity
+of its own), and the answer rides back on `UsageInfo.VerifiedAccount` —
+`json:"-"`, since each host verifies where its own tokens live and a second
+writer on the wire would just make the winner depend on poll ordering.
+`usageAccountLabel` is the one attribution rule (verified beats the file read)
+and `verifiedIdentityMismatch` the one disagreement test; the live path, the
+known-accounts poller and the server's `/usage` all go through both, so they
+cannot drift. This closed a read-order race — the token was read at one instant
+and `~/.claude.json` at another, so a switch in between labelled one account's
+numbers with another's — and it is what makes a *clobber* visible: a header
+showing an unexpected address means the credential store and the identity cache
+have drifted apart. A verified email that disagrees with the file **wins**;
+smoothing it over is what hid the problem.
+
+`usageInfoFetch`'s production value is therefore `fetchVerifiedUsageInfo`, not
+the bare `fetchUsageInfo` — one seam covers both legs, so a test fake with a
+zero `VerifiedAccount` reproduces the pre-verification behaviour exactly.
+`profileEmailFetch` is the probe's own seam (`TestMain` panics on it, like
+`usageInfoFetch`). Three rules keep the cost down and the failure modes benign.
+The probe runs **only after a successful usage fetch** — a throttled or dead
+account already has its answer, and asking twice would double the cost of the
+very failure the backoff exists to stop paying for. A probe failure is **never**
+an error: identity verification is an upgrade over a file read, so every caller
+falls back to the file. And the answer is **cached per token** (`profileEmails`,
+keyed by sha256 of the access token, ~32 entries, successes only), because it is
+a property of the credential — a rotated token is a different key and re-probes
+naturally, so no TTL is needed to stay correct, and steady-state request volume
+is unchanged.
+
+**The two legs are sequential and their timeouts have to add up**: 5s for usage
++ `profileFetchTimeout` (2s) ≈ 7s worst case, which has to fit under both the
+server's `runBounded` wrapper (`usageFetchTimeout`, 10s — past it, good numbers
+are discarded and a timeout is cached in their place) and `FetchRemoteUsage`'s
+8s client timeout. 5+2 clears both; 5+5 cleared neither. Anything added to this
+chain gets re-checked against those two numbers.
+
+**A failed fetch has five outcomes, not two.** `Expired` used to mean "the last
 fetch failed", which is how a 429 came to render as `auth expired` and send the
 user off to re-login over a throttle — and the endpoint 429s constantly, since
 every Claude Code session shares the account's per-token budget. So
@@ -402,8 +440,13 @@ parsed at all never reaches `classifyUsageErr` — there was no answer to
 classify — and carries its own `bad snapshot` tag (`usageBadSnapshotReason`,
 known_accounts.go) rather than falling in with `unreachable`: nothing about it
 is a network problem, and unlike every tag above it does not heal on its own.
-The fix is `account save <name>` while logged into that account, the same
-recovery `switchAccount`'s identity precondition names. `Reason`
+The fifth is `wrong identity` (`usageWrongIdentityReason`): the token answered
+fine, for a *different* account than the snapshot's `.<name>.account.json`
+claims. It is deliberately not an error at all and has no `classifyUsageErr`
+branch — the request succeeded; the two call sites that compare emails set the
+tag on the entry directly. Never `Expired` (the credential works — it is the
+name on it that is wrong), and its own tag rather than `bad snapshot` (the file
+is perfectly readable); the fix is the same `account save <name>`. `Reason`
 is a short fixed tag and never the underlying error's text: a `*url.Error`
 stringifies with the whole request URL, which would land in a one-line header
 placeholder and in the `/usage` JSON.
@@ -420,6 +463,20 @@ forever fresh, when that timestamp is the only thing bounding the carry
 bars beside a dead credential imply it still works. The four states are
 `Info` fresh / `Info` + `Stale` / `Expired` / neither-with-a-`Reason`, and
 `KnownAccountUsage` documents them.
+
+**The `wrong identity` path carries only a `Verified` reading**, and that extra
+condition is load-bearing rather than belt-and-braces. `carryable` compares the
+*claimed* email on both sides, which is exactly what is in doubt here: a pass
+whose probe was unavailable stores the stranger's numbers under the claimed
+email (nothing contradicted the claim, so the entry looks ordinary), and the
+next pass — the one that does reach the probe and does detect the mismatch —
+would carry precisely those numbers forward, smuggling in what dropping the
+fresh reading exists to prevent. So `KnownAccountUsage.Verified` records that
+`Info`'s identity was *confirmed*, travels with the numbers through a carry
+(one throttled pass in between must not re-open the hole), is serialized so a
+warm start keeps the distinction, and gates this one path only. Every other
+failure keeps today's carry semantics regardless: a 429 or a network blip says
+nothing about whose numbers `prev` holds.
 
 Memory across polls lives in `newKnownAccountsFetcher`'s closure, because
 `usagePoller`'s `fetch` takes no arguments. Its `last` map is **rebuilt** from
@@ -506,6 +563,14 @@ host's heading. Per-account failures go through `classifyUsageErr` into that
 entry's `Expired`/`Reason`, never an error for the request, and a success
 stamps `FetchedAt`; the server keeps no cross-request memory, so it never
 produces a `Stale` entry — carrying numbers forward is the client hub's job.
+A snapshot whose verified email disagrees with its identity file gets
+`wrong identity` and no numbers, the same call `knownAccountUsage` makes.
+`activeSnapshotName` is resolved from the **file's** email while the live
+account's label uses the **verified** one, and that divergence is deliberate:
+the former answers "which snapshot does this host believe it is running" (a
+question about files, resolvable with no network and before any fetch), the
+latter "whose budget produced these numbers". When they disagree, that *is* the
+clobber signal — deriving both from the verified email would hide it again.
 Accounts are fetched **concurrently**, one goroutine each, because a
 cold cache with a handful of accounts would otherwise serialize into N × the
 endpoint's 5s timeout and outlive the client's own.
@@ -753,11 +818,20 @@ two stay interchangeable: identical file names, formats and paths
 (`.<name>.keychain-cred` / `.<name>.credentials.json` / `.<name>.account.json`),
 so either tool can switch an account on any machine with no migration step.
 `account_list.go` renders `account list`; `account_picker.go` is the Ctrl+W
-overlay and its action. Entry points: the `account switch|save|list`
+overlay and its action. Entry points: the `account switch|save|list|remove`
 subcommands, `POST /account/switch` (bearer auth like every mutating endpoint,
 `400 unknown_account` / `500 switch_failed`, no `session_id`-style precondition
 because it is host identity, not a session), and Ctrl+W in the TUI (picker →
-Enter → done, no confirm dialog).
+Enter → done, no confirm dialog). `remove` is CLI-only on purpose — no
+endpoint, no TUI binding: deleting a switch target is rare, irreversible
+without a relogin, and has no business being one keystroke from the picker.
+
+The two override flags are deliberately *not* interchangeable
+(`accountArgs`, commands.go). `remove` asks a yes/no question, so `-y` answers
+it and `--force` is a synonym. `save` asks nothing — it *refuses*, and
+`--force` means "reassign this snapshot to another account", so `-y` is
+rejected there: the reflexive don't-ask-me flag must not reassign a
+credential. `switch` and `list` reject both.
 
 `switchAccount`'s step order **is** the contract, all of it inside
 `withAccountLock`: validate the name against `snapshotAccountNames()` (nothing
@@ -769,8 +843,10 @@ doesn't (nothing is read or written past this failure either) → refuse if a
 previous switch left the pending-switch marker armed (see below) → if it is
 already current, return immediately, a *true* no-op touching zero files
 (re-applying the snapshot would overwrite a live token that may have
-refreshed with a stale one) → unconditional rescue copy of the live
-credential to the single rolling `.last-switch-rescue.<ext>` slot → when the
+refreshed with a stale one) → **step 2.4**, validate the credential about to
+be installed (`validateSnapshotCredential`) → **step 2.5**, collect the
+advisory session warning (`switchSessionWarnings`) → unconditional rescue copy
+of the live credential to the single rolling `.last-switch-rescue.<ext>` slot → when the
 outgoing account resolves to a name, its own credential + identity snapshot →
 arm the pending-switch marker → only then overwrite the live credential →
 patch `~/.claude.json` → disarm the marker → return the email re-read from
@@ -779,6 +855,55 @@ strand you: the outgoing credential always has at least one copy on disk
 before anything overwrites it, including when its account can't be named
 (first switch, renamed account), which is exactly the case the *rescue* copy
 covers and the named sync-back cannot.
+
+**Steps 2.4 and 2.5 both sit after the no-op return, and that placement is the
+point.** 2.4 refuses a snapshot that is no longer a login: no `refreshToken`,
+or a `refreshTokenExpiresAt` already past. Installing one logs the host out —
+Claude Code's next refresh is answered `invalid_grant` and it *zeroes* the
+stored credential — which is the failure that reads as "the switch worked and
+then everything broke". An expired *access* token is fine and is not probed;
+refreshing it is what the refresh token is for. When the access token is still
+valid the profile endpoint is asked whose it is, and a disagreement with the
+identity file is refused too (the same misattribution `wrong identity` reports
+after the fact, caught before it becomes the live credential). That probe is
+advisory — validation works offline, and any failure to reach it leaves the
+two file-only checks as the whole decision. The validated bytes are carried to
+the write rather than re-read, so what was checked is what gets installed.
+Running this *before* the no-op return would let a stale parked snapshot turn a
+guaranteed no-op into a refusal, and spend a network probe on it.
+
+2.5 warns — never refuses, never prompts — about Claude Code sessions still
+running under the outgoing account. Those processes hold its token and write a
+refreshed one back to the live store whenever it ages out, so one of them can
+overwrite the credential this switch just installed, or (on a superseded
+refresh token) make Claude Code zero it. Nothing here can prevent that: this
+tool does not own those processes and there is no way to make one re-read its
+credential. Refusing or prompting would block the very case it warns about —
+the command is quite likely being typed inside one of those sessions. The
+collector is `CollectLocalLite` behind the `collectSessionsForSwitch` seam,
+because this runs under the flock where every millisecond blocks another
+switch, and all the warning needs is pids. A collection failure yields no
+warning rather than an error. `switchAccount` returns
+`(email, warnings, err)`; the CLI prints the full text to stderr,
+`POST /account/switch` carries it in `warnings` on the *success* response, and
+the Ctrl+W picker folds a short clause into `accountSwitchToast` — the picker's
+cooked window is repainted the instant the TUI loop resumes, so the toast is
+the only surface that survives.
+
+`account save NAME` refuses to file the live credential under a name whose
+`.<name>.account.json` already names a *different* account — that is the
+misattribution every other guard here exists to prevent, reached by hand.
+Refreshing a snapshot of the same account after a relogin is untouched, and a
+first save of an unclaimed name is never refused; `--force` reassigns
+deliberately and still clears the pending-switch marker. `account remove NAME`
+deletes the credential blob under **both** platforms' names plus the identity
+file, under the lock, validated against `snapshotAccountNames()` — which is
+what makes the rescue slot unremovable, since the listing filters it out. It
+never touches the live login. Whether the name stood for the live account is
+re-derived **under the lock** and returned, not taken from the pre-prompt
+`planAccountRemoval`: a human can sit on the confirmation while a Ctrl+W switch
+changes the answer, and what is reported has to describe the removal that
+actually happened.
 
 **Why a credential-only snapshot is refused, not silently applied with a
 "`/login` once" fallback.** An earlier version of this code allowed it: the

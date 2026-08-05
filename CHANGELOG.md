@@ -9,6 +9,26 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `account remove NAME` deletes one parked account snapshot — the credential
+  blob (both platforms' file names, so a machine that has held either loses
+  both) and the identity file beside it. It never touches the live login, and
+  the rescue slot is unremovable by construction, since the only listing it
+  validates against filters that name out. Removing the snapshot that stands
+  for the account you are logged into is allowed but never quiet: it costs you
+  the ability to switch back until `account save` recaptures it, so a terminal
+  is asked and a pipeline has to pass `-y`. Local only — no endpoint, no TUI
+  binding.
+- `account switch` warns when Claude Code sessions are still running. Those
+  processes hold the outgoing account's token and write a refreshed one back to
+  the live credential store whenever it ages out, so one of them can overwrite
+  the credential the switch just installed — or, when its own refresh token has
+  been superseded and the server answers `invalid_grant`, make Claude Code zero
+  the stored credential outright and log the host out of both accounts. Nothing
+  can prevent that from here, so the switch says so and proceeds: it never
+  refuses and never prompts, because the command is quite likely being typed
+  inside one of the sessions it is warning about. `POST /account/switch`
+  carries the same text in a new `warnings` field on the success response, and
+  the Ctrl+W picker prints it.
 - Inspector: press `i` to compose a line of text and send it as literal
   keystrokes (`tmux send-keys -l`) into the selected session's tmux pane,
   local or remote. Disabled with a "no tmux pane" hint when the session has
@@ -261,6 +281,41 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Account rate limits are now attributed to the account the *token* belongs to,
+  not to whatever `~/.claude.json` happened to say. Every usage fetch is paired
+  with a profile lookup on the same token, and the verified email wins over the
+  file read. This closes a read-order race — the token was read at one instant
+  and the email at another, so a switch in between labelled one account's
+  numbers with another's — and it makes the clobber above *visible*: a header
+  suddenly showing an unexpected address is the credential store and the
+  identity cache having drifted apart. The probe is a strict upgrade, never a
+  precondition: it only runs after the numbers arrive, and any failure to reach
+  it falls back to exactly the behaviour before this change.
+- A credential snapshot whose token provably belongs to a different account
+  than its `.<name>.account.json` claims now reads as `wrong identity` instead
+  of putting that other account's bars on screen under this one's email. It is
+  its own tag rather than `bad snapshot` (the file is perfectly readable) and
+  never `auth expired` (the credential works — it is the name on it that is
+  wrong); the fix is `account save <name>` while logged into that account.
+  Carry-forward is unchanged, so this account's own last verified reading still
+  shows, marked stale.
+- `account switch` validates the snapshot before installing it. A credential
+  with no refresh token, or one whose refresh token has already expired, is
+  refused outright — installing it is a switch that logs the host out as soon
+  as the access token ages out, which is exactly the failure that reads as "the
+  switch worked and then everything broke". An expired *access* token is still
+  fine and is not probed. When the access token is still valid, the profile
+  endpoint is asked whose it is and a disagreement with the identity file is
+  refused too — the same misattribution reported above, caught before it
+  becomes the live credential. That probe is advisory: validation works offline,
+  and an unreachable endpoint leaves the two file-only checks as the decision.
+- `account save NAME` refuses to file the live credential under a name that
+  already stands for a different account, which would misattribute the
+  snapshot and make the next switch to that name install the wrong login.
+  Refreshing a snapshot of the same account after a relogin — the documented
+  use — is untouched, and a first save of an unclaimed name is never refused.
+  `--force` reassigns deliberately, and still clears the pending-switch marker,
+  so `save` remains the one complete recovery step.
 - `--bind tailscale` now finds the CLI when it is not on `PATH`. The macOS GUI
   builds ship it inside the app bundle and install no symlink, so a Mac fully
   authenticated to a tailnet had nothing named `tailscale` to run and reported

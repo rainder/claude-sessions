@@ -4154,6 +4154,7 @@ func TestAccountSwitchHandler(t *testing.T) {
 		name       string
 		body       string
 		switchErr  error
+		warnings   []string
 		wantStatus int
 		wantOK     bool
 		wantCode   string
@@ -4162,6 +4163,17 @@ func TestAccountSwitchHandler(t *testing.T) {
 		{
 			name:       "valid name switches and reports the new email",
 			body:       `{"name":"avisoma"}`,
+			wantStatus: http.StatusOK,
+			wantOK:     true,
+			wantCalled: true,
+		},
+		{
+			// A successful switch that raised a warning carries it on the
+			// success response — refusing would block the very case it warns
+			// about (see runningSessionsWarning).
+			name:       "warnings ride the success response",
+			body:       `{"name":"avisoma"}`,
+			warnings:   []string{"2 Claude Code sessions are still running (pid 11, 12)."},
 			wantStatus: http.StatusOK,
 			wantOK:     true,
 			wantCalled: true,
@@ -4194,12 +4206,12 @@ func TestAccountSwitchHandler(t *testing.T) {
 			called := false
 			s := &server{
 				token: "secret",
-				switchAcct: func(name string) (string, error) {
+				switchAcct: func(name string) (string, []string, error) {
 					called = true
 					if tc.switchErr != nil {
-						return "", tc.switchErr
+						return "", nil, tc.switchErr
 					}
-					return "andy@" + name + ".example", nil
+					return "andy@" + name + ".example", tc.warnings, nil
 				},
 			}
 			req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(tc.body))
@@ -4230,6 +4242,9 @@ func TestAccountSwitchHandler(t *testing.T) {
 			if !tc.wantOK && r.Message == "" {
 				t.Fatal("failure carries no message")
 			}
+			if !slices.Equal(r.Warnings, tc.warnings) {
+				t.Fatalf("warnings = %v, want %v", r.Warnings, tc.warnings)
+			}
 		})
 	}
 }
@@ -4238,7 +4253,7 @@ func TestAccountSwitchHandlerUnauthorized(t *testing.T) {
 	called := false
 	s := &server{
 		token:      "secret",
-		switchAcct: func(string) (string, error) { called = true; return "", nil },
+		switchAcct: func(string) (string, []string, error) { called = true; return "", nil, nil },
 	}
 	req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(`{"name":"avisoma"}`))
 	rec := httptest.NewRecorder()
@@ -4256,7 +4271,7 @@ func TestAccountSwitchHandlerUnauthorized(t *testing.T) {
 func TestAccountSwitchHandlerBadJSON(t *testing.T) {
 	s := &server{
 		token:      "secret",
-		switchAcct: func(string) (string, error) { t.Fatal("switch called for a bad body"); return "", nil },
+		switchAcct: func(string) (string, []string, error) { t.Fatal("switch called for a bad body"); return "", nil, nil },
 	}
 	req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(`{"name":`))
 	req.Header.Set("Authorization", "Bearer secret")
@@ -5199,5 +5214,76 @@ func TestFlagsHandlerReportsAStoreItCannotWrite(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != string(corrupt) {
 		t.Fatalf("corrupt store was rewritten (err=%v):\n%s", err, got)
+	}
+}
+
+// TestUsageEndpointFlagsMisattributedSnapshot proves the server classifies a
+// verified-identity mismatch exactly as the client-side poller does: the
+// stranger's numbers are dropped and the entry carries the tag instead, so no
+// host anywhere renders one account's bars under another's email.
+func TestUsageEndpointFlagsMisattributedSnapshot(t *testing.T) {
+	f := newAccountFixture(t)
+	f.setIdentity("andy@avisoma.com")
+	f.snapshot("avisoma", "tok-a", "andy@avisoma.com")
+	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
+
+	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
+		return &UsageInfo{FiveHour: usageBucket{Pct: 55}, VerifiedAccount: "someone@elsewhere.example"}, nil
+	})
+	resp := getUsage(t, s)
+
+	entry := findKnownAccount(t, resp, "trecs")
+	if entry.Info != nil {
+		t.Fatalf("Info = %+v, want the stranger's numbers dropped", entry.Info)
+	}
+	if entry.Expired {
+		t.Fatal("Expired = true; a working credential under the wrong name is not a dead one")
+	}
+	if entry.Reason != usageWrongIdentityReason {
+		t.Fatalf("Reason = %q, want %q", entry.Reason, usageWrongIdentityReason)
+	}
+}
+
+// TestUsageEndpointLabelsLiveAccountWithVerifiedEmail proves the live half of
+// fix 2 on the server: the account the token itself belongs to labels the
+// reading, even when ~/.claude.json says otherwise — which is exactly the
+// clobber worth surfacing.
+func TestUsageEndpointLabelsLiveAccountWithVerifiedEmail(t *testing.T) {
+	f := newAccountFixture(t)
+	f.setIdentity("andy@avisoma.com")
+
+	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
+		if snapshot != "" {
+			t.Fatalf("fetched snapshot %q, want only the live account", snapshot)
+		}
+		return &UsageInfo{FiveHour: usageBucket{Pct: 55}, VerifiedAccount: "andy@trecs.aero"}, nil
+	})
+	resp := getUsage(t, s)
+
+	if resp.Usage == nil {
+		t.Fatal("usage missing")
+	}
+	if resp.Usage.Account != "andy@trecs.aero" {
+		t.Fatalf("account = %q, want the verified email to win over the identity cache", resp.Usage.Account)
+	}
+	if resp.Usage.Info == nil {
+		t.Fatal("info missing; the live account's numbers are still reported")
+	}
+}
+
+// TestUsageEndpointLiveAccountFallsBackToTheFile proves the fallback is intact:
+// with nothing verified, the endpoint labels the live account exactly as it
+// always did.
+func TestUsageEndpointLiveAccountFallsBackToTheFile(t *testing.T) {
+	f := newAccountFixture(t)
+	f.setIdentity("andy@avisoma.com")
+
+	s := newUsageServer(func(string) (*UsageInfo, error) {
+		return &UsageInfo{FiveHour: usageBucket{Pct: 55}}, nil
+	})
+	resp := getUsage(t, s)
+
+	if resp.Usage == nil || resp.Usage.Account != "andy@avisoma.com" {
+		t.Fatalf("usage = %+v, want the identity cache's email", resp.Usage)
 	}
 }

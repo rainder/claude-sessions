@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -52,6 +54,25 @@ type UsageInfo struct {
 	WeeklyScoped      usageBucket
 	WeeklyScopedLabel string
 	Credits           creditsInfo
+	// VerifiedAccount is the login email the OAuth profile endpoint attributed
+	// the very token that fetched these numbers to — the identity of the
+	// numbers themselves, rather than of whatever file the caller happened to
+	// read a token out of. "" when the profile probe failed or was not made;
+	// identity then falls back to the file read it always used.
+	//
+	// It exists because pairing a token from one store (the Keychain, a
+	// snapshot file) with an email from another (~/.claude.json,
+	// .<name>.account.json) is a read-order race at best and a silent
+	// misattribution at worst: a still-running session of the outgoing account
+	// can rewrite the live credential moments after a switch, leaving the two
+	// stores describing different accounts with nothing to notice it.
+	//
+	// Not serialized. Identity is verified where the token lives, so a remote
+	// host's answer already carries its own verified AccountUsage.Account /
+	// KnownAccountUsage.Account; shipping this too would give one fact two
+	// writers on the wire. It is likewise absent from the disk caches, which is
+	// harmless — a seeded reading is re-verified by the first live fetch.
+	VerifiedAccount string `json:"-"`
 }
 
 // AccountUsage pairs a rate-limit snapshot with the account it belongs to, so a
@@ -175,6 +196,12 @@ func loadAccountEmail() string {
 // usageURL is the endpoint Claude Code's /usage command reads.
 const usageURL = "https://api.anthropic.com/api/oauth/usage"
 
+// profileURL answers who a token belongs to: {"account":{"email":…},…}. Verified
+// directly against the live endpoint with the same headers fetchUsageInfo sends
+// (the usage response itself carries no identity at all, which is why this is a
+// second request rather than one more field to parse).
+const profileURL = "https://api.anthropic.com/api/oauth/profile"
+
 // loadOAuthToken reads Claude Code's OAuth access token: from the login
 // Keychain on macOS (exec'd `security`, no cgo), from
 // ~/.claude/.credentials.json elsewhere. Read-only — Claude Code owns the
@@ -208,27 +235,70 @@ func loadOAuthToken() (string, error) {
 // path (loadOAuthToken) and the snapshot path (snapshotToken) so both parse
 // identically; an empty token is an error, not an empty string.
 func parseOAuthCredentials(data []byte) (string, error) {
-	var creds struct {
-		ClaudeAiOauth struct {
-			AccessToken string `json:"accessToken"`
-		} `json:"claudeAiOauth"`
+	creds, err := parseOAuthCredentialBlob(data)
+	if err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return "", fmt.Errorf("parse credentials: %w", err)
-	}
-	if creds.ClaudeAiOauth.AccessToken == "" {
+	if creds.AccessToken == "" {
 		return "", fmt.Errorf("no access token in credentials")
 	}
-	return creds.ClaudeAiOauth.AccessToken, nil
+	return creds.AccessToken, nil
 }
 
-// fetchUsage hits the usage endpoint with the current token and pairs the parsed
-// snapshot with a fresh read of the logged-in account email (loadAccountEmail),
-// so a relogin into a different account mid-run re-attributes the limits instead
-// of reporting them under the account read at startup. The email is read at
-// fetch time, like the token; an unreadable email yields Account "" (not an
-// error). The HTTP leg has a 5s timeout; token loading (macOS Keychain) and the
-// email read are off the render path in the poller's background goroutine.
+// oauthCredentials is the part of a Claude Code credential blob this tool reads.
+// Only the access token is needed to spend one; the refresh token and the two
+// expiries are what tell a *snapshot* apart from a usable login, which is what
+// `account switch` validates before installing one (see
+// validateSnapshotCredential).
+//
+// Both expiries are milliseconds since the epoch, matching what Claude Code
+// writes; 0 means the field was absent, which is treated as "unknown", never as
+// "expired in 1970".
+type oauthCredentials struct {
+	AccessToken           string `json:"accessToken"`
+	RefreshToken          string `json:"refreshToken"`
+	ExpiresAt             int64  `json:"expiresAt"`
+	RefreshTokenExpiresAt int64  `json:"refreshTokenExpiresAt"`
+}
+
+// expiry converts one of the millisecond fields to a time, or the zero time when
+// the field was absent — so callers test IsZero() for "unknown" rather than
+// having to know the wire units.
+func msExpiry(ms int64) time.Time {
+	if ms <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
+}
+
+// parseOAuthCredentialBlob decodes a credential blob — the JSON the macOS
+// Keychain item holds, byte-for-byte what ~/.claude/.credentials.json stores and
+// what claude-switch copies into its per-account snapshots.
+func parseOAuthCredentialBlob(data []byte) (oauthCredentials, error) {
+	var creds struct {
+		ClaudeAiOauth oauthCredentials `json:"claudeAiOauth"`
+	}
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return oauthCredentials{}, fmt.Errorf("parse credentials: %w", err)
+	}
+	return creds.ClaudeAiOauth, nil
+}
+
+// fetchUsage hits the usage endpoint with the current token and attributes the
+// result to the account that token actually belongs to (UsageInfo.VerifiedAccount,
+// from the profile endpoint), falling back to the logged-in email on disk when
+// the profile probe could not answer.
+//
+// The fallback email is captured immediately beside the token read, before the
+// round trip, and never re-read afterwards. Pairing a token read at T0 with an
+// email read at T1 is a race in its own right — a relogin or a switch in that
+// window labels one account's numbers with another's — and the whole reason this
+// function now asks the endpoint instead of inferring from two files.
+//
+// A verified email that disagrees with the file wins, and deliberately so: it is
+// the ground truth for whose budget these numbers came out of, and the header
+// showing an unexpected address is exactly how a credential clobbered by a
+// still-running session of the outgoing account becomes visible at all.
 //
 // This is the only place AccountUsage.FetchedAt is stamped: it dates the numbers
 // themselves, so everything that re-serves them (newUsageFetcher) carries the
@@ -238,11 +308,221 @@ func fetchUsage() (*AccountUsage, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := fetchUsageInfo(tok)
+	// Read adjacent to the token, not after the network call — see above.
+	fileEmail := loadAccountEmail()
+	info, err := usageInfoFetch(tok)
 	if err != nil {
 		return nil, err
 	}
-	return &AccountUsage{Account: loadAccountEmail(), Info: info, FetchedAt: time.Now()}, nil
+	return &AccountUsage{Account: usageAccountLabel(fileEmail, info), Info: info, FetchedAt: time.Now()}, nil
+}
+
+// fetchVerifiedUsageInfo is the production value of usageInfoFetch: one usage
+// fetch plus, on success only, one profile fetch with the same token to record
+// whose numbers these are.
+//
+// Only a successful usage fetch pays for the second round trip. An account being
+// throttled or a credential that is dead already has its answer, and asking a
+// second endpoint about it would double the cost of exactly the failure the
+// consecutive-429 backoff exists to stop paying for.
+//
+// A profile failure is never an error here. Identity verification is an upgrade
+// over reading an email from a file, not a precondition for reporting numbers:
+// every caller falls back to the file read it used before, so an offline or
+// throttled profile endpoint costs nothing but the upgrade.
+//
+// **The two legs are sequential and their timeouts have to add up.** The usage
+// request allows 5s (fetchUsageInfo) and the profile request 2s
+// (profileFetchTimeout), so this function's worst case is ~7s. That has to fit
+// under two independent budgets: the server's own runBounded wrapper at
+// usageFetchTimeout (10s), which would otherwise discard perfectly good numbers
+// and cache a timeout in their place, and FetchRemoteUsage's 8s client timeout,
+// past which the client gives up on the whole /usage answer. 5+2 clears both;
+// 5+5 cleared neither. Anything added to this chain has to be re-checked against
+// those two numbers.
+//
+// The verified email is also cached per token (profileEmails), so the second
+// round trip is paid once per credential rather than on every poll tick.
+func fetchVerifiedUsageInfo(token string) (*UsageInfo, error) {
+	return verifiedUsageInfo(token, fetchUsageInfo, profileEmails.emailFor)
+}
+
+// verifiedUsageInfo is fetchVerifiedUsageInfo with both legs injected, so the
+// composition — which call happens first, which failures are fatal — is
+// exercisable without a network on either endpoint.
+func verifiedUsageInfo(token string,
+	usage func(string) (*UsageInfo, error),
+	profile func(string) (string, error)) (*UsageInfo, error) {
+	info, err := usage(token)
+	if err != nil {
+		return nil, err
+	}
+	if email, perr := profile(token); perr == nil {
+		info.VerifiedAccount = email
+	}
+	return info, nil
+}
+
+// profileEmailCacheMax bounds the token→email map. The key space is "credentials
+// this process has spent" — the live one plus one per snapshot — so a handful;
+// the bound exists so a long-running client that has seen many rotated tokens
+// cannot grow it without limit, not because collisions are expected.
+const profileEmailCacheMax = 32
+
+// profileEmails caches which account each access token belongs to.
+//
+// Verification would otherwise double this process's request volume forever: the
+// answer is a property of the token, and the token only changes when Claude Code
+// rotates or replaces it — at which point the key changes with it and the next
+// poll re-probes naturally. Nothing here needs a TTL for that reason; a stale
+// entry is impossible, because a stale token is a different key.
+//
+// Keyed by sha256 of the token rather than the token itself so no credential
+// material sits in a long-lived map (and none can be printed by an accidental
+// dump of it). Only successes are cached: a failed probe must stay retryable,
+// and it costs nothing to leave it out.
+//
+// The probe goes through the profileEmailFetch package var rather than being
+// bound at construction, so the one seam tests swap still covers this path.
+var profileEmails = &profileEmailCache{}
+
+type profileEmailCache struct {
+	mu    sync.Mutex
+	byKey map[[32]byte]string
+}
+
+// reset drops every cached answer. Tests call it when they swap
+// profileEmailFetch, since the cache outlives any single test and would
+// otherwise serve one test's stubbed identity to the next.
+func (c *profileEmailCache) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.byKey = nil
+}
+
+// emailFor returns token's verified account email, probing at most once per
+// distinct token.
+func (c *profileEmailCache) emailFor(token string) (string, error) {
+	key := sha256.Sum256([]byte(token))
+	c.mu.Lock()
+	if email, ok := c.byKey[key]; ok {
+		c.mu.Unlock()
+		return email, nil
+	}
+	c.mu.Unlock()
+
+	// Deliberately not single-flighted: unlike usageCache this guards a cheap,
+	// idempotent read, and two concurrent first probes of the same token cost one
+	// extra request once, where holding the mutex across the round trip would
+	// serialize every account's probe behind whichever one is slowest.
+	email, err := profileEmailFetch(token)
+	if err != nil || email == "" {
+		return "", err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.byKey == nil {
+		c.byKey = make(map[[32]byte]string, profileEmailCacheMax)
+	}
+	if len(c.byKey) >= profileEmailCacheMax {
+		// No recency to preserve — every entry is equally valid until its token
+		// stops being used — so the cheapest eviction is the right one: drop one
+		// arbitrary entry, whose only cost is one extra probe if it comes back.
+		for k := range c.byKey {
+			delete(c.byKey, k)
+			break
+		}
+	}
+	c.byKey[key] = email
+	return email, nil
+}
+
+// usageAccountLabel is the one rule for attributing a fetched reading to an
+// account: the identity the token itself proved wins, and the email read off
+// disk is the fallback for when nothing proved anything.
+//
+// A disagreement is not an error and is never smoothed over. It means the
+// credential store and the identity cache have drifted apart — the signature of
+// a switch clobbered by a still-running session of the outgoing account — and
+// labelling the numbers with the account that actually produced them is what
+// makes that visible in the header instead of silently wrong.
+func usageAccountLabel(fileEmail string, info *UsageInfo) string {
+	if info != nil && info.VerifiedAccount != "" {
+		return info.VerifiedAccount
+	}
+	return fileEmail
+}
+
+// verifiedIdentityMismatch reports that a fetched reading provably belongs to an
+// account other than the one claimed for it. Shared by every caller that fetches
+// a *snapshot* account's numbers — the client poller and the server's /usage
+// handler — so both classify the same file the same way.
+//
+// Both sides must be known for a disagreement to exist: an unverified reading
+// proves nothing, and a claim of "" claims nothing.
+func verifiedIdentityMismatch(claimed string, info *UsageInfo) bool {
+	return claimed != "" && info != nil && info.VerifiedAccount != "" &&
+		!strings.EqualFold(info.VerifiedAccount, claimed)
+}
+
+// profileEmailFetch is fetchProfileEmail behind a package var, the same seam
+// usageInfoFetch is and for the same reason: a test must never spend the
+// developer's own token on a real request. TestMain defaults it to a panic.
+var profileEmailFetch = fetchProfileEmail
+
+// profileFetchTimeout bounds the identity probe, and is deliberately much
+// tighter than fetchUsageInfo's 5s. The probe runs *after* a successful usage
+// fetch, so its budget is whatever is left over: see fetchVerifiedUsageInfo for
+// the 5+2 arithmetic against the server's 10s runBounded and the client's 8s
+// FetchRemoteUsage. Losing the identity upgrade to a slow probe costs a fallback
+// to the file read; losing the numbers to one costs a cached failure.
+const profileFetchTimeout = 2 * time.Second
+
+// fetchProfileEmail asks the OAuth profile endpoint which account a token
+// belongs to. Same request discipline as fetchUsageInfo — same beta header, same
+// 1MB cap, same typed usageHTTPError for a non-200 — so a caller can classify a
+// failure here exactly as it classifies one there, but on the tighter timeout
+// above.
+//
+// An answer with no email is an error rather than an empty string: callers treat
+// "" as "identity unknown, fall back", and a 200 that carries nothing usable is
+// indistinguishable from that, so collapsing them keeps one meaning per value.
+func fetchProfileEmail(token string) (string, error) {
+	req, err := http.NewRequest("GET", profileURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	client := &http.Client{Timeout: profileFetchTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		e := &usageHTTPError{Status: resp.StatusCode}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			e.RetryAt = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		}
+		return "", e
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	var raw struct {
+		Account struct {
+			Email string `json:"email"`
+		} `json:"account"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return "", err
+	}
+	if raw.Account.Email == "" {
+		return "", fmt.Errorf("profile response carries no account email")
+	}
+	return raw.Account.Email, nil
 }
 
 // fetchUsageInfo is the HTTP leg alone: one usage fetch for an arbitrary OAuth
@@ -334,6 +614,21 @@ func parseRetryAfter(v string, now time.Time) time.Time {
 // act on. It doubles as the placeholder the header renders (usageExpiredText),
 // which is why it reads as a state rather than as an error.
 const usageExpiredReason = "auth expired"
+
+// usageWrongIdentityReason is the classification for a credential snapshot whose
+// token the profile endpoint attributes to a different account than the snapshot's
+// own .<name>.account.json claims. Like usageBadSnapshotReason it describes the
+// file rather than the endpoint, and like it the fix is `account save <name>`
+// while logged into that account — but it is its own tag because the file is
+// perfectly readable, and saying "bad snapshot" would send someone looking for
+// corruption that isn't there.
+// A mismatch is deliberately NOT carried as an error and has no entry in
+// classifyUsageErr: it is detected after a fetch that succeeded, by the two call
+// sites that compare the claimed email against the verified one
+// (verifiedIdentityMismatch), and each sets this tag on the entry directly.
+// Wrapping it in an error would mean inventing a failure for a request that
+// worked.
+const usageWrongIdentityReason = "wrong identity"
 
 // usageRateLimitedReason is the classification for a 429. It is a named
 // constant because two schedulers (the client's known-accounts fetcher and the
@@ -553,6 +848,13 @@ type UsageHub = usagePoller[AccountUsage]
 // AccountUsage carried a timestamp reads as non-carryable rather than eternally
 // young — the same one-time drop loadKnownAccountsCache takes for its own
 // pre-timestamp entries.
+//
+// last.Account is the profile-verified email when the profile endpoint answered,
+// so the identity test now compares "whose numbers these actually are" against
+// "who this host believes is logged in". A standing disagreement — the clobber
+// signature — therefore stops the carry rather than re-serving numbers under an
+// identity this host cannot confirm, which is the same conclusion carryable
+// reaches for a snapshot whose name has been reused.
 func liveCarryable(last *AccountUsage, live string) bool {
 	return last != nil && last.Info != nil && !last.FetchedAt.IsZero() &&
 		time.Since(last.FetchedAt) <= usageCacheMaxAge &&
@@ -667,7 +969,15 @@ func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) fu
 			return nil, err
 		}
 		last = u
-		backoff, armedFor = usageBackoff{}, u.Account
+		// armedFor tracks the *file's* live email, never u.Account: since
+		// fetchUsage began attributing numbers to the profile-verified account,
+		// the two can legitimately disagree (a clobbered credential is exactly
+		// that state), and seeding armedFor from the verified side would make
+		// every later pass read a standing disagreement as a fresh account
+		// switch. Nothing observable turns on the value here anyway — a cleared
+		// backoff is always due, so armedFor is not read again until a 429 arms
+		// it, and that path already records live.
+		backoff, armedFor = usageBackoff{}, live
 		return u, nil
 	}
 }

@@ -37,6 +37,25 @@ type KnownAccountUsage struct {
 	// Reason is set whenever the latest attempt failed: alongside Expired, and
 	// alongside either carried-forward or absent numbers. Empty on a clean fetch.
 	Reason string `json:"reason,omitempty"`
+	// Verified records that Info's identity was confirmed by the profile probe —
+	// this token really does belong to Account — rather than merely assumed from
+	// the snapshot's own .<name>.account.json.
+	//
+	// It exists for one narrow but load-bearing rule: only a *verified* reading
+	// may be carried forward past a `wrong identity` failure. Without it, a pass
+	// whose probe was unavailable stores a stranger's numbers under the claimed
+	// email (nothing contradicted the claim, so the entry looks ordinary), and
+	// the next pass — which does reach the probe and does detect the
+	// misattribution — carries exactly those numbers forward through carryable,
+	// whose identity test only compares the *claimed* email on both sides and so
+	// cannot tell them apart. That is the one thing the wrong-identity
+	// classification exists to prevent, reached through the carry instead of
+	// through the fresh reading.
+	//
+	// Serialized so a disk-cache warm start keeps the distinction; a cache
+	// written before this field existed decodes to false, which is the safe
+	// direction (it declines a carry it might have allowed).
+	Verified bool `json:"verified,omitempty"`
 	// FetchedAt is when Info was actually fetched, not when this struct was
 	// built — a carried-forward entry keeps the original timestamp, which is
 	// what bounds how long staleness may accumulate (usageCacheMaxAge).
@@ -202,11 +221,18 @@ func fetchKnownAccountUsage(name, liveEmail string, prev *KnownAccountUsage) (*K
 	return knownAccountUsage(name, liveEmail, prev, usageInfoFetch)
 }
 
-// usageInfoFetch is fetchUsageInfo behind a package var so tests can drive the
-// poller's own fetch — the one place carrying numbers across polls is decided —
-// without a network or a real token. Never reassigned outside tests; the same
-// seam keychainRead/keychainWrite use in account.go.
-var usageInfoFetch = fetchUsageInfo
+// usageInfoFetch is the usage round trip behind a package var so tests can drive
+// every fetch path — the poller's, the live account's, and the server's — without
+// a network or a real token. Never reassigned outside tests; the same seam
+// keychainRead/keychainWrite use in account.go.
+//
+// Its production value is fetchVerifiedUsageInfo rather than the bare
+// fetchUsageInfo, so identity verification rides along with every fetch through
+// one seam instead of three. A test fake therefore controls both halves at once:
+// leaving UsageInfo.VerifiedAccount zero reproduces exactly the pre-verification
+// behaviour (fall back to the file read), and setting it drives the verified
+// path.
+var usageInfoFetch = fetchVerifiedUsageInfo
 
 // usageBadSnapshotReason is the classification for a credential snapshot that
 // could not be read or parsed at all. It is deliberately not one of
@@ -231,11 +257,15 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 	if emailMatchesLive(email, liveEmail) {
 		return nil, true
 	}
-	failed := func(expired bool, reason string) (*KnownAccountUsage, bool) {
+	// needVerified is set only by the wrong-identity path: everything else keeps
+	// the carry rules it always had, since a 429 or a network blip says nothing
+	// about whose numbers prev holds — carryable's claimed-email test is the
+	// right and sufficient one there. See KnownAccountUsage.Verified.
+	failed := func(expired bool, reason string, needVerified bool) (*KnownAccountUsage, bool) {
 		if expired {
 			return &KnownAccountUsage{Name: name, Account: email, Expired: true, Reason: reason}, false
 		}
-		if carryable(prev, email) {
+		if carryable(prev, email) && (!needVerified || prev.Verified) {
 			return &KnownAccountUsage{
 				Name:      name,
 				Account:   email,
@@ -243,6 +273,12 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 				Stale:     true,
 				Reason:    reason,
 				FetchedAt: prev.FetchedAt,
+				// Carried forward with its numbers: the flag describes how
+				// Info's identity was established, and re-serving the same
+				// Info does not weaken that. Dropping it would make a single
+				// throttled pass between a good fetch and a mismatch enough to
+				// re-open the hole Verified closes.
+				Verified: prev.Verified,
 			}, false
 		}
 		return &KnownAccountUsage{Name: name, Account: email, Reason: reason}, false
@@ -256,12 +292,12 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 		// and unlike the failures that heal on their own this one stays until
 		// the snapshot is rewritten (`account save <name>` while logged into
 		// it, the same recovery switchAccount's identity precondition names).
-		return failed(false, usageBadSnapshotReason)
+		return failed(false, usageBadSnapshotReason, false)
 	}
 	info, err := fetch(tok)
 	if err != nil {
 		expired, reason := classifyUsageErr(err)
-		res, skip := failed(expired, reason)
+		res, skip := failed(expired, reason, false)
 		// Only a throttle carries a retry hint, and only the throttle path has a
 		// scheduler waiting for one (newKnownAccountsFetcher's backoff map).
 		if reason == usageRateLimitedReason {
@@ -269,7 +305,35 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 		}
 		return res, skip
 	}
-	return &KnownAccountUsage{Name: name, Account: email, Info: info, FetchedAt: time.Now()}, false
+	// The token answered, but for a different account than the snapshot's
+	// identity file claims — the exact misattribution `account save` under the
+	// wrong name produces, and the after-the-fact signature of a credential
+	// clobbered by a still-running session of another account. Showing the
+	// FRESH numbers here would put one account's budget on screen under
+	// another's email, which is worse than showing none.
+	//
+	// It goes through failed() like every other non-expired outcome, but with the
+	// one extra condition carryable cannot express: prev may only be re-served
+	// here if prev's OWN identity was verified. carryable compares the claimed
+	// email on both sides, and on this path the claim is exactly what is in
+	// doubt — an earlier pass whose probe was unavailable would have stored the
+	// stranger's numbers under this same claimed email, and carrying those
+	// forward would smuggle in precisely what dropping the fresh reading
+	// prevents. See KnownAccountUsage.Verified.
+	//
+	// An unreadable identity file (email "") claims nothing, so there is nothing
+	// for the verified answer to contradict; that case keeps the behaviour it
+	// always had — an entry with no email, which the header drops anyway.
+	if verifiedIdentityMismatch(email, info) {
+		return failed(false, usageWrongIdentityReason, true)
+	}
+	return &KnownAccountUsage{
+		Name:      name,
+		Account:   email,
+		Info:      info,
+		Verified:  info.VerifiedAccount != "",
+		FetchedAt: time.Now(),
+	}, false
 }
 
 // fresh reports whether a result's own numbers are young enough to still

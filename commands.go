@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // Scriptable subcommands. Used by the HTTP server (shell-out) and available
@@ -528,10 +530,11 @@ func cmdListSessions(args []string) int {
 // no --server on purpose: it captures the credential that is live on *this*
 // machine, which is only meaningful where that credential lives.
 const accountUsageMsg = `usage: claude-sessions account switch NAME [--server SERVER]
-       claude-sessions account save NAME
-       claude-sessions account list [--server SERVER]`
+       claude-sessions account save NAME [--force]
+       claude-sessions account list [--server SERVER]
+       claude-sessions account remove NAME [-y|--force]`
 
-// cmdAccount dispatches the switch/save/list subcommands of `account`.
+// cmdAccount dispatches the switch/save/list/remove subcommands of `account`.
 func cmdAccount(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, accountUsageMsg)
@@ -544,33 +547,59 @@ func cmdAccount(args []string) int {
 		return cmdAccountSave(args[1:])
 	case "list":
 		return cmdAccountList(args[1:])
+	case "remove":
+		return cmdAccountRemove(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "account: unknown subcommand %q\n%s\n", args[0], accountUsageMsg)
 		return 2
 	}
 }
 
+// accountArgs is what the `account` subcommands parse out of their arguments.
+//
+// force and assumeYes are tracked separately rather than collapsed into one
+// bool, because the two subcommands that take an override mean different things
+// by it. `remove` asks a yes/no question, so `-y` (the repo-wide "don't ask me"
+// spelling, as in `kill -y`) answers it and `--force` is accepted as a synonym.
+// `save` asks nothing — it refuses, and `--force` means "reassign this snapshot
+// to another account", a deliberate act with no prompt to skip. Letting `-y`
+// stand for that would make a reflexive flag reassign a credential.
+type accountArgs struct {
+	name      string
+	server    string
+	force     bool // --force
+	assumeYes bool // -y
+}
+
 // parseAccountArgs reads an optional positional NAME plus an optional --server
-// value. An unknown flag or a second positional is an error rather than a silent
-// no-op, matching parseKillFlags' rule that a typo never reads as "do it anyway".
-func parseAccountArgs(args []string) (name, server string, err error) {
+// value and the two override flags. An unknown flag or a second positional is an
+// error rather than a silent no-op, matching parseKillFlags' rule that a typo
+// never reads as "do it anyway"; each subcommand then rejects the flags it has
+// no mode for, which is what keeps `account list --force` from being silently
+// ignored.
+func parseAccountArgs(args []string) (accountArgs, error) {
+	var out accountArgs
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
 		case a == "--server":
 			if i+1 >= len(args) {
-				return "", "", fmt.Errorf("--server needs a value")
+				return accountArgs{}, fmt.Errorf("--server needs a value")
 			}
-			server = args[i+1]
+			out.server = args[i+1]
 			i++
+		case a == "--force":
+			out.force = true
+		case a == "-y":
+			out.assumeYes = true
 		case strings.HasPrefix(a, "--"):
-			return "", "", fmt.Errorf("unknown flag: %s", a)
-		case name == "":
-			name = a
+			return accountArgs{}, fmt.Errorf("unknown flag: %s", a)
+		case out.name == "":
+			out.name = a
 		default:
-			return "", "", fmt.Errorf("unexpected argument: %s", a)
+			return accountArgs{}, fmt.Errorf("unexpected argument: %s", a)
 		}
 	}
-	return name, server, nil
+	return out, nil
 }
 
 // accountSwitchedLine is the confirmation printed after a switch. switchAccount
@@ -582,25 +611,41 @@ func accountSwitchedLine(name, email string) string {
 }
 
 func cmdAccountSwitch(args []string) int {
-	name, server, err := parseAccountArgs(args)
+	a, err := parseAccountArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "account switch: %v\n%s\n", err, accountUsageMsg)
 		return 2
 	}
-	if name == "" {
+	if a.name == "" {
 		fmt.Fprintln(os.Stderr, accountUsageMsg)
 		return 2
 	}
-	if server != "" {
-		return cmdAccountSwitchRemote(name, server)
+	if a.force || a.assumeYes {
+		fmt.Fprintf(os.Stderr, "account switch: --force/-y are not supported (a switch never prompts)\n")
+		return 2
 	}
-	email, err := switchAccount(name)
+	name := a.name
+	if a.server != "" {
+		return cmdAccountSwitchRemote(name, a.server)
+	}
+	email, warnings, err := switchAccount(name)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "account switch:", err)
 		return 1
 	}
+	printAccountWarnings(warnings)
 	fmt.Println(accountSwitchedLine(name, email))
 	return 0
+}
+
+// printAccountWarnings writes a switch's advisory warnings to stderr, so the
+// success line on stdout stays the one thing a shell pipeline reads. They are
+// printed BEFORE that line: the warning is about what may happen next, and a
+// reader who stops at "switched to …" has not missed anything they needed.
+func printAccountWarnings(warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "account switch: warning:", w)
+	}
 }
 
 // cmdAccountSwitchRemote switches a configured remote's active account over
@@ -625,25 +670,36 @@ func cmdAccountSwitchRemote(name, server string) int {
 		fmt.Fprintf(os.Stderr, "account switch: %s: %s\n", server, result.Message)
 		return 1
 	}
+	// The remote host's own warnings, about processes running there — same
+	// hazard, reported by the machine that can see it.
+	printAccountWarnings(result.Warnings)
 	fmt.Println(accountSwitchedLine(name, result.Account))
 	return 0
 }
 
 func cmdAccountSave(args []string) int {
-	name, server, err := parseAccountArgs(args)
+	a, err := parseAccountArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "account save: %v\n%s\n", err, accountUsageMsg)
 		return 2
 	}
+	name := a.name
 	if name == "" {
 		fmt.Fprintln(os.Stderr, accountUsageMsg)
 		return 2
 	}
-	if server != "" {
+	if a.server != "" {
 		fmt.Fprintf(os.Stderr, "account save: --server is not supported (a snapshot captures the credential live on this machine)\n")
 		return 2
 	}
-	if err := saveAccountSnapshot(name); err != nil {
+	if a.assumeYes {
+		// Save never prompts, so there is no "yes" to assume. Its override
+		// reassigns a snapshot to a different account, which is a deliberate act
+		// and has to be spelled out.
+		fmt.Fprintf(os.Stderr, "account save: -y is not supported; use --force to reassign a snapshot to another account\n")
+		return 2
+	}
+	if err := saveAccountSnapshot(name, a.force); err != nil {
 		fmt.Fprintln(os.Stderr, "account save:", err)
 		return 1
 	}
@@ -657,16 +713,20 @@ func cmdAccountSave(args []string) int {
 }
 
 func cmdAccountList(args []string) int {
-	name, server, err := parseAccountArgs(args)
+	a, err := parseAccountArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "account list: %v\n%s\n", err, accountUsageMsg)
 		return 2
 	}
-	if name != "" {
-		fmt.Fprintf(os.Stderr, "account list: unexpected argument: %s\n%s\n", name, accountUsageMsg)
+	if a.name != "" {
+		fmt.Fprintf(os.Stderr, "account list: unexpected argument: %s\n%s\n", a.name, accountUsageMsg)
 		return 2
 	}
-	if server != "" {
+	if a.force || a.assumeYes {
+		fmt.Fprintf(os.Stderr, "account list: --force/-y are not supported (listing changes nothing)\n")
+		return 2
+	}
+	if server := a.server; server != "" {
 		srv, ok := LookupServer(server)
 		if !ok {
 			cfgs, _ := LoadServerConfigs()
@@ -688,6 +748,68 @@ func cmdAccountList(args []string) int {
 		listings = append(listings, remoteAccountListing(r))
 	}
 	fmt.Print(renderAccountTable(listings))
+	return 0
+}
+
+// cmdAccountRemove deletes one parked account snapshot from this machine.
+//
+// Local-only, like `save`, and for the same reason: it acts on files that exist
+// only on the machine holding them. There is deliberately no HTTP endpoint and
+// no TUI binding — removing a switch target is rare, irreversible without a
+// relogin, and has no business being one keystroke away from the picker.
+func cmdAccountRemove(args []string) int {
+	a, err := parseAccountArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "account remove: %v\n%s\n", err, accountUsageMsg)
+		return 2
+	}
+	name := a.name
+	// Remove asks a yes/no question, so -y answers it and --force is accepted
+	// as a synonym; see accountArgs for why save does not take both.
+	force := a.force || a.assumeYes
+	if name == "" {
+		fmt.Fprintln(os.Stderr, accountUsageMsg)
+		return 2
+	}
+	if a.server != "" {
+		fmt.Fprintf(os.Stderr, "account remove: --server is not supported (a snapshot only exists on the machine holding it)\n")
+		return 2
+	}
+	plan, err := planAccountRemoval(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "account remove:", err)
+		return 1
+	}
+	if plan.Live && !force {
+		// Removing the live account's snapshot is allowed — it deletes a parked
+		// copy, not the login — but it is the one removal that quietly costs
+		// something later, so it is never done unasked. A pipeline has to say -y;
+		// a human is asked.
+		fmt.Println("this snapshot stands for the account logged in right now.")
+		fmt.Println("removing it does NOT log you out — it deletes the parked copy, so nothing")
+		fmt.Println("will be able to switch back to this account until 'account save' recaptures it.")
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintf(os.Stderr, "account remove: refusing without -y (not a terminal, so nothing can confirm)\n")
+			return 1
+		}
+		if !confirm(fmt.Sprintf("remove snapshot %q anyway? [y/N] ", name)) {
+			fmt.Println("aborted")
+			return 0
+		}
+	}
+	removed, wasLive, err := removeAccountSnapshot(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "account remove:", err)
+		return 1
+	}
+	fmt.Printf("removed snapshot %s (%s)\n", name, strings.Join(removed, ", "))
+	// Re-derived under the lock, so this describes the removal that happened
+	// rather than what the plan predicted before the prompt. A -y run reaches
+	// here without ever having seen the warning above, and a switch during the
+	// prompt can make a removal live that was not when it was planned.
+	if wasLive {
+		fmt.Printf("note: %s was the account logged in here; nothing can switch back to it until 'account save %s' recaptures it\n", name, name)
+	}
 	return 0
 }
 

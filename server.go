@@ -77,6 +77,13 @@ type accountSwitchResult struct {
 	Account string `json:"account,omitempty"` // login email now live on this host
 	Code    string `json:"code,omitempty"`    // codeUnknownAccount / codeSwitchFailed
 	Message string `json:"message,omitempty"`
+	// Warnings are advisory notes about a switch that SUCCEEDED — currently the
+	// one hazard this tool cannot remove: Claude Code sessions still running
+	// under the outgoing account, which can overwrite or wipe the credential
+	// afterwards (see runningSessionsWarning). They ride the success response
+	// rather than an error because refusing would block the very case they warn
+	// about. omitempty keeps them invisible to clients that don't read them.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // The two values accountSwitchResult.Code ever carries. Unlike the kill/migrate
@@ -670,7 +677,7 @@ type server struct {
 	// nil falls back to switchAccount. Injectable for the same reason as the
 	// seams above, and more urgently: without it a handler test would perform a
 	// real account switch against the machine running `go test`.
-	switchAcct func(name string) (string, error)
+	switchAcct func(name string) (string, []string, error)
 	// attest re-reads one PID's own session file; nil falls back to
 	// readSessionByPID. Used for the last-moment identity check before a
 	// destructive act, and separate from collect because it must be the cheapest
@@ -872,7 +879,7 @@ func spawnSuffix(requestID string) string {
 	return hex.EncodeToString(sum[:])[:6]
 }
 
-func (s *server) switchAccountTo(name string) (string, error) {
+func (s *server) switchAccountTo(name string) (string, []string, error) {
 	if s.switchAcct != nil {
 		return s.switchAcct(name)
 	}
@@ -1091,7 +1098,10 @@ func fetchAccountUsage(snapshot string) (*UsageInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return fetchUsageInfo(tok)
+	// usageInfoFetch, not the bare fetchUsageInfo: the seam's production value
+	// verifies the token's own account alongside the numbers, so this host
+	// classifies a misattributed snapshot exactly as the client-side poller does.
+	return usageInfoFetch(tok)
 }
 
 func (s *server) accountUsage(snapshot string) (*UsageInfo, error) {
@@ -1149,6 +1159,17 @@ func (s *server) usage(w http.ResponseWriter, r *http.Request) {
 			// Same rule as allKnownAccounts: every snapshot standing for the live
 			// account is left out of the list (it is reported through Usage
 			// instead), and the first one names the active snapshot.
+			//
+			// Note this resolves against the FILE's email while the header label
+			// below uses the profile-verified one, and the divergence is
+			// deliberate. activeSnapshotName answers "which snapshot does this
+			// host believe it is running", which is a question about
+			// ~/.claude.json and the snapshot files — it has to be resolvable
+			// with no network and before any fetch. The label answers "whose
+			// budget produced these numbers". When a still-running session of the
+			// outgoing account has clobbered the credential the two disagree, and
+			// that disagreement IS the signal: silently deriving both from the
+			// verified email would make the clobber invisible again.
 			if activeName == "" {
 				activeName = name
 			}
@@ -1193,7 +1214,17 @@ func (s *server) usage(w http.ResponseWriter, r *http.Request) {
 				entry.Expired, entry.Reason = classifyUsageErr(err)
 				return
 			}
+			// Same rule knownAccountUsage applies client-side: numbers the
+			// profile endpoint attributes to a different account than this
+			// snapshot's identity file claims are reported as a classification,
+			// never as that account's bars. The server keeps no memory across
+			// requests, so there is nothing to carry forward here either way.
+			if verifiedIdentityMismatch(entry.Account, info) {
+				entry.Reason = usageWrongIdentityReason
+				return
+			}
 			entry.Info = info
+			entry.Verified = info.VerifiedAccount != ""
 			entry.FetchedAt = time.Now()
 		}()
 	}
@@ -1202,9 +1233,12 @@ func (s *server) usage(w http.ResponseWriter, r *http.Request) {
 	resp := usageResponse{KnownAccounts: known, ActiveSnapshotName: activeName}
 	// The live account's email is free, so it is reported even when its numbers
 	// were ignored or failed — it is what labels this host's heading in the
-	// client's table.
+	// client's table. When the fetch did land, the account the token itself
+	// belongs to wins over the one ~/.claude.json names: it is the identity of
+	// the numbers being reported, and a disagreement is precisely the clobber
+	// worth surfacing rather than papering over.
 	if liveEmail != "" || liveInfo != nil {
-		resp.Usage = &AccountUsage{Account: liveEmail, Info: liveInfo}
+		resp.Usage = &AccountUsage{Account: usageAccountLabel(liveEmail, liveInfo), Info: liveInfo}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1652,7 +1686,7 @@ func (s *server) accountSwitch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	email, err := s.switchAccountTo(req.Name)
+	email, warnings, err := s.switchAccountTo(req.Name)
 	if err != nil {
 		if errors.Is(err, errUnknownAccount) {
 			writeJSON(w, http.StatusBadRequest, accountSwitchResult{
@@ -1673,7 +1707,7 @@ func (s *server) accountSwitch(w http.ResponseWriter, r *http.Request) {
 	// pre-switch answer. Only the percentages are cached, and they are keyed by
 	// account email, so the switch cannot make any of them describe the wrong
 	// account either.
-	writeJSON(w, http.StatusOK, accountSwitchResult{OK: true, Account: email})
+	writeJSON(w, http.StatusOK, accountSwitchResult{OK: true, Account: email, Warnings: warnings})
 }
 
 func (s *server) migrate(w http.ResponseWriter, r *http.Request) {

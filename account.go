@@ -9,7 +9,10 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -322,7 +325,8 @@ func withAccountLock(fn func() error) error {
 }
 
 // switchAccount makes the named snapshot this host's active Claude Code account
-// and returns the email that is live afterwards. The whole body runs under
+// and returns the email that is live afterwards, plus any advisory warnings the
+// caller should show beside the success. The whole body runs under
 // withAccountLock.
 //
 // The step order is the contract, not an implementation detail: nothing is read
@@ -333,37 +337,43 @@ func withAccountLock(fn func() error) error {
 // name when that name is known, both strictly before it is overwritten. A
 // failure anywhere after that leaves at least one copy of the outgoing
 // credential on disk, so no switch can ever strand an account with no way back.
-func switchAccount(name string) (string, error) {
+//
+// Warnings are never a refusal. They describe a hazard this tool cannot remove
+// (see runningSessionsWarning), and the one command most likely to run into it
+// is one typed inside a Claude Code session — so refusing, or prompting, would
+// block the very case it is warning about.
+func switchAccount(name string) (string, []string, error) {
 	var email string
+	var warnings []string
 	err := withAccountLock(func() error {
 		var err error
-		email, err = switchAccountLocked(name)
+		email, warnings, err = switchAccountLocked(name)
 		return err
 	})
-	return email, err
+	return email, warnings, err
 }
 
 // switchAccountLocked is switchAccount's body, already holding the lock. Split
 // out so the lock scope is obvious and so tests can exercise the steps without
 // re-entering the lock.
-func switchAccountLocked(name string) (string, error) {
+func switchAccountLocked(name string) (string, []string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// 1. Validate. Nothing below this point runs for an unknown name, and the
 	// name is always one the directory listing produced — never a client string
 	// interpolated into a path.
 	names, err := snapshotAccountNames()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !containsAccountName(names, name) {
 		known := "none"
 		if len(names) > 0 {
 			known = strings.Join(names, ", ")
 		}
-		return "", fmt.Errorf("%w for %q (known: %s)", errUnknownAccount, name, known)
+		return "", nil, fmt.Errorf("%w for %q (known: %s)", errUnknownAccount, name, known)
 	}
 
 	// 1.5. Require an identity snapshot before touching anything else. A
@@ -379,13 +389,13 @@ func switchAccountLocked(name string) (string, error) {
 	identity, err := os.ReadFile(snapshotAccountPath(home, name))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("snapshot %q has no identity snapshot — run 'claude-sessions account save %s' while logged into it first", name, name)
+			return "", nil, fmt.Errorf("snapshot %q has no identity snapshot — run 'claude-sessions account save %s' while logged into it first", name, name)
 		}
-		return "", fmt.Errorf("read identity snapshot %q: %w", name, err)
+		return "", nil, fmt.Errorf("read identity snapshot %q: %w", name, err)
 	}
 	var snapshot map[string]json.RawMessage
 	if err := json.Unmarshal(identity, &snapshot); err != nil {
-		return "", fmt.Errorf("parse identity snapshot %q: %w", name, err)
+		return "", nil, fmt.Errorf("parse identity snapshot %q: %w", name, err)
 	}
 	// A file existing and parsing isn't enough on its own: identitySlice
 	// writes an explicit JSON null for any key ~/.claude.json didn't have at
@@ -407,8 +417,9 @@ func switchAccountLocked(name string) (string, error) {
 	// actually be patched — not a byte-identical-assumed second read — also
 	// closes a TOCTOU a concurrent (non-flock-holding, e.g. hand-editing the
 	// file) writer could otherwise exploit between two separate reads.
-	if strings.TrimSpace(identitySnapshotEmail(snapshot)) == "" {
-		return "", fmt.Errorf("snapshot %q's identity snapshot has no email — run 'claude-sessions account save %s' while logged into it first", name, name)
+	snapEmail := strings.TrimSpace(identitySnapshotEmail(snapshot))
+	if snapEmail == "" {
+		return "", nil, fmt.Errorf("snapshot %q's identity snapshot has no email — run 'claude-sessions account save %s' while logged into it first", name, name)
 	}
 
 	// 1.6. Refuse if a previous switch was interrupted mid-flight (killed
@@ -424,7 +435,7 @@ func switchAccountLocked(name string) (string, error) {
 	// confirms which account is actually live converts that silent corruption
 	// into a loud, safe stop.
 	if pending := readPendingSwitchMarker(home); pending != "" {
-		return "", fmt.Errorf("a previous switch to %q did not finish (process interrupted?) — "+
+		return "", nil, fmt.Errorf("a previous switch to %q did not finish (process interrupted?) — "+
 			"run '/login' in Claude Code to confirm the live account and refresh its identity, then "+
 			"'claude-sessions account save <that account's name>' to resync its snapshot and clear this warning "+
 			"(save always clears it, since capturing what's live is exactly the confirmation this is waiting for); "+
@@ -435,13 +446,38 @@ func switchAccountLocked(name string) (string, error) {
 	// snapshot would replace a possibly-refreshed live token with a stale one.
 	current := currentAccountName()
 	if current == name {
-		return loadAccountEmail(), nil
+		return loadAccountEmail(), nil, nil
 	}
+
+	// 2.4. Validate the credential this switch would install — still before
+	// anything at all is written, so a refusal here leaves the host exactly as
+	// it was. The identity precondition at 1.5 proves the snapshot knows *who*
+	// it is; this proves it is still a usable login. Installing a snapshot whose
+	// refresh token has expired logs the host out: Claude Code's own refresh is
+	// answered with invalid_grant and it zeroes the stored credential, leaving
+	// the user staring at a switch that "worked".
+	//
+	// Deliberately after the no-op return above, unlike the identity checks. A
+	// switch to the account already live installs nothing, so there is nothing
+	// to validate — and validating anyway would let a stale parked snapshot turn
+	// a guaranteed no-op into a refusal, and (worse) spend a network probe on it.
+	//
+	// The bytes are carried to step 5 rather than re-read there, so what was
+	// validated is exactly what gets installed.
+	data, err := validateSnapshotCredential(home, name, snapEmail)
+	if err != nil {
+		return "", nil, err
+	}
+
+	// 2.5. Warn — never refuse — about Claude Code sessions still running under
+	// the outgoing account. Deliberately after the no-op return above too: a
+	// switch that touches nothing has no hazard to warn about.
+	warnings := switchSessionWarnings(name)
 
 	// 3 + 4. Unconditional rescue copy, then the named sync-back when the
 	// outgoing account is identifiable. Both complete before step 5.
 	if err := backupOutgoing(home, current); err != nil {
-		return "", err
+		return "", warnings, err
 	}
 
 	// 4.5. Arm the pending-switch marker before the two operations that can't
@@ -452,20 +488,18 @@ func switchAccountLocked(name string) (string, error) {
 	// for whichever switch comes next.
 	writePendingSwitchMarker(home, name)
 
-	// 5. The switch itself.
-	data, err := os.ReadFile(snapshotCredentialPath(home, name))
-	if err != nil {
-		return "", fmt.Errorf("read snapshot %q: %w", name, err)
-	}
+	// 5. The switch itself. The bytes are the ones step 2.4 validated, not a
+	// second read of the same path — re-reading would leave a window in which
+	// what was checked and what gets installed are different files.
 	if err := writeActiveCredential(data); err != nil {
-		return "", err
+		return "", warnings, err
 	}
 
 	// 6. Patch the identity cache so no /login is needed. Already read and
 	// parsed at step 1.5 — re-reading here would just be a second trip to
 	// disk for data validation already confirmed usable.
 	if err := patchIdentityCache(snapshot); err != nil {
-		return "", err
+		return "", warnings, err
 	}
 
 	// 6.5. Disarm: both halves of the non-atomic pair completed, so there is
@@ -473,7 +507,131 @@ func switchAccountLocked(name string) (string, error) {
 	clearPendingSwitchMarker(home)
 
 	// 7. Report what is actually on disk now, not what was assumed.
-	return loadAccountEmail(), nil
+	return loadAccountEmail(), warnings, nil
+}
+
+// collectSessionsForSwitch is the session collector behind a package var so a
+// switch test can supply a list without a process tree or a live tmux, the same
+// seam discipline keychainRead/usageInfoFetch use. Never reassigned outside
+// tests.
+//
+// CollectLocalLite, not CollectLocal: this runs inside withAccountLock, where
+// every millisecond blocks any other switch or save on the host, and all the
+// warning needs is "how many live sessions, at which pids". CollectLocal's
+// per-session transcript scans (cost, model, context tokens) and tmux pane walk
+// would all be collected and thrown away.
+var collectSessionsForSwitch = CollectLocalLite
+
+// switchSessionWarnings is step 2.5: the advisory list a switch hands back.
+//
+// A Claude Code process holds its OAuth credential in memory and writes a
+// refreshed one back to the live store (Keychain item / ~/.claude/.credentials.json)
+// whenever its access token ages out. Nothing about a switch tells those
+// processes anything, so a session belonging to the OUTGOING account can
+// overwrite the credential this switch just installed minutes later — and if its
+// own refresh token has since been superseded, the server answers invalid_grant
+// and Claude Code zeroes the stored credential outright, logging the host out of
+// both accounts at once.
+//
+// This tool cannot prevent that: it does not own those processes, and there is
+// no supported way to make one re-read its credential. So the honest thing is to
+// say so and continue. A collection failure yields no warning rather than an
+// error — being unable to enumerate sessions is not a reason to fail a switch.
+func switchSessionWarnings(name string) []string {
+	sessions, err := collectSessionsForSwitch()
+	if err != nil || len(sessions) == 0 {
+		return nil
+	}
+	return []string{runningSessionsWarning(name, sessions)}
+}
+
+// switchWarningPIDLimit caps how many pids a warning names before summarizing
+// the rest. The line is printed on a terminal and posted over HTTP; a host with
+// twenty sessions should still produce a readable sentence.
+const switchWarningPIDLimit = 8
+
+// runningSessionsWarning phrases switchSessionWarnings' finding. Pids are sorted
+// so two consecutive runs against the same set produce the same line.
+func runningSessionsWarning(name string, sessions []Session) string {
+	pids := make([]int, 0, len(sessions))
+	for _, s := range sessions {
+		pids = append(pids, s.PID)
+	}
+	sort.Ints(pids)
+	shown := pids
+	extra := 0
+	if len(shown) > switchWarningPIDLimit {
+		extra = len(shown) - switchWarningPIDLimit
+		shown = shown[:switchWarningPIDLimit]
+	}
+	parts := make([]string, len(shown))
+	for i, p := range shown {
+		parts[i] = strconv.Itoa(p)
+	}
+	list := strings.Join(parts, ", ")
+	if extra > 0 {
+		list = fmt.Sprintf("%s and %d more", list, extra)
+	}
+	noun, verb := "session is", "It holds"
+	if len(pids) != 1 {
+		noun, verb = "sessions are", "They hold"
+	}
+	return fmt.Sprintf("%d Claude Code %s still running (pid %s). %s the outgoing account's "+
+		"token and can overwrite — or, if their own refresh is refused, wipe — the credential "+
+		"this switch just installed. Close them and re-run 'claude-sessions account switch %s' "+
+		"if the switch does not stick.", len(pids), noun, list, verb, name)
+}
+
+// validateSnapshotCredential checks that the named snapshot is still a usable
+// login before a switch installs it, and returns the bytes it validated.
+//
+// Offline-first, in three steps of decreasing certainty. A missing refresh token
+// and an expired one are refusals decided entirely from the file: without a live
+// refresh token the installed credential dies the moment its access token ages
+// out, and Claude Code's response to a refused refresh is to zero the stored
+// credential — a switch that logs the host out of everything. An access token
+// that has merely expired is fine and says nothing: refreshing it is exactly
+// what the refresh token is for.
+//
+// The third step is a network probe and therefore advisory. When the snapshot's
+// access token is still valid, the profile endpoint can say whose it really is,
+// which catches a snapshot saved under the wrong name — the same misattribution
+// the usage poller reports after the fact as `wrong identity`, caught here
+// before it becomes this host's live credential. Any failure to ask (offline,
+// throttled, endpoint down) is not a refusal: validation must work on a laptop
+// with no network, and the two offline checks above are the ones that matter.
+func validateSnapshotCredential(home, name, snapEmail string) ([]byte, error) {
+	path := snapshotCredentialPath(home, name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot %q: %w", name, err)
+	}
+	creds, err := parseOAuthCredentialBlob(data)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot %q: %w", name, err)
+	}
+	if strings.TrimSpace(creds.RefreshToken) == "" {
+		return nil, fmt.Errorf("snapshot %q has no refresh token, so it would stop working as soon as "+
+			"its access token ages out — run 'claude-sessions account save %s' while logged into that account", name, name)
+	}
+	if exp := msExpiry(creds.RefreshTokenExpiresAt); !exp.IsZero() && exp.Before(time.Now()) {
+		return nil, fmt.Errorf("snapshot %q's refresh token expired on %s, so installing it would log this host out — "+
+			"run 'claude-sessions account save %s' while logged into that account", name, exp.UTC().Format(time.RFC3339), name)
+	}
+	if access := msExpiry(creds.ExpiresAt); access.IsZero() || !access.After(time.Now()) {
+		// Nothing left to ask the endpoint with. The two checks above stand.
+		return data, nil
+	}
+	verified, err := profileEmailFetch(creds.AccessToken)
+	if err != nil || verified == "" {
+		return data, nil
+	}
+	if !strings.EqualFold(verified, snapEmail) {
+		return nil, fmt.Errorf("snapshot %q holds a credential for %s but its identity file says %s — "+
+			"switching would leave this host logged in as one account and labelled as the other; "+
+			"run 'claude-sessions account save %s' while logged into the right account", name, verified, snapEmail, name)
+	}
+	return data, nil
 }
 
 // pendingSwitchMarkerFile is armed for the duration of the one gap this file
@@ -687,7 +845,17 @@ func patchIdentityCache(snapshot map[string]json.RawMessage) error {
 //
 // Local-only by design (there is no --server flag): it captures *this* machine's
 // live credential, which is only meaningful on the machine holding it.
-func saveAccountSnapshot(name string) error {
+//
+// force overrides the one refusal below. Saving over a snapshot that already
+// stands for a DIFFERENT account writes this account's credential under that
+// account's name, which is the misattribution every other guard in this file
+// exists to prevent: the next switch to that name installs the wrong login,
+// currentAccountName then resolves the wrong outgoing snapshot, and the usage
+// poller reports `wrong identity` for an account nobody deliberately broke.
+// Overwriting a snapshot of the SAME account is the normal refresh-after-relogin
+// case and is never refused; a name with no snapshot yet is a first save and is
+// never refused either.
+func saveAccountSnapshot(name string, force bool) error {
 	if !accountNameOK(name) {
 		return fmt.Errorf("invalid account name %q (allowed: letters, digits, '-', '_')", name)
 	}
@@ -695,6 +863,19 @@ func saveAccountSnapshot(name string) error {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return err
+		}
+		if !force {
+			// Both sides must be readable for a disagreement to mean anything:
+			// an absent snapshot email is a first save, and an unreadable live
+			// one is no evidence of a mismatch — refusing on either would block
+			// the exact recovery this command is documented as.
+			if existing := snapshotAccountEmail(name); existing != "" {
+				if live := loadAccountEmail(); live != "" && !strings.EqualFold(existing, live) {
+					return fmt.Errorf("snapshot %q stands for %s but %s is logged in — saving would file this "+
+						"account's credential under the other one's name; switch to %s first, or pass --force if "+
+						"the snapshot really should be reassigned", name, existing, live, existing)
+				}
+			}
 		}
 		data, err := readActiveCredential()
 		if err != nil {
@@ -718,4 +899,102 @@ func saveAccountSnapshot(name string) error {
 		clearPendingSwitchMarker(home)
 		return nil
 	})
+}
+
+// accountRemovalPlan is what `account remove NAME` is about to do, resolved
+// before the deletion so a caller can decide whether to confirm it.
+type accountRemovalPlan struct {
+	Name string
+	// Live reports that this snapshot stands for the account logged in right
+	// now. Removing it is allowed — it deletes a parked copy, not the login —
+	// but it throws away the only thing that could switch back to this account
+	// later, so the CLI confirms first.
+	Live bool
+}
+
+// planAccountRemoval validates a name and reports what removing it would mean.
+// Read-only, and deliberately outside the lock: the CLI may sit on a prompt
+// between this and the removal, and holding the switch lock across a wait for
+// human input would block any concurrent switch for as long as nobody answers.
+// removeAccountSnapshot re-validates the name under the lock.
+func planAccountRemoval(name string) (accountRemovalPlan, error) {
+	names, err := snapshotAccountNames()
+	if err != nil {
+		return accountRemovalPlan{}, err
+	}
+	if !containsAccountName(names, name) {
+		known := "none"
+		if len(names) > 0 {
+			known = strings.Join(names, ", ")
+		}
+		return accountRemovalPlan{}, fmt.Errorf("%w for %q (known: %s)", errUnknownAccount, name, known)
+	}
+	return accountRemovalPlan{
+		Name: name,
+		Live: emailMatchesLive(snapshotAccountEmail(name), loadAccountEmail()),
+	}, nil
+}
+
+// removeAccountSnapshot deletes one account's parked snapshot files: the
+// credential blob (both platforms' names — a machine that has run both this tool
+// and claude-switch across an OS change can hold either, and leaving one behind
+// would keep the account listed) and the identity file beside them. Returns the
+// base names actually deleted, so the caller can report what happened rather
+// than assert it, plus whether the name turned out to stand for the account that
+// is live *now*.
+//
+// That second return is re-derived here rather than taken from the caller's
+// planAccountRemoval: the plan is resolved before a confirmation prompt, and a
+// human can sit on that prompt for as long as they like while a Ctrl+W switch,
+// a `/login`, or another process changes which account is live. The value the
+// caller reports has to describe the removal that actually happened, so it is
+// read under the same lock that performs it.
+//
+// The name is validated against snapshotAccountNames() under the lock, which is
+// also what makes the rescue slot unremovable: the listing filters it out, so
+// there is no name that reaches the unlink. Nothing else is touched — not the
+// live credential, not ~/.claude.json, not the pending-switch marker: removing a
+// parked copy changes nothing about who is logged in.
+func removeAccountSnapshot(name string) ([]string, bool, error) {
+	var removed []string
+	var wasLive bool
+	err := withAccountLock(func() error {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		names, err := snapshotAccountNames()
+		if err != nil {
+			return err
+		}
+		if !containsAccountName(names, name) {
+			known := "none"
+			if len(names) > 0 {
+				known = strings.Join(names, ", ")
+			}
+			return fmt.Errorf("%w for %q (known: %s)", errUnknownAccount, name, known)
+		}
+		// Read before the unlink — afterwards the identity file it compares is
+		// gone and the answer would always be "no".
+		wasLive = emailMatchesLive(snapshotAccountEmail(name), loadAccountEmail())
+		dir := filepath.Join(home, ".claude")
+		for _, base := range []string{
+			"." + name + ".keychain-cred",
+			"." + name + ".credentials.json",
+			"." + name + ".account.json",
+		} {
+			err := os.Remove(filepath.Join(dir, base))
+			if err == nil {
+				removed = append(removed, base)
+				continue
+			}
+			// A file that was never there is not a failure — the three names
+			// above span both platforms, so at most two of them ever exist.
+			if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove %s: %w", base, err)
+			}
+		}
+		return nil
+	})
+	return removed, wasLive, err
 }

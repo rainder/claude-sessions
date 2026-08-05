@@ -241,35 +241,46 @@ func actSwitchAccount(c *actCtx) (toast string, switched bool) {
 	defer c.enterRaw()
 	fmt.Printf("\nswitching %s to %s... ", label, choice.Name)
 
-	email, err := applyAccountSwitch(host, choice.Name)
+	email, warnings, err := applyAccountSwitch(host, choice.Name)
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
 		return "account switch failed: " + err.Error(), false
 	}
 	fmt.Println("ok")
-	return accountSwitchToast(label, choice.Name, email), true
+	return accountSwitchToast(label, choice.Name, email, warnings), true
 }
 
 // applyAccountSwitch performs the switch on the row's own host: in-process for a
 // local row, over that host's HTTP API for a remote one — the same local/remote
-// split every other action takes. Returns the email now live there.
-func applyAccountSwitch(host, name string) (string, error) {
+// split every other action takes. Returns the email now live there, plus any
+// advisory warnings that host raised about the switch.
+func applyAccountSwitch(host, name string) (string, []string, error) {
 	if host == "" {
 		return switchAccount(name)
 	}
 	result, err := switchAccountRemote(host, name)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !result.OK {
-		return "", fmt.Errorf("%s", result.Message)
+		return "", nil, fmt.Errorf("%s", result.Message)
 	}
-	return result.Account, nil
+	return result.Account, result.Warnings, nil
 }
 
 // accountSwitchToast is the one-liner shown after a successful switch. A switch
 // only ever succeeds with a real, non-empty email (see accountSwitchedLine in
 // commands.go for why), so there is nothing to omit here.
-func accountSwitchToast(host, name, email string) string {
-	return fmt.Sprintf("%s: switched to %s (%s)", host, name, email)
+//
+// A warning is folded in as a short clause rather than printed separately. The
+// cooked window this action opens is repainted the instant the TUI loop resumes,
+// so anything written there is gone before it can be read — the toast is the
+// only surface that survives. The full text stays on the CLI path
+// (printAccountWarnings), which has a scrollback to land in.
+func accountSwitchToast(host, name, email string, warnings []string) string {
+	line := fmt.Sprintf("%s: switched to %s (%s)", host, name, email)
+	if len(warnings) == 0 {
+		return line
+	}
+	return line + " — warning: running Claude sessions may overwrite this credential"
 }

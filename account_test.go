@@ -36,6 +36,11 @@ func TestMain(m *testing.M) {
 	// poller's HTTP leg without swapFetch would spend the developer's own token
 	// on a real request, so the default has to be loud rather than plausible.
 	usageInfoFetch = func(string) (*UsageInfo, error) { panic("test reached the real usage endpoint") }
+	// Same rule for the identity probe beside it: a test that reaches the
+	// profile endpoint would spend the developer's own token on a real request,
+	// so the default is loud. Every path that probes gates on an unexpired
+	// access token, which no fixture has unless it asks for one.
+	profileEmailFetch = func(string) (string, error) { panic("test reached the real profile endpoint") }
 	cuFetchFunc = func(context.Context, string) ([]byte, error) { panic("test reached the real cu CLI") }
 	claudeSummarizeFunc = func(context.Context, string, []byte) ([]byte, error) { panic("test reached the real claude CLI") }
 	codexSummarizeFunc = func(context.Context, string, []byte) ([]byte, error) { panic("test reached the real codex CLI") }
@@ -69,6 +74,13 @@ func newAccountFixture(t *testing.T) *accountFixture {
 	keychainRead = func() ([]byte, error) { return os.ReadFile(f.keychain) }
 	keychainWrite = func(data []byte) error { return os.WriteFile(f.keychain, data, 0600) }
 	t.Cleanup(func() { keychainRead, keychainWrite = prevRead, prevWrite })
+	// A switch consults the live session list, and the real collector shells out
+	// to `ps` (and `tmux`) on the developer's own machine. Nothing in these
+	// fixtures has sessions, so default the seam to an empty list; the warning
+	// tests override it afterwards with stubSwitchSessions.
+	prevCollect := collectSessionsForSwitch
+	collectSessionsForSwitch = func() ([]Session, error) { return nil, nil }
+	t.Cleanup(func() { collectSessionsForSwitch = prevCollect })
 	return f
 }
 
@@ -125,6 +137,18 @@ func (f *accountFixture) snapshot(name, token, email string) {
 	writeSnapshotFixture(f.t, f.home, name, token, email)
 }
 
+// snapshotCred returns one snapshot's credential blob, or "" when there is
+// none — so an assertion can say "this file was not touched" without
+// distinguishing an absent file from an unreadable one.
+func (f *accountFixture) snapshotCred(name string) string {
+	f.t.Helper()
+	data, err := os.ReadFile(snapshotCredentialPath(f.home, name))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
 // snapshotIdentity replaces one snapshot's identity file with a full
 // {oauthAccount, userID} slice, the shape both this tool and claude-switch's jq
 // write.
@@ -140,8 +164,32 @@ func (f *accountFixture) snapshotIdentity(name, email, userID string) {
 // ~/.claude/.credentials.json hold — byte-identical to what
 // writeSnapshotFixture parks in a snapshot, so "the live credential is now
 // exactly that snapshot" is a plain string comparison.
+//
+// It carries the refresh token every real Claude Code credential has, because
+// switchAccount refuses a snapshot without one (a credential that cannot
+// refresh logs the host out the moment it ages out) — a fixture missing it
+// would fail every switch test for a reason none of them is about.
+//
+// expiresAt is deliberately absent: the identity probe in
+// validateSnapshotCredential only runs for a snapshot whose access token is
+// still valid, so leaving it unset keeps every existing test off the network
+// seam. credBlobAt below is for the tests that want that path.
 func credBlob(token string) string {
-	return fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q}}`, token)
+	return fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q,"refreshToken":%q}}`, token, "refresh-"+token)
+}
+
+// credBlobAt is credBlob with explicit expiries, in milliseconds since the
+// epoch, for the validation tests. A zero for either field omits it, which is
+// how "the file predates this field" is spelled.
+func credBlobAt(token string, expiresAt, refreshExpiresAt time.Time) string {
+	fields := fmt.Sprintf(`"accessToken":%q,"refreshToken":%q`, token, "refresh-"+token)
+	if !expiresAt.IsZero() {
+		fields += fmt.Sprintf(`,"expiresAt":%d`, expiresAt.UnixMilli())
+	}
+	if !refreshExpiresAt.IsZero() {
+		fields += fmt.Sprintf(`,"refreshTokenExpiresAt":%d`, refreshExpiresAt.UnixMilli())
+	}
+	return fmt.Sprintf(`{"claudeAiOauth":{%s}}`, fields)
 }
 
 // treeState is a content+mtime fingerprint of every file under root, used to
@@ -214,7 +262,7 @@ func TestSwitchAccountUnknownName(t *testing.T) {
 	f.setIdentity("andy@avisoma.com")
 	before := treeState(t, f.home)
 
-	email, err := switchAccount("nope")
+	email, _, err := switchAccount("nope")
 	if !errors.Is(err, errUnknownAccount) {
 		t.Fatalf("err = %v, want errUnknownAccount", err)
 	}
@@ -239,7 +287,7 @@ func TestSwitchAccountAlreadyActiveIsTrueNoOp(t *testing.T) {
 	f.setIdentity("andy@avisoma.com")
 	before := treeState(t, f.home)
 
-	email, err := switchAccount("avisoma")
+	email, _, err := switchAccount("avisoma")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -265,7 +313,7 @@ func TestSwitchAccountRescuesUnidentifiedOutgoing(t *testing.T) {
 	f.setLive("tok-stranger")
 	f.setIdentity("someone@elsewhere.example")
 
-	if _, err := switchAccount("avisoma"); err != nil {
+	if _, _, err := switchAccount("avisoma"); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	rescue, err := os.ReadFile(snapshotCredentialPath(f.home, rescueSnapshotName))
@@ -293,7 +341,7 @@ func TestSwitchAccountSyncsOutgoingAccount(t *testing.T) {
 	f.setLive("tok-avisoma-refreshed")
 	f.setIdentity("andy@avisoma.com")
 
-	email, err := switchAccount("trecs")
+	email, _, err := switchAccount("trecs")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -364,13 +412,13 @@ func TestSwitchAccountRefusesWithPendingMarker(t *testing.T) {
 	before := treeState(t, f.home)
 
 	// A retry of the SAME target must refuse…
-	if _, err := switchAccount("trecs"); err == nil {
+	if _, _, err := switchAccount("trecs"); err == nil {
 		t.Fatal("err = nil for a retry with a pending marker, want a refusal")
 	}
 	// …and so must a switch to a THIRD, unrelated account — the case that
 	// would otherwise corrupt trecs' real snapshot with the misattributed
 	// live credential.
-	if _, err := switchAccount("third"); err == nil {
+	if _, _, err := switchAccount("third"); err == nil {
 		t.Fatal("err = nil for a different target with a pending marker, want a refusal")
 	}
 	assertTreeUnchanged(t, f.home, before)
@@ -395,7 +443,7 @@ func TestSwitchAccountRefusesCredentialOnlyTarget(t *testing.T) {
 	f.setIdentity("andy@avisoma.com")
 	before := treeState(t, f.home)
 
-	_, err := switchAccount("trecs")
+	_, _, err := switchAccount("trecs")
 	if err == nil {
 		t.Fatal("err = nil, want a refusal")
 	}
@@ -428,7 +476,7 @@ func TestSwitchAccountRefusesNullIdentity(t *testing.T) {
 	f.setIdentity("andy@avisoma.com")
 	before := treeState(t, f.home)
 
-	if _, err := switchAccount("trecs"); err == nil {
+	if _, _, err := switchAccount("trecs"); err == nil {
 		t.Fatal("err = nil, want a refusal")
 	}
 	assertTreeUnchanged(t, f.home, before)
@@ -456,7 +504,7 @@ func TestSwitchAccountRefusesMismatchedKeyCasing(t *testing.T) {
 	f.setIdentity("andy@avisoma.com")
 	before := treeState(t, f.home)
 
-	if _, err := switchAccount("trecs"); err == nil {
+	if _, _, err := switchAccount("trecs"); err == nil {
 		t.Fatal("err = nil, want a refusal (patchIdentityCache would silently apply nothing)")
 	}
 	assertTreeUnchanged(t, f.home, before)
@@ -480,7 +528,7 @@ func TestSwitchAccountRefusesWhenOutgoingCredentialUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, switchErr := switchAccount("trecs")
+	_, _, switchErr := switchAccount("trecs")
 
 	// Restore readability before asserting — the point under test is that
 	// switchAccount refused and left the file's *content* untouched, not that
@@ -518,7 +566,7 @@ func TestSwitchAccountFirstEverSwitchNoCredentialAtAll(t *testing.T) {
 	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
 	f.setIdentity("andy@avisoma.com") // stale/wrong identity, no live credential file at all
 
-	if _, err := switchAccount("trecs"); err != nil {
+	if _, _, err := switchAccount("trecs"); err != nil {
 		t.Fatalf("err = %v, want the switch to proceed (nothing to lose)", err)
 	}
 	if got := f.live(); got != credBlob("tok-trecs") {
@@ -539,7 +587,7 @@ func TestSwitchAccountFirstEverSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	email, err := switchAccount("avisoma")
+	email, _, err := switchAccount("avisoma")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -561,7 +609,7 @@ func TestSaveAccountSnapshot(t *testing.T) {
 	f.setLive("tok-live")
 	f.setIdentity("andy@avisoma.com")
 
-	if err := saveAccountSnapshot("avisoma"); err != nil {
+	if err := saveAccountSnapshot("avisoma", false); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	for _, path := range []string{
@@ -594,10 +642,12 @@ func TestSaveAccountSnapshot(t *testing.T) {
 		t.Fatalf("pending marker = %q after a save, want none armed", got)
 	}
 
-	// Re-running after a relogin overwrites both files.
+	// Re-running after a relogin into the SAME account overwrites both files —
+	// the documented refresh-after-relogin case, which the mismatch guard must
+	// never get in the way of.
 	f.setLive("tok-relogged")
-	f.setIdentity("andy@trecs.aero")
-	if err := saveAccountSnapshot("avisoma"); err != nil {
+	f.setIdentity("andy@avisoma.com")
+	if err := saveAccountSnapshot("avisoma", false); err != nil {
 		t.Fatalf("second save: %v", err)
 	}
 	cred, err := os.ReadFile(snapshotCredentialPath(f.home, "avisoma"))
@@ -607,8 +657,72 @@ func TestSaveAccountSnapshot(t *testing.T) {
 	if string(cred) != credBlob("tok-relogged") {
 		t.Fatalf("credential snapshot = %q, want the refreshed one", cred)
 	}
-	if got := snapshotAccountEmail("avisoma"); got != "andy@trecs.aero" {
+	if got := snapshotAccountEmail("avisoma"); got != "andy@avisoma.com" {
 		t.Fatalf("snapshot email = %q, want the refreshed one", got)
+	}
+}
+
+// TestSaveAccountSnapshotRefusesForeignAccount covers fix 3's second half:
+// saving over a snapshot that stands for a DIFFERENT account would file this
+// account's credential under the other one's name, which is the exact
+// misattribution `wrong identity` reports after the fact. --force is the
+// deliberate override, and it still clears the pending-switch marker, so save
+// stays the one complete recovery step the marker's own message points at.
+func TestSaveAccountSnapshotRefusesForeignAccount(t *testing.T) {
+	f := newAccountFixture(t)
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+	if err := saveAccountSnapshot("avisoma", false); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+
+	// Now logged into a different account; the name still stands for the first.
+	f.setLive("tok-trecs")
+	f.setIdentity("andy@trecs.aero")
+	writePendingSwitchMarker(f.home, "avisoma")
+
+	err := saveAccountSnapshot("avisoma", false)
+	if err == nil {
+		t.Fatal("err = nil, want a refusal")
+	}
+	for _, want := range []string{"andy@avisoma.com", "andy@trecs.aero", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to name %q", err, want)
+		}
+	}
+	if cred := f.snapshotCred("avisoma"); cred != credBlob("tok-avisoma") {
+		t.Fatalf("snapshot credential = %q, want the refused save to have touched nothing", cred)
+	}
+	if got := readPendingSwitchMarker(f.home); got != "avisoma" {
+		t.Fatalf("pending marker = %q, want a refused save to leave it armed", got)
+	}
+
+	if err := saveAccountSnapshot("avisoma", true); err != nil {
+		t.Fatalf("--force save: %v", err)
+	}
+	if cred := f.snapshotCred("avisoma"); cred != credBlob("tok-trecs") {
+		t.Fatalf("snapshot credential = %q, want --force to have reassigned it", cred)
+	}
+	if got := snapshotAccountEmail("avisoma"); got != "andy@trecs.aero" {
+		t.Fatalf("snapshot email = %q, want the reassigned one", got)
+	}
+	if got := readPendingSwitchMarker(f.home); got != "" {
+		t.Fatalf("pending marker = %q, want --force to clear it like any other save", got)
+	}
+}
+
+// TestSaveAccountSnapshotFirstSaveIsNeverRefused proves the mismatch guard only
+// fires when there is something to disagree with: a name nobody has claimed yet
+// saves exactly as it always did.
+func TestSaveAccountSnapshotFirstSaveIsNeverRefused(t *testing.T) {
+	f := newAccountFixture(t)
+	f.setLive("tok-live")
+	f.setIdentity("andy@trecs.aero")
+	if err := saveAccountSnapshot("brand-new", false); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got := snapshotAccountEmail("brand-new"); got != "andy@trecs.aero" {
+		t.Fatalf("snapshot email = %q", got)
 	}
 }
 
@@ -623,7 +737,7 @@ func TestSaveAccountSnapshotClearsPendingMarker(t *testing.T) {
 	f.setIdentity("andy@avisoma.com")
 	writePendingSwitchMarker(f.home, "avisoma")
 
-	if err := saveAccountSnapshot("avisoma"); err != nil {
+	if err := saveAccountSnapshot("avisoma", false); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if got := readPendingSwitchMarker(f.home); got != "" {
@@ -639,7 +753,7 @@ func TestSaveAccountSnapshotRejectsBadNames(t *testing.T) {
 	f.setIdentity("andy@avisoma.com")
 
 	for _, name := range []string{"", "../escape", "has/slash", "dot.name", rescueSnapshotName} {
-		if err := saveAccountSnapshot(name); err == nil {
+		if err := saveAccountSnapshot(name, false); err == nil {
 			t.Fatalf("saveAccountSnapshot(%q) = nil, want an error", name)
 		}
 	}
@@ -906,7 +1020,7 @@ func TestSwitchAccountConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(i int, name string) {
 			defer wg.Done()
-			_, errs[i] = switchAccount(name)
+			_, _, errs[i] = switchAccount(name)
 		}(i, name)
 	}
 	wg.Wait()
@@ -960,4 +1074,423 @@ func keysOf(m map[string]json.RawMessage) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// setSnapshotCred replaces one snapshot's credential blob with arbitrary bytes,
+// so the validation tests can build a credential the ordinary fixture never
+// produces (no refresh token, an expired one, a still-valid access token).
+func (f *accountFixture) setSnapshotCred(name, blob string) {
+	f.t.Helper()
+	if err := os.WriteFile(snapshotCredentialPath(f.home, name), []byte(blob), 0600); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// stubSwitchSessions installs a fake session list for switchSessionWarnings and
+// restores the real collector afterwards.
+func stubSwitchSessions(t *testing.T, sessions []Session, err error) {
+	t.Helper()
+	prev := collectSessionsForSwitch
+	collectSessionsForSwitch = func() ([]Session, error) { return sessions, err }
+	t.Cleanup(func() { collectSessionsForSwitch = prev })
+}
+
+// stubProfileEmail installs a fake identity probe. TestMain defaults the seam to
+// a panic, so every test that can reach the probe has to say what it answers.
+// The token→email cache is reset on both sides of the swap: it is a package-level
+// singleton that outlives any one test, so without this one test's stubbed
+// identity would be served to the next.
+func stubProfileEmail(t *testing.T, fn func(token string) (string, error)) {
+	t.Helper()
+	prev := profileEmailFetch
+	profileEmailFetch = fn
+	profileEmails.reset()
+	t.Cleanup(func() {
+		profileEmailFetch = prev
+		profileEmails.reset()
+	})
+}
+
+// TestSwitchAccountRefusesExpiredRefreshToken is fix 3's core case. A snapshot
+// whose refresh token has expired is not a login any more: Claude Code's next
+// refresh is answered with invalid_grant and it zeroes the stored credential, so
+// installing one is a switch that logs the host out. It is refused before
+// anything at all is written, and the message names the one command that fixes
+// it.
+func TestSwitchAccountRefusesExpiredRefreshToken(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.setSnapshotCred("trecs", credBlobAt("tok-trecs", time.Time{}, time.Now().Add(-time.Hour)))
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+	before := treeState(t, f.home)
+
+	_, _, err := switchAccount("trecs")
+	if err == nil {
+		t.Fatal("err = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "account save trecs") {
+		t.Fatalf("err = %v, want it to name the fix", err)
+	}
+	assertTreeUnchanged(t, f.home, before)
+}
+
+// TestSwitchAccountRefusesCredentialWithoutRefreshToken covers the same hazard
+// reached the other way: a blob that never had a refresh token at all.
+func TestSwitchAccountRefusesCredentialWithoutRefreshToken(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.setSnapshotCred("trecs", `{"claudeAiOauth":{"accessToken":"tok-trecs"}}`)
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+	before := treeState(t, f.home)
+
+	_, _, err := switchAccount("trecs")
+	if err == nil {
+		t.Fatal("err = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "refresh token") {
+		t.Fatalf("err = %v, want it to name the missing refresh token", err)
+	}
+	assertTreeUnchanged(t, f.home, before)
+}
+
+// TestSwitchAccountAcceptsExpiredAccessToken proves the validation refuses only
+// what actually breaks: an access token past its expiry is the normal state of a
+// parked snapshot, and refreshing it is exactly what the refresh token is for.
+// It is also the case that must NOT probe the profile endpoint — the token could
+// not authenticate it anyway — which the panicking default seam enforces.
+func TestSwitchAccountAcceptsExpiredAccessToken(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.setSnapshotCred("trecs", credBlobAt("tok-trecs", time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour)))
+	f.snapshotIdentity("trecs", "andy@trecs.aero", "uid-trecs")
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+
+	email, _, err := switchAccount("trecs")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if email != "andy@trecs.aero" {
+		t.Fatalf("email = %q", email)
+	}
+}
+
+// TestSwitchAccountRefusesMisattributedSnapshot is the network half of fix 3:
+// when the snapshot's access token is still valid, the profile endpoint can say
+// whose it really is, and a disagreement with the identity file means switching
+// would leave this host logged in as one account and labelled as the other —
+// the same `wrong identity` the usage poller reports after the fact, caught
+// before it becomes the live credential.
+func TestSwitchAccountRefusesMisattributedSnapshot(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.setSnapshotCred("trecs", credBlobAt("tok-trecs", time.Now().Add(time.Hour), time.Now().Add(24*time.Hour)))
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+	stubProfileEmail(t, func(token string) (string, error) {
+		if token != "tok-trecs" {
+			t.Fatalf("probed with %q, want the snapshot's own access token", token)
+		}
+		return "someone@elsewhere.example", nil
+	})
+	before := treeState(t, f.home)
+
+	_, _, err := switchAccount("trecs")
+	if err == nil {
+		t.Fatal("err = nil, want a refusal")
+	}
+	for _, want := range []string{"someone@elsewhere.example", "andy@trecs.aero", "account save trecs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to name %q", err, want)
+		}
+	}
+	assertTreeUnchanged(t, f.home, before)
+}
+
+// TestSwitchAccountProbeFailureIsNotBlocking proves the identity probe is
+// advisory. Validation has to work on a laptop with no network, so an
+// unreachable or throttled endpoint leaves the two offline checks — the ones
+// that matter — as the whole decision.
+func TestSwitchAccountProbeFailureIsNotBlocking(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.setSnapshotCred("trecs", credBlobAt("tok-trecs", time.Now().Add(time.Hour), time.Now().Add(24*time.Hour)))
+	f.snapshotIdentity("trecs", "andy@trecs.aero", "uid-trecs")
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+	stubProfileEmail(t, func(string) (string, error) {
+		return "", &usageHTTPError{Status: 429}
+	})
+
+	email, _, err := switchAccount("trecs")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if email != "andy@trecs.aero" {
+		t.Fatalf("email = %q", email)
+	}
+}
+
+// TestSwitchAccountWarnsAboutRunningSessions is fix 1. Sessions of the outgoing
+// account hold its token and rewrite the live credential when they refresh, so a
+// switch says so — and proceeds regardless, because the command is quite likely
+// being typed inside one of those very sessions.
+func TestSwitchAccountWarnsAboutRunningSessions(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.snapshotIdentity("trecs", "andy@trecs.aero", "uid-trecs")
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+	stubSwitchSessions(t, []Session{{PID: 4242}, {PID: 17}}, nil)
+
+	email, warnings, err := switchAccount("trecs")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if email != "andy@trecs.aero" {
+		t.Fatalf("email = %q, want the switch to have gone through anyway", email)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one", warnings)
+	}
+	// Pids are sorted, so the same set always renders the same line.
+	for _, want := range []string{"2 Claude Code sessions", "pid 17, 4242", "account switch trecs"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Fatalf("warning = %q, want it to contain %q", warnings[0], want)
+		}
+	}
+	if got := f.live(); got != credBlob("tok-trecs") {
+		t.Fatalf("live credential = %q, want the switch to have happened", got)
+	}
+}
+
+// TestSwitchAccountNoWarningWithoutSessions covers the two quiet cases: nothing
+// running, and a collector that failed. Being unable to enumerate sessions is
+// not a reason to invent a warning — or to fail a switch.
+func TestSwitchAccountNoWarningWithoutSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sessions []Session
+		err      error
+	}{
+		{name: "no sessions", sessions: nil},
+		{name: "collector failed", err: errors.New("read process tree: boom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAccountFixture(t)
+			f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+			f.snapshotIdentity("trecs", "andy@trecs.aero", "uid-trecs")
+			f.setLive("tok-avisoma")
+			f.setIdentity("andy@avisoma.com")
+			stubSwitchSessions(t, tc.sessions, tc.err)
+
+			_, warnings, err := switchAccount("trecs")
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if len(warnings) != 0 {
+				t.Fatalf("warnings = %v, want none", warnings)
+			}
+		})
+	}
+}
+
+// TestSwitchAccountAlreadyActiveRaisesNoWarning pins the placement of the check:
+// a no-op switch touches nothing, so there is no hazard to warn about — and the
+// session collector is never even consulted.
+func TestSwitchAccountAlreadyActiveRaisesNoWarning(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("avisoma", "tok-avisoma", "andy@avisoma.com")
+	f.setLive("tok-avisoma-live")
+	f.setIdentity("andy@avisoma.com")
+	stubSwitchSessions(t, nil, errors.New("collector must not be called for a no-op"))
+
+	_, warnings, err := switchAccount("avisoma")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}
+
+// TestRunningSessionsWarningPhrasing covers singular/plural agreement and the
+// pid-list cap, which only matters on a busy host but is what keeps the line
+// readable there.
+func TestRunningSessionsWarningPhrasing(t *testing.T) {
+	one := runningSessionsWarning("trecs", []Session{{PID: 9}})
+	if !strings.Contains(one, "1 Claude Code session is still running (pid 9)") {
+		t.Fatalf("singular = %q", one)
+	}
+	if !strings.Contains(one, "It holds") {
+		t.Fatalf("singular verb missing: %q", one)
+	}
+
+	many := make([]Session, 0, switchWarningPIDLimit+3)
+	for i := switchWarningPIDLimit + 3; i > 0; i-- {
+		many = append(many, Session{PID: i})
+	}
+	line := runningSessionsWarning("trecs", many)
+	if !strings.Contains(line, "and 3 more") {
+		t.Fatalf("capped list missing: %q", line)
+	}
+	if strings.Contains(line, "11,") {
+		t.Fatalf("pid past the cap was listed: %q", line)
+	}
+}
+
+// TestRemoveAccountSnapshot is fix 4's happy path: every file the snapshot owns
+// goes, and nothing else is touched — not the live credential, not
+// ~/.claude.json, not another account's snapshot.
+func TestRemoveAccountSnapshot(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.snapshot("avisoma", "tok-avisoma", "andy@avisoma.com")
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+
+	plan, err := planAccountRemoval("trecs")
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if plan.Live {
+		t.Fatal("plan.Live = true for a snapshot that is not the live account")
+	}
+	removed, wasLive, err := removeAccountSnapshot("trecs")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if wasLive {
+		t.Fatal("wasLive = true for a snapshot that is not the live account")
+	}
+	if len(removed) != 2 {
+		t.Fatalf("removed = %v, want the credential and the identity file", removed)
+	}
+	names, _ := snapshotAccountNames()
+	if containsAccountName(names, "trecs") {
+		t.Fatalf("names = %v, want trecs gone", names)
+	}
+	if !containsAccountName(names, "avisoma") {
+		t.Fatalf("names = %v, want avisoma untouched", names)
+	}
+	if got := f.live(); got != credBlob("tok-avisoma") {
+		t.Fatalf("live credential = %q, want it untouched", got)
+	}
+	if got := loadAccountEmail(); got != "andy@avisoma.com" {
+		t.Fatalf("live email = %q, want it untouched", got)
+	}
+}
+
+// TestRemoveAccountSnapshotBothPlatformCredentials proves a machine that has
+// held both file shapes loses both — leaving one behind would keep the account
+// listed by snapshotAccountNames on the other platform.
+func TestRemoveAccountSnapshotBothPlatformCredentials(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	other := ".trecs.keychain-cred"
+	if runtime.GOOS == "darwin" {
+		other = ".trecs.credentials.json"
+	}
+	otherPath := filepath.Join(f.home, ".claude", other)
+	if err := os.WriteFile(otherPath, []byte(credBlob("tok-legacy")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.setLive("tok-live")
+	f.setIdentity("andy@avisoma.com")
+
+	removed, _, err := removeAccountSnapshot("trecs")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(removed) != 3 {
+		t.Fatalf("removed = %v, want all three files", removed)
+	}
+	if _, err := os.Stat(otherPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat %s = %v, want it gone", otherPath, err)
+	}
+}
+
+// TestRemoveAccountSnapshotLiveAccountIsFlagged proves the plan tells a caller
+// when the removal costs it the ability to switch back. The removal itself is
+// still allowed — it deletes a parked copy, not the login.
+func TestRemoveAccountSnapshotLiveAccountIsFlagged(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("avisoma", "tok-avisoma", "andy@avisoma.com")
+	f.setLive("tok-avisoma-live")
+	f.setIdentity("andy@avisoma.com")
+
+	plan, err := planAccountRemoval("avisoma")
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !plan.Live {
+		t.Fatal("plan.Live = false for the snapshot standing for the live account")
+	}
+	_, wasLive, err := removeAccountSnapshot("avisoma")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !wasLive {
+		t.Fatal("wasLive = false; the removal has to report what it actually removed")
+	}
+	if got := f.live(); got != credBlob("tok-avisoma-live") {
+		t.Fatalf("live credential = %q, want removing a snapshot to leave the login alone", got)
+	}
+	if got := loadAccountEmail(); got != "andy@avisoma.com" {
+		t.Fatalf("live email = %q, want it untouched", got)
+	}
+}
+
+// TestRemoveAccountSnapshotUnknownName proves an unrecognized name reaches no
+// unlink at all — and that the rescue slot is therefore unremovable, since
+// snapshotAccountNames filters it out of the only listing this consults.
+func TestRemoveAccountSnapshotUnknownName(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	if err := os.WriteFile(snapshotCredentialPath(f.home, rescueSnapshotName),
+		[]byte(credBlob("tok-rescue")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.setLive("tok-live")
+	f.setIdentity("andy@avisoma.com")
+	before := treeState(t, f.home)
+
+	for _, name := range []string{"nope", rescueSnapshotName, "../escape"} {
+		if _, err := planAccountRemoval(name); !errors.Is(err, errUnknownAccount) {
+			t.Fatalf("planAccountRemoval(%q) = %v, want errUnknownAccount", name, err)
+		}
+		if _, _, err := removeAccountSnapshot(name); !errors.Is(err, errUnknownAccount) {
+			t.Fatalf("removeAccountSnapshot(%q) = %v, want errUnknownAccount", name, err)
+		}
+	}
+	assertTreeUnchanged(t, f.home, before)
+}
+
+// TestSwitchAccountNoOpSkipsValidation pins step 2.4's placement. Switching to
+// the account already live installs nothing, so there is nothing to validate —
+// and validating anyway would turn a guaranteed no-op into a refusal whenever
+// the parked snapshot had gone stale, which is precisely when someone reaches
+// for a switch. The panicking profile seam also proves no probe was spent on it.
+func TestSwitchAccountNoOpSkipsValidation(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("avisoma", "tok-avisoma", "andy@avisoma.com")
+	// A snapshot that would be refused outright if it were ever installed.
+	f.setSnapshotCred("avisoma", credBlobAt("tok-avisoma", time.Now().Add(time.Hour), time.Now().Add(-time.Hour)))
+	f.setLive("tok-avisoma-live")
+	f.setIdentity("andy@avisoma.com")
+	before := treeState(t, f.home)
+
+	email, warnings, err := switchAccount("avisoma")
+	if err != nil {
+		t.Fatalf("err = %v, want a no-op, not a refusal", err)
+	}
+	if email != "andy@avisoma.com" {
+		t.Fatalf("email = %q", email)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none for a no-op", warnings)
+	}
+	assertTreeUnchanged(t, f.home, before)
 }
