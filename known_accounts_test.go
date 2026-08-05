@@ -23,8 +23,13 @@ func writeSnapshotFixture(t *testing.T, home, name, token, email string) {
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	creds := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q}}`, token)
-	if err := os.WriteFile(snapshotCredentialPath(home, name), []byte(creds), 0600); err != nil {
+	// credBlob, not a bare access token: switchAccount validates that a snapshot
+	// it is about to install can still refresh, and a fixture without a refresh
+	// token would fail every switch test for a reason none of them is about.
+	// Sharing the helper also keeps a snapshot byte-identical to what a switch
+	// installs, which is what makes "the live credential is now that snapshot" a
+	// plain string comparison.
+	if err := os.WriteFile(snapshotCredentialPath(home, name), []byte(credBlob(token)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if email == "" {
@@ -965,4 +970,114 @@ func TestKnownAccountsFetcherResolvesActiveNameWhileBackedOff(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("fetches = %d, want the live account never fetched from its snapshot", calls)
 	}
+}
+
+// TestKnownAccountUsageWrongIdentity is fix 2's snapshot half. A snapshot whose
+// token the profile endpoint attributes to somebody else must not put that
+// somebody's bars on screen under this account's email; it reads as its own
+// classification instead, beside whatever this account's own last verified
+// reading was.
+func TestKnownAccountUsageWrongIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeSnapshotFixture(t, home, "trecs", "tok-trecs", "andy@trecs.aero")
+
+	stranger := &UsageInfo{
+		FiveHour:        usageBucket{Pct: 91},
+		VerifiedAccount: "someone@elsewhere.example",
+	}
+	fetch := func(string) (*UsageInfo, error) { return stranger, nil }
+
+	t.Run("fresh numbers from the wrong account are never shown", func(t *testing.T) {
+		got, skip := knownAccountUsage("trecs", "andy@avisoma.com", nil, fetch)
+		if skip {
+			t.Fatal("skip = true, want the entry reported")
+		}
+		if got.Info != nil {
+			t.Fatalf("Info = %+v, want the stranger's numbers dropped", got.Info)
+		}
+		if got.Expired {
+			t.Fatal("Expired = true; a working credential under the wrong name is not a dead one")
+		}
+		if got.Reason != usageWrongIdentityReason {
+			t.Fatalf("Reason = %q, want %q", got.Reason, usageWrongIdentityReason)
+		}
+		if got.Account != "andy@trecs.aero" {
+			t.Fatalf("Account = %q, want the snapshot's own claimed email", got.Account)
+		}
+	})
+
+	t.Run("this account's own VERIFIED last reading carries forward", func(t *testing.T) {
+		prev := &KnownAccountUsage{
+			Name:      "trecs",
+			Account:   "andy@trecs.aero",
+			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 40}},
+			Verified:  true,
+			FetchedAt: time.Now().Add(-time.Minute),
+		}
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, fetch)
+		if got.Info == nil || got.Info.FiveHour.Pct != 40 {
+			t.Fatalf("Info = %+v, want this account's own carried-forward numbers", got.Info)
+		}
+		if !got.Stale || got.Reason != usageWrongIdentityReason {
+			t.Fatalf("got = %+v, want a stale entry tagged %q", got, usageWrongIdentityReason)
+		}
+		if !got.FetchedAt.Equal(prev.FetchedAt) {
+			t.Fatalf("FetchedAt = %v, want prev's original timestamp", got.FetchedAt)
+		}
+		if !got.Verified {
+			t.Fatal("Verified = false; a carry keeps how its numbers' identity was established")
+		}
+	})
+
+	// The whole reason KnownAccountUsage.Verified exists. Two passes: the first
+	// fetches the stranger's numbers with the probe unavailable, so nothing
+	// contradicts the claimed email and the entry looks ordinary; the second
+	// reaches the probe and detects the misattribution. carryable compares the
+	// claimed email on both sides and cannot tell those numbers from this
+	// account's own, so without the Verified gate pass 2 would carry the
+	// stranger's bars forward under this account's email — the exact thing
+	// dropping the fresh reading exists to prevent.
+	t.Run("an unverified earlier pass never carries a stranger's numbers", func(t *testing.T) {
+		unreachableProbe := func(string) (*UsageInfo, error) {
+			return &UsageInfo{FiveHour: usageBucket{Pct: 91}}, nil
+		}
+		pass1, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, unreachableProbe)
+		if pass1.Info == nil || pass1.Verified {
+			t.Fatalf("pass 1 = %+v, want unverified numbers stored", pass1)
+		}
+		// Age it so freshness is not what decides the carry.
+		pass1.FetchedAt = time.Now().Add(-time.Minute)
+
+		pass2, _ := knownAccountUsage("trecs", "andy@avisoma.com", pass1, fetch)
+		if pass2.Reason != usageWrongIdentityReason {
+			t.Fatalf("pass 2 reason = %q, want %q", pass2.Reason, usageWrongIdentityReason)
+		}
+		if pass2.Info != nil {
+			t.Fatalf("pass 2 Info = %+v, want no bars carried from an unverified pass", pass2.Info)
+		}
+		if pass2.Stale {
+			t.Fatal("pass 2 marked Stale, but nothing was carried")
+		}
+	})
+
+	t.Run("agreement is an ordinary success", func(t *testing.T) {
+		agreeing := func(string) (*UsageInfo, error) {
+			return &UsageInfo{FiveHour: usageBucket{Pct: 40}, VerifiedAccount: "ANDY@trecs.aero"}, nil
+		}
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, agreeing)
+		if got.Info == nil || got.Reason != "" {
+			t.Fatalf("got = %+v, want fresh numbers and no reason", got)
+		}
+	})
+
+	t.Run("an unverified reading changes nothing", func(t *testing.T) {
+		unverified := func(string) (*UsageInfo, error) {
+			return &UsageInfo{FiveHour: usageBucket{Pct: 40}}, nil
+		}
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, unverified)
+		if got.Info == nil || got.Reason != "" {
+			t.Fatalf("got = %+v, want the pre-verification behaviour", got)
+		}
+	})
 }

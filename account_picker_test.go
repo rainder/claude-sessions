@@ -96,8 +96,29 @@ func TestRenderAccountPickerUnknownSize(t *testing.T) {
 }
 
 func TestAccountSwitchToast(t *testing.T) {
-	got := accountSwitchToast("box", "trecs", "andy@trecs.aero")
+	got := accountSwitchToast("box", "trecs", "andy@trecs.aero", nil)
 	if !strings.Contains(got, "box") || !strings.Contains(got, "trecs") || !strings.Contains(got, "andy@trecs.aero") {
 		t.Fatalf("toast = %q", got)
+	}
+	if strings.Contains(got, "warning") {
+		t.Fatalf("toast = %q, want no warning clause when there is none", got)
+	}
+}
+
+// TestAccountSwitchToastFoldsWarning proves a switch warning survives to the
+// user. The picker's cooked window is repainted the instant the TUI loop
+// resumes, so anything printed there is gone before it can be read — the toast
+// is the only surface that lasts.
+func TestAccountSwitchToastFoldsWarning(t *testing.T) {
+	got := accountSwitchToast("box", "trecs", "andy@trecs.aero",
+		[]string{"3 Claude Code sessions are still running (pid 1, 2, 3). …"})
+	if !strings.Contains(got, "andy@trecs.aero") {
+		t.Fatalf("toast = %q, want the switch itself still reported", got)
+	}
+	if !strings.Contains(got, "warning") {
+		t.Fatalf("toast = %q, want a warning clause", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Fatalf("toast = %q, want a single line", got)
 	}
 }

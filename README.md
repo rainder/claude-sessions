@@ -94,8 +94,11 @@ claude-sessions snapshot restore NAME      # recreate a saved set (best-effort; 
 claude-sessions snapshot list              # list saved snapshots
 claude-sessions account switch NAME [--server S]
                                             # switch the active Claude account (local or remote)
-claude-sessions account save NAME          # capture the live credential + identity as a snapshot
+claude-sessions account save NAME [--force]
+                                            # capture the live credential + identity as a snapshot
+                                            # (--force reassigns a snapshot to a different account)
 claude-sessions account list [--server S]  # what accounts each host knows, and which is active
+claude-sessions account remove NAME [-y]   # delete a parked snapshot (never touches the live login)
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
 claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)

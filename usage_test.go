@@ -839,3 +839,200 @@ func TestSaveOnceUsageSkipsCarriedAndEmptySnapshots(t *testing.T) {
 		t.Fatalf("saves = %#v, want only the one genuinely fetched reading on disk", saved)
 	}
 }
+
+// TestVerifiedUsageInfoBindsIdentityToTheToken covers the composition fix 2
+// rests on: the profile probe rides the same token as the numbers, it only runs
+// once the numbers actually arrived, and a probe that fails costs nothing but
+// the upgrade.
+func TestVerifiedUsageInfoBindsIdentityToTheToken(t *testing.T) {
+	t.Run("verified email lands on the reading", func(t *testing.T) {
+		var probed string
+		info, err := verifiedUsageInfo("tok-live",
+			func(string) (*UsageInfo, error) { return &UsageInfo{FiveHour: usageBucket{Pct: 12}}, nil },
+			func(tok string) (string, error) { probed = tok; return "andy@trecs.aero", nil })
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if probed != "tok-live" {
+			t.Fatalf("probed %q, want the same token the numbers were fetched with", probed)
+		}
+		if info.VerifiedAccount != "andy@trecs.aero" {
+			t.Fatalf("VerifiedAccount = %q", info.VerifiedAccount)
+		}
+	})
+
+	t.Run("a failed probe is not a failed fetch", func(t *testing.T) {
+		info, err := verifiedUsageInfo("tok-live",
+			func(string) (*UsageInfo, error) { return &UsageInfo{FiveHour: usageBucket{Pct: 12}}, nil },
+			func(string) (string, error) { return "", &usageHTTPError{Status: 429} })
+		if err != nil {
+			t.Fatalf("err = %v, want a probe failure to be non-fatal", err)
+		}
+		if info.VerifiedAccount != "" {
+			t.Fatalf("VerifiedAccount = %q, want it unset", info.VerifiedAccount)
+		}
+	})
+
+	t.Run("a failed usage fetch never pays for a probe", func(t *testing.T) {
+		_, err := verifiedUsageInfo("tok-live",
+			func(string) (*UsageInfo, error) { return nil, &usageHTTPError{Status: 429} },
+			func(string) (string, error) { t.Fatal("probed after a failed usage fetch"); return "", nil })
+		if err == nil {
+			t.Fatal("err = nil, want the usage failure")
+		}
+	})
+}
+
+// TestUsageAccountLabel pins the attribution rule: proof beats the file, and a
+// disagreement is reported as the verified account rather than smoothed over —
+// that visible, unexpected address in the header is how a clobbered credential
+// announces itself.
+func TestUsageAccountLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		info *UsageInfo
+		want string
+	}{
+		{name: "no reading at all falls back to the file", file: "andy@avisoma.com", want: "andy@avisoma.com"},
+		{name: "unverified reading falls back to the file", file: "andy@avisoma.com",
+			info: &UsageInfo{}, want: "andy@avisoma.com"},
+		{name: "verified reading wins", file: "andy@avisoma.com",
+			info: &UsageInfo{VerifiedAccount: "andy@avisoma.com"}, want: "andy@avisoma.com"},
+		{name: "a clobber is labelled with the truth", file: "andy@avisoma.com",
+			info: &UsageInfo{VerifiedAccount: "andy@trecs.aero"}, want: "andy@trecs.aero"},
+		{name: "verified identity survives an unreadable file",
+			info: &UsageInfo{VerifiedAccount: "andy@trecs.aero"}, want: "andy@trecs.aero"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := usageAccountLabel(tt.file, tt.info); got != tt.want {
+				t.Fatalf("= %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestVerifiedIdentityMismatch pins the other half: a disagreement needs both
+// sides to be known, and it is case-insensitive like every other email
+// comparison in this package.
+func TestVerifiedIdentityMismatch(t *testing.T) {
+	tests := []struct {
+		name    string
+		claimed string
+		info    *UsageInfo
+		want    bool
+	}{
+		{name: "agreement", claimed: "andy@trecs.aero", info: &UsageInfo{VerifiedAccount: "andy@trecs.aero"}},
+		{name: "case-insensitive agreement", claimed: "Andy@Trecs.Aero", info: &UsageInfo{VerifiedAccount: "andy@trecs.aero"}},
+		{name: "disagreement", claimed: "andy@trecs.aero",
+			info: &UsageInfo{VerifiedAccount: "andy@avisoma.com"}, want: true},
+		{name: "nothing claimed, nothing to contradict", info: &UsageInfo{VerifiedAccount: "andy@avisoma.com"}},
+		{name: "nothing verified, nothing proven", claimed: "andy@trecs.aero", info: &UsageInfo{}},
+		{name: "no reading", claimed: "andy@trecs.aero"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := verifiedIdentityMismatch(tt.claimed, tt.info); got != tt.want {
+				t.Fatalf("= %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseOAuthCredentialBlob covers the fields fix 3's validation reads. An
+// absent expiry decodes to the zero time rather than to 1970, which is what
+// keeps a snapshot written before those fields existed from reading as expired.
+func TestParseOAuthCredentialBlob(t *testing.T) {
+	creds, err := parseOAuthCredentialBlob([]byte(
+		`{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":1785942392167}}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if creds.AccessToken != "a" || creds.RefreshToken != "r" {
+		t.Fatalf("creds = %+v", creds)
+	}
+	if got := msExpiry(creds.ExpiresAt); got.UnixMilli() != 1785942392167 {
+		t.Fatalf("expiresAt = %v", got)
+	}
+	if got := msExpiry(creds.RefreshTokenExpiresAt); !got.IsZero() {
+		t.Fatalf("absent refreshTokenExpiresAt = %v, want the zero time", got)
+	}
+}
+
+// TestProfileEmailCache covers finding 4's whole point: verification must not
+// double this process's request volume forever. The answer is a property of the
+// token, so one probe per distinct token is enough — and a rotated token is a
+// different key, which is why no TTL is needed to stay correct.
+func TestProfileEmailCache(t *testing.T) {
+	t.Run("one probe per token", func(t *testing.T) {
+		calls := 0
+		stubProfileEmail(t, func(string) (string, error) {
+			calls++
+			return "andy@trecs.aero", nil
+		})
+		for i := 0; i < 4; i++ {
+			got, err := profileEmails.emailFor("tok-a")
+			if err != nil || got != "andy@trecs.aero" {
+				t.Fatalf("emailFor = (%q, %v)", got, err)
+			}
+		}
+		if calls != 1 {
+			t.Fatalf("probes = %d, want exactly one", calls)
+		}
+	})
+
+	t.Run("a rotated token re-probes", func(t *testing.T) {
+		calls := 0
+		stubProfileEmail(t, func(tok string) (string, error) {
+			calls++
+			return tok + "@example.com", nil
+		})
+		if _, err := profileEmails.emailFor("tok-old"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := profileEmails.emailFor("tok-new")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "tok-new@example.com" {
+			t.Fatalf("emailFor = %q, want the new token's own answer", got)
+		}
+		if calls != 2 {
+			t.Fatalf("probes = %d, want one per distinct token", calls)
+		}
+	})
+
+	t.Run("a failure is never cached", func(t *testing.T) {
+		calls := 0
+		stubProfileEmail(t, func(string) (string, error) {
+			calls++
+			if calls == 1 {
+				return "", &usageHTTPError{Status: 429}
+			}
+			return "andy@trecs.aero", nil
+		})
+		if _, err := profileEmails.emailFor("tok-a"); err == nil {
+			t.Fatal("err = nil, want the throttle")
+		}
+		got, err := profileEmails.emailFor("tok-a")
+		if err != nil || got != "andy@trecs.aero" {
+			t.Fatalf("retry = (%q, %v), want the probe to have run again", got, err)
+		}
+	})
+
+	t.Run("the map stays bounded", func(t *testing.T) {
+		stubProfileEmail(t, func(tok string) (string, error) { return tok + "@example.com", nil })
+		for i := 0; i < profileEmailCacheMax*2; i++ {
+			if _, err := profileEmails.emailFor(fmt.Sprintf("tok-%d", i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		profileEmails.mu.Lock()
+		n := len(profileEmails.byKey)
+		profileEmails.mu.Unlock()
+		if n > profileEmailCacheMax {
+			t.Fatalf("entries = %d, want at most %d", n, profileEmailCacheMax)
+		}
+	})
+}
