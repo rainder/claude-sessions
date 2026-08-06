@@ -171,11 +171,20 @@ file (`nameSource != "derived"`), else the transcript's summary line, else
 `resumableMaxCount`) first stats every match and applies only what a name and a
 mtime can decide — dirs, zero-byte files, the `resumableMaxAge` cutoff, live
 session ids — producing candidates sorted mtime-desc, ties broken by path
-(`Glob`'s own order). Only then does it walk that list newest-first calling
-`readResumableHeadFn` + `countFileLines`, and it **stops the moment `limit`
-entries are collected**. It used to scan everything and sort at the end, which
-on a host with 5363 transcripts inside the window meant thousands of head scans
-plus thousands of full-file line counts to keep 100 — 5.8–6s, past
+string comparison (not `Glob`'s own order — a worktree's project dir is a
+suffixed variant of its parent's, e.g. `-repo` vs `-repo--claude-worktrees-x`,
+and `Glob` sorts those per path component while a raw string compare orders
+them by byte value, so the two orderings can disagree on which of two
+identical-mtime candidates comes first; harmless here, since both candidates
+carry the same session id and mtime either way). Only then does it walk that
+list newest-first calling `readResumableHeadFn` + `countFileLines`, and it
+**stops the moment `limit` entries are collected**. It used to scan everything
+and sort at the end, which cost one head scan and one full-file line count per
+transcript inside the window regardless of the cap — measured on a
+3348-transcript corpus, 3348 head scans and 608 line counts (2.58s); the lazy
+version cut that to 686 and 100 (0.39s), a ratio that tracks how many recent
+transcripts get rejected by content filters, not a fixed "~100 files". On the
+5363-transcript host that motivated this fix it took 5.8–6s, past
 `fetchRemoteResumable`'s 5s client timeout, so the picker rendered a healthy
 host as unreachable. Because pass 2 emits in the order it walks, its output is
 already mtime-desc and already capped; the sort-then-truncate this replaced was

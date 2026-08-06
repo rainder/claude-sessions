@@ -126,7 +126,8 @@ var readResumableHeadFn = readResumableHead
 //
 //  1. Cheap pass: stat every match and apply the filters that need nothing but
 //     a name and a mtime, producing candidates sorted mtime-desc (ties broken by
-//     path, which is the order Glob returns).
+//     a plain string compare on path — deterministic, not the same order Glob
+//     itself returns).
 //  2. Expensive pass: walk that list newest-first, reading each candidate's head
 //     only when its session id has not already been emitted, and stop as soon as
 //     limit entries are collected.
