@@ -95,14 +95,59 @@ func CollectResumable() []ResumableSession {
 // transcript, mirroring findTranscript. Sorted mtime-desc, capped at
 // resumableMaxCount.
 func collectResumableFrom(home string, live map[string]bool, now time.Time) []ResumableSession {
+	return collectResumableLimited(home, live, now, resumableMaxCount)
+}
+
+// resumableCandidate is one transcript file that survived collectResumableLimited's
+// cheap pass — everything decidable from a name and an os.Stat, with no read of
+// the file's contents.
+type resumableCandidate struct {
+	sid   string
+	path  string
+	mtime time.Time
+}
+
+// readResumableHeadFn is the seam the laziness test counts invocations through.
+// Unlike the keychain/usage seams, its default is the real function rather than
+// a panic: this one only reads a fixture file, so no test needs to be stopped
+// from reaching it — the point is knowing *how often* it is reached.
+var readResumableHeadFn = readResumableHead
+
+// collectResumableLimited is collectResumableFrom with the result cap injected,
+// so a test can prove the laziness below without weakening resumableMaxCount.
+// limit is assumed positive.
+//
+// The work is split into two passes because the expensive half used to run on
+// every match and then be thrown away: on a busy host the glob returns
+// thousands of transcripts within the 30-day window, each of which cost a
+// head scan (up to resumePromptsScanLines JSON unmarshals) plus a full-file
+// line count, only for all but the newest resumableMaxCount to be discarded by
+// the final sort. So:
+//
+//  1. Cheap pass: stat every match and apply the filters that need nothing but
+//     a name and a mtime, producing candidates sorted mtime-desc (ties broken by
+//     a plain string compare on path — deterministic, not the same order Glob
+//     itself returns).
+//  2. Expensive pass: walk that list newest-first, reading each candidate's head
+//     only when its session id has not already been emitted, and stop as soon as
+//     limit entries are collected.
+//
+// Because pass 2 emits in the order it walks, its output is already mtime-desc
+// and already capped — the sort-then-truncate this replaced is redundant.
+//
+// Dedupe is deliberately *not* resolved in the cheap pass. Doing so would drop a
+// session id whose newest transcript fails a content filter, where the loop this
+// replaced fell back to an older, valid copy of the same id: an id is emitted
+// from its newest *content-valid* transcript, and a rejected candidate leaves the
+// id unmarked so the next-newest copy is still tried.
+func collectResumableLimited(home string, live map[string]bool, now time.Time, limit int) []ResumableSession {
 	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", "*.jsonl"))
 	if err != nil || len(matches) == 0 {
 		return nil
 	}
 	cutoff := now.Add(-resumableMaxAge)
-	names := resumableNameMap(home)
 
-	byID := make(map[string]ResumableSession, len(matches))
+	cands := make([]resumableCandidate, 0, len(matches))
 	for _, path := range matches {
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() || info.Size() == 0 {
@@ -116,41 +161,50 @@ func collectResumableFrom(home string, live map[string]bool, now time.Time) []Re
 		if sid == "" || live[sid] {
 			continue
 		}
-		// Keep only the newest transcript per session id.
-		if existing, ok := byID[sid]; ok && !mtime.After(existing.ModifiedAt) {
-			continue
+		cands = append(cands, resumableCandidate{sid: sid, path: path, mtime: mtime})
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if !cands[i].mtime.Equal(cands[j].mtime) {
+			return cands[i].mtime.After(cands[j].mtime)
 		}
-		head, ok := readResumableHead(path)
+		return cands[i].path < cands[j].path
+	})
+
+	names := resumableNameMap(home)
+
+	out := make([]ResumableSession, 0, min(len(cands), limit))
+	emitted := make(map[string]bool, min(len(cands), limit))
+	for _, c := range cands {
+		if len(out) >= limit {
+			break
+		}
+		if emitted[c.sid] {
+			continue // an even newer transcript for this id already won
+		}
+		head, ok := readResumableHeadFn(c.path)
 		if !ok || head.cwd == "" || scratchCwd(head.cwd) || head.agentTranscript() {
 			continue
 		}
 		// NAME is best-effort: a user-set name from a still-present session file
 		// wins; otherwise a transcript summary; otherwise empty (rendered "-").
-		name := names[sid]
+		name := names[c.sid]
 		if name == "" {
 			name = head.summary
 		}
-		byID[sid] = ResumableSession{
-			SessionID:    sid,
+		emitted[c.sid] = true
+		out = append(out, ResumableSession{
+			SessionID:    c.sid,
 			CWD:          head.cwd,
 			GitBranch:    head.gitBranch,
 			Name:         name,
 			FirstPrompt:  head.firstPrompt,
 			Prompts:      head.prompts,
-			MessageCount: countFileLines(path),
-			ModifiedAt:   mtime,
-		}
-	}
-
-	out := make([]ResumableSession, 0, len(byID))
-	for _, s := range byID {
-		out = append(out, s)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].ModifiedAt.After(out[j].ModifiedAt)
-	})
-	if len(out) > resumableMaxCount {
-		out = out[:resumableMaxCount]
+			MessageCount: countFileLines(c.path),
+			ModifiedAt:   c.mtime,
+		})
 	}
 	return out
 }

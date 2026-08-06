@@ -285,6 +285,23 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The resume picker no longer reports a busy host as unreachable.
+  `GET /resumable` head-scanned and line-counted *every* transcript inside the
+  30-day window and then discarded all but the newest 100 — on a host with
+  5363 transcripts (157MB) that is a >50x waste and took 5.8–6s, past the
+  picker's 5s per-host timeout, so a perfectly healthy host whose `/sessions`
+  answered in 0.3s read as down. The collector now splits into a cheap
+  stat-only pass (glob, mtime cutoff, live ids) and an expensive pass that
+  walks the survivors newest-first and stops the moment the cap is full, so it
+  parses only as many files as it takes to fill the 100-entry cap, not every
+  match — the exact count depends on how many recent transcripts get rejected
+  by content filters (sidechain/agent transcripts, no cwd, scratch cwds); on a
+  3348-transcript corpus this cut head scans from 3348 to 686 and full-file
+  line counts from 608 to 100, taking the endpoint from 2.58s to 0.39s. Every
+  filter, the per-session-id dedupe, and the mtime-desc ordering are
+  unchanged — including the subtle case where a session id's newest
+  transcript fails a content filter and an older, valid copy of it is what
+  gets listed.
 - Account rate limits are now attributed to the account the *token* belongs to,
   not to whatever `~/.claude.json` happened to say. Every usage fetch is paired
   with a profile lookup on the same token, and the verified email wins over the
