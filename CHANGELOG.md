@@ -9,6 +9,21 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The resume picker (`r`, and `GET /resumable`) now memoizes its two expensive
+  per-file reads — the transcript head scan and the full-file line count — in
+  `~/.claude/.resumable-cache.json`, keyed by (path, mtime, size). Every open
+  used to redo both from scratch for every candidate it walked; a warm open now
+  re-reads no transcript contents at all. On a 3356-transcript corpus that is
+  692 head scans and 361ms cold against 0 and 17ms warm, and it survives a
+  restart, so a fresh TUI launch benefits too. Rejected files are cached as
+  well as accepted ones — most of what the collector opens is rejected on its
+  contents, so caching only the rows would have bought almost nothing. Any edit
+  or replacement of a transcript moves its mtime or size and is a miss by
+  construction; entries are dropped once their file disappears or ages past the
+  same 30-day cutoff the collector uses. Every filter, the per-session-id
+  dedupe (including the fall back to an older valid copy), the mtime-desc
+  ordering and the stop-at-the-cap laziness are unchanged.
+
 - Local TUI kill (`actKill`): when the post-kill worktree removal fails (git
   refuses a dirty/untracked tree), offers to resurrect the session that was
   just killed right back into the same worktree checkout, then attaches — the
