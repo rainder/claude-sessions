@@ -252,6 +252,21 @@ func actKill(c *actCtx) {
 	fmt.Print("\nremoving worktree... ")
 	if err := RemoveWorktree(worktree); err != nil {
 		fmt.Printf("failed: %v\n", err)
+		if confirm("resurrect the killed session in this worktree? [y/N] ") {
+			repoRoot := worktreeRepoRoot(worktree)
+			name := worktreeName(worktree)
+			fmt.Print("resuming... ")
+			tname, rerr := ResumeSessionInWorktree(s.SessionID, repoRoot, name)
+			if rerr != nil {
+				fmt.Printf("failed: %v\n", rerr)
+			} else {
+				fmt.Printf("ok → %s\n", tname)
+				c.spawnedTmux = tname
+				c.enterRaw()
+				runTmuxAttach(c, tname)
+				return
+			}
+		}
 		pauseForKey(c.fd, c.oldState)
 	}
 }

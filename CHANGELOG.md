@@ -9,6 +9,10 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Local TUI kill (`actKill`): when the post-kill worktree removal fails (git
+  refuses a dirty/untracked tree), offers to resurrect the session that was
+  just killed right back into the same worktree checkout, then attaches — the
+  same `ResumeSessionInWorktree` primitive the `r` resume picker uses.
 - `account remove NAME` deletes one parked account snapshot — the credential
   blob (both platforms' file names, so a machine that has held either loses
   both) and the identity file beside it. It never touches the live login, and

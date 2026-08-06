@@ -194,7 +194,22 @@ filtered by the active group and text query, and a filtered-out session in the
 same worktree would read as "no survivors"; `git worktree remove` doesn't care
 that a live process is sitting in the checkout. And removal is plain `git
 worktree remove` from the main checkout — never `--force`, so a dirty worktree
-survives and git's refusal is what the user sees. The branch is never deleted.
+survives and git's refusal is what the user sees — in `actKill` that refusal
+now offers a recovery step, below. The branch is never deleted.
+
+`actKill`'s worktree-remove failure offers to resurrect: `git worktree remove`
+refuses on a dirty/untracked tree, and the alternative to leaving the user
+stranded is resuming the session that was just killed, right back into the
+same still-on-disk worktree checkout. A `y` answer calls
+`ResumeSessionInWorktree(s.SessionID, repoRoot, name)` — the same primitive the
+`r` resume picker uses for a worktree session, which works whether or not the
+checkout survived, since `--worktree <name>` recreates it if needed. On success
+the new tmux name is stashed on `c.spawnedTmux` (the same field `actResume` and
+`actNew` use) and `runTmuxAttach` takes over the terminal immediately, mirroring
+`actResume`'s own resume→attach sequence rather than leaving the user back at
+the session list. A `N` answer, or a failed resume, falls through to the
+existing `pauseForKey` pause. This is local-TUI-only (`actKill`); `cmdKill` and
+the remote kill path (`actKillRemote`) still just report the failure.
 
 Three entry points: `actKill` (local TUI — the kill itself is confirmed, but a
 worktree left idle by it is removed outright, no second confirm), the TUI's
