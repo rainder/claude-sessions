@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,6 +220,101 @@ func TestCollectResumableName(t *testing.T) {
 	}
 	if names["bareseso"] != "" {
 		t.Errorf("bare name = %q, want empty", names["bareseso"])
+	}
+}
+
+// TestCollectResumableFallsBackToOlderValidTranscript pins pre-existing
+// collector behavior that the two-pass restructuring had to preserve: dedupe
+// resolves to a session id's newest *content-valid* transcript, not simply its
+// newest one. Rejecting a candidate leaves its id unclaimed, so an older copy
+// still gets its turn — which is why dedupe can't be settled in the cheap
+// stat-only pass.
+func TestCollectResumableFallsBackToOlderValidTranscript(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+
+	// Newest copy has no cwd anywhere → rejected.
+	writeResumableTranscript(t, home, "new", "dup99999", now.Add(-1*time.Hour),
+		`{"type":"queue-operation"}`,
+		`{"type":"user","message":{"role":"user","content":"newest copy, no cwd"}}`,
+	)
+	writeResumableTranscript(t, home, "old", "dup99999", now.Add(-3*time.Hour),
+		`{"type":"attachment","cwd":"/home/u/old"}`,
+		`{"type":"user","message":{"role":"user","content":"older but valid"}}`,
+	)
+
+	got := collectResumableFrom(home, nil, now)
+	if len(got) != 1 {
+		t.Fatalf("got %d sessions %v, want 1", len(got), ids(got))
+	}
+	if got[0].CWD != "/home/u/old" || got[0].FirstPrompt != "older but valid" {
+		t.Fatalf("kept %q / %q, want the older valid transcript", got[0].CWD, got[0].FirstPrompt)
+	}
+	if !got[0].ModifiedAt.Equal(now.Add(-3 * time.Hour)) {
+		t.Fatalf("mtime = %v, want the valid transcript's own mtime", got[0].ModifiedAt)
+	}
+}
+
+// TestCollectResumableStopsScanningAtTheLimit is the laziness regression test.
+// The collector used to head-scan and line-count every transcript inside the
+// 30-day window and then throw all but the newest resumableMaxCount away — on a
+// host with thousands of transcripts that is a >50x waste, and it pushed
+// GET /resumable past the picker's HTTP timeout so the host reported as
+// unreachable. Expensive per-file work must now touch only as many candidates as
+// it takes to fill the cap.
+func TestCollectResumableStopsScanningAtTheLimit(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	const limit = 5
+
+	write := func(sid string, mtime time.Time) {
+		writeResumableTranscript(t, home, "proj", sid, mtime,
+			`{"type":"attachment","cwd":"/home/u/proj","gitBranch":"main"}`,
+			`{"type":"user","message":{"role":"user","content":"prompt for `+sid+`"}}`,
+		)
+	}
+	// Newest: the only ones worth reading. Numbered so lexical order matches
+	// mtime order, making the expected result stable.
+	var wantIDs []string
+	for i := 0; i < limit+3; i++ {
+		sid := fmt.Sprintf("recent%02d", i)
+		write(sid, now.Add(-time.Duration(i+1)*time.Minute))
+		if i < limit {
+			wantIDs = append(wantIDs, sid)
+		}
+	}
+	// Inside the cutoff but older than every recent one: only the cap keeps
+	// these unread.
+	for i := 0; i < 300; i++ {
+		write(fmt.Sprintf("filler%03d", i), now.Add(-2*time.Hour-time.Duration(i)*time.Minute))
+	}
+	// Past the cutoff: dropped by the cheap pass, never candidates at all.
+	for i := 0; i < 20; i++ {
+		write(fmt.Sprintf("stale%03d", i), now.Add(-40*24*time.Hour))
+	}
+
+	scans := 0
+	real := readResumableHeadFn
+	readResumableHeadFn = func(path string) (resumableHead, bool) {
+		scans++
+		return real(path)
+	}
+	defer func() { readResumableHeadFn = real }()
+
+	got := collectResumableLimited(home, nil, now, limit)
+
+	if len(got) != limit {
+		t.Fatalf("got %d sessions %v, want %d", len(got), ids(got), limit)
+	}
+	for i, id := range wantIDs {
+		if got[i].SessionID != id {
+			t.Fatalf("order[%d] = %q, want %q (all: %v)", i, got[i].SessionID, id, ids(got))
+		}
+	}
+	// Every candidate walked is a valid one here, so filling the cap costs
+	// exactly limit scans — nothing beyond it is ever opened.
+	if scans != limit {
+		t.Fatalf("head scans = %d, want %d (the collector is scanning discarded files)", scans, limit)
 	}
 }
 

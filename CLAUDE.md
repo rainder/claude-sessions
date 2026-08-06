@@ -166,6 +166,37 @@ file (`nameSource != "derived"`), else the transcript's summary line, else
 `-`. Session ids arriving over HTTP are format-validated
 (`resumeSessionIDRe`) before touching the filesystem or tmux.
 
+**The collector is lazy, and its two passes are split by cost.**
+`collectResumableLimited` (which `collectResumableFrom` calls with
+`resumableMaxCount`) first stats every match and applies only what a name and a
+mtime can decide — dirs, zero-byte files, the `resumableMaxAge` cutoff, live
+session ids — producing candidates sorted mtime-desc, ties broken by path
+(`Glob`'s own order). Only then does it walk that list newest-first calling
+`readResumableHeadFn` + `countFileLines`, and it **stops the moment `limit`
+entries are collected**. It used to scan everything and sort at the end, which
+on a host with 5363 transcripts inside the window meant thousands of head scans
+plus thousands of full-file line counts to keep 100 — 5.8–6s, past
+`fetchRemoteResumable`'s 5s client timeout, so the picker rendered a healthy
+host as unreachable. Because pass 2 emits in the order it walks, its output is
+already mtime-desc and already capped; the sort-then-truncate this replaced was
+redundant, not load-bearing.
+
+Two details are load-bearing. Dedupe is deliberately **not** resolved in the
+cheap pass, even though mtime is all it needs: doing so would drop a session id
+whose newest transcript fails a *content* filter, where the loop this replaced
+fell back to an older valid copy. The rule is "newest **content-valid**
+transcript per id", so a rejected candidate leaves its id unmarked in `emitted`
+and the next-newest copy still gets its turn
+(`TestCollectResumableFallsBackToOlderValidTranscript` pins it). And
+`readResumableHeadFn` is a package-var seam whose default is the **real**
+function, not a `TestMain` panic like `keychainRead`/`usageInfoFetch` — it only
+reads a fixture file, so nothing needs to be stopped from reaching it; the
+seam exists so `TestCollectResumableStopsScanningAtTheLimit` can count *how
+often* it is reached, which is the only way the laziness is observable.
+`collectResumableLimited` takes the cap as a parameter for the same reason —
+that test asserts against a small limit without weakening the production
+constant.
+
 `resumeRows` autocompacts to terminal width: HOST only when a remote row
 exists; then shed order is shrink PROMPT → drop #MSG → drop BRANCH → shrink
 DIR → shrink NAME. AGE/NAME/DIR always survive; header mirrors the layout.
