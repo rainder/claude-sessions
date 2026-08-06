@@ -206,6 +206,56 @@ often* it is reached, which is the only way the laziness is observable.
 that test asserts against a small limit without weakening the production
 constant.
 
+**The two expensive reads are memoized on disk** (`resume_cache.go`,
+`~/.claude/.resumable-cache.json`, path derived from the same `home` parameter
+the collector globs under — which is what keeps every collector test cold and
+hermetic in its own temp home). Pass 2 still stops at the cap; a warm open just
+re-reads no transcript contents at all. Measured on a 3356-transcript corpus:
+cold 692 head scans / 361ms, warm 0 / 17ms, 398KB cache file. The key is
+**(path, mtime, size)**, never the session id — ids are not unique per file (a
+worktree move leaves two transcripts under one id) and the rule is "newest
+content-valid transcript per id", so an id-keyed entry would let one file's
+cached answer stand in for another's; a path key carrying the file's own mtime
+and size makes every edit, truncation or replacement a miss by construction, so
+there is no invalidation logic to get wrong. What is cached is
+`readResumableHead`'s answer, which is also what every *content* rejection is
+derived from (no cwd, scratch cwd, agent transcript), so a rejected file
+short-circuits exactly like an accepted one — and that is where most of the win
+is, since of the 692 files pass 2 opened only 100 became rows. A candidate
+skipped by `emitted[sid]` is never read and so never cached, which is what keeps
+dedupe purely per-pass state and the fall-back-to-an-older-valid-copy rule
+untouched. `Lines: -1` means "count not computed": a file whose head was read
+but which was then rejected never had `countFileLines` run, and a later pass
+that does accept it (its newer duplicate having gone) fills the number in
+without invalidating the head beside it.
+
+The cache sits **in front of** `readResumableHeadFn`, not behind it, so that
+seam keeps counting transcript reads that genuinely happened — the same
+quantity before and after the cache existed.
+`TestCollectResumableStopsScanningAtTheLimit` is therefore unchanged and still
+proves laziness against a cold cache, and the cache's own tests prove their
+half with the identical counter reading zero warm. Behind the seam it would
+have counted cache *lookups*, a number that says nothing about work avoided and
+that would let a cache bug hide inside a still-green laziness test. There is
+deliberately no second seam for `countFileLines`: the round-trip test replaces a
+transcript's contents while restoring its mtime and size, so a re-read would
+change the answer — which proves the memo harder than a counter would, and for
+both reads at once.
+
+The size bound is the prune on every write: an entry goes if its path was not
+in this pass's glob (deleted or moved — `seen` is recorded *before* the cheap
+pass's filters, since a zero-byte or currently-live transcript is still a file
+whose memo must survive) or if its own mtime has fallen past `resumableMaxAge`.
+So the file can only ever hold transcripts inside the window that some pass
+actually read. The prune runs even on a pass that collects nothing, so a host
+whose whole corpus ages out does not keep its entries for as long as the picker
+goes unused. Nothing is written at all when a pass neither read a file nor
+pruned one. Writes are temp-file-then-rename in the same directory
+(`patchIdentityCache`'s pattern) with **no lock**: the TUI and the `/resumable`
+handler each run their own pass, and the loser of a rename race simply loses its
+new entries — one more scan of those files on some later pass, which is what
+"best-effort memo, not a source of truth" is worth.
+
 `resumeRows` autocompacts to terminal width: HOST only when a remote row
 exists; then shed order is shrink PROMPT → drop #MSG → drop BRANCH → shrink
 DIR → shrink NAME. AGE/NAME/DIR always survive; header mirrors the layout.

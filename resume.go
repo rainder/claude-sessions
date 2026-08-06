@@ -105,12 +105,23 @@ type resumableCandidate struct {
 	sid   string
 	path  string
 	mtime time.Time
+	size  int64
 }
 
 // readResumableHeadFn is the seam the laziness test counts invocations through.
 // Unlike the keychain/usage seams, its default is the real function rather than
 // a panic: this one only reads a fixture file, so no test needs to be stopped
 // from reaching it — the point is knowing *how often* it is reached.
+//
+// resumableCache (resume_cache.go) sits deliberately *in front of* this seam,
+// not behind it: the counter then measures transcript reads that genuinely
+// happened, which is the same quantity before and after the cache existed. So
+// TestCollectResumableStopsScanningAtTheLimit still proves laziness unchanged
+// against a cold cache (limit scans, never one more), and the cache's own tests
+// prove their half with the identical counter reading zero on a warm pass.
+// Behind the seam it would have counted "cache lookups" — a number that says
+// nothing about work avoided, and that would have let a cache bug hide inside a
+// still-green laziness test.
 var readResumableHeadFn = readResumableHead
 
 // collectResumableLimited is collectResumableFrom with the result cap injected,
@@ -135,6 +146,13 @@ var readResumableHeadFn = readResumableHead
 // Because pass 2 emits in the order it walks, its output is already mtime-desc
 // and already capped — the sort-then-truncate this replaced is redundant.
 //
+// Pass 2's per-file work is memoized on disk by resumableCache
+// (resume_cache.go), keyed by (path, mtime, size), so a warm open re-reads no
+// transcript contents at all. That is purely a layer under the two reads: the
+// filters, the ordering, the dedupe rule and the stop-at-limit laziness below
+// are all unchanged, and a cold cache costs exactly what this function cost
+// before it existed.
+//
 // Dedupe is deliberately *not* resolved in the cheap pass. Doing so would drop a
 // session id whose newest transcript fails a content filter, where the loop this
 // replaced fell back to an older, valid copy of the same id: an id is emitted
@@ -148,9 +166,19 @@ func collectResumableLimited(home string, live map[string]bool, now time.Time, l
 	cutoff := now.Add(-resumableMaxAge)
 
 	cands := make([]resumableCandidate, 0, len(matches))
+	// seen is the head cache's existence set (see resumableCache.save): every
+	// path this glob found on disk, recorded before the filters below, since a
+	// zero-byte or currently-live transcript is still a file whose memo must not
+	// be evicted. A failed stat is the one case that is deliberately left out —
+	// the file is gone, so its entry should go with it.
+	seen := make(map[string]bool, len(matches))
 	for _, path := range matches {
 		info, err := os.Stat(path)
-		if err != nil || info.IsDir() || info.Size() == 0 {
+		if err != nil {
+			continue
+		}
+		seen[path] = true
+		if info.IsDir() || info.Size() == 0 {
 			continue
 		}
 		mtime := info.ModTime()
@@ -161,8 +189,13 @@ func collectResumableLimited(home string, live map[string]bool, now time.Time, l
 		if sid == "" || live[sid] {
 			continue
 		}
-		cands = append(cands, resumableCandidate{sid: sid, path: path, mtime: mtime})
+		cands = append(cands, resumableCandidate{sid: sid, path: path, mtime: mtime, size: info.Size()})
 	}
+	// Loaded (and saved) even when nothing survives the cheap pass, so a host
+	// whose whole corpus has aged out still gets its stale entries pruned rather
+	// than keeping them for as long as the picker stays unused.
+	cache := loadResumableCache(home)
+	defer cache.save(home, seen, cutoff)
 	if len(cands) == 0 {
 		return nil
 	}
@@ -184,7 +217,7 @@ func collectResumableLimited(home string, live map[string]bool, now time.Time, l
 		if emitted[c.sid] {
 			continue // an even newer transcript for this id already won
 		}
-		head, ok := readResumableHeadFn(c.path)
+		head, ok := cache.head(c.path, c.mtime, c.size)
 		if !ok || head.cwd == "" || scratchCwd(head.cwd) || head.agentTranscript() {
 			continue
 		}
@@ -202,7 +235,7 @@ func collectResumableLimited(home string, live map[string]bool, now time.Time, l
 			Name:         name,
 			FirstPrompt:  head.firstPrompt,
 			Prompts:      head.prompts,
-			MessageCount: countFileLines(c.path),
+			MessageCount: cache.lineCount(c.path, c.mtime, c.size),
 			ModifiedAt:   c.mtime,
 		})
 	}
