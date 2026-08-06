@@ -11,6 +11,10 @@ import (
 	"unicode/utf8"
 )
 
+// maxNameCellWidth caps the NAME column so one long session name can't blow
+// out the whole table's layout.
+const maxNameCellWidth = 20
+
 // ANSI escape sequences.
 const (
 	ansiReset      = "\033[0m"
@@ -1775,6 +1779,7 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		sid = sid[:8]
 	}
 	name, nameDim := s.DisplayName()
+	name = truncateRunes(name, maxNameCellWidth)
 	return drowFull{
 		s:         s,
 		nameStr:   name,
@@ -2073,6 +2078,7 @@ func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
 		}
 	}
 	disp, dimName := s.DisplayName()
+	disp = truncateRunes(disp, maxNameCellWidth)
 	return drowMinimal{
 		s:       s,
 		dir:     dir,
