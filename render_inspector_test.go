@@ -63,7 +63,7 @@ func TestRenderInspectorMetadataAndLiveFooter(t *testing.T) {
 	}
 	v.viewportRows = 10
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, 100, 20)
+	hits := RenderInspector(&b, v, nil, false, 100, 20)
 	out := b.String()
 	for _, want := range []string{"api-refactor", "PID 42", "dev", "opus", "busy", "LIVE", "Back", "Refresh", "Follow", "Compose"} {
 		if !strings.Contains(out, want) {
@@ -78,7 +78,7 @@ func TestRenderInspectorMetadataAndLiveFooter(t *testing.T) {
 func TestRenderInspectorNarrowDropsMetadataBeforeControls(t *testing.T) {
 	v := populatedInspectorView()
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, 38, 10)
+	hits := RenderInspector(&b, v, nil, false, 38, 10)
 	if strings.Contains(b.String(), "$1.28") {
 		t.Fatalf("cost not collapsed:\n%s", b.String())
 	}
@@ -92,7 +92,7 @@ func TestRenderInspectorNarrowDropsMetadataBeforeControls(t *testing.T) {
 func TestRenderInspectorNarrowDropsContext(t *testing.T) {
 	v := populatedInspectorView()
 	var b strings.Builder
-	RenderInspector(&b, v, nil, 60, 10)
+	RenderInspector(&b, v, nil, false, 60, 10)
 	out := b.String()
 	if strings.Contains(out, "42k") {
 		t.Fatalf("context not collapsed at cols=60:\n%s", out)
@@ -162,7 +162,7 @@ func TestRenderInspectorStatusPriority(t *testing.T) {
 			v := base()
 			tc.mutate(&v)
 			var b strings.Builder
-			RenderInspector(&b, v, nil, 100, 20)
+			RenderInspector(&b, v, nil, false, 100, 20)
 			out := b.String()
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("want status %q in:\n%s", tc.want, out)
@@ -186,7 +186,7 @@ func TestRenderInspectorErrorWithoutContent(t *testing.T) {
 	}
 	v.viewportRows = 6
 	var b strings.Builder
-	RenderInspector(&b, v, nil, 80, 12)
+	RenderInspector(&b, v, nil, false, 80, 12)
 	if !strings.Contains(b.String(), "connection refused") {
 		t.Fatalf("error text missing from body:\n%s", b.String())
 	}
@@ -200,7 +200,7 @@ func TestRenderInspectorFollowClickableWhileFollowing(t *testing.T) {
 		t.Fatal("precondition: expected follow=true")
 	}
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, 100, 20)
+	hits := RenderInspector(&b, v, nil, false, 100, 20)
 	if !hasHit(hits, hitInspectorFollow) {
 		t.Fatalf("Follow not clickable while following: %#v", hits)
 	}
@@ -225,7 +225,7 @@ func TestInspectorTitleDimsAutoDerivedName(t *testing.T) {
 func TestRenderInspectorTerminalTooSmall(t *testing.T) {
 	v := populatedInspectorView()
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, 20, 4)
+	hits := RenderInspector(&b, v, nil, false, 20, 4)
 	out := b.String()
 	if !strings.Contains(out, "terminal too small") {
 		t.Fatalf("missing too-small message:\n%s", out)
@@ -248,7 +248,7 @@ func TestRenderInspectorClipsEveryLine(t *testing.T) {
 	v.snapshot.Lines = []string{strings.Repeat("x", 500)}
 	v.follow = true
 	var b strings.Builder
-	RenderInspector(&b, v, nil, 40, 12)
+	RenderInspector(&b, v, nil, false, 40, 12)
 	for _, ln := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
 		if visibleWidth(ln) > 40 {
 			t.Fatalf("line exceeds width 40: %d cols", visibleWidth(ln))
@@ -264,7 +264,7 @@ func TestRenderInspectorComposingShowsInputBar(t *testing.T) {
 		composeText:  "hello",
 		snapshot:     InspectorSnapshot{Session: Session{PID: 1}},
 	}
-	RenderInspector(&buf, view, nil, 80, 14)
+	RenderInspector(&buf, view, nil, false, 80, 14)
 	if !strings.Contains(buf.String(), "> hello") {
 		t.Fatalf("output = %q, want it to contain the compose prompt", buf.String())
 	}
@@ -279,7 +279,7 @@ func TestRenderInspectorComposingShowsSendingStatus(t *testing.T) {
 		composeStatus: "sending…",
 		snapshot:      InspectorSnapshot{Session: Session{PID: 1}},
 	}
-	RenderInspector(&buf, view, nil, 80, 14)
+	RenderInspector(&buf, view, nil, false, 80, 14)
 	out := buf.String()
 	if !strings.Contains(out, "> hello") {
 		t.Fatalf("output = %q, want it to contain the compose prompt", out)
@@ -298,7 +298,7 @@ func TestRenderInspectorComposingShowsFailureStatus(t *testing.T) {
 		composeStatus: "send failed: broken pipe",
 		snapshot:      InspectorSnapshot{Session: Session{PID: 1}},
 	}
-	RenderInspector(&buf, view, nil, 80, 14)
+	RenderInspector(&buf, view, nil, false, 80, 14)
 	out := buf.String()
 	if !strings.Contains(out, "> hello") {
 		t.Fatalf("output = %q, want it to still contain the compose prompt so the user can retry", out)
@@ -342,7 +342,7 @@ func TestRenderInspectorFooterRightWinsOverComposeWhenNarrow(t *testing.T) {
 	v.composeStatus = "no tmux pane"
 	v.composeStatusUntil = time.Now().Add(4 * time.Second)
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, 35, 20)
+	hits := RenderInspector(&b, v, nil, false, 35, 20)
 	out := b.String()
 
 	if !strings.Contains(out, "no tmux pane") {
@@ -381,7 +381,7 @@ func TestRenderInspectorFooterAtMinColsNeverOverflows(t *testing.T) {
 	v := populatedInspectorView()
 	v.snapshot.Ended = true // longest footer-right text: "tmux · SESSION ENDED"
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, minInspectorCols, 20)
+	hits := RenderInspector(&b, v, nil, false, minInspectorCols, 20)
 	out := b.String()
 
 	if strings.Contains(out, "Compose") {
@@ -409,7 +409,7 @@ func TestRenderInspectorFooterShowsComposeWhenRoomAllows(t *testing.T) {
 	v.composeStatus = "no tmux pane"
 	v.composeStatusUntil = time.Now().Add(4 * time.Second)
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, 44, 20)
+	hits := RenderInspector(&b, v, nil, false, 44, 20)
 	out := b.String()
 
 	if !strings.Contains(out, "no tmux pane") {
@@ -428,7 +428,7 @@ func TestRenderInspectorFooterShowsComposeWhenRoomAllows(t *testing.T) {
 func TestRenderInspectorFooterHitColumns(t *testing.T) {
 	v := populatedInspectorView()
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, 100, 20)
+	hits := RenderInspector(&b, v, nil, false, 100, 20)
 
 	want := map[hitAction][2]int{
 		hitInspectorBack:    {0, 3},   // "Back"
@@ -470,8 +470,12 @@ func TestInspectorTicketSummaryLinesNothingToShow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := inspectorTicketSummaryLines(tc.prev, 80); got != nil {
+			got, trimmed := inspectorTicketSummaryLines(tc.prev, 80, false)
+			if got != nil {
 				t.Fatalf("inspectorTicketSummaryLines = %q, want nil", got)
+			}
+			if trimmed {
+				t.Fatal("trimmed = true, want false: there is nothing to expand")
 			}
 			if n := inspectorSummaryExtraRows(nil); n != 0 {
 				t.Fatalf("inspectorSummaryExtraRows(nil) = %d, want 0", n)
@@ -484,11 +488,11 @@ func TestInspectorTicketSummaryLinesNothingToShow(t *testing.T) {
 // heading carrying the label, content word-wrapped to cols, blank lines passed
 // through untouched, and trailing blanks dropped.
 func TestInspectorTicketSummaryLinesHeadingAndWrap(t *testing.T) {
-	got := inspectorTicketSummaryLines(overlayPreview{
+	got, _ := inspectorTicketSummaryLines(overlayPreview{
 		Loaded: true,
 		Label:  "DR-1234",
 		Lines:  []string{"alpha beta gamma delta epsilon", "", ""},
-	}, 20)
+	}, 20, false)
 
 	want := []string{
 		bold("ticket: DR-1234:"),
@@ -508,13 +512,13 @@ func TestInspectorTicketSummaryLinesHeadingAndWrap(t *testing.T) {
 	}
 
 	// No label: the heading is the bare word.
-	unlabelled := inspectorTicketSummaryLines(overlayPreview{Loaded: true, Lines: []string{"body"}}, 20)
+	unlabelled, _ := inspectorTicketSummaryLines(overlayPreview{Loaded: true, Lines: []string{"body"}}, 20, false)
 	if len(unlabelled) == 0 || unlabelled[0] != bold("ticket:") {
 		t.Errorf("unlabelled heading = %q, want %q", unlabelled, bold("ticket:"))
 	}
 
 	// A blank line between content lines survives as its own row.
-	spaced := inspectorTicketSummaryLines(overlayPreview{Loaded: true, Lines: []string{"a", "", "b"}}, 20)
+	spaced, _ := inspectorTicketSummaryLines(overlayPreview{Loaded: true, Lines: []string{"a", "", "b"}}, 20, false)
 	if len(spaced) != 4 || spaced[2] != "" {
 		t.Errorf("spaced = %q, want a blank third row", spaced)
 	}
@@ -524,15 +528,160 @@ func TestInspectorTicketSummaryLinesHeadingAndWrap(t *testing.T) {
 // inspectorTicketSummaryMaxLines rows, the last one replaced by a dim ellipsis
 // so the cut is visible.
 func TestInspectorTicketSummaryLinesTruncates(t *testing.T) {
-	got := inspectorTicketSummaryLines(overlayPreview{
+	got, trimmed := inspectorTicketSummaryLines(overlayPreview{
 		Loaded: true,
 		Lines:  []string{"one", "two", "three", "four", "five"},
-	}, 80)
+	}, 80, false)
 	if len(got) != inspectorTicketSummaryMaxLines {
 		t.Fatalf("len = %d, want %d: %q", len(got), inspectorTicketSummaryMaxLines, got)
 	}
 	if last := got[len(got)-1]; last != dim("…") {
 		t.Errorf("last line = %q, want %q", last, dim("…"))
+	}
+	if !trimmed {
+		t.Error("trimmed = false, want true: the block was cut")
+	}
+	if want := bold("ticket:") + dim(inspectorSummaryExpandHint); got[0] != want {
+		t.Errorf("heading = %q, want %q", got[0], want)
+	}
+}
+
+// TestInspectorTicketSummaryLinesExpanded is the other half of the toggle: the
+// same over-long content returns whole, with the collapse hint on the heading and
+// no ellipsis, leaving the height bound entirely to inspectorSummaryFit.
+func TestInspectorTicketSummaryLinesExpanded(t *testing.T) {
+	prev := overlayPreview{
+		Loaded: true,
+		Label:  "DR-1234",
+		Lines:  []string{"one", "two", "three", "four", "five"},
+	}
+	got, trimmed := inspectorTicketSummaryLines(prev, 80, true)
+	if !trimmed {
+		t.Fatal("trimmed = false, want true: the content still exceeds the cap")
+	}
+	want := []string{
+		bold("ticket: DR-1234:") + dim(inspectorSummaryCollapseHint),
+		"one", "two", "three", "four", "five",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("lines = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if len(got) <= inspectorTicketSummaryMaxLines {
+		t.Errorf("expanded block is %d lines, want more than the cap %d", len(got), inspectorTicketSummaryMaxLines)
+	}
+
+	// trimmed reads the same in both states — it is what makes the block
+	// clickable, so a collapsed-only reading would strand it open.
+	if _, collapsedTrimmed := inspectorTicketSummaryLines(prev, 80, false); !collapsedTrimmed {
+		t.Error("collapsed trimmed = false, want true: same content, same answer")
+	}
+}
+
+// TestInspectorTicketSummaryLinesShortContentIgnoresExpanded pins the untrimmed
+// case: content inside the cap has nothing to reveal, so expanded changes
+// nothing, no hint is added, and trimmed stays false in both states.
+func TestInspectorTicketSummaryLinesShortContentIgnoresExpanded(t *testing.T) {
+	prev := overlayPreview{
+		Loaded: true,
+		Label:  "DR-1234",
+		Lines:  []string{"one", "two", "three"},
+	}
+	collapsed, collapsedTrimmed := inspectorTicketSummaryLines(prev, 80, false)
+	expanded, expandedTrimmed := inspectorTicketSummaryLines(prev, 80, true)
+
+	if collapsedTrimmed || expandedTrimmed {
+		t.Fatalf("trimmed = (%v, %v), want (false, false)", collapsedTrimmed, expandedTrimmed)
+	}
+	want := []string{bold("ticket: DR-1234:"), "one", "two", "three"}
+	for _, got := range [][]string{collapsed, expanded} {
+		if len(got) != len(want) {
+			t.Fatalf("lines = %q, want %q", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// TestRenderInspectorSummaryToggleHitRegion covers the affordance itself: a
+// trimmed block claims every column of its own rows and nothing else, so a click
+// anywhere on it toggles while the separator below it and the header above stay
+// inert.
+func TestRenderInspectorSummaryToggleHitRegion(t *testing.T) {
+	v := populatedInspectorView()
+	summary := []string{
+		bold("ticket: DR-1234:") + dim(inspectorSummaryExpandHint),
+		"one", "two", dim("…"),
+	}
+	var b strings.Builder
+	hits := RenderInspector(&b, v, summary, true, 100, 20)
+
+	var region *hitRegion
+	for i := range hits {
+		if hits[i].action == hitInspectorSummaryToggle {
+			region = &hits[i]
+		}
+	}
+	if region == nil {
+		t.Fatalf("no %v hit region in %v", hitInspectorSummaryToggle, hits)
+	}
+	wantY1 := 3 + len(summary) - 1
+	if region.x0 != 0 || region.x1 != 99 || region.y0 != 3 || region.y1 != wantY1 {
+		t.Errorf("region = (x0=%d,x1=%d,y0=%d,y1=%d), want (0,99,3,%d)",
+			region.x0, region.x1, region.y0, region.y1, wantY1)
+	}
+
+	// The footer controls are still reported alongside it.
+	if len(hits) < 2 {
+		t.Errorf("hits = %v, want the footer controls too", hits)
+	}
+
+	// Boundary check through the same lookup the mouse handler uses.
+	s := newTUIState()
+	s.hits = hits
+	for _, y := range []int{3, wantY1} {
+		if h := s.hitAt(50, y); h == nil || h.action != hitInspectorSummaryToggle {
+			t.Errorf("hitAt(50,%d) = %v, want the summary toggle", y, h)
+		}
+	}
+	for _, y := range []int{2, wantY1 + 1} {
+		if h := s.hitAt(50, y); h != nil {
+			t.Errorf("hitAt(50,%d) = %v, want no hit", y, h)
+		}
+	}
+}
+
+// TestRenderInspectorSummaryNoToggleWhenUntrimmed is the negative: a block
+// showing everything it has is not clickable, and neither is an absent one — even
+// when the caller claims it was trimmed, which is what a short terminal produces
+// after inspectorSummaryFit drops the block.
+func TestRenderInspectorSummaryNoToggleWhenUntrimmed(t *testing.T) {
+	v := populatedInspectorView()
+	cases := []struct {
+		name    string
+		lines   []string
+		trimmed bool
+	}{
+		{"untrimmed block", []string{bold("ticket: DR-1234:"), "one", "two"}, false},
+		{"no block at all", nil, true},
+		{"empty block", []string{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			for _, h := range RenderInspector(&b, v, tc.lines, tc.trimmed, 100, 20) {
+				if h.action == hitInspectorSummaryToggle {
+					t.Fatalf("unexpected %v region at y=%d..%d", h.action, h.y0, h.y1)
+				}
+			}
+		})
 	}
 }
 
@@ -575,7 +724,7 @@ func TestRenderInspectorSummaryAboveBody(t *testing.T) {
 	v := populatedInspectorView()
 	summary := []string{bold("ticket: DR-1234:"), "fix the thing", "and the other"}
 	var b strings.Builder
-	hits := RenderInspector(&b, v, summary, 100, 20)
+	hits := RenderInspector(&b, v, summary, false, 100, 20)
 
 	lines := inspectorFrameLines(b.String())
 	if len(lines) != 20 {
@@ -616,7 +765,7 @@ func TestRenderInspectorSummaryClampedOnShortTerminal(t *testing.T) {
 	summary := []string{bold("ticket: DR-1234:"), "one", "two", dim("…")}
 	for _, rows := range []int{5, 6, 7, 8, 9, 12} {
 		var b strings.Builder
-		RenderInspector(&b, v, summary, 100, rows)
+		RenderInspector(&b, v, summary, false, 100, rows)
 		lines := inspectorFrameLines(b.String())
 		if len(lines) != rows {
 			t.Fatalf("rows=%d: frame has %d lines, want %d:\n%s", rows, len(lines), rows, b.String())
@@ -633,7 +782,7 @@ func TestRenderInspectorSummaryClampedOnShortTerminal(t *testing.T) {
 func TestRenderInspectorNilSummaryUnchanged(t *testing.T) {
 	v := populatedInspectorView()
 	var b strings.Builder
-	RenderInspector(&b, v, nil, 100, 20)
+	RenderInspector(&b, v, nil, false, 100, 20)
 	lines := inspectorFrameLines(b.String())
 
 	if len(lines) != 20 {
@@ -651,7 +800,7 @@ func TestRenderInspectorNilSummaryUnchanged(t *testing.T) {
 
 	// An empty (non-nil) slice must render identically to nil.
 	var empty strings.Builder
-	RenderInspector(&empty, v, []string{}, 100, 20)
+	RenderInspector(&empty, v, []string{}, false, 100, 20)
 	if empty.String() != b.String() {
 		t.Errorf("empty slice frame differs from nil frame")
 	}

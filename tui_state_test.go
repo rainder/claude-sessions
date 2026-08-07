@@ -290,6 +290,32 @@ func TestInspectorMouseHandlers(t *testing.T) {
 	}
 }
 
+// TestInspectorMouseSummaryToggle checks the ticket-summary block's click
+// behaviour: each press flips summaryExpanded and asks for nothing more than a
+// repaint, since the state lives entirely in the render loop.
+func TestInspectorMouseSummaryToggle(t *testing.T) {
+	s := newTUIState()
+	s.inspector = newInspectorViewState("42")
+	s.hits = []hitRegion{
+		{x0: 0, y0: 3, x1: 79, y1: 6, action: hitInspectorSummaryToggle},
+	}
+	if s.inspector.summaryExpanded {
+		t.Fatal("summaryExpanded = true on a freshly opened inspector, want false")
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{x: 10, y: 4, button: mouseLeft}); cmd != commandRender {
+		t.Fatalf("first click: cmd=%v, want commandRender", cmd)
+	}
+	if !s.inspector.summaryExpanded {
+		t.Fatal("first click did not expand the summary")
+	}
+	if cmd := s.handleInspectorMouse(mouseEvent{x: 10, y: 6, button: mouseLeft}); cmd != commandRender {
+		t.Fatalf("second click: cmd=%v, want commandRender", cmd)
+	}
+	if s.inspector.summaryExpanded {
+		t.Fatal("second click did not collapse the summary")
+	}
+}
+
 // listTestFrame builds a table frame with rowCount selectable rows after a
 // single header line, plus the phantom trailing "" that BuildTableFrame's
 // newline split produces. Row i sits on line i+1 with target ID "r<i>".

@@ -58,9 +58,21 @@ func footerLeftWidth(n int) int {
 // the inspector exists to show.
 const inspectorTicketSummaryMaxLines = 4
 
+// inspectorSummaryExpandHint and inspectorSummaryCollapseHint are the dim
+// affordances appended to the summary heading whenever the block holds more
+// than the collapsed cap shows. They are the only signal that the block is
+// clickable at all, so they appear in both states — one naming what a click
+// would do next.
+const (
+	inspectorSummaryExpandHint   = "  (more — click to expand)"
+	inspectorSummaryCollapseHint = "  (click to collapse)"
+)
+
 // RenderInspector writes the fullscreen session inspector to w as plain lines
 // (no cursor movement or alternate-screen escapes — RunTUI owns positioning) and
-// returns the zero-based clickable footer regions for the frame it drew.
+// returns the zero-based clickable regions for the frame it drew: the footer
+// controls, plus the ticket summary block itself when summaryTrimmed says there
+// is more content than the collapsed cap shows.
 //
 // Layout, top to bottom: a title (name, PID, host), a width-responsive metadata
 // line (model, status, context, cost, cpu — dropping cpu below 93 cols, cost
@@ -77,8 +89,11 @@ const inspectorTicketSummaryMaxLines = 4
 // summaryLines is re-fit to rows here even though the caller already fit it: the
 // clamp is idempotent, and a renderer that can draw a frame taller than rows —
 // dropping the footer while still reporting hit regions on the last row — is not
-// something to leave to a caller's discipline.
-func RenderInspector(w io.Writer, view inspectorViewState, summaryLines []string, cols, rows int) []hitRegion {
+// something to leave to a caller's discipline. The summary's own hit region is
+// measured against that re-fit block, so it never claims a row the frame did not
+// draw — including the short-terminal case where the fit drops the block
+// entirely and summaryTrimmed is still true.
+func RenderInspector(w io.Writer, view inspectorViewState, summaryLines []string, summaryTrimmed bool, cols, rows int) []hitRegion {
 	if rows < minInspectorRows || cols < minInspectorCols {
 		return renderInspectorTooSmall(w, cols, rows)
 	}
@@ -110,25 +125,50 @@ func RenderInspector(w io.Writer, view inspectorViewState, summaryLines []string
 
 	// Row rows-1: footer — the compose input bar while composing, otherwise
 	// the normal Back/Refresh/Follow/Compose controls.
+	var hits []hitRegion
 	if view.composing {
-		return inspectorComposeBar(w, view, cols)
+		hits = inspectorComposeBar(w, view, cols)
+	} else {
+		hits = inspectorFooter(w, view, cols, rows-1)
 	}
-	return inspectorFooter(w, view, cols, rows-1)
+
+	// A trimmed summary block is clickable across its whole width, toggling
+	// between the collapsed cap and what the terminal can hold. An untrimmed one
+	// has nothing to reveal, so it stays inert. The region survives compose mode
+	// deliberately: a toggle touches no compose state, and a block that stopped
+	// responding to clicks while the input bar is open would read as broken.
+	if summaryTrimmed && len(summaryLines) > 0 {
+		hits = append(hits, hitRegion{
+			x0:     0,
+			y0:     3,
+			x1:     cols - 1,
+			y1:     3 + len(summaryLines) - 1,
+			action: hitInspectorSummaryToggle,
+		})
+	}
+	return hits
 }
 
 // inspectorTicketSummaryLines renders the ticket summary block shown above the
 // inspector body: a bold heading plus the summary's own lines word-wrapped to
-// cols, capped at inspectorTicketSummaryMaxLines with a dim "…" replacing the
-// last kept line on overflow. Returns nil whenever there is nothing worth
-// showing — still fetching, failed, or empty — because the inspector reserves no
-// space for a summary it doesn't have: no placeholder, no spinner.
-func inspectorTicketSummaryLines(ticketSummary overlayPreview, cols int) []string {
+// cols. Collapsed (expanded false) it is capped at inspectorTicketSummaryMaxLines
+// with a dim "…" replacing the last kept line; expanded it returns everything and
+// leaves the bound to inspectorSummaryFit, which caps by terminal height rather
+// than by policy. Returns nil whenever there is nothing worth showing — still
+// fetching, failed, or empty — because the inspector reserves no space for a
+// summary it doesn't have: no placeholder, no spinner.
+//
+// trimmed reports whether the full content exceeds the collapsed cap, and is
+// computed off the untruncated block so it reads the same in either state: it is
+// what decides whether the block is clickable at all, and a value that flipped
+// with expanded would strand the block open with no way back.
+func inspectorTicketSummaryLines(ticketSummary overlayPreview, cols int, expanded bool) (lines []string, trimmed bool) {
 	if !ticketSummary.Loaded || ticketSummary.Err != nil {
-		return nil
+		return nil, false
 	}
 	content := trimTrailingBlank(ticketSummary.Lines)
 	if len(content) == 0 {
-		return nil
+		return nil, false
 	}
 
 	heading := "ticket:"
@@ -144,11 +184,18 @@ func inspectorTicketSummaryLines(ticketSummary overlayPreview, cols int) []strin
 		}
 		out = append(out, wrapRunes(line, cols)...)
 	}
-	if len(out) > inspectorTicketSummaryMaxLines {
-		out = out[:inspectorTicketSummaryMaxLines]
-		out[inspectorTicketSummaryMaxLines-1] = dim("…")
+	trimmed = len(out) > inspectorTicketSummaryMaxLines
+	if trimmed {
+		hint := inspectorSummaryExpandHint
+		if expanded {
+			hint = inspectorSummaryCollapseHint
+		} else {
+			out = out[:inspectorTicketSummaryMaxLines]
+			out[inspectorTicketSummaryMaxLines-1] = dim("…")
+		}
+		out[0] += dim(hint)
 	}
-	return out
+	return out, trimmed
 }
 
 // inspectorSummaryExtraRows is how many rows the summary block costs on top of
