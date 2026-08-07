@@ -400,10 +400,11 @@ func RunTUI(interval time.Duration) error {
 			// One derivation feeds both the viewport size and the drawn block —
 			// two would be free to drift, and the body arithmetic is what keeps
 			// scrolling and the footer row in agreement.
-			summaryLines := inspectorSummaryFit(inspectorTicketSummaryLines(ticketSummarySec.snapshot(), cols), rows)
+			summaryLines, summaryTrimmed := inspectorTicketSummaryLines(ticketSummarySec.snapshot(), cols, state.inspector.summaryExpanded)
+			summaryLines = inspectorSummaryFit(summaryLines, rows)
 			state.inspector.resize(rows - inspectorChromeRows - inspectorSummaryExtraRows(summaryLines))
 			var buf strings.Builder
-			state.hits = RenderInspector(&buf, state.inspector, summaryLines, cols, rows)
+			state.hits = RenderInspector(&buf, state.inspector, summaryLines, summaryTrimmed, cols, rows)
 			_ = screen.Draw(buf.String(), cols, rows)
 			return
 		}

@@ -52,6 +52,12 @@ type inspectorViewState struct {
 	composeText        string
 	composeStatus      string
 	composeStatusUntil time.Time
+	// summaryExpanded toggles the ticket-summary block between its fixed
+	// collapsed cap (inspectorTicketSummaryMaxLines) and however many lines the
+	// terminal has room for. It is flipped by clicking the block itself and is
+	// zero — collapsed — every time the inspector is (re)opened, since both
+	// newInspectorViewState and closeInspector replace the whole struct.
+	summaryExpanded bool
 }
 
 // newInspectorViewState starts in follow mode with no content.

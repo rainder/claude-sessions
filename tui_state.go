@@ -23,6 +23,7 @@ const (
 	hitInspectorRefresh
 	hitInspectorFollow
 	hitInspectorCompose
+	hitInspectorSummaryToggle
 )
 
 // hitRegion is a rectangular clickable area on the current screen, addressed in
@@ -466,7 +467,9 @@ func (s *tuiState) armCompose() {
 
 // handleInspectorMouse applies a mouse event to the inspector viewport. Release
 // events are ignored; the wheel scrolls three lines; a left click on a control
-// region returns that control's command (Back, Refresh, Follow, or Compose).
+// region returns that control's command (Back, Refresh, Follow, or Compose), and
+// a left click on a trimmed ticket-summary block toggles it open or shut — a
+// purely local state flip, so it asks for a repaint and nothing more.
 func (s *tuiState) handleInspectorMouse(m mouseEvent) tuiCommand {
 	if m.release {
 		return commandNone
@@ -492,6 +495,9 @@ func (s *tuiState) handleInspectorMouse(m mouseEvent) tuiCommand {
 			return commandFollowInspector
 		case hitInspectorCompose:
 			return commandComposeInspector
+		case hitInspectorSummaryToggle:
+			s.inspector.summaryExpanded = !s.inspector.summaryExpanded
+			return commandRender
 		}
 		return commandNone
 	default:
