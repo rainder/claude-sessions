@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -14,12 +13,12 @@ import (
 	"time"
 )
 
-// noSaveKnownAccountsBackoff is the saveBackoff arg for tests that don't
-// exercise disk persistence of the backoff state — the real
-// saveKnownAccountsBackoffCache writes to os.TempDir(), and several tests in
-// this file set HOME via loginAs without also setting TMPDIR, so passing the
-// real function here would write to the developer's actual temp directory.
-func noSaveKnownAccountsBackoff(map[string]usageBackoff) {}
+// noSaveAccountCache is the save arg for tests that don't exercise disk
+// persistence — the real saveAccountCache writes to os.TempDir(), and several
+// tests in this file set HOME via loginAs without also setting TMPDIR, so
+// passing the real function here would write to the developer's actual temp
+// directory.
+func noSaveAccountCache(string, accountCacheEntry) {}
 
 // writeSnapshotFixture creates one claude-switch credential snapshot (and, when
 // email is non-empty, its account.json sibling) under home. It goes through
@@ -177,7 +176,7 @@ func TestKnownAccountsFetcherWithNoSnapshots(t *testing.T) {
 	// A fresh machine with no claude-switch setup: an empty list, never an error
 	// — an error here would put the poller into backoff over nothing.
 	t.Setenv("HOME", t.TempDir())
-	got, err := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)()
+	got, err := newKnownAccountsFetcher(noSaveAccountCache)()
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -469,87 +468,137 @@ func TestClassifyUsageErrLeaksNoErrorText(t *testing.T) {
 	}
 }
 
-func TestAllKnownAccountsNeverFailsOnOneBadAccount(t *testing.T) {
+// Direct successor to the removed allKnownAccounts' own version, against the
+// real per-account walk inside newKnownAccountsFetcher rather than the
+// dead standalone helper: one dead account must not suppress its
+// neighbours' healthy data.
+func TestKnownAccountsFetcherNeverFailsOnOneBadAccount(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
 	writeSnapshotFixture(t, home, "avisoma", "tok-a", "andy@avisoma.com")
 	writeSnapshotFixture(t, home, "dead", "tok-dead", "andy@dead.dev")
 	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
-	fetch := stubUsageFetch(map[string]*UsageInfo{
+	swapFetch(t, stubUsageFetch(map[string]*UsageInfo{
 		"tok-a": {FiveHour: usageBucket{Pct: 41}},
 		"tok-t": {FiveHour: usageBucket{Pct: 22}},
-	})
-	// The real per-account path, only with the HTTP leg stubbed.
-	one := func(name, liveEmail string, prev *KnownAccountUsage) (*KnownAccountUsage, bool) {
-		return knownAccountUsage(name, liveEmail, prev, fetch)
-	}
+	}))
 
-	got, active := allKnownAccounts([]string{"avisoma", "dead", "trecs"}, "someone@else.com", nil, one)
-	if len(got) != 3 {
-		t.Fatalf("len = %d, want every account represented: %#v", len(got), got)
+	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if active != "" {
-		t.Fatalf("active snapshot = %q, want empty when no snapshot is the live account", active)
+	if len(res.Accounts) != 3 {
+		t.Fatalf("accounts = %#v, want all three represented", res.Accounts)
 	}
-	// Order follows names, so a failing account can't shuffle its neighbours.
-	if got[0].Name != "avisoma" || got[1].Name != "dead" || got[2].Name != "trecs" {
-		t.Fatalf("order = %q,%q,%q, want names order", got[0].Name, got[1].Name, got[2].Name)
+	byName := map[string]KnownAccountUsage{}
+	for _, a := range res.Accounts {
+		byName[a.Name] = a
 	}
-	if got[1].Expired != true || got[1].Info != nil {
-		t.Fatalf("failing account = %#v, want Expired", got[1])
+	if !byName["dead"].Expired || byName["dead"].Info != nil {
+		t.Fatalf("dead account = %#v, want Expired with no numbers", byName["dead"])
 	}
 	// The whole point: one dead account suppresses nobody else's healthy data.
-	if got[0].Info == nil || got[0].Info.FiveHour.Pct != 41 {
-		t.Fatalf("healthy account before the failure lost its Info: %#v", got[0])
+	if byName["avisoma"].Info == nil || byName["avisoma"].Info.FiveHour.Pct != 41 {
+		t.Fatalf("avisoma lost its numbers beside a failing neighbour: %#v", byName["avisoma"])
 	}
-	if got[2].Info == nil || got[2].Info.FiveHour.Pct != 22 {
-		t.Fatalf("healthy account after the failure lost its Info: %#v", got[2])
+	if byName["trecs"].Info == nil || byName["trecs"].Info.FiveHour.Pct != 22 {
+		t.Fatalf("trecs lost its numbers beside a failing neighbour: %#v", byName["trecs"])
 	}
-
-	// The live account drops out entirely; everyone else still reports. The case
-	// difference proves the match is case-insensitive, like the dedupe key — and
-	// the skipped name comes straight back out as the active snapshot, so the two
-	// can never disagree about which account was left out.
-	live, active := allKnownAccounts([]string{"avisoma", "dead", "trecs"}, "Andy@Avisoma.com", nil, one)
-	if len(live) != 2 || live[0].Name != "dead" || live[1].Name != "trecs" {
-		t.Fatalf("live-account skip wrong: %#v", live)
-	}
-	if active != "avisoma" {
-		t.Fatalf("active snapshot = %q, want the skipped name", active)
-	}
-
-	// No names at all is an empty result, never a nil-deref or an error path.
-	if got, active := allKnownAccounts(nil, "", nil, one); len(got) != 0 || active != "" {
-		t.Fatalf("no names = %#v/%q, want empty", got, active)
+	if res.ActiveName != "" {
+		t.Fatalf("active snapshot = %q, want empty when no snapshot is the live account", res.ActiveName)
 	}
 }
 
-// Each account's previous result reaches its own fetch and nobody else's.
-func TestAllKnownAccountsThreadsEachAccountsOwnPrev(t *testing.T) {
+// The live account drops out entirely; everyone else still reports. The case
+// difference proves the match is case-insensitive, like the dedupe key — and
+// the skipped name comes back out as the active snapshot.
+func TestKnownAccountsFetcherSkipsLiveAccountAndReportsItActive(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
 	writeSnapshotFixture(t, home, "avisoma", "tok-a", "andy@avisoma.com")
 	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+	writeLiveAccount(t, home, "Andy@Avisoma.com")
+	swapFetch(t, stubUsageFetch(map[string]*UsageInfo{
+		"tok-t": {FiveHour: usageBucket{Pct: 22}},
+	}))
 
-	var mu sync.Mutex
-	seen := map[string]*KnownAccountUsage{}
-	one := func(name, liveEmail string, prev *KnownAccountUsage) (*KnownAccountUsage, bool) {
-		mu.Lock()
-		seen[name] = prev
-		mu.Unlock()
-		return &KnownAccountUsage{Name: name}, false
+	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
+	if err != nil {
+		t.Fatal(err)
 	}
-	prev := map[string]KnownAccountUsage{
-		"trecs": {Name: "trecs", Info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}},
+	if len(res.Accounts) != 1 || res.Accounts[0].Name != "trecs" {
+		t.Fatalf("accounts = %#v, want just trecs (avisoma is live, excluded)", res.Accounts)
 	}
-	allKnownAccounts([]string{"avisoma", "trecs"}, "", prev, one)
+	if res.ActiveName != "avisoma" {
+		t.Fatalf("active snapshot = %q, want avisoma (the skipped name)", res.ActiveName)
+	}
+}
 
-	if got := seen["trecs"]; got == nil || got.Info == nil || got.Info.FiveHour.Pct != 63 {
-		t.Fatalf("trecs' prev = %#v, want its own previous result", got)
+// Direct successor to the removed allKnownAccounts' own threading test: each
+// account's persisted entry reaches its own fetch and nobody else's.
+func TestKnownAccountsFetcherThreadsEachAccountsOwnEntry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "avisoma", "tok-a", "andy@avisoma.com")
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+	saveAccountCache("trecs", accountCacheEntry{
+		Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, FetchedAt: time.Now(),
+	})
+	swapFetch(t, func(string) (*UsageInfo, error) { return nil, &usageHTTPError{Status: 429} })
+
+	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
+	if err != nil {
+		t.Fatal(err)
 	}
-	// An account with no history gets nil, not its neighbour's numbers.
-	if got := seen["avisoma"]; got != nil {
-		t.Fatalf("avisoma's prev = %#v, want nil", got)
+	byName := map[string]KnownAccountUsage{}
+	for _, a := range res.Accounts {
+		byName[a.Name] = a
+	}
+	if got := byName["trecs"]; got.Info == nil || got.Info.FiveHour.Pct != 63 {
+		t.Fatalf("trecs = %#v, want its own persisted 63%% carried", got)
+	}
+	if got := byName["avisoma"]; got.Info != nil {
+		t.Fatalf("avisoma = %#v, want no numbers — it must not inherit trecs' entry", got)
+	}
+}
+
+// A loaded entry whose Account doesn't match this snapshot's own currently
+// claimed email (e.g. `account save --force` reassigned the name to a
+// different account) must not have its backoff trusted either — the numbers
+// half was already gated (knownAccountUsage's own carryable check), but the
+// backoff half was extracted unconditionally until independent review caught
+// it. The correct outcome is a real fetch, not a wait held over from
+// whichever account previously owned this name.
+func TestKnownAccountsFetcherDropsBackoffWhenCachedAccountDoesNotMatchSnapshot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "avisoma", "tok-a", "andy@avisoma.com")
+	saveAccountCache("avisoma", accountCacheEntry{
+		Account:            "someone@else.example",
+		Info:               &UsageInfo{FiveHour: usageBucket{Pct: 99}},
+		FetchedAt:          time.Now(),
+		BackoffStreak:      3,
+		BackoffNextAttempt: time.Now().Add(10 * time.Minute),
+	})
+	calls := 0
+	swapFetch(t, func(string) (*UsageInfo, error) {
+		calls++
+		return &UsageInfo{FiveHour: usageBucket{Pct: 5}}, nil
+	})
+
+	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("fetches = %d, want a mismatched entry's armed wait discarded — a real fetch, not a wait for someone else's throttle", calls)
+	}
+	if len(res.Accounts) != 1 || res.Accounts[0].Info == nil || res.Accounts[0].Info.FiveHour.Pct != 5 {
+		t.Fatalf("accounts = %#v, want avisoma's fresh numbers, not the mismatched entry's 99%%", res.Accounts)
 	}
 }
 
@@ -612,7 +661,7 @@ func TestKnownAccountsFetcherRetriesAFailedAccountFirst(t *testing.T) {
 		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
 	})
 
-	fetcher := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)
+	fetcher := newKnownAccountsFetcher(noSaveAccountCache)
 	if _, err := fetcher(); err != nil {
 		t.Fatalf("pass 1: %v", err)
 	}
@@ -633,8 +682,8 @@ func TestKnownAccountsFetcherRetriesAFailedAccountFirst(t *testing.T) {
 
 // The actual point of persisting the backoff: a process restarted mid-wait
 // must not fire a real request for an account before its persisted deadline
-// passes. seedBackoff is seeded exactly as NewKnownAccountsHub seeds it (from
-// loadKnownAccountsBackoffCache).
+// passes. Seeded via a direct saveAccountCache write, exactly what a prior
+// process instance's own save call would have left on disk.
 func TestKnownAccountsFetcherHonorsSeededBackoffAcrossRestart(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -647,10 +696,10 @@ func TestKnownAccountsFetcherHonorsSeededBackoffAcrossRestart(t *testing.T) {
 		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
 	})
 
-	seedBackoff := map[string]usageBackoff{
-		"avisoma": {streak: 3, nextAttempt: time.Now().Add(10 * time.Minute)},
-	}
-	fetcher := newKnownAccountsFetcher(nil, seedBackoff, noSaveKnownAccountsBackoff)
+	saveAccountCache("avisoma", accountCacheEntry{
+		BackoffStreak: 3, BackoffNextAttempt: time.Now().Add(10 * time.Minute),
+	})
+	fetcher := newKnownAccountsFetcher(noSaveAccountCache)
 	res, err := fetcher()
 	if err != nil {
 		t.Fatal(err)
@@ -677,10 +726,10 @@ func TestKnownAccountsFetcherFetchesWhenSeededBackoffHasElapsed(t *testing.T) {
 		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
 	})
 
-	seedBackoff := map[string]usageBackoff{
-		"avisoma": {streak: 3, nextAttempt: time.Now().Add(-time.Minute)},
-	}
-	fetcher := newKnownAccountsFetcher(nil, seedBackoff, noSaveKnownAccountsBackoff)
+	saveAccountCache("avisoma", accountCacheEntry{
+		BackoffStreak: 3, BackoffNextAttempt: time.Now().Add(-time.Minute),
+	})
+	fetcher := newKnownAccountsFetcher(noSaveAccountCache)
 	res, err := fetcher()
 	if err != nil {
 		t.Fatal(err)
@@ -693,11 +742,11 @@ func TestKnownAccountsFetcherFetchesWhenSeededBackoffHasElapsed(t *testing.T) {
 	}
 }
 
-// saveBackoff is called with each pass's final backoff map, so a restart
-// between passes sees an accurate picture of who is currently waiting: armed
-// after the first throttle (streak 1, still due immediately — the next
-// ordinary tick fetches for real — but a restart before the second throttle
-// should still know one already happened), cleared once a fetch succeeds.
+// save is called for each account attempted this pass, so a restart between
+// passes sees an accurate picture of who is currently waiting: armed after
+// the first throttle (streak 1, still due immediately — the next ordinary
+// tick fetches for real — but a restart before the second throttle should
+// still know one already happened), cleared once a fetch succeeds.
 func TestKnownAccountsFetcherPersistsBackoffAfterEachPass(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -712,19 +761,19 @@ func TestKnownAccountsFetcherPersistsBackoffAfterEachPass(t *testing.T) {
 		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
 	})
 
-	var saved []map[string]usageBackoff
-	saveBackoff := func(held map[string]usageBackoff) {
-		cp := make(map[string]usageBackoff, len(held))
-		for k, v := range held {
-			cp[k] = v
-		}
-		saved = append(saved, cp)
+	type saveCall struct {
+		name   string
+		streak int
 	}
-	fetcher := newKnownAccountsFetcher(nil, nil, saveBackoff)
+	var saved []saveCall
+	save := func(name string, e accountCacheEntry) {
+		saved = append(saved, saveCall{name, e.BackoffStreak})
+	}
+	fetcher := newKnownAccountsFetcher(save)
 	if _, err := fetcher(); err != nil {
 		t.Fatal(err)
 	}
-	if len(saved) != 1 || saved[0]["avisoma"].streak != 1 {
+	if len(saved) != 1 || saved[0].name != "avisoma" || saved[0].streak != 1 {
 		t.Fatalf("saved after first throttle = %+v, want avisoma streak 1", saved)
 	}
 
@@ -732,7 +781,7 @@ func TestKnownAccountsFetcherPersistsBackoffAfterEachPass(t *testing.T) {
 	if _, err := fetcher(); err != nil {
 		t.Fatal(err)
 	}
-	if len(saved) != 2 || len(saved[1]) != 0 {
+	if len(saved) != 2 || saved[1].streak != 0 {
 		t.Fatalf("saved after success = %+v, want the wait cleared", saved)
 	}
 }
@@ -762,7 +811,9 @@ func TestKnownAccountsFetcherCarriesNumbersAcrossPolls(t *testing.T) {
 		return healthy[token], nil
 	})
 
-	fetcher := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)
+	// Real persistence, not a no-op: this test's whole point is that pass 2
+	// reads back what pass 1 wrote, so the numbers survive a throttle.
+	fetcher := newKnownAccountsFetcher(saveAccountCache)
 	first, err := fetcher()
 	if err != nil {
 		t.Fatal(err)
@@ -805,22 +856,23 @@ func TestKnownAccountsFetcherCarriesNumbersAcrossPolls(t *testing.T) {
 	}
 }
 
-// A warm start carries forward too: the disk cache seeds the fetcher's memory,
-// so a first poll that lands mid-throttle shows the cached numbers rather than
-// a placeholder.
+// A warm start carries forward too: each account's own disk cache is what the
+// fetcher reads on its very first pass (no separate seed needed — the fetcher
+// has no in-memory state of its own at all), so a first poll that lands
+// mid-throttle shows the cached numbers rather than a placeholder.
 func TestKnownAccountsFetcherSeedsFromCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
 	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
 	swapFetch(t, func(string) (*UsageInfo, error) { return nil, &usageHTTPError{Status: 429} })
 
-	seed := &knownAccountsResult{Accounts: []KnownAccountUsage{{
-		Name:      "trecs",
+	saveAccountCache("trecs", accountCacheEntry{
 		Account:   "andy@trecs.aero",
 		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
 		FetchedAt: time.Now().Add(-time.Minute),
-	}}}
-	res, err := newKnownAccountsFetcher(seed, nil, noSaveKnownAccountsBackoff)()
+	})
+	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -829,299 +881,6 @@ func TestKnownAccountsFetcherSeedsFromCache(t *testing.T) {
 	}
 	if got := res.Accounts[0]; !got.Stale || got.Info == nil || got.Info.FiveHour.Pct != 63 {
 		t.Fatalf("first pass after a warm start = %#v, want the seeded numbers, stale", got)
-	}
-}
-
-func TestKnownAccountsCacheRoundTrip(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	res := knownAccountsResult{
-		Accounts: []KnownAccountUsage{
-			{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: time.Now()},
-		},
-		ActiveName: "trecs",
-	}
-	saveKnownAccountsCache(&res)
-	got := loadKnownAccountsCache()
-	if got == nil {
-		t.Fatal("cache round-trip returned nil")
-	}
-	if len(got.Accounts) != 1 || got.Accounts[0].Name != "avisoma" {
-		t.Fatalf("cached accounts = %#v", got.Accounts)
-	}
-	if got.Accounts[0].Info == nil || got.Accounts[0].Info.FiveHour.Pct != 41 {
-		t.Fatalf("cached info = %#v", got.Accounts[0].Info)
-	}
-	// Which account is logged in can change while the process is down, so the
-	// active name is never seeded from disk — the first fetch resolves it.
-	if got.ActiveName != "" {
-		t.Fatalf("seeded active snapshot = %q, want empty", got.ActiveName)
-	}
-}
-
-func TestKnownAccountsCacheNeverPersistsExpired(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	res := knownAccountsResult{Accounts: []KnownAccountUsage{
-		{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: time.Now()},
-		{Name: "trecs", Account: "andy@trecs.aero", Expired: true},
-	}}
-	saveKnownAccountsCache(&res)
-	got := loadKnownAccountsCache()
-	if got == nil {
-		t.Fatal("cache round-trip returned nil")
-	}
-	if len(got.Accounts) != 1 || got.Accounts[0].Name != "avisoma" {
-		t.Fatalf("expired entry survived the cache: %#v", got.Accounts)
-	}
-
-	// Nothing but expired entries leaves no usable cache at all — an expired
-	// account starts as "no data yet" after a restart.
-	onlyExpired := knownAccountsResult{Accounts: []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Expired: true}}}
-	saveKnownAccountsCache(&onlyExpired)
-	if got := loadKnownAccountsCache(); got != nil {
-		t.Fatalf("all-expired cache seeded %#v, want nil", *got)
-	}
-}
-
-func TestKnownAccountsBackoffCacheRoundTrip(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	if got := loadKnownAccountsBackoffCache(); got != nil {
-		t.Fatalf("loadKnownAccountsBackoffCache with no file = %+v, want nil", got)
-	}
-	next := time.Now().Add(6 * time.Minute).UTC().Truncate(time.Second)
-	saveKnownAccountsBackoffCache(map[string]usageBackoff{
-		"avisoma": {streak: 2, nextAttempt: next},
-	})
-	got := loadKnownAccountsBackoffCache()
-	if got == nil || got["avisoma"].streak != 2 {
-		t.Fatalf("round-trip = %+v, want avisoma streak 2", got)
-	}
-	if !got["avisoma"].nextAttempt.Equal(next) {
-		t.Errorf("round-trip nextAttempt = %v, want %v", got["avisoma"].nextAttempt, next)
-	}
-}
-
-// Clearing every wait (an empty map) removes the file rather than writing an
-// empty envelope, mirroring saveUsageBackoffCache's rule for the live account.
-func TestKnownAccountsBackoffCacheClearedWhenEmpty(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	saveKnownAccountsBackoffCache(map[string]usageBackoff{
-		"avisoma": {streak: 2, nextAttempt: time.Now().Add(time.Minute)},
-	})
-	if got := loadKnownAccountsBackoffCache(); got == nil {
-		t.Fatal("setup: expected a wait to be persisted before clearing it")
-	}
-	saveKnownAccountsBackoffCache(nil)
-	if got := loadKnownAccountsBackoffCache(); got != nil {
-		t.Fatalf("after clearing, cache = %+v, want nil", got)
-	}
-	if _, err := os.Stat(knownAccountsBackoffCachePath()); !os.IsNotExist(err) {
-		t.Errorf("cache file still exists after clearing, err = %v", err)
-	}
-}
-
-// A deadline recorded before a long outage — or a corrupt/bogus one — must not
-// be able to wedge an account out of rotation past usageBackoffCeiling from
-// the moment it is loaded, mirroring loadUsageBackoffCache's clamp for the
-// live account.
-func TestKnownAccountsBackoffCacheClampsAnExcessiveDeadline(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	saveKnownAccountsBackoffCache(map[string]usageBackoff{
-		"avisoma": {streak: 5, nextAttempt: time.Now().Add(6 * time.Hour)},
-	})
-	got := loadKnownAccountsBackoffCache()
-	max := time.Now().Add(usageBackoffCeiling + 5*time.Second)
-	if got == nil || got["avisoma"].nextAttempt.After(max) {
-		t.Fatalf("loaded = %+v, want clamped to within %v of now", got, usageBackoffCeiling)
-	}
-	if got["avisoma"].streak != 5 {
-		t.Errorf("clamping the deadline also dropped the streak: got %d, want 5 preserved", got["avisoma"].streak)
-	}
-}
-
-// A zero streak, or a zero deadline, is not a real persisted wait — loading it
-// must not silently arm one.
-func TestKnownAccountsBackoffCacheRejectsIncompleteEntries(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	bad, _ := json.Marshal(cachedKnownAccountsBackoff{Entries: map[string]cachedKnownAccountsBackoffEntry{
-		"avisoma": {Streak: 0, NextAttempt: time.Now().Add(time.Minute)},
-	}})
-	if err := os.WriteFile(knownAccountsBackoffCachePath(), bad, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadKnownAccountsBackoffCache(); got != nil {
-		t.Fatalf("zero-streak entry = %+v, want rejected", got)
-	}
-	if err := os.WriteFile(knownAccountsBackoffCachePath(), []byte("not json"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadKnownAccountsBackoffCache(); got != nil {
-		t.Fatalf("corrupt cache = %+v, want nil", got)
-	}
-}
-
-// An elapsed deadline drops its streak along with it — mirrors
-// loadUsageBackoffCache's identical rule for the live account: due() reports
-// the account fetchable regardless of the streak, so carrying it forward would
-// only jump the next throttle straight into usageBackoffMax.
-func TestKnownAccountsBackoffCacheDropsAnElapsedWait(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	saveKnownAccountsBackoffCache(map[string]usageBackoff{
-		"avisoma": {streak: 3, nextAttempt: time.Now().Add(-time.Minute)},
-	})
-	if got := loadKnownAccountsBackoffCache(); got != nil {
-		t.Fatalf("elapsed wait loaded as %+v, want dropped along with its streak", got)
-	}
-}
-
-// A clamp that only lived in memory would leave the bogus value on disk to be
-// re-clamped fresh (and never actually fixed) on every future restart. The
-// correction must be written back.
-func TestKnownAccountsBackoffCacheClampSelfHeals(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	saveKnownAccountsBackoffCache(map[string]usageBackoff{
-		"avisoma": {streak: 5, nextAttempt: time.Now().Add(6 * time.Hour)},
-	})
-	if got := loadKnownAccountsBackoffCache(); got == nil || got["avisoma"].streak != 5 {
-		t.Fatalf("setup: loaded = %+v, want the clamped wait", got)
-	}
-	// Read the raw file directly rather than through loadKnownAccountsBackoffCache
-	// again, which would clamp a second time and hide whether the write-back
-	// actually happened.
-	data, err := os.ReadFile(knownAccountsBackoffCachePath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c cachedKnownAccountsBackoff
-	if err := json.Unmarshal(data, &c); err != nil {
-		t.Fatal(err)
-	}
-	entry, ok := c.Entries["avisoma"]
-	if !ok {
-		t.Fatal("raw file has no avisoma entry after the self-heal write")
-	}
-	if max := time.Now().Add(usageBackoffCeiling + 5*time.Second); entry.NextAttempt.After(max) {
-		t.Fatalf("raw file next_attempt = %v, want the clamped value persisted back, not the original 6h one", entry.NextAttempt)
-	}
-}
-
-// Vintage is judged per account, not per file: each entry keeps its own
-// FetchedAt rather than the envelope's, and there is no age gate any more — a
-// carried-forward entry beside a freshly-fetched one both load, whatever their
-// individual ages.
-func TestKnownAccountsCacheHasNoAgeGatePerAccount(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	// One file, written at the same instant, holding numbers of two very
-	// different vintages — which is exactly what a carried-forward entry beside
-	// a freshly-fetched one is.
-	freshAt := time.Now().Add(-time.Minute)
-	ancientAt := time.Now().Add(-24 * time.Hour)
-	mixed, err := json.Marshal(cachedKnownAccounts{
-		FetchedAt: time.Now(),
-		Accounts: []KnownAccountUsage{
-			{Name: "fresh", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: freshAt},
-			{Name: "ancient", Info: &UsageInfo{FiveHour: usageBucket{Pct: 99}}, FetchedAt: ancientAt},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(knownAccountsCachePath(), mixed, 0600); err != nil {
-		t.Fatal(err)
-	}
-	got := loadKnownAccountsCache()
-	if got == nil || len(got.Accounts) != 2 {
-		t.Fatalf("seeded %#v, want both entries regardless of age", got)
-	}
-	byName := map[string]KnownAccountUsage{}
-	for _, a := range got.Accounts {
-		byName[a.Name] = a
-	}
-	if !byName["fresh"].FetchedAt.Equal(freshAt) || !byName["ancient"].FetchedAt.Equal(ancientAt) {
-		t.Fatalf("timestamps not preserved: %#v", byName)
-	}
-	// A disk seed is a read, not a completed poll: every entry must come back
-	// marked Stale, or it would render indistinguishable from a just-fetched
-	// account until the next real pass.
-	if !byName["fresh"].Stale || !byName["ancient"].Stale {
-		t.Fatalf("seeded entries = %#v, want every disk seed marked Stale", byName)
-	}
-
-	// A cache file written before per-account timestamps existed decodes to the
-	// zero time everywhere, so the whole thing drops — one poll replaces it,
-	// since there is no vintage at all to judge for numbers with no timestamp.
-	legacy, err := json.Marshal(cachedKnownAccounts{
-		FetchedAt: time.Now(),
-		Accounts:  []KnownAccountUsage{{Name: "avisoma", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(knownAccountsCachePath(), legacy, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadKnownAccountsCache(); got != nil {
-		t.Fatalf("untimestamped cache seeded %#v, want nil", *got)
-	}
-}
-
-// A stale entry survives a restart with its numbers AND its original
-// timestamp — laundering it into a fresh reading is the one thing the cache
-// must not do.
-func TestKnownAccountsCachePersistsStaleWithoutRestamping(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	fetched := time.Now().Add(-5 * time.Minute)
-	res := knownAccountsResult{Accounts: []KnownAccountUsage{{
-		Name:      "trecs",
-		Account:   "andy@trecs.aero",
-		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
-		Stale:     true,
-		Reason:    "rate limited",
-		FetchedAt: fetched,
-	}}}
-	saveKnownAccountsCache(&res)
-	got := loadKnownAccountsCache()
-	if got == nil || len(got.Accounts) != 1 {
-		t.Fatalf("stale entry did not survive the cache: %#v", got)
-	}
-	a := got.Accounts[0]
-	if a.Info == nil || a.Info.FiveHour.Pct != 63 || !a.Stale {
-		t.Fatalf("cached stale entry = %#v, want its numbers and its marker", a)
-	}
-	if !a.FetchedAt.Round(time.Second).Equal(fetched.Round(time.Second)) {
-		t.Fatalf("FetchedAt = %v, want the original %v", a.FetchedAt, fetched)
-	}
-}
-
-func TestKnownAccountsCacheExpiryAndCorruption(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-
-	// An entry that decodes without Info is a miss, not a healthy-looking zero.
-	nilInfo, err := json.Marshal(cachedKnownAccounts{
-		FetchedAt: time.Now(),
-		Accounts:  []KnownAccountUsage{{Name: "avisoma", FetchedAt: time.Now()}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(knownAccountsCachePath(), nilInfo, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadKnownAccountsCache(); got != nil {
-		t.Fatalf("info-less cache seeded %#v, want nil", *got)
-	}
-
-	if err := os.WriteFile(knownAccountsCachePath(), []byte("not json"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadKnownAccountsCache(); got != nil {
-		t.Fatalf("corrupt cache seeded %#v, want nil", *got)
-	}
-
-	if err := os.Remove(knownAccountsCachePath()); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadKnownAccountsCache(); got != nil {
-		t.Fatalf("absent cache seeded %#v, want nil", *got)
 	}
 }
 
@@ -1177,7 +936,10 @@ func TestKnownAccountsFetcherBacksOffRepeatedThrottles(t *testing.T) {
 		defer mu.Unlock()
 		throttled = v
 	}
-	fetcher := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)
+	// Real persistence, not a no-op: this fetcher keeps no in-memory state at
+	// all any more, so building a real streak across passes (and carrying
+	// numbers past a throttle) requires the disk round-trip.
+	fetcher := newKnownAccountsFetcher(saveAccountCache)
 	pass := func(t *testing.T, n int) KnownAccountUsage {
 		t.Helper()
 		res, err := fetcher()
@@ -1248,7 +1010,11 @@ func TestKnownAccountsFetcherResolvesActiveNameWhileBackedOff(t *testing.T) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	})
-	fetcher := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)
+	// Real persistence: two consecutive throttles must actually arm a wait
+	// (streak building requires the disk round-trip, since this fetcher keeps
+	// no in-memory state), which is the "backed off" precondition this test
+	// is named for.
+	fetcher := newKnownAccountsFetcher(saveAccountCache)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err != nil {
 			t.Fatalf("pass %d: %v", i, err)

@@ -429,9 +429,28 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was silently truncating. A loaded deadline further out than the ceiling is
   clamped, and the corrected value is written back to disk so a crash loop
   can't keep re-clamping the same bogus far-future timestamp forever without
-  ever actually fixing it; a loaded deadline that has already elapsed drops
-  its streak too, rather than letting the very next throttle skip straight to
-  the multi-minute wait tier instead of the normal free first retry.
+  ever actually fixing it.
+- Switching accounts (`account switch`, Ctrl+W) no longer loses either
+  account's cached usage numbers or backoff wait. Live-account and
+  known-account numbers used to be cached in separate files split by role, so
+  a switch reset both sides' state: the incoming account started its numbers
+  over as if never seen, and the outgoing account's backoff streak vanished
+  the moment it reappeared as a known account. Both now read and write one
+  cache entry per account (numbers and backoff together), keyed by
+  claude-switch snapshot name rather than by role, so switching just changes
+  which slot is being asked for — a known account's existing carried numbers
+  and armed wait show up immediately on the live side the moment it becomes
+  live, and vice versa. Writes go through the same atomic temp-file-then-rename
+  helper account switching already used, since one account's file can now
+  legitimately have two writers (the live and known-account pollers both touch
+  it across a switch). A loaded entry whose claimed account doesn't match
+  who's actually live — a stale file, or a snapshot name reassigned to a
+  different account — has neither its numbers nor its backoff trusted; a live
+  account that has never been `account save`d, or whose identity is
+  momentarily unreadable, falls back to the in-memory-only backoff behavior
+  every account had before this change, so it loses nothing either — and that
+  fallback state survives switching to and from other accounts without being
+  overwritten.
 - `-s` prints the bearer token only when stdout is a terminal. Redirected or
   piped output gets the path to the token file instead, so `claude-sessions -s
   > server.log` no longer copies a secret that lives `0600` on disk into

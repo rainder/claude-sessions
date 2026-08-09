@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -347,9 +346,9 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 // fresh reports whether a result actually has numbers on it — real Info and a
 // timestamp establishing their vintage — with no identity check and, since
 // carrying is not age-bounded, no age check either: an unstamped entry (a
-// pre-timestamp disk write) is the only thing this rejects. Used where prev
-// and the value being judged are the same record (loadKnownAccountsCache
-// checking a cache entry against itself), so there is nothing to misattribute.
+// pre-timestamp disk write) is the only thing this rejects. carryable is the
+// only caller — this is its numbers-and-info half, before carryable adds its
+// own identity test on top.
 func fresh(v *KnownAccountUsage) bool {
 	return v != nil && v.Info != nil && !v.FetchedAt.IsZero()
 }
@@ -368,59 +367,6 @@ func fresh(v *KnownAccountUsage) bool {
 // since identity can't be confirmed either way.
 func carryable(prev *KnownAccountUsage, email string) bool {
 	return fresh(prev) && prev.Account != "" && email != "" && strings.EqualFold(prev.Account, email)
-}
-
-// allKnownAccounts fetches every named snapshot account one at a time, in the
-// order given, skipping whichever name stands for liveEmail, and returns the
-// survivors in that same order plus the skipped name (the active snapshot; ""
-// when none matched).
-//
-// Sequential rather than fanned out: these are typically a handful of
-// different Anthropic accounts, each with its own token and budget, so
-// nothing here risks one account's throttle on another's — but they are all
-// requests from the same process to the same endpoint at the same moment, and
-// spreading them out in time rather than bursting them costs one pass a
-// little wall-clock (bounded by the timeout inside each fetch) in exchange for
-// never presenting as a burst. names is the order newKnownAccountsFetcher
-// hands in, not raw snapshotAccountNames() order — see that function for how
-// a name that failed (or was skipped as backed-off) this pass earns the front
-// of the queue next time, so a chronically struggling account isn't
-// perpetually the last one attempted.
-//
-// It never returns an error, and never omits an account because that account
-// failed: a failure is carried as that entry's own classification. That is the
-// property KnownAccountsHub depends on — the poller's fetch only fails for a
-// catastrophic host-level problem, so one flaky account can't trigger the
-// whole-batch backoff and hide every other account's healthy data.
-//
-// prev holds each account's last result, keyed by snapshot name (absent for an
-// account that has none yet); it is what a transient failure re-serves.
-//
-// The per-account fetch is injected, which is also how the poller substitutes a
-// no-round-trip answer for an account it is currently backing off (see
-// newKnownAccountsFetcher). The active-snapshot name is a genuine side output of
-// this one pass — it is the name whose own email/live-email comparison came back
-// "skip", so it can never disagree with which account the pass actually left
-// out, the way an independent second lookup (different call, possibly a
-// different live email) could.
-func allKnownAccounts(names []string, liveEmail string, prev map[string]KnownAccountUsage, one func(name, liveEmail string, prev *KnownAccountUsage) (*KnownAccountUsage, bool)) ([]KnownAccountUsage, string) {
-	out := make([]KnownAccountUsage, 0, len(names))
-	active := ""
-	for _, name := range names {
-		var last *KnownAccountUsage
-		if p, ok := prev[name]; ok {
-			p := p
-			last = &p
-		}
-		r, skipped := one(name, liveEmail, last)
-		if skipped && active == "" {
-			active = name
-		}
-		if r != nil {
-			out = append(out, *r)
-		}
-	}
-	return out, active
 }
 
 // knownAccountsResult is one poll's outcome: usage for every known account this
@@ -479,167 +425,51 @@ func reorderFailedFirst(order []string, failed map[string]bool) []string {
 	return next
 }
 
-// knownAccountsBackoffCachePath is where each known account's armed wait is
-// persisted, alongside (but separate from) knownAccountsCachePath's numbers —
-// the two expire on different events (a fetch vs. a 429), the same split
-// usageBackoffCachePath makes for the live account.
-func knownAccountsBackoffCachePath() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("claude-sessions-known-accounts-backoff-%d.json", os.Getuid()))
-}
-
-// cachedKnownAccountsBackoffEntry is the on-disk form of one account's
-// usageBackoff.
-type cachedKnownAccountsBackoffEntry struct {
-	Streak      int       `json:"streak"`
-	NextAttempt time.Time `json:"next_attempt"`
-}
-
-// cachedKnownAccountsBackoff is the on-disk envelope, keyed by snapshot name —
-// the same key newKnownAccountsFetcher's own backoff map uses.
-type cachedKnownAccountsBackoff struct {
-	Entries map[string]cachedKnownAccountsBackoffEntry `json:"entries"`
-}
-
-// saveKnownAccountsBackoffCache persists every account currently backed off.
-// held with nothing left in it (every wait has ended) clears the file rather
-// than writing an empty envelope — "no waits armed" needs no file on disk, the
-// same rule saveUsageBackoffCache follows for the live account. Best-effort:
-// a read-only /tmp just costs the warm start, not correctness.
-func saveKnownAccountsBackoffCache(held map[string]usageBackoff) {
-	entries := make(map[string]cachedKnownAccountsBackoffEntry, len(held))
-	for name, b := range held {
-		if b.streak <= 0 {
-			continue
-		}
-		entries[name] = cachedKnownAccountsBackoffEntry{Streak: b.streak, NextAttempt: b.nextAttempt}
-	}
-	if len(entries) == 0 {
-		_ = os.Remove(knownAccountsBackoffCachePath())
-		return
-	}
-	data, err := json.Marshal(cachedKnownAccountsBackoff{Entries: entries})
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(knownAccountsBackoffCachePath(), data, 0600)
-}
-
-// loadKnownAccountsBackoffCache returns the persisted waits, keyed by
-// snapshot name, or nil if there are none, the file is unreadable, or every
-// entry is missing a field a real wait always has.
-//
-// An entry whose deadline has already elapsed drops its streak along with it
-// rather than carrying it forward, and one whose deadline hasn't is clamped to
-// now+usageBackoffCeiling and, if clamping actually changed it, the correction
-// is written straight back to disk — see loadUsageBackoffCache's identical
-// reasoning for both: due() reports an elapsed entry fetchable regardless of
-// its streak, so a stale streak buys nothing but a needlessly long wait on the
-// next throttle; and a clamp that only lives in memory would leave a bogus
-// far-future timestamp to be re-clamped fresh (and never actually fixed) on
-// every future restart, which in a crash loop is a slow-motion version of the
-// exact wedge the clamp exists to prevent.
-func loadKnownAccountsBackoffCache() map[string]usageBackoff {
-	data, err := os.ReadFile(knownAccountsBackoffCachePath())
-	if err != nil {
-		return nil
-	}
-	var c cachedKnownAccountsBackoff
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil
-	}
-	now := time.Now()
-	max := now.Add(usageBackoffCeiling)
-	out := make(map[string]usageBackoff, len(c.Entries))
-	clamped := false
-	for name, e := range c.Entries {
-		if e.Streak <= 0 || e.NextAttempt.IsZero() || !e.NextAttempt.After(now) {
-			continue
-		}
-		next := e.NextAttempt
-		if next.After(max) {
-			next = max
-			clamped = true
-		}
-		out[name] = usageBackoff{streak: e.Streak, nextAttempt: next}
-	}
-	if clamped {
-		saveKnownAccountsBackoffCache(out)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 // newKnownAccountsFetcher builds the poller's fetch: resolve this host's
 // snapshot names, then fetch every one that isn't the live account, one at a
-// time (allKnownAccounts). The live email is re-read per fetch, like
-// fetchUsage does, so a relogin mid-run immediately changes both which
-// snapshot is skipped and which one is reported as active. Only an
+// time, inline in the loop below (sequential, not fanned out — several
+// different Anthropic accounts, each with its own budget, but all requests
+// from this one process to the same endpoint at the same moment, so spreading
+// them out in time avoids presenting as a burst). The live email is re-read
+// per fetch, like fetchUsage does, so a relogin mid-run immediately changes
+// both which snapshot is skipped and which one is reported as active. Only an
 // unresolvable home directory is an error; zero snapshots is an empty list.
 //
-// It is a closure rather than a plain function because carrying numbers across
-// a failed poll needs memory of the previous one, and usagePoller's fetch takes
-// no arguments. seed is the disk cache the hub also seeds the poller with (nil
-// when there is none), so a restart mid-throttle can carry forward too instead
-// of starting from nothing.
+// Unlike the version of this function that predates account_cache.go, the
+// closure itself holds no memory at all: every pass reads each account's own
+// cache entry fresh from disk (loadAccountCache) instead of maintaining an
+// in-memory `last`/`backoff` map rebuilt from a construction-time seed. That
+// is what makes an account switch a non-event on this side too — a name that
+// stops being skipped (its email no longer matches who's live) picks up
+// whatever was persisted for it, including if that account was itself live a
+// moment ago, with no special-casing needed to notice the switch happened.
+// Reading N small files every 2-minute pass is negligible next to the actual
+// per-account HTTP round trips this function makes; see CLAUDE.md's "Usage
+// polling" section for the full reasoning behind the shared per-account file.
 //
-// last is rebuilt from each pass rather than mutated, and only from entries
-// that actually have numbers: an account whose snapshot was renamed or deleted
-// drops out of names, so it drops out of last on the next pass instead of
-// lingering for the life of the process.
+// The only memory the closure DOES keep is the fetch order — WHICH account
+// goes first, since accounts are fetched one at a time rather than fanned
+// out all at once. Any account this pass could not get fresh
+// numbers for — a genuine failure or a synthesized backoff answer,
+// `Expired || Reason != ""` either way — moves to the front for the next pass
+// (reorderFailedFirst), ahead of the accounts that are fine. reconcileFetchOrder
+// folds in additions and removals each pass so a renamed or newly-saved
+// snapshot is never silently dropped from the rotation. The returned result is
+// sorted by name regardless of fetchOrder (see below), so this reordering is
+// invisible to the header and every other consumer — it only changes request
+// sequence, not content. order is read and written only inside the returned
+// closure, which usagePoller.run calls one tick at a time from its single
+// goroutine, so mu guards nothing that is genuinely contended — kept anyway
+// to match every other closure in this file that carries state this shape.
 //
-// The closure carries a second memory beside it: how many consecutive passes
-// each account has been rate limited, and when it may be tried again
-// (usageBackoff). The same account is routinely held as a credential snapshot
-// on more than one host, and every host polls it on its own tick, so an account
-// the endpoint keeps throttling would otherwise cost a failed round trip per
-// host per usageRefreshInterval forever. While an account is backed off its
-// fetch is not attempted at all — the entry is synthesized from the answer a
-// throttled fetch would have produced, so the header keeps showing exactly what
-// it showed before, carried forward and marked stale like any other transient
-// failure.
-//
-// A third memory is the fetch order itself. Since allKnownAccounts now goes
-// one account at a time rather than fanning every account out at once, WHICH
-// one goes first matters — not for whether it gets attempted this pass (every
-// name in fetchOrder is: skip is decided from the backoff map alone, gating on
-// due(now) rather than position) but for the order requests actually fire in.
-// Any account this pass could not get fresh numbers for — a genuine failure or
-// a synthesized backoff answer, `Expired || Reason != ""` either way — moves
-// to the front for the next pass (reorderFailedFirst), ahead of the accounts
-// that are fine, on the request explicitly made: whatever failed most
-// recently is retried first. reconcileFetchOrder folds in additions and
-// removals each pass so a renamed or newly-saved snapshot is never silently
-// dropped from the rotation. The returned result is sorted by name regardless
-// of fetchOrder (see below), so this reordering is invisible to the header
-// and every other consumer — it only changes request sequence, not content.
-//
-// All three maps and the order slice are rebuilt or recomputed from names each
-// pass, for the same reason, and all are only ever read and written here — in
-// the serial closure the poller calls one tick at a time.
-//
-// seedBackoff re-arms whatever waits a prior process instance had in flight
-// (loadKnownAccountsBackoffCache) — assigned straight into backoff, never run
-// back through usageBackoffUntil, for the same reason newUsageFetcher's
-// backoffSeed isn't: those deadlines were already computed once, against the
-// now current when they were saved, and recomputing them here against a new
-// now would let a restart loop walk them forward indefinitely. saveBackoff is
-// injected rather than called as a package function so tests can drive this
-// closure without writing to the real host's /tmp — the same reason
-// newUsageFetcher takes one.
-func newKnownAccountsFetcher(seed *knownAccountsResult, seedBackoff map[string]usageBackoff, saveBackoff func(map[string]usageBackoff)) func() (*knownAccountsResult, error) {
+// save is injected rather than called as saveAccountCache directly, the same
+// reason newUsageFetcher's save is: a hardcoded call would make every test
+// that exercises a real fetch write to the developer's actual TMPDIR. load
+// (loadAccountCache) is called directly, not injected — reads are lower risk
+// than writes and every test already isolates TMPDIR the same way tests
+// isolate HOME for loadAccountEmail, matching this file's existing precedent.
+func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func() (*knownAccountsResult, error) {
 	var mu sync.Mutex
-	last := map[string]KnownAccountUsage{}
-	if seed != nil {
-		for _, a := range seed.Accounts {
-			last[a.Name] = a
-		}
-	}
-	backoff := make(map[string]usageBackoff, len(seedBackoff))
-	for name, b := range seedBackoff {
-		backoff[name] = b
-	}
 	var order []string
 	return func() (*knownAccountsResult, error) {
 		names, err := snapshotAccountNames()
@@ -648,85 +478,91 @@ func newKnownAccountsFetcher(seed *knownAccountsResult, seedBackoff map[string]u
 		}
 		now := time.Now()
 		mu.Lock()
-		prev := make(map[string]KnownAccountUsage, len(names))
-		held := make(map[string]usageBackoff, len(names))
-		for _, n := range names {
-			if a, ok := last[n]; ok {
-				prev[n] = a
-			}
-			if b, ok := backoff[n]; ok {
-				held[n] = b
-			}
-		}
 		fetchOrder := reconcileFetchOrder(order, names)
 		mu.Unlock()
 
-		// Decided before the sequential walk so nothing in it needs to touch
-		// the closure's own maps.
-		skip := make(map[string]bool, len(held))
-		for n, b := range held {
-			if !b.due(now) {
-				skip[n] = true
+		liveEmail := loadAccountEmail()
+		accounts := make([]KnownAccountUsage, 0, len(fetchOrder))
+		active := ""
+		failed := make(map[string]bool, len(fetchOrder))
+		for _, name := range fetchOrder {
+			email := snapshotAccountEmail(name)
+			if emailMatchesLive(email, liveEmail) {
+				if active == "" {
+					active = name
+				}
+				continue
 			}
-		}
-		one := func(name, liveEmail string, p *KnownAccountUsage) (*KnownAccountUsage, bool) {
-			if !skip[name] {
-				return fetchKnownAccountUsage(name, liveEmail, p)
+			cached, clamped := loadAccountCache(name)
+			if clamped {
+				save(name, cached)
 			}
-			// A backed-off account still goes through knownAccountUsage, with the
-			// answer a throttled endpoint would have given substituted for the round
-			// trip. That keeps one place deciding whether this name stands for the
-			// live account (which is what resolves ActiveName, and what a name
-			// filtered out of the batch entirely would have silently broken),
-			// whether prev's numbers may be carried forward, and how the entry reads.
-			return knownAccountUsage(name, liveEmail, p, func(string) (*UsageInfo, error) {
-				return nil, &usageHTTPError{Status: http.StatusTooManyRequests}
-			})
-		}
-		accounts, active := allKnownAccounts(fetchOrder, loadAccountEmail(), prev, one)
-
-		fresh := make(map[string]KnownAccountUsage, len(accounts))
-		listed := make(map[string]bool, len(accounts))
-		failed := make(map[string]bool, len(accounts))
-		for _, a := range accounts {
-			listed[a.Name] = true
-			if a.Info != nil {
-				fresh[a.Name] = a
+			var prev *KnownAccountUsage
+			if cached.Info != nil {
+				// Handed to knownAccountUsage regardless of whether cached.Account
+				// matches email below — its own carryable(prev, email) check is
+				// what actually decides whether these numbers may be carried
+				// forward, and rejects a mismatch on its own.
+				prev = &KnownAccountUsage{
+					Name: name, Account: cached.Account, Info: cached.Info,
+					Stale: cached.Stale, Verified: cached.Verified, FetchedAt: cached.FetchedAt,
+				}
 			}
-			// Anything that isn't a clean success — Expired, or any Reason at
-			// all (a genuine failure this pass, or a synthesized backoff
-			// answer) — earns the front of the queue next time.
-			if a.Expired || a.Reason != "" {
-				failed[a.Name] = true
+			backoff := cached.backoff()
+			if !entryIdentityMatches(cached, email) && cached.Account != "" {
+				// Unlike numbers (guarded by knownAccountUsage's own carryable
+				// check above), nothing gated the backoff half until an
+				// independent review caught it: a claude-switch snapshot name
+				// reassigned to a different account (`account save --force`)
+				// would otherwise inherit the outgoing account's armed wait
+				// even though the new account was never itself throttled.
+				backoff = usageBackoff{}
+			}
+			attempted := backoff.due(now)
+			var r *KnownAccountUsage
+			if attempted {
+				r, _ = fetchKnownAccountUsage(name, liveEmail, prev)
+			} else {
+				// A backed-off account still goes through knownAccountUsage, with the
+				// answer a throttled endpoint would have given substituted for the
+				// round trip. That keeps one place deciding whether this name stands
+				// for the live account, whether prev's numbers may be carried
+				// forward, and how the entry reads.
+				r, _ = knownAccountUsage(name, liveEmail, prev, func(string) (*UsageInfo, error) {
+					return nil, &usageHTTPError{Status: http.StatusTooManyRequests}
+				})
+			}
+			if r == nil {
+				continue
+			}
+			accounts = append(accounts, *r)
+			// Anything that isn't a clean success — Expired, or any Reason at all
+			// (a genuine failure this pass, or a synthesized backoff answer) —
+			// earns the front of the queue next time.
+			if r.Expired || r.Reason != "" {
+				failed[name] = true
 			}
 			// A synthesized entry is not an attempt, so it neither lengthens the
 			// wait nor resets it — the deadline already armed simply stands.
-			if skip[a.Name] {
-				continue
+			if attempted {
+				if r.Reason == usageRateLimitedReason {
+					backoff = backoff.next(now, r.RetryAt)
+				} else {
+					// Numbers, a dead credential, a failure of some other kind — all
+					// end the streak. The state tracks consecutive throttles only.
+					backoff = usageBackoff{}
+				}
 			}
-			if a.Reason == usageRateLimitedReason {
-				held[a.Name] = held[a.Name].next(now, a.RetryAt)
-				continue
+			e := accountCacheEntry{BackoffStreak: backoff.streak, BackoffNextAttempt: backoff.nextAttempt}
+			if r.Info != nil {
+				e.Account, e.FetchedAt, e.Info, e.Verified = r.Account, r.FetchedAt, r.Info, r.Verified
 			}
-			// Anything else — numbers, a dead credential, a failure of some other
-			// kind — ends the streak. The state tracks consecutive throttles only.
-			delete(held, a.Name)
-		}
-		// A name in names with no entry at all is the one this pass skipped as the
-		// live account. It is fetched through the live path now, so whatever was
-		// armed against its snapshot no longer describes anything.
-		for n := range held {
-			if !listed[n] {
-				delete(held, n)
-			}
+			save(name, e)
 		}
 
 		mu.Lock()
-		last = fresh
-		backoff = held
 		order = reorderFailedFirst(fetchOrder, failed)
 		mu.Unlock()
-		saveBackoff(held)
 		// Sorted by name for the result, independent of fetchOrder: the header
 		// (dedupeAccounts) reads Accounts in this order directly, and without
 		// sorting here a name would jump around the header block whenever it
@@ -738,95 +574,6 @@ func newKnownAccountsFetcher(seed *knownAccountsResult, seedBackoff map[string]u
 	}
 }
 
-// knownAccountsCachePath is where the last successful known-accounts fetch is
-// persisted so a restart during an endpoint throttle still has something to
-// show. Separate file from the live-usage cache; UID in the name keeps
-// multi-user /tmp collisions away.
-func knownAccountsCachePath() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("claude-sessions-known-accounts-%d.json", os.Getuid()))
-}
-
-// cachedKnownAccounts is the on-disk envelope: the per-account snapshots plus
-// when the file was written. That envelope timestamp is informational only —
-// each entry carries its own FetchedAt, and an entry re-served after a failed
-// refresh keeps the timestamp of the fetch that actually produced its numbers,
-// so an envelope-level "written just now" would say nothing about how old the
-// numbers inside are. The active-snapshot name is deliberately not persisted —
-// it describes which account is logged in *now*, which a restart can have
-// changed, and it is re-resolved by the first fetch anyway.
-type cachedKnownAccounts struct {
-	FetchedAt time.Time           `json:"fetched_at"`
-	Accounts  []KnownAccountUsage `json:"accounts"`
-}
-
-// saveKnownAccountsCache persists the entries of a fetch that have numbers —
-// expired ones are deliberately dropped, so a restart can seed a recently-good
-// account but never resurrects a previously-expired one as if it were fresh (it
-// starts as "no data yet" and waits for the next live fetch to decide). A stale
-// entry does pass, carrying the FetchedAt of the fetch its numbers came from,
-// which is what stops a restart from laundering it into a fresh reading.
-// Best-effort: a read-only /tmp just means no warm start next launch.
-func saveKnownAccountsCache(res *knownAccountsResult) {
-	fresh := make([]KnownAccountUsage, 0, len(res.Accounts))
-	for _, a := range res.Accounts {
-		if a.Expired || a.Info == nil {
-			continue
-		}
-		fresh = append(fresh, a)
-	}
-	data, err := json.Marshal(cachedKnownAccounts{FetchedAt: time.Now(), Accounts: fresh})
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(knownAccountsCachePath(), data, 0600)
-}
-
-// loadKnownAccountsCache returns the cached snapshots, or nil if absent,
-// unreadable, or carrying nothing usable. An entry without Info is dropped
-// rather than seeded: dedupeAccounts would silently discard it anyway, and it
-// must not masquerade as a healthy account. A seeded result carries no
-// ActiveName (see cachedKnownAccounts) — the first fetch fills it in.
-//
-// Vintage is judged per account, not per file, because entries in one file
-// don't share one: a carried-forward entry's numbers can be much older than
-// the write that persisted them, and each keeps its own FetchedAt rather than
-// the envelope's. fresh is the same gate a live carry-forward uses (no age
-// bound, just "does this entry actually have numbers and a timestamp"), so an
-// entry that survives a restart is exactly one that would have survived
-// without one. A cache file written before per-account timestamps existed
-// decodes to the zero time and is therefore dropped whole — intended: one
-// poll replaces it, and there is no vintage to speak of for numbers with no
-// timestamp at all.
-//
-// Every seeded entry is marked Stale. This is a disk read, not a completed
-// poll — saveKnownAccountsCache never persists Stale (only genuinely fetched
-// entries reach disk), so without this every seed would decode as an ordinary
-// fresh reading and render exactly like one just fetched, for however long it
-// takes the first real pass to land.
-func loadKnownAccountsCache() *knownAccountsResult {
-	data, err := os.ReadFile(knownAccountsCachePath())
-	if err != nil {
-		return nil
-	}
-	var c cachedKnownAccounts
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil
-	}
-	accounts := make([]KnownAccountUsage, 0, len(c.Accounts))
-	for _, a := range c.Accounts {
-		a := a
-		if a.Expired || !fresh(&a) {
-			continue
-		}
-		a.Stale = true
-		accounts = append(accounts, a)
-	}
-	if len(accounts) == 0 {
-		return nil
-	}
-	return &knownAccountsResult{Accounts: accounts}
-}
-
 // KnownAccountsHub polls every account this host holds a claude-switch
 // credential snapshot for, alongside UsageHub's poll of the live account (see
 // usagePoller for the shared mechanism: same 2-minute cadence, same
@@ -836,17 +583,48 @@ func loadKnownAccountsCache() *knownAccountsResult {
 // read straight off disk on demand by GET /usage instead (server.go).
 type KnownAccountsHub = usagePoller[knownAccountsResult]
 
-// NewKnownAccountsHub starts the poller and returns immediately, seeded from a
-// recent disk cache. The cache is read once and handed to both the poller (what
-// the header shows until the first fetch lands) and the fetcher (what a first
-// pass that fails transiently carries forward) — two reads could disagree, and
-// the second would buy nothing. Persisted backoff deadlines
-// (loadKnownAccountsBackoffCache) seed the same fetcher so a restart mid-wait
-// does not fire a real request for any account before its deadline passes.
+// seedKnownAccounts builds the poller's initial display straight from each
+// non-live account's own accountCacheEntry, without waiting on the fetcher's
+// own first pass (which reaches the identical entries a moment later anyway,
+// via loadAccountCache inside newKnownAccountsFetcher).
+func seedKnownAccounts() *knownAccountsResult {
+	names, err := snapshotAccountNames()
+	if err != nil || len(names) == 0 {
+		return nil
+	}
+	liveEmail := loadAccountEmail()
+	accounts := make([]KnownAccountUsage, 0, len(names))
+	for _, name := range names {
+		if emailMatchesLive(snapshotAccountEmail(name), liveEmail) {
+			continue
+		}
+		e, _ := loadAccountCache(name)
+		if e.Info == nil || e.FetchedAt.IsZero() {
+			// The zero-timestamp guard matches fresh()'s own gate elsewhere in
+			// this file: an unstamped entry (a pre-timestamp disk write, in
+			// practice never produced by a current writer) must not seed the
+			// header with numbers the fetcher's own carryable()/fresh() would
+			// then refuse to carry forward — the seed and the carry rule have
+			// to agree on what counts as usable.
+			continue
+		}
+		accounts = append(accounts, KnownAccountUsage{
+			Name: name, Account: e.Account, Info: e.Info, Stale: e.Stale, Verified: e.Verified, FetchedAt: e.FetchedAt,
+		})
+	}
+	if len(accounts) == 0 {
+		return nil
+	}
+	sort.Slice(accounts, func(i, j int) bool { return accounts[i].Name < accounts[j].Name })
+	return &knownAccountsResult{Accounts: accounts}
+}
+
+// NewKnownAccountsHub starts the poller and returns immediately, seeded from
+// each account's own recent disk cache (seedKnownAccounts) so a restart shows
+// (stale) bars immediately rather than waiting on the fetcher's own first
+// pass.
 func NewKnownAccountsHub() *KnownAccountsHub {
-	seed := loadKnownAccountsCache()
-	seedBackoff := loadKnownAccountsBackoffCache()
-	return newUsagePoller(seed, newKnownAccountsFetcher(seed, seedBackoff, saveKnownAccountsBackoffCache), saveKnownAccountsCache)
+	return newUsagePoller(seedKnownAccounts(), newKnownAccountsFetcher(saveAccountCache), func(*knownAccountsResult) {})
 }
 
 // derefKnownAccounts flattens the poller's *knownAccountsResult (nil until the

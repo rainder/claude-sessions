@@ -482,21 +482,22 @@ shows it as two progress bars (5-hour and weekly limits). The token is read-only
 (`~/.claude/.<name>.keychain-cred` on macOS, `.<name>.credentials.json`
 elsewhere, plus `.<name>.account.json` for the email), and `KnownAccountsHub`
 (same `usagePoller` generic, `T = knownAccountsResult`) fetches each one's
-limits with that snapshot's own token, **one account at a time**
-(`allKnownAccounts`) rather than fanned out — these are typically several
-different Anthropic accounts, each spending its own budget, but they are all
-requests from the same process to the same endpoint in the same moment, and
-going one at a time spreads that out instead of bursting it. Strictly
-read-only — nothing is ever swapped into the Keychain or the live credential
-file. Three rules hold. The **live** account is never read from its own
-snapshot (Claude Code rotates the live token in place while the snapshot
-keeps whatever was stashed at switch time, so the snapshot can look expired
-while the session is healthy) — it is skipped by email equality against
-`loadAccountEmail`. A per-account failure is never an error: it becomes that
-entry's own classification, so `allKnownAccounts` always returns a full slice
-and the poller's whole-batch backoff only ever fires on a host-level problem,
-never because one account is flaky. And only entries with numbers are cached, so a restart can
-seed a recently-good account but never resurrects an expired one.
+limits with that snapshot's own token, **one account at a time** (inline in
+`newKnownAccountsFetcher`'s loop) rather than fanned out — these are
+typically several different Anthropic accounts, each spending its own
+budget, but they are all requests from the same process to the same endpoint
+in the same moment, and going one at a time spreads that out instead of
+bursting it. Strictly read-only — nothing is ever swapped into the Keychain
+or the live credential file. Three rules hold. The **live** account is never
+read from its own snapshot (Claude Code rotates the live token in place
+while the snapshot keeps whatever was stashed at switch time, so the
+snapshot can look expired while the session is healthy) — it is skipped by
+email equality against `loadAccountEmail`. A per-account failure is never an
+error: it becomes that entry's own classification, so the walk always
+produces a full slice and the poller's whole-batch backoff only ever fires
+on a host-level problem, never because one account is flaky. And only
+entries with numbers are cached, so a restart can seed a recently-good
+account but never resurrects an expired one.
 
 **Identity is bound to the token, not to a file.** Every usage fetch is paired
 with one profile fetch on the *same* token (`fetchProfileEmail`,
@@ -592,56 +593,30 @@ warm start keeps the distinction, and gates this one path only. Every other
 failure keeps today's carry semantics regardless: a 429 or a network blip says
 nothing about whose numbers `prev` holds.
 
-**Fetch order is a third memory the closure carries**, beside `last` and the
-backoff map, and it exists because going one account at a time means WHICH one
-goes first now matters — fanned out, every account got fetched every pass
-regardless of order, but a chronically struggling account fetched sequentially
-would otherwise always land wherever `snapshotAccountNames`' directory listing
-puts it, typically last. Any account this pass could not get fresh numbers for
-— `Expired`, or any `Reason` at all, which covers both a genuine failure and a
+**Fetch order is the one thing the closure still carries in memory**, and it
+exists because going one account at a time means WHICH one goes first
+matters — fanned out, every account got fetched every pass regardless of
+order, but a chronically struggling account fetched sequentially would
+otherwise always land wherever `snapshotAccountNames`' directory listing puts
+it, typically last. Any account this pass could not get fresh numbers for —
+`Expired`, or any `Reason` at all, which covers both a genuine failure and a
 synthesized backoff answer — moves to the front for the next pass
 (`reorderFailedFirst`), ahead of the accounts that were fine.
 `reconcileFetchOrder` runs first each pass to fold in additions and removals:
 a name the order slice still remembers but that `snapshotAccountNames` no
 longer lists (renamed or deleted) drops out, and a name newly listed but not
 yet in the order (a snapshot saved since the last pass) is appended at the
-end. Like `last` and the backoff map, order is read and written only inside
-the serial closure.
+end. Order is read and written only inside the serial closure
+`usagePoller.run` calls one tick at a time.
 
-All of this lives in `newKnownAccountsFetcher`'s closure because
-`usagePoller`'s `fetch` takes no arguments. `last` is **rebuilt** from
-each pass (intersected with the current snapshot names, entries with `Info`
-only), so a renamed or deleted snapshot stops being re-served instead of
-lingering for the life of the process. `NewKnownAccountsHub` reads the disk
-cache **once** and hands it to both the poller (what the header shows before
-the first fetch) and the fetcher (what a first pass landing mid-throttle
-carries forward). There is deliberately no memoryless one-pass wrapper beside
-it: nothing outside the poller calls one, and keeping one alive for a test to
-exercise is how dead code survives — the test that used it now drives
-`newKnownAccountsFetcher(nil)()`, the shape production actually runs.
-`usageInfoFetch` is the package-var seam that lets tests drive the poller
-without a network (same pattern as `keychainRead`/`keychainWrite`).
-
-The disk cache ages **per account**, not per file. Entries in one file no
-longer share a vintage — a carried-forward entry's numbers can be much older
-than the write that persisted them — so `loadKnownAccountsCache` gates each
-entry through the same `fresh` a live carry-forward uses (no age bound, just
-"does this entry actually have numbers and a timestamp") and ignores the
-envelope timestamp entirely. A cache file written before per-account
-timestamps existed decodes to the zero time and is dropped whole on the first
-load; that is intended — there is no vintage to speak of for numbers with no
-timestamp at all, and no fallback to the envelope's clock either.
-
-Every entry `loadKnownAccountsCache` seeds is force-marked `Stale`, whatever
-it decoded as. This is load-bearing, not cosmetic: `saveKnownAccountsCache`
-only ever persists genuinely fetched entries (`Stale: false`), so without this
-a disk seed would be indistinguishable from a just-fetched reading, and on an
-account that never returns a 429 again (so the carry-forward branch that
-would otherwise mark it stale is never reached) it would render as live for
-as long as the process runs — the exact failure the age bound used to prevent
-by dropping the seed outright, reopened by removing that bound without this.
-`liveCarryable`'s disk counterpart, `loadUsageCache` (usage.go), does the same
-for the live account's seed for the identical reason.
+Numbers and backoff state are **not** otherwise held in memory across passes
+any more — see "One cache entry per account" below. `newKnownAccountsFetcher`
+takes no seed parameter at all: each pass reads every account's own file
+fresh (`loadAccountCache`), so a renamed or deleted snapshot simply drops out
+of `snapshotAccountNames()` and is never consulted again, with nothing to
+separately rebuild or prune. `usageInfoFetch` is the package-var seam that
+lets tests drive the poller without a network (same pattern as
+`keychainRead`/`keychainWrite`).
 
 There used to be a gap here worth documenting: an account only a **remote**
 host held a snapshot for had nothing anywhere remembering its last good
@@ -681,8 +656,8 @@ never-fail-the-batch property intact.
 no live-account fetch, no per-known-account fetch, nothing. The whole account
 universe — names from `snapshotAccountNames`, emails from
 `snapshotAccountEmail`, and which snapshot matches `loadAccountEmail` — is
-resolved from disk on **every** call, mirroring `allKnownAccounts`' skip rule
-(every snapshot standing for the live account is left out of `knownAccounts`;
+resolved from disk on **every** call, mirroring `newKnownAccountsFetcher`'s own
+skip rule (every snapshot standing for the live account is left out of `knownAccounts`;
 the first one names `activeSnapshotName`). Being pure disk reads is what keeps
 it always current: a picker opened right after a remote account switch is never
 stale, with no cache and no kick-on-switch machinery needed to keep it that way.
@@ -747,144 +722,338 @@ streak either way, even if the synthesized path's own local reads (e.g.
 now-unreadable credential — the already-armed wait simply stands, and
 self-corrects at the next real attempt once it elapses.
 
-**The armed wait is persisted to disk**, not just held in the closure. Without
-this, restarting the TUI mid-wait (a relaunch, a crash, a deploy) lost the wait
-entirely — the new process's closure started with a zero `usageBackoff`, due
-immediately, and fired a real request on its very first pass against an
-endpoint that had just said not to. `usageBackoffCachePath()` (usage.go, live
-account) and `knownAccountsBackoffCachePath()` (known_accounts.go, keyed by
-snapshot name) are separate files from the numbers caches
-(`usageCachePath`/`knownAccountsCachePath`) — the two expire on different
-events, a fetch vs. a 429, so there's no reason to couple them. `saveUsageBackoffCache`/`saveKnownAccountsBackoffCache` are called at every
-transition that changes the in-memory state (armed by a throttle, cleared by a
-success or any non-throttle failure, dropped by a confirmed account switch),
-and remove the file entirely once nothing is backed off — "not waiting" needs
-no file on disk. Both are injected into their fetcher closures as parameters
-(`newUsageFetcher`'s `saveBackoff`, `newKnownAccountsFetcher`'s `saveBackoff`)
-rather than called as package functions directly, the same reason `fetch` is
-injected: several existing tests set `HOME` via `loginAs` without also setting
-`TMPDIR`, so a hardcoded call would write to the real host's `/tmp` during a
-test run.
+**One cache entry per account, not one file per role.** `account_cache.go`'s
+`accountCacheEntry` holds numbers AND backoff state together — `Account`,
+`FetchedAt`, `Info`, `Stale`, `Verified`, `BackoffStreak`,
+`BackoffNextAttempt` — one JSON file per account
+(`claude-sessions-account-<uid>-<name>.json`, `accountCachePath`), read and
+written by `loadAccountCache`/`saveAccountCache`. Before this type existed,
+the live account and every known account were cached across four separate
+files split by ROLE (a live-numbers file, a live-backoff file, a
+known-accounts-numbers file holding every non-live snapshot in one array, and
+a known-accounts-backoff file mirroring it) — which meant switching which
+account was live lost continuity in **both** directions: the account you
+switched TO started its numbers over on the live side (its known-account
+history lived in a different file the live path never read), and the account
+you switched AWAY FROM lost its backoff streak the instant it reappeared on
+the known side (same problem, other direction). One file per account, keyed
+by identity rather than by which role is currently asking, makes a switch a
+non-event for both: whichever side asks next just finds what was already
+there.
 
-`loadUsageBackoffCache`/`loadKnownAccountsBackoffCache` seed the closures'
-`backoff`/`armedFor` state directly — assigned verbatim, never re-run through
-`usageBackoffUntil` — because that deadline was already computed once, against
-the `now` current at the moment it was saved; recomputing it against a *new*
-`now` on every load would let a restart loop walk the deadline forward
-indefinitely instead of counting down to the one that was actually armed.
+The key is the claude-switch **snapshot name**, never the email — an account
+whose `.<name>.account.json` is unreadable (email `""`) still needs a stable
+slot to persist real backoff state into, or it gets fetched (and likely
+re-throttled) on every single pass; a name survives that where an email
+can't. `resolveActiveSnapshotName(liveEmail)` (account_cache.go) is the one
+place the live account's cache resolves "which per-account slot am I" —
+`snapshotAccountNames()` plus an `emailMatchesLive` scan, first match wins,
+`""` when the live email is unknown or matches no snapshot. A live account
+with no snapshot at all has nowhere to persist anything and degrades to a
+plain in-memory-only fetch every pass, which is what every account got
+before this file existed — no regression for that case, just no cross-restart
+or cross-switch memory either, since there is no slot to hold it.
 
-A loaded deadline that has already elapsed is dropped along with its streak,
-not just its timeout: `due()` reports the account fetchable either way, and a
-streak whose deadline ended who knows how long ago (the process could have
-been down for a week) says nothing trustworthy about whether the next attempt
-is still part of that run — carrying it forward anyway would jump straight
-into `usageBackoffMax` instead of the free first retry the schedule promises
-everyone else. A deadline that has NOT yet elapsed is clamped to
-`now+usageBackoffCeiling`, for the same reason armed waits are capped in the
-first place: a corrupt file, a backwards clock adjustment, or a future bug
-that writes a garbage timestamp must not be able to wedge an account out of
-rotation for longer than a live-armed wait ever could — the clamp is what
-makes raising `usageBackoffCeiling` to cover a real long Retry-After safe to
-persist at all. Clamping alone only bounds one process's read of a bad value,
-though; without writing the correction back, a crash loop that never lets the
-real (bogus) deadline elapse would re-clamp it fresh from the same bad raw
-value on every restart and never actually fix it — so a clamp is followed by a
-best-effort save of the corrected value, the same self-healing shape every
-other cache write here already has. `NewUsageHub`/`NewKnownAccountsHub` load
-the seed once, the same "read once, hand to both the poller and the fetcher"
-pattern the numbers caches already use.
+**Both fetchers are now fully stateless between passes** — no more in-memory
+`last`/`backoff`/`armedFor` maps carried inside the closure, the single
+biggest simplification this type enabled. `newUsageFetcher` (usage.go) takes
+no seed of any kind; every call resolves the live account's name fresh
+(`resolveActiveSnapshotName`) and loads that slot fresh (`loadAccountCache`)
+before deciding whether to carry, placeholder, or fetch. `newKnownAccountsFetcher`
+(known_accounts.go) already walked `snapshotAccountNames()` fresh every pass;
+now it also loads each account's own file fresh inside that same walk instead
+of consulting an in-memory map rebuilt from a construction-time seed. This is
+what makes switching a non-event: a name that stops being skipped (its email
+no longer matches who's live) simply resolves to whatever was already
+persisted for it, including a wait armed while it was still live a moment
+ago — no special-casing needed anywhere to detect the switch happened, because
+there is no separate identity-tracking state (the old `armedFor`) left to get
+out of sync with reality.
 
-This closes a restart gap, not a concurrency one: both cache files are keyed
-only by `os.Getuid()` (like the numbers caches), so two processes run by the
-same user on the same host — two TUIs, or a TUI and a one-shot CLI invocation
-— share one file each, not one per process. Nothing here coordinates between
-them beyond that shared file: each writes its own view of the world with a
-plain, non-atomic `os.WriteFile` whenever its own state changes, so the loser
-of a same-instant write race simply has its update overwritten by the other,
-the same best-effort "no lock" behavior every other cache in this file
-already accepts. A second process's own successful fetch clearing its file
-mid-wait is not a bug either — it means that process's view of the account has
-genuinely recovered, which is real information the first process's next own
-fetch will independently confirm within one poll. What this still does
+**Unconfirmable identity (`loadAccountEmail()` returns `""`) refuses
+unconditionally**, before anything else runs — there is no email to resolve a
+name from, so there is no way to know whether a wait is even armed for
+whoever was live a moment ago, and showing an account's bars means knowing
+whose they are. The version of `newUsageFetcher` that predates
+`account_cache.go` only refused when a wait already blocked the alternative
+(its backoff state lived in memory, decoupled from any per-account lookup, so
+an unconfirmable identity with nothing currently armed fell through to a real
+fetch); the per-account design has no lookup to fall back to once identity is
+unreadable, so the safe answer is to refuse always, not only when convenient.
+Slightly more conservative than before, and consistent with the
+identity-unconfirmable rule everywhere else in this section.
+
+**A loaded backoff deadline that has already elapsed keeps its streak.** An
+earlier version of `loadAccountCache` dropped the streak along with an
+elapsed deadline (reasoning: `due()` reports the account fetchable either
+way, so a streak whose deadline ended who-knows-how-long ago says nothing
+trustworthy about whether the next attempt is part of the same run) — this
+was fine when backoff state was loaded once at process startup, but became a
+live bug once loading happens on **every pass**: a streak of 1 always has
+`BackoffNextAttempt` equal to the instant it was recorded (the first throttle
+imposes no wait, by design — see `usageBackoffUntil`), which means it reads
+as "elapsed" on the very next load, microseconds later, as an entirely
+ordinary part of back-to-back polling. Dropping the streak there silently
+prevented it from EVER reaching 2 and arming a real wait —
+`TestUsageFetcherBacksOffRepeatedThrottles` and
+`TestKnownAccountsFetcherBacksOffRepeatedThrottles` are what caught it (both
+reported the pass meant to be held back by an armed wait fetching anyway).
+`loadAccountCache` now leaves the streak alone regardless of how elapsed the
+deadline is; `due()` alone decides whether a fetch happens, exactly as it
+always has.
+
+A deadline that has NOT yet elapsed is still clamped to
+`now+usageBackoffCeiling`, for the reason armed waits are capped in the first
+place: a corrupt file, a backwards clock adjustment, or a future bug that
+writes a garbage timestamp must not be able to wedge an account out of
+rotation for longer than a live-armed wait ever could. Clamping alone only
+bounds one process's read of a bad value, though; without writing the
+correction back, a crash loop that never lets the real (bogus) deadline
+elapse would re-clamp it fresh from the same bad raw value on every restart
+and never actually fix it — so a clamp is followed by a best-effort save of
+the corrected value, the same self-healing shape every other cache write here
+already has.
+
+This closes a restart gap, not a concurrency one: every account's cache file
+is keyed only by `os.Getuid()` and its own snapshot name (like every cache in
+this codebase), so two processes run by the same user on the same host — two
+TUIs, or a TUI and a one-shot CLI invocation — share one file per account, not
+one per process. `saveAccountCache` writes via `writeFileAtomic` (account.go,
+temp-file-then-rename) rather than a truncating `os.WriteFile` specifically
+because of this: one account's file can now legitimately have two writers at
+once (the live hub and the known-accounts hub both touch the SAME file across
+a switch, where before they wrote entirely separate files by role), so a
+reader must never be able to observe a half-written entry. Nothing here
+coordinates writers beyond that atomicity, though: whoever writes last simply
+overwrites the other, the same best-effort "no lock" behavior every other
+cache in this file already accepts — atomic rename only rules out a *torn*
+read, not a *lost* write. A second process's own successful fetch clearing an
+account's wait
+mid-throttle is not a bug either — it means that process's view of the
+account has genuinely recovered, which is real information the first
+process's next own pass will independently confirm. What this still does
 nothing for is the same account backed off independently on two *different*
-hosts — each host's cache file is local, with no cross-host memory at all, and
-the in-memory wait never covered that case either.
+hosts — each host's cache files are local, with no cross-host memory at all,
+and the in-memory design this replaced never covered that case either.
 
-Client-side it lives in `newKnownAccountsFetcher`'s closure beside `last`, keyed
-by snapshot name and rebuilt from `snapshotAccountNames()` each pass for the same
-reason `last` is. A backed-off account is **not** filtered out of the batch: it
-still goes through `knownAccountUsage` with a synthesized 429 in place of the
-round trip, so one place keeps deciding whether that name stands for the live
-account (which is what resolves `ActiveName`) and whether `prev`'s numbers may be
-carried forward — the entry renders as the same stale-with-`rate limited` line a
-real throttle produces. Both maps are read and written only in the serial
-closure, never inside `allKnownAccounts`' sequential walk. The **live**
-account gets the same treatment from `newUsageFetcher` (usage.go), the
-one-account shape of that closure — it is the account every session on the host
-is actually spending, so it is the likeliest to be throttled. A skipped pass
-there re-serves the last good `AccountUsage` as an ordinary **success**, never an
-error: an error would engage `usagePoller.run`'s generic 5s-doubling retry —
-shared with `CodexUsageHub`, and the right answer for a genuine transient, which
-is why it stays untouched — and that retry is the very burst this prevents. An
-armed wait holds **whether or not** there is anything to show: when nothing is
-safe to re-serve — no `last` at all (a cold start, or an account that has never
-once succeeded), or an identity that cannot be confirmed — the pass answers
-with a bare identity placeholder
+A backed-off known account is **not** filtered out of `newKnownAccountsFetcher`'s
+walk: it still goes through `knownAccountUsage` with a synthesized 429 in
+place of the round trip, so one place keeps deciding whether that name stands
+for the live account (which is what resolves `ActiveName`) and whether
+`prev`'s numbers may be carried forward — the entry renders as the same
+stale-with-`rate limited` line a real throttle produces. The **live** account
+gets the same treatment from `newUsageFetcher`, the one-account shape of that
+logic — it is the account every session on the host is actually spending, so
+it is the likeliest to be throttled. A skipped pass there re-serves the
+loaded reading as an ordinary **success**, never an error: an error would
+engage `usagePoller.run`'s generic 5s-doubling retry — shared with
+`CodexUsageHub`, and the right answer for a genuine transient, which is why
+it stays untouched — and that retry is the very burst this prevents. An armed
+wait holds **whether or not** there is anything to show: when nothing is safe
+to re-serve — no cached entry at all (a cold start, or an account that has
+never once succeeded), or a loaded entry whose `Account` doesn't match who is
+live (a stale or corrupted file, or a reused snapshot name — the same
+`carryable`/`liveCarryable` identity gate as before, now checked against a
+value freshly loaded from disk rather than one carried in memory) — the pass
+answers with a bare identity placeholder
 (`AccountUsage{Account: loadAccountEmail()}`, nil `Info`) and still makes no
-request. Falling through to a real fetch there, as it once did, was a **no-op
-backoff**, and it fired in precisely the case this exists for: a fresh TUI launch
-against an already-throttled account, whose 429 came back as an error and woke
-the generic retry. The known-account path never had that hole —
-`allKnownAccounts` never returns an error for one account's failure, so nothing
-there can wake the retry regardless of carry state; only the live path could.
-The re-serve is **identity-gated** for the reason
-`carryable` documents: `last` is keyed by nothing — just "whoever was live last
-time" — so a Ctrl+W switch or a relogin during an armed wait would otherwise keep
-the previous account's bars on screen under its own email. A confirmed change of
-live email drops both memories and forces a real fetch (the wait was earned
-against the other account's budget, and this pass knows nothing whatsoever about
-the account that just arrived); an *unconfirmable* one — either email unreadable
-— takes the placeholder too, which dominates the old "fetch rather than re-serve"
-rule now that a third option exists: showing no numbers misattributes nothing and
-costs no request.
+request.
 
-Switch detection cannot key off `last.Account`, though an earlier version of
-this did and it was a real regression: `last` is nil until the first success,
-and can hold an empty `Account` forever once one lands with identity unreadable
-(`fetchUsage` reports `Account: loadAccountEmail()`, which is `""` on any read
-error, and nothing later corrects it). Either state would leave the wait
-permanently unable to recognise a switch, silently swallowing a Ctrl+W kick for
-up to `usageBackoffMax` (or `usageBackoffCeiling` with a `Retry-After`) instead
-of the immediate re-fetch a switch is supposed to force. `armedFor` tracks the
-email that was live at the moment the *current* streak was armed or extended,
-independently of what `last` holds, so switch detection works whether or not
-`last` carries a usable identity of its own.
-
-`NewUsageHub` pairs the fetcher with `saveOnceUsage`, which keeps everything but
-a genuinely fetched reading off disk — **pointer identity** for a re-served seed,
-plus `Stale` and a nil `Info`, since a carry and a placeholder are each a fresh
-pointer per pass and identity alone stopped recognising them. `saveUsageCache`
-restamps `FetchedAt` with `time.Now()` and the poller saves on every success, so
-persisting a carry would rewrite the cache every two minutes and a warm start
-would show numbers as freshly fetched when they are not — the same restamping
-`KnownAccountUsage`'s carried-forward `FetchedAt` refuses; persisting a
-placeholder is worse still, since `loadUsageCache` reads a nil-`Info` entry as a
-miss, so it would *destroy* the warm start rather than merely stale it.
-
-`AccountUsage` carries its own `FetchedAt` (stamped in `fetchUsage` and nowhere
-else — the server's on-demand `/usage` handler has no memory to carry anything
-forward, so it never produces a `Stale` reading, exactly as with
+`AccountUsage` carries its own `FetchedAt` (stamped in `fetchUsage` and
+nowhere else — the server's on-demand `/usage` handler has no memory to carry
+anything forward, so it never produces a `Stale` reading, exactly as with
 `KnownAccountUsage`). `liveCarryable` is `carryable` in one-account shape —
 `fresh`'s numbers-and-info test, including the explicit zero check, plus the
 identity test — and a re-serve returns a **copy** marked `Stale` keeping the
-original timestamp, never the stored pointer, so `last` stays unmarked and
-keeps aging. There is deliberately no age bound on either: an outage running
-long still leaves numbers that are more informative than a bare "rate limited"
-placeholder, and `Stale` (never cleared by a carry) is what tells the header,
-and `localFreshAccountEmails`, not to trust them as current. A disk seed
-written before this field existed reads as unstamped and is simply not
-carryable — the same one-time drop `loadKnownAccountsCache` takes for its own
-pre-timestamp entries.
+original timestamp; the loaded value itself is a fresh struct reconstructed
+from JSON on every pass; nothing stores or ages a live pointer across calls
+any more. There is deliberately no age bound on either: an outage running
+long still leaves numbers that are more informative than a bare "rate
+limited" placeholder, and `Stale` (never cleared by a carry) is what tells
+the header, and `localFreshAccountEmails`, not to trust them as current. Any
+disk seed with a non-nil `Info` is force-marked `Stale` by `loadAccountCache`
+itself — this is a disk read, not a completed poll, so nothing has confirmed
+the numbers as current — and an unstamped reading (a pre-timestamp disk
+write) is simply not carryable, since its vintage is unknown rather than
+merely old.
+
+There is no more `saveOnceUsage`-style wrapper needed on the live side:
+`saveAccountCache` is called by `newUsageFetcher` itself, directly, only from
+the two branches that actually changed something (a real fetch's success or
+failure) — the carry and placeholder branches return early without touching
+disk at all, so there is nothing analogous to "skip re-persisting an
+unchanged re-serve" left to get wrong.
+
+**A first version of this whole unification shipped with real bugs an
+independent cross-model review caught before merge** — the kind of gap that
+only shows up once you stop trusting a design and start trying to break it.
+Worth naming so the next person doesn't reintroduce them:
+
+- *The identity gate protected numbers but not backoff.* `liveCarryable`/
+  `carryable` always gated whether a loaded entry's `Info` could be shown, but
+  the loaded `BackoffStreak`/`BackoffNextAttempt` were extracted and trusted
+  unconditionally in both fetchers. A claude-switch snapshot name reassigned
+  to a different account (`account save --force`) would inherit the outgoing
+  account's armed wait even though the new account was never itself
+  throttled. Fixed with `entryIdentityMatches` (account_cache.go), applied to
+  both halves together in `newUsageFetcher` and `newKnownAccountsFetcher`: a
+  mismatched entry has neither its numbers nor its backoff trusted, which
+  forces a real fetch instead of waiting out someone else's throttle.
+- *A live account with no matching snapshot lost backoff protection
+  entirely, not just cross-restart memory.* The first version had genuinely
+  zero in-memory state; `resolveActiveSnapshotName` returning `""` meant
+  every single pass loaded nothing and treated the account as never
+  throttled — not just after a restart, but on the very next 2-minute tick,
+  forever. Verified with an A/B fetch-count comparison against `main` before
+  the fix (`TestUsageFetcherBacksOffEvenWithNoMatchingSnapshot` pins the
+  fixed count). The fix reintroduces a small amount of in-memory state
+  (`fbLast`/`fbBackoff`/`fbArmedFor` in `newUsageFetcher`) used ONLY when
+  `name == ""` — an unconfirmable identity or a never-saved snapshot — mirroring
+  the design this whole file replaced, but scoped narrowly enough that it
+  never interferes with the disk-based continuity a resolved name gets.
+- *An unconfirmable identity refused unconditionally, even with nothing
+  armed.* The first version treated "can't read `~/.claude.json`" as an
+  automatic refusal, reasoning that showing bars means knowing whose they
+  are. But the file read isn't the only route to identity —
+  `fetchVerifiedUsageInfo`'s profile probe can attribute numbers to a
+  verified account the file alone can't confirm (`usageAccountLabel`) — so an
+  unconditional refusal would permanently blank the header the instant the
+  file becomes unreadable, even though a real fetch might still recover
+  identity. Fixed: the fallback path now refuses only while a wait is
+  actually armed, exactly like the disk path does.
+- *The fallback and disk paths didn't share memory, so a wait armed while
+  identity was readable stopped being enforced the moment identity broke.*
+  Fixed by having the disk path mirror its outcome into the same fallback
+  vars at every return point, not just use them — so a wait armed on disk
+  survives identity going unreadable mid-run instead of a still-armed wait
+  silently going unenforced the instant `resolveActiveSnapshotName` stops
+  resolving. (`TestUsageFetcherPlaceholdsWhenIdentityIsUnconfirmable` is the
+  regression pin: two throttles while identity is readable, then the file is
+  removed — the pass must still refuse, not fetch.)
+- *`Verified` silently downgraded to `false` on every carried or failed
+  pass.* `persist` originally derived it from `u.Info.VerifiedAccount`, but
+  that field is `json:"-"` — always empty on anything reconstructed from a
+  JSON-round-tripped `loadAccountCache` read, which is exactly what `last` is
+  on a carry or a failure. Fixed by threading `matches && cached.Verified`
+  through explicitly on those paths, and only deriving from
+  `u.Info.VerifiedAccount` on an actual fresh fetch.
+  (`TestUsageFetcherPreservesVerifiedAcrossACarry` pins it.)
+- *`saveAccountCache` used a truncating `os.WriteFile`, not atomic
+  temp-file-then-rename.* Every other cache in this codebase gets away with
+  that because each file had exactly one writer (the live hub owned its
+  files, the known-accounts hub owned its own separate ones). One file per
+  account now genuinely has two possible writers — the live hub and the
+  known-accounts hub both touch the SAME account's file across a switch — so
+  a reader could observe a torn write. Fixed: `saveAccountCache` now goes
+  through `writeFileAtomic` (account.go), the same temp-file-then-rename
+  helper `account.go` already uses for its own credential writes.
+- *`loadAccountCache`'s clamp self-heal wrote to disk directly*, bypassing
+  the injected-`save` discipline the rest of this design follows specifically
+  so tests don't need to isolate TMPDIR for every code path that might write.
+  Fixed: `loadAccountCache` now only *reports* whether it clamped (a second
+  return value), and each fetcher writes the correction back through its own
+  already-injected `save`.
+- *`allKnownAccounts` (the old per-account-walk helper) became dead code*
+  once `newKnownAccountsFetcher` started inlining that walk directly to reach
+  each account's own disk entry — nothing outside its own tests called it any
+  more. Removed; the tests that exercised it now exercise the same behavior
+  through the real `newKnownAccountsFetcher` path instead
+  (`TestKnownAccountsFetcherNeverFailsOnOneBadAccount`,
+  `TestKnownAccountsFetcherSkipsLiveAccountAndReportsItActive`,
+  `TestKnownAccountsFetcherThreadsEachAccountsOwnEntry`).
+- *`seedKnownAccounts` dropped the vintage gate `fresh()` applies everywhere
+  else* — it checked only `Info != nil`, not `!FetchedAt.IsZero()`, so an
+  unstamped entry (never produced by a current writer, but latent) could seed
+  the header with numbers the fetcher's own `carryable` would then refuse to
+  carry forward. Fixed to match `fresh()`'s own gate.
+
+**A second review pass against the fixed diff, before merge, caught two more
+— proof that fixing reasoning-derived bugs with more reasoning is exactly how
+this class of bug survives a review.** Both were verified with a failing
+reproduction *before* the fix landed, not just argued through:
+
+- *`entryIdentityMatches`'s effect on an unverified (`Account == ""`) entry
+  looked, on paper, like it could combine "backoff held" with "numbers
+  withheld" into a permanent bare-placeholder state.* Checked empirically
+  with a throwaway reproduction rather than taken on the reviewer's word:
+  the combination is real but is *not* a regression — `liveCarryable` already
+  refused to carry numbers for an empty `Account` before this file existed
+  (its own explicit zero check), and switch detection here is structurally
+  independent of `Account` entirely (it goes through
+  `resolveActiveSnapshotName` reading a *different file*, not through
+  comparing `Account` strings), so both the wait and the eventual recovery
+  behave exactly as they did pre-unification. No fix needed; recorded here so
+  it isn't re-litigated.
+- *The fallback vars (`fbLast`/`fbBackoff`/`fbArmedFor`) are shared across
+  every account `newUsageFetcher` is ever asked about, and every disk-path
+  return point mirrored into them unconditionally.* So a snapshotted
+  account's disk pass would clobber a *different*, still-unsnapshotted
+  account's own armed wait: switch from an unsnapshotted account (with a
+  wait armed in the fallback) to a snapshotted one and back, and the first
+  account's wait is gone, even though nothing about that account itself
+  changed. Reproduced empirically first (a debug test showing the fetch
+  count incrementing on the pass that should have been held back), then
+  fixed by gating the mirror: it now only writes when the fallback is
+  untracked or already tracking the *current* live email
+  (`mirrorFallback` in `newUsageFetcher`).
+  `TestUsageFetcherFallbackSurvivesAnUnrelatedDiskPass` pins it, and was
+  confirmed to fail against the unguarded mirror before the guard was added.
+  A second, independent-review-caught round on this same fix: the guard
+  compares `fbArmedFor` against `live`, but a wait armed while identity was
+  itself unconfirmable (`live == ""`) was written into `fbArmedFor` as `""`
+  too — indistinguishable from "untracked" to the guard, so a later resolved
+  account's disk pass could still clobber an ownerless wait even with the
+  guard in place. Fixed with the `fbUnconfirmedOwner` sentinel
+  (`coalesceOwner` in usage.go): an unconfirmable identity's armed wait is
+  now recorded under a value that can never equal a real email, so `""`
+  reliably means "nothing armed" everywhere it's checked.
+  `TestUsageFetcherUnconfirmedIdentityWaitSurvivesALaterResolvedAccount` pins
+  it, confirmed to fail without the sentinel. (One thing this fix does *not*
+  touch: the "different account" clearing check in the `name == ""` branch
+  still requires `live != ""` before clearing — an unreadable identity is
+  never itself evidence of a *different* account, which is the whole reason
+  a disk-mirrored wait survives identity going unreadable mid-run at all;
+  removing that guard to "simplify" alongside the sentinel change was tried
+  and immediately broke `TestUsageFetcherPlaceholdsWhenIdentityIsUnconfirmable`.)
+
+Also added in this pass: `TestAccountSwitchRoundTripsThroughRealDisk`, which
+`TestAccountSwitchPreservesContinuityBothDirections` was missing — that test
+pre-seeds both accounts' files by hand and passes a no-op `save` to both
+fetchers, proving only that a *pre-existing* file loads correctly across a
+switch, never that what one fetcher actually *writes* is what the other then
+*reads*. The new test wires both fetchers to the real `saveAccountCache` and
+drives one real write (a live fetch as trecs) followed by a real read (the
+known-accounts fetcher, after switching away) — the literal round trip the
+whole per-account-file design exists for.
+
+**Accepted, currently-undocumented-elsewhere gaps, left open rather than
+fixed in this pass:**
+
+- *A resolvable account whose disk write fails loses backoff accumulation
+  entirely, not just warm-start memory.* The disk path in both fetchers
+  keeps no in-memory copy of what it last wrote — every pass reloads from
+  disk — so if `saveAccountCache` silently fails (e.g. a read-only TMPDIR),
+  the next pass never sees the streak the previous pass tried to record, and
+  the account gets fetched (and likely re-throttled) every single pass
+  instead of backing off. The `fbXXX` fallback does not cover this case: it
+  only engages when the name fails to *resolve*, not when it resolves but
+  the *write* fails. Documented directly on `saveAccountCache`
+  (account_cache.go) rather than fixed here, since covering it means
+  threading a write-success signal out of `save func(name, e)` into the
+  fallback's engagement condition — a real change, not a comment fix.
+- *Orphaned per-account files are never pruned.* Removing a claude-switch
+  snapshot (`account remove`) does not delete its `claude-sessions-account-*`
+  cache file — it just stops being read, since `snapshotAccountNames()` no
+  longer lists it. Harmless (an unread file costs nothing but disk), but
+  worth knowing before assuming the file list on disk matches the account
+  list `account list` shows.
+- *`Stale` is write-only on disk.* `loadAccountCache` always sets it to
+  `true` unconditionally on any successful decode (a loaded entry is, by
+  definition, not this pass's own fresh fetch), so nothing ever persists
+  `Stale: false` — it only exists as an in-memory signal on the value each
+  fetcher hands back for the current pass. Not a bug: nothing reads the
+  on-disk field expecting anything else.
+
 `localFreshAccountEmails` excludes a `Stale` live account for the identical
 reason it already excluded a `Stale` known one, and `dedupeAccounts` threads
 `Stale` into its pass-1 `add` so a carried live or remote line takes the same dim
