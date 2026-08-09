@@ -734,8 +734,10 @@ imposes no wait of its own (most heal within one tick — only an explicit
 `Retry-After` can delay it), the second waits `usageBackoffSecond` (4min), the
 third and beyond `usageBackoffMax` (8min, the cap). A 429's `Retry-After`
 (`parseRetryAfter`, either RFC 9110 form) may only *lengthen* that wait, bounded
-by `usageBackoffCeiling` (15min) so a bogus header can't park an account for the
-life of the process. On a pass that actually attempts the account, any outcome
+by `usageBackoffCeiling` (1h — raised from 15min after a live 429 was observed
+asking for ~31.6min, Retry-After: 1895, which the old ceiling silently
+truncated) so a bogus header still can't park an account for the life of the
+process. On a pass that actually attempts the account, any outcome
 other than another rate-limited failure — numbers, `Expired`, a different
 failure, or the snapshot turning out to be the live account — clears the streak
 (`usageBackoffUntil` / `usageBackoff` in usage.go hold the shared arithmetic;
@@ -744,6 +746,69 @@ streak either way, even if the synthesized path's own local reads (e.g.
 `snapshotToken`) would have reported something other than a throttle, like a
 now-unreadable credential — the already-armed wait simply stands, and
 self-corrects at the next real attempt once it elapses.
+
+**The armed wait is persisted to disk**, not just held in the closure. Without
+this, restarting the TUI mid-wait (a relaunch, a crash, a deploy) lost the wait
+entirely — the new process's closure started with a zero `usageBackoff`, due
+immediately, and fired a real request on its very first pass against an
+endpoint that had just said not to. `usageBackoffCachePath()` (usage.go, live
+account) and `knownAccountsBackoffCachePath()` (known_accounts.go, keyed by
+snapshot name) are separate files from the numbers caches
+(`usageCachePath`/`knownAccountsCachePath`) — the two expire on different
+events, a fetch vs. a 429, so there's no reason to couple them. `saveUsageBackoffCache`/`saveKnownAccountsBackoffCache` are called at every
+transition that changes the in-memory state (armed by a throttle, cleared by a
+success or any non-throttle failure, dropped by a confirmed account switch),
+and remove the file entirely once nothing is backed off — "not waiting" needs
+no file on disk. Both are injected into their fetcher closures as parameters
+(`newUsageFetcher`'s `saveBackoff`, `newKnownAccountsFetcher`'s `saveBackoff`)
+rather than called as package functions directly, the same reason `fetch` is
+injected: several existing tests set `HOME` via `loginAs` without also setting
+`TMPDIR`, so a hardcoded call would write to the real host's `/tmp` during a
+test run.
+
+`loadUsageBackoffCache`/`loadKnownAccountsBackoffCache` seed the closures'
+`backoff`/`armedFor` state directly — assigned verbatim, never re-run through
+`usageBackoffUntil` — because that deadline was already computed once, against
+the `now` current at the moment it was saved; recomputing it against a *new*
+`now` on every load would let a restart loop walk the deadline forward
+indefinitely instead of counting down to the one that was actually armed.
+
+A loaded deadline that has already elapsed is dropped along with its streak,
+not just its timeout: `due()` reports the account fetchable either way, and a
+streak whose deadline ended who knows how long ago (the process could have
+been down for a week) says nothing trustworthy about whether the next attempt
+is still part of that run — carrying it forward anyway would jump straight
+into `usageBackoffMax` instead of the free first retry the schedule promises
+everyone else. A deadline that has NOT yet elapsed is clamped to
+`now+usageBackoffCeiling`, for the same reason armed waits are capped in the
+first place: a corrupt file, a backwards clock adjustment, or a future bug
+that writes a garbage timestamp must not be able to wedge an account out of
+rotation for longer than a live-armed wait ever could — the clamp is what
+makes raising `usageBackoffCeiling` to cover a real long Retry-After safe to
+persist at all. Clamping alone only bounds one process's read of a bad value,
+though; without writing the correction back, a crash loop that never lets the
+real (bogus) deadline elapse would re-clamp it fresh from the same bad raw
+value on every restart and never actually fix it — so a clamp is followed by a
+best-effort save of the corrected value, the same self-healing shape every
+other cache write here already has. `NewUsageHub`/`NewKnownAccountsHub` load
+the seed once, the same "read once, hand to both the poller and the fetcher"
+pattern the numbers caches already use.
+
+This closes a restart gap, not a concurrency one: both cache files are keyed
+only by `os.Getuid()` (like the numbers caches), so two processes run by the
+same user on the same host — two TUIs, or a TUI and a one-shot CLI invocation
+— share one file each, not one per process. Nothing here coordinates between
+them beyond that shared file: each writes its own view of the world with a
+plain, non-atomic `os.WriteFile` whenever its own state changes, so the loser
+of a same-instant write race simply has its update overwritten by the other,
+the same best-effort "no lock" behavior every other cache in this file
+already accepts. A second process's own successful fetch clearing its file
+mid-wait is not a bug either — it means that process's view of the account has
+genuinely recovered, which is real information the first process's next own
+fetch will independently confirm within one poll. What this still does
+nothing for is the same account backed off independently on two *different*
+hosts — each host's cache file is local, with no cross-host memory at all, and
+the in-memory wait never covered that case either.
 
 Client-side it lives in `newKnownAccountsFetcher`'s closure beside `last`, keyed
 by snapshot name and rebuilt from `snapshotAccountNames()` each pass for the same

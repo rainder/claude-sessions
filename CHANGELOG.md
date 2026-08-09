@@ -412,6 +412,19 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   synthesized backoff answer) is retried first next pass — a chronically
   throttled account no longer settles at the back of the queue behind every
   healthy one.
+- The consecutive-429 backoff wait (live account and every known account) is
+  now persisted to disk, not just held in memory. A TUI restart mid-wait used
+  to lose it entirely and fire a real request on its very first pass, against
+  an endpoint that had just said not to; a restart now loads the wait it left
+  off with and honors it. The wait's ceiling — how long a 429's own
+  `Retry-After` may extend it — is also raised from 15 minutes to 1 hour: a
+  live throttle was observed asking for ~31.6 minutes, which the old ceiling
+  was silently truncating. A loaded deadline further out than the ceiling is
+  clamped, and the corrected value is written back to disk so a crash loop
+  can't keep re-clamping the same bogus far-future timestamp forever without
+  ever actually fixing it; a loaded deadline that has already elapsed drops
+  its streak too, rather than letting the very next throttle skip straight to
+  the multi-minute wait tier instead of the normal free first retry.
 - `-s` prints the bearer token only when stdout is a terminal. Redirected or
   piped output gets the path to the token file instead, so `claude-sessions -s
   > server.log` no longer copies a secret that lives `0600` on disk into

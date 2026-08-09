@@ -231,6 +231,115 @@ func TestUsageCacheHasNoAgeGate(t *testing.T) {
 	}
 }
 
+func TestUsageBackoffCacheRoundTrip(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	if seed := loadUsageBackoffCache(); seed.account != "" || seed.backoff.streak != 0 {
+		t.Fatalf("loadUsageBackoffCache with no file = %+v, want zero", seed)
+	}
+	next := time.Now().Add(6 * time.Minute).UTC().Truncate(time.Second)
+	saveUsageBackoffCache("andy@trecs.aero", usageBackoff{streak: 2, nextAttempt: next})
+	seed := loadUsageBackoffCache()
+	if seed.account != "andy@trecs.aero" || seed.backoff.streak != 2 {
+		t.Fatalf("round-trip seed = %+v, want account andy@trecs.aero streak 2", seed)
+	}
+	if !seed.backoff.nextAttempt.Equal(next) {
+		t.Errorf("round-trip nextAttempt = %v, want %v", seed.backoff.nextAttempt, next)
+	}
+}
+
+// Clearing a wait (streak 0) removes the file rather than writing an empty
+// one, so a later load sees "nothing persisted" rather than a technically
+// valid but meaningless zero entry.
+func TestUsageBackoffCacheClearedOnZeroStreak(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	saveUsageBackoffCache("andy@trecs.aero", usageBackoff{streak: 2, nextAttempt: time.Now().Add(time.Minute)})
+	if seed := loadUsageBackoffCache(); seed.backoff.streak == 0 {
+		t.Fatal("setup: expected a wait to be persisted before clearing it")
+	}
+	saveUsageBackoffCache("", usageBackoff{})
+	if seed := loadUsageBackoffCache(); seed.account != "" || seed.backoff.streak != 0 {
+		t.Fatalf("after clearing, seed = %+v, want zero", seed)
+	}
+	if _, err := os.Stat(usageBackoffCachePath()); !os.IsNotExist(err) {
+		t.Errorf("cache file still exists after clearing, err = %v", err)
+	}
+}
+
+// A deadline recorded before a long outage — or a corrupt/bogus one — must not
+// be able to wedge an account out of rotation past usageBackoffCeiling from
+// the moment it is loaded, the same bound a live-armed wait is capped at. The
+// streak itself is not part of what gets clamped: only the timestamp can be
+// bogus in a way that matters.
+func TestUsageBackoffCacheClampsAnExcessiveDeadline(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	saveUsageBackoffCache("andy@trecs.aero", usageBackoff{streak: 5, nextAttempt: time.Now().Add(6 * time.Hour)})
+	seed := loadUsageBackoffCache()
+	if max := time.Now().Add(usageBackoffCeiling + 5*time.Second); seed.backoff.nextAttempt.After(max) {
+		t.Fatalf("loaded nextAttempt = %v, want clamped to within %v of now", seed.backoff.nextAttempt, usageBackoffCeiling)
+	}
+	if seed.backoff.streak != 5 {
+		t.Errorf("clamping the deadline also dropped the streak: got %d, want 5 preserved", seed.backoff.streak)
+	}
+}
+
+// A streak with no account, or a zero deadline, is not a real persisted wait —
+// loading it must not silently arm one.
+func TestUsageBackoffCacheRejectsIncompleteEntries(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	bad, _ := json.Marshal(cachedUsageBackoff{Account: "", Streak: 3, NextAttempt: time.Now().Add(time.Minute)})
+	if err := os.WriteFile(usageBackoffCachePath(), bad, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if seed := loadUsageBackoffCache(); seed.backoff.streak != 0 {
+		t.Fatalf("entry with no account = %+v, want rejected", seed)
+	}
+	if err := os.WriteFile(usageBackoffCachePath(), []byte("not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if seed := loadUsageBackoffCache(); seed.backoff.streak != 0 {
+		t.Fatalf("corrupt cache = %+v, want zero", seed)
+	}
+}
+
+// An elapsed deadline drops its streak along with it: due() would report the
+// account fetchable regardless of the streak, so carrying a stale streak
+// forward would only jump the next throttle straight into usageBackoffMax
+// instead of the free first retry the schedule promises everyone else.
+func TestUsageBackoffCacheDropsAnElapsedWait(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	saveUsageBackoffCache("andy@trecs.aero", usageBackoff{streak: 3, nextAttempt: time.Now().Add(-time.Minute)})
+	seed := loadUsageBackoffCache()
+	if seed.account != "" || seed.backoff.streak != 0 {
+		t.Fatalf("elapsed wait loaded as %+v, want the streak dropped along with it", seed)
+	}
+}
+
+// A clamp that only lived in memory would leave the bogus value on disk to be
+// re-clamped fresh (and never actually fixed) on every future restart — a
+// crash loop that never lets the real deadline elapse never heals. The
+// correction must be written back.
+func TestUsageBackoffCacheClampSelfHeals(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	saveUsageBackoffCache("andy@trecs.aero", usageBackoff{streak: 5, nextAttempt: time.Now().Add(6 * time.Hour)})
+	if seed := loadUsageBackoffCache(); seed.backoff.streak != 5 {
+		t.Fatalf("setup: loaded = %+v, want the clamped wait", seed)
+	}
+	// Read the raw file directly rather than through loadUsageBackoffCache
+	// again, which would clamp a second time and hide whether the write-back
+	// actually happened.
+	data, err := os.ReadFile(usageBackoffCachePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c cachedUsageBackoff
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatal(err)
+	}
+	if max := time.Now().Add(usageBackoffCeiling + 5*time.Second); c.NextAttempt.After(max) {
+		t.Fatalf("raw file next_attempt = %v, want the clamped value persisted back, not the original 6h one", c.NextAttempt)
+	}
+}
+
 // A new-envelope cache whose nested snapshot is null (only the account written)
 // is a miss too, so the poller waits for a live fetch rather than seeding an
 // info-less bar.
@@ -353,6 +462,12 @@ func TestUsageBackoffUntil(t *testing.T) {
 		// A bogus header must not be able to park an account for the life of the
 		// process.
 		{"an absurd Retry-After is capped", 2, now.Add(9 * time.Hour), usageBackoffCeiling},
+		// Pins the actual regression: a live 429 was observed asking for
+		// Retry-After: 1895 (~31.6 minutes). The old 15-minute ceiling silently
+		// truncated that to 15 minutes, so this account's own wait was shorter
+		// than the wait the endpoint had just asked for — the endpoint's opinion
+		// must be honoured in full whenever it fits under the ceiling.
+		{"a real long Retry-After is honoured, not silently truncated", 2, now.Add(1895 * time.Second), 1895 * time.Second},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -430,6 +545,12 @@ func placeholded(t *testing.T, u *AccountUsage, err error, email string) {
 	}
 }
 
+// noSaveUsageBackoff is the saveBackoff arg for tests that don't exercise disk
+// persistence of the backoff state — the real saveUsageBackoffCache writes to
+// os.TempDir(), and loginAs sets HOME without also setting TMPDIR, so passing
+// the real function here would write to the developer's actual temp directory.
+func noSaveUsageBackoff(string, usageBackoff) {}
+
 // loginAs points loadAccountEmail at a temp HOME logged into email, since
 // newUsageFetcher re-serves a reading only while that account is still the live
 // one. Without it these tests would read the developer's own ~/.claude.json and
@@ -460,13 +581,13 @@ func TestUsageFetcherBacksOffRepeatedThrottles(t *testing.T) {
 	calls := 0
 	throttled := true
 	good := liveUsageFixture(21)
-	fetcher := newUsageFetcher(nil, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(nil, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		if throttled {
 			return nil, &usageHTTPError{Status: 429}
 		}
 		return good, nil
-	})
+	}, noSaveUsageBackoff)
 
 	// A first throttle imposes no wait at all — most heal within one tick.
 	if _, err := fetcher(); err == nil {
@@ -518,10 +639,10 @@ func TestUsageFetcherBacksOffRepeatedThrottles(t *testing.T) {
 func TestUsageFetcherBacksOffOnlyOnThrottles(t *testing.T) {
 	loginAs(t, "andy@trecs.aero")
 	calls := 0
-	fetcher := newUsageFetcher(liveUsageFixture(21), func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(liveUsageFixture(21), usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 503}
-	})
+	}, noSaveUsageBackoff)
 	for i := 1; i <= 3; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the failure reported", i)
@@ -543,10 +664,10 @@ func TestUsageFetcherBacksOffOnlyOnThrottles(t *testing.T) {
 func TestUsageFetcherColdStartStopsFetchingOnceBackedOff(t *testing.T) {
 	loginAs(t, "andy@trecs.aero")
 	calls := 0
-	fetcher := newUsageFetcher(nil, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(nil, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
-	})
+	}, noSaveUsageBackoff)
 	// The first throttle imposes no wait; the second is what arms it. Both are
 	// real attempts, and both report the error they actually got.
 	for i := 1; i <= 2; i++ {
@@ -573,10 +694,10 @@ func TestUsageFetcherPlaceholdsWhenIdentityIsUnconfirmable(t *testing.T) {
 	loginAs(t, "andy@trecs.aero")
 	calls := 0
 	good := liveUsageFixture(37)
-	fetcher := newUsageFetcher(good, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(good, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
-	})
+	}, noSaveUsageBackoff)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
@@ -600,10 +721,10 @@ func TestUsageFetcherCarriesNumbersRegardlessOfAge(t *testing.T) {
 	loginAs(t, "andy@trecs.aero")
 	calls := 0
 	old := liveUsageFixtureAged(37, 6*time.Hour)
-	fetcher := newUsageFetcher(old, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(old, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
-	})
+	}, noSaveUsageBackoff)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
@@ -628,10 +749,10 @@ func TestUsageFetcherReservesRepeatedlyWithoutMarkingItsOwnCopy(t *testing.T) {
 	loginAs(t, "andy@trecs.aero")
 	calls := 0
 	good := liveUsageFixture(37)
-	fetcher := newUsageFetcher(good, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(good, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
-	})
+	}, noSaveUsageBackoff)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
@@ -661,10 +782,10 @@ func TestUsageFetcherReservesTheSeed(t *testing.T) {
 	loginAs(t, "andy@trecs.aero")
 	calls := 0
 	seed := liveUsageFixture(37)
-	fetcher := newUsageFetcher(seed, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(seed, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
-	})
+	}, noSaveUsageBackoff)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
@@ -691,10 +812,10 @@ func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
 
 	calls := 0
 	seed := liveUsageFixture(37)
-	fetcher := newUsageFetcher(seed, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(seed, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
-	})
+	}, noSaveUsageBackoff)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
@@ -730,6 +851,122 @@ func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
 	}
 }
 
+// The actual point of persisting the backoff: a process restarted mid-wait
+// must not fire a real request before the persisted deadline passes.
+// newUsageFetcher is seeded exactly as NewUsageHub seeds it (from
+// loadUsageBackoffCache), so this proves the very first call withholds the
+// fetch with no throttle having happened yet in this process's lifetime.
+func TestUsageFetcherHonorsSeededBackoffAcrossRestart(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	good := liveUsageFixture(21)
+	calls := 0
+	seedBackoff := usageBackoffSeed{
+		account: "andy@trecs.aero",
+		backoff: usageBackoff{streak: 3, nextAttempt: time.Now().Add(10 * time.Minute)},
+	}
+	fetcher := newUsageFetcher(good, seedBackoff, func() (*AccountUsage, error) {
+		calls++
+		return good, nil
+	}, noSaveUsageBackoff)
+	u, err := fetcher()
+	if calls != 0 {
+		t.Fatalf("fetches = %d, want a persisted future deadline to withhold the very first call", calls)
+	}
+	if err != nil {
+		t.Fatalf("seeded-backoff pass = %v, want a success re-serving the seed", err)
+	}
+	carriedFrom(t, u, good)
+}
+
+// A persisted deadline that has already elapsed — the wait ran out while the
+// process was down — must not hold anything back.
+func TestUsageFetcherFetchesWhenSeededBackoffHasElapsed(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	good := liveUsageFixture(21)
+	calls := 0
+	seedBackoff := usageBackoffSeed{
+		account: "andy@trecs.aero",
+		backoff: usageBackoff{streak: 3, nextAttempt: time.Now().Add(-time.Minute)},
+	}
+	fetcher := newUsageFetcher(nil, seedBackoff, func() (*AccountUsage, error) {
+		calls++
+		return good, nil
+	}, noSaveUsageBackoff)
+	u, err := fetcher()
+	if calls != 1 {
+		t.Fatalf("fetches = %d, want an already-elapsed persisted deadline to allow a real fetch", calls)
+	}
+	if err != nil || u != good {
+		t.Fatalf("pass = (%#v, %v), want the fresh numbers", u, err)
+	}
+}
+
+// A persisted wait armed against a DIFFERENT account than the one now logged
+// in must not hold back the new account's fetch — the same rule an in-process
+// switch already follows (TestUsageFetcherDropsAnotherAccountsNumbers), now
+// proven for a wait that arrived from disk instead of from this process's own
+// history (e.g. a switch happened while the process was down).
+func TestUsageFetcherDropsSeededBackoffForADifferentAccount(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	calls := 0
+	seedBackoff := usageBackoffSeed{
+		account: "andy@avisoma.com",
+		backoff: usageBackoff{streak: 3, nextAttempt: time.Now().Add(10 * time.Minute)},
+	}
+	good := liveUsageFixture(21)
+	fetcher := newUsageFetcher(nil, seedBackoff, func() (*AccountUsage, error) {
+		calls++
+		return good, nil
+	}, noSaveUsageBackoff)
+	u, err := fetcher()
+	if calls != 1 {
+		t.Fatalf("fetches = %d, want a wait armed for a different account to be discarded", calls)
+	}
+	if err != nil || u != good {
+		t.Fatalf("pass = (%#v, %v), want the fresh numbers", u, err)
+	}
+}
+
+// saveBackoff is called at the transitions that change the wait, so the
+// persisted deadline tracks the in-memory one closely enough that a restart
+// between passes sees an accurate picture: armed on the first throttle
+// (streak 1, still due immediately, but a restart before the second throttle
+// should still know one already happened), cleared on the success that ends
+// the streak.
+func TestUsageFetcherPersistsBackoffTransitions(t *testing.T) {
+	loginAs(t, "andy@trecs.aero")
+	type saveCall struct {
+		account string
+		streak  int
+	}
+	var saved []saveCall
+	saveBackoff := func(account string, b usageBackoff) {
+		saved = append(saved, saveCall{account, b.streak})
+	}
+	throttled := true
+	good := liveUsageFixture(21)
+	fetcher := newUsageFetcher(nil, usageBackoffSeed{}, func() (*AccountUsage, error) {
+		if throttled {
+			return nil, &usageHTTPError{Status: 429}
+		}
+		return good, nil
+	}, saveBackoff)
+
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	if len(saved) != 1 || saved[0].account != "andy@trecs.aero" || saved[0].streak != 1 {
+		t.Fatalf("saved after first throttle = %+v, want [{andy@trecs.aero 1}]", saved)
+	}
+	throttled = false
+	if _, err := fetcher(); err != nil {
+		t.Fatalf("pass 2 = %v, want a success", err)
+	}
+	if len(saved) != 2 || saved[1].streak != 0 {
+		t.Fatalf("saved after success = %+v, want the wait cleared", saved)
+	}
+}
+
 // A cold start (no seed) has no last to key switch detection off. Keying it off
 // last.Account instead of a separately-tracked armedFor would leave the wait
 // unable to ever recognise a switch in this state — a Ctrl+W kick would answer
@@ -742,10 +979,10 @@ func TestUsageFetcherRecognizesSwitchWithNoSeed(t *testing.T) {
 	writeLiveAccount(t, home, "andy@trecs.aero")
 
 	calls := 0
-	fetcher := newUsageFetcher(nil, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(nil, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
-	})
+	}, noSaveUsageBackoff)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
@@ -780,10 +1017,10 @@ func TestUsageFetcherRecognizesSwitchWhenLastHasNoAccount(t *testing.T) {
 
 	calls := 0
 	blank := &AccountUsage{Account: "", Info: &UsageInfo{FiveHour: usageBucket{Pct: 12}}, FetchedAt: time.Now()}
-	fetcher := newUsageFetcher(blank, func() (*AccountUsage, error) {
+	fetcher := newUsageFetcher(blank, usageBackoffSeed{}, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
-	})
+	}, noSaveUsageBackoff)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err == nil {
 			t.Fatalf("pass %d = nil error, want the throttle reported", i)
