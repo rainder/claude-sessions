@@ -4,7 +4,9 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
+	"strings"
 )
 
 // resizeTmuxTarget resizes s's tmux window to cols x rows via `tmux
@@ -64,4 +66,60 @@ func resizeSession(s Session, cols, rows int, revert bool) error {
 		return revertTmuxTarget(s)
 	}
 	return resizeTmuxTarget(s, cols, rows)
+}
+
+// inspectorContentCapMargin is kept below the measured content height when
+// shrinking an oversized inspector pane back down, so a session sitting
+// right at a wrapped-line boundary doesn't get re-cut immediately below the
+// fold.
+const inspectorContentCapMargin = 2
+
+// ansiSGR matches a complete SGR ("...m") escape sequence — the only kind of
+// escape a preview's Content can still contain, since sanitizeTerminalText
+// already strips everything else (preview.go) but deliberately keeps color.
+// measuredContentRows needs plain text to judge a line blank, so it strips
+// these first; leaving them in would misread a color-only line (e.g. a bare
+// reset code) as content.
+var ansiSGR = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// measuredContentRows returns the 1-based index of the last non-blank line in
+// content — how many rows of a capture actually hold rendered output, not
+// counting unused rows below it. A blank line embedded between real content
+// still counts (it's inside the span), only trailing blank rows are excluded,
+// which is what oversizing a pane past what the live app rendered leaves
+// behind. Returns 0 for an entirely blank (or empty) capture.
+func measuredContentRows(content string) int {
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	last := 0
+	for i, l := range lines {
+		if strings.TrimSpace(ansiSGR.ReplaceAllString(l, "")) != "" {
+			last = i + 1
+		}
+	}
+	return last
+}
+
+// capInspectorPaneRows decides whether an oversized inspector pane
+// (currently `requested` rows tall) should be shrunk back down, based on
+// content — a capture of that pane taken right after the oversize resize.
+// ok is false when no shrink is warranted: the capture read as blank (a
+// failed or too-early probe — shrinking on that would cut a session that
+// simply hadn't redrawn yet) or the live app's content already fills
+// `requested` rows, meaning the oversize was worth it. Otherwise rows is
+// the measured content height plus inspectorContentCapMargin, floored at
+// `floor` (the inspector's own physical viewport — never shrink below what
+// the user's terminal shows regardless of how little content there is).
+func capInspectorPaneRows(content string, requested, floor int) (rows int, ok bool) {
+	used := measuredContentRows(content)
+	if used <= 0 {
+		return 0, false
+	}
+	capped := used + inspectorContentCapMargin
+	if capped < floor {
+		capped = floor
+	}
+	if capped >= requested {
+		return 0, false
+	}
+	return capped, true
 }
