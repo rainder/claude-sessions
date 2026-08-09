@@ -58,23 +58,25 @@ func TestResizeSessionDispatchesToResizeTmuxTarget(t *testing.T) {
 	}
 }
 
-func TestMeasuredContentRows(t *testing.T) {
+func TestLargestBlankRun(t *testing.T) {
 	tests := []struct {
-		name    string
-		content string
-		want    int
+		name      string
+		content   string
+		wantRun   int
+		wantTotal int
 	}{
-		{"empty", "", 0},
-		{"all blank", "\n\n\n", 0},
-		{"trailing blank rows", "hello\nworld\n\n\n\n", 2},
-		{"blank line embedded counts inside the span", "hello\n\nworld\n\n\n", 3},
-		{"last row non-blank — content fills the pane", "hello\nworld\n", 2},
-		{"color-only line reads as blank", "hello\n\x1b[0m\n\n", 1},
+		{"empty", "", 1, 1},
+		{"all blank", "\n\n\n", 3, 3},
+		{"trailing blank rows", "hello\nworld\n\n\n\n", 3, 5},
+		{"interior gap larger than trailing", "hello\n\n\n\n\nworld\n\n", 4, 7},
+		{"no blanks at all", "hello\nworld\n", 0, 2},
+		{"color-only line reads as blank", "hello\n\x1b[0m\n\n", 2, 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := measuredContentRows(tt.content); got != tt.want {
-				t.Errorf("measuredContentRows(%q) = %d, want %d", tt.content, got, tt.want)
+			run, total := largestBlankRun(tt.content)
+			if run != tt.wantRun || total != tt.wantTotal {
+				t.Errorf("largestBlankRun(%q) = (%d, %d), want (%d, %d)", tt.content, run, total, tt.wantRun, tt.wantTotal)
 			}
 		})
 	}
@@ -88,6 +90,14 @@ func TestCapInspectorPaneRows(t *testing.T) {
 		}
 	})
 
+	t.Run("entirely blank capture (too-early probe) refuses to shrink", func(t *testing.T) {
+		content := strings.Repeat("\n", 80)
+		_, ok := capInspectorPaneRows(content, 80, 20)
+		if ok {
+			t.Fatal("capInspectorPaneRows(all-blank) should refuse to shrink")
+		}
+	})
+
 	t.Run("content fills the oversized pane, no shrink", func(t *testing.T) {
 		content := strings.Repeat("x\n", 80)
 		_, ok := capInspectorPaneRows(content, 80, 20)
@@ -96,13 +106,40 @@ func TestCapInspectorPaneRows(t *testing.T) {
 		}
 	})
 
-	t.Run("short content shrinks to content height plus margin", func(t *testing.T) {
+	t.Run("only small natural spacing between messages, no shrink", func(t *testing.T) {
+		// Every message followed by exactly one blank separator line — normal
+		// formatting, not oversize padding. No run exceeds the threshold.
+		content := strings.Repeat("x\n\n", 20)
+		_, ok := capInspectorPaneRows(content, 40, 10)
+		if ok {
+			t.Fatal("capInspectorPaneRows(small gaps) should refuse to shrink")
+		}
+	})
+
+	t.Run("trailing blank run shrinks to content height plus margin", func(t *testing.T) {
 		content := strings.Repeat("x\n", 10) + strings.Repeat("\n", 70)
 		rows, ok := capInspectorPaneRows(content, 80, 5)
 		if !ok {
 			t.Fatal("capInspectorPaneRows(short) should shrink")
 		}
 		want := 10 + inspectorContentCapMargin
+		if rows != want {
+			t.Errorf("rows = %d, want %d", rows, want)
+		}
+	})
+
+	t.Run("interior gap before an anchored footer still shrinks", func(t *testing.T) {
+		// Mirrors a real Claude Code preview capture: header + history, a
+		// wide gap left by oversizing the pane, then a footer pinned to the
+		// pane's last rows — content on both sides of the gap, so a
+		// trailing-blanks-only measure would see this as "full" and refuse.
+		content := strings.Repeat("h\n", 13) + strings.Repeat("\n", 10) + strings.Repeat("f\n", 3)
+		// total = 13 + 10 + 3 = 26, largest run = 10
+		rows, ok := capInspectorPaneRows(content, 26, 5)
+		if !ok {
+			t.Fatal("capInspectorPaneRows(anchored footer) should shrink")
+		}
+		want := 26 - (10 - inspectorContentCapMargin)
 		if rows != want {
 			t.Errorf("rows = %d, want %d", rows, want)
 		}
