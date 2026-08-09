@@ -479,6 +479,98 @@ func reorderFailedFirst(order []string, failed map[string]bool) []string {
 	return next
 }
 
+// knownAccountsBackoffCachePath is where each known account's armed wait is
+// persisted, alongside (but separate from) knownAccountsCachePath's numbers —
+// the two expire on different events (a fetch vs. a 429), the same split
+// usageBackoffCachePath makes for the live account.
+func knownAccountsBackoffCachePath() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("claude-sessions-known-accounts-backoff-%d.json", os.Getuid()))
+}
+
+// cachedKnownAccountsBackoffEntry is the on-disk form of one account's
+// usageBackoff.
+type cachedKnownAccountsBackoffEntry struct {
+	Streak      int       `json:"streak"`
+	NextAttempt time.Time `json:"next_attempt"`
+}
+
+// cachedKnownAccountsBackoff is the on-disk envelope, keyed by snapshot name —
+// the same key newKnownAccountsFetcher's own backoff map uses.
+type cachedKnownAccountsBackoff struct {
+	Entries map[string]cachedKnownAccountsBackoffEntry `json:"entries"`
+}
+
+// saveKnownAccountsBackoffCache persists every account currently backed off.
+// held with nothing left in it (every wait has ended) clears the file rather
+// than writing an empty envelope — "no waits armed" needs no file on disk, the
+// same rule saveUsageBackoffCache follows for the live account. Best-effort:
+// a read-only /tmp just costs the warm start, not correctness.
+func saveKnownAccountsBackoffCache(held map[string]usageBackoff) {
+	entries := make(map[string]cachedKnownAccountsBackoffEntry, len(held))
+	for name, b := range held {
+		if b.streak <= 0 {
+			continue
+		}
+		entries[name] = cachedKnownAccountsBackoffEntry{Streak: b.streak, NextAttempt: b.nextAttempt}
+	}
+	if len(entries) == 0 {
+		_ = os.Remove(knownAccountsBackoffCachePath())
+		return
+	}
+	data, err := json.Marshal(cachedKnownAccountsBackoff{Entries: entries})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(knownAccountsBackoffCachePath(), data, 0600)
+}
+
+// loadKnownAccountsBackoffCache returns the persisted waits, keyed by
+// snapshot name, or nil if there are none, the file is unreadable, or every
+// entry is missing a field a real wait always has.
+//
+// An entry whose deadline has already elapsed drops its streak along with it
+// rather than carrying it forward, and one whose deadline hasn't is clamped to
+// now+usageBackoffCeiling and, if clamping actually changed it, the correction
+// is written straight back to disk — see loadUsageBackoffCache's identical
+// reasoning for both: due() reports an elapsed entry fetchable regardless of
+// its streak, so a stale streak buys nothing but a needlessly long wait on the
+// next throttle; and a clamp that only lives in memory would leave a bogus
+// far-future timestamp to be re-clamped fresh (and never actually fixed) on
+// every future restart, which in a crash loop is a slow-motion version of the
+// exact wedge the clamp exists to prevent.
+func loadKnownAccountsBackoffCache() map[string]usageBackoff {
+	data, err := os.ReadFile(knownAccountsBackoffCachePath())
+	if err != nil {
+		return nil
+	}
+	var c cachedKnownAccountsBackoff
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil
+	}
+	now := time.Now()
+	max := now.Add(usageBackoffCeiling)
+	out := make(map[string]usageBackoff, len(c.Entries))
+	clamped := false
+	for name, e := range c.Entries {
+		if e.Streak <= 0 || e.NextAttempt.IsZero() || !e.NextAttempt.After(now) {
+			continue
+		}
+		next := e.NextAttempt
+		if next.After(max) {
+			next = max
+			clamped = true
+		}
+		out[name] = usageBackoff{streak: e.Streak, nextAttempt: next}
+	}
+	if clamped {
+		saveKnownAccountsBackoffCache(out)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // newKnownAccountsFetcher builds the poller's fetch: resolve this host's
 // snapshot names, then fetch every one that isn't the live account, one at a
 // time (allKnownAccounts). The live email is re-read per fetch, like
@@ -526,7 +618,17 @@ func reorderFailedFirst(order []string, failed map[string]bool) []string {
 // All three maps and the order slice are rebuilt or recomputed from names each
 // pass, for the same reason, and all are only ever read and written here — in
 // the serial closure the poller calls one tick at a time.
-func newKnownAccountsFetcher(seed *knownAccountsResult) func() (*knownAccountsResult, error) {
+//
+// seedBackoff re-arms whatever waits a prior process instance had in flight
+// (loadKnownAccountsBackoffCache) — assigned straight into backoff, never run
+// back through usageBackoffUntil, for the same reason newUsageFetcher's
+// backoffSeed isn't: those deadlines were already computed once, against the
+// now current when they were saved, and recomputing them here against a new
+// now would let a restart loop walk them forward indefinitely. saveBackoff is
+// injected rather than called as a package function so tests can drive this
+// closure without writing to the real host's /tmp — the same reason
+// newUsageFetcher takes one.
+func newKnownAccountsFetcher(seed *knownAccountsResult, seedBackoff map[string]usageBackoff, saveBackoff func(map[string]usageBackoff)) func() (*knownAccountsResult, error) {
 	var mu sync.Mutex
 	last := map[string]KnownAccountUsage{}
 	if seed != nil {
@@ -534,7 +636,10 @@ func newKnownAccountsFetcher(seed *knownAccountsResult) func() (*knownAccountsRe
 			last[a.Name] = a
 		}
 	}
-	backoff := map[string]usageBackoff{}
+	backoff := make(map[string]usageBackoff, len(seedBackoff))
+	for name, b := range seedBackoff {
+		backoff[name] = b
+	}
 	var order []string
 	return func() (*knownAccountsResult, error) {
 		names, err := snapshotAccountNames()
@@ -621,6 +726,7 @@ func newKnownAccountsFetcher(seed *knownAccountsResult) func() (*knownAccountsRe
 		backoff = held
 		order = reorderFailedFirst(fetchOrder, failed)
 		mu.Unlock()
+		saveBackoff(held)
 		// Sorted by name for the result, independent of fetchOrder: the header
 		// (dedupeAccounts) reads Accounts in this order directly, and without
 		// sorting here a name would jump around the header block whenever it
@@ -734,10 +840,13 @@ type KnownAccountsHub = usagePoller[knownAccountsResult]
 // recent disk cache. The cache is read once and handed to both the poller (what
 // the header shows until the first fetch lands) and the fetcher (what a first
 // pass that fails transiently carries forward) — two reads could disagree, and
-// the second would buy nothing.
+// the second would buy nothing. Persisted backoff deadlines
+// (loadKnownAccountsBackoffCache) seed the same fetcher so a restart mid-wait
+// does not fire a real request for any account before its deadline passes.
 func NewKnownAccountsHub() *KnownAccountsHub {
 	seed := loadKnownAccountsCache()
-	return newUsagePoller(seed, newKnownAccountsFetcher(seed), saveKnownAccountsCache)
+	seedBackoff := loadKnownAccountsBackoffCache()
+	return newUsagePoller(seed, newKnownAccountsFetcher(seed, seedBackoff, saveKnownAccountsBackoffCache), saveKnownAccountsCache)
 }
 
 // derefKnownAccounts flattens the poller's *knownAccountsResult (nil until the

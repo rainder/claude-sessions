@@ -653,8 +653,13 @@ const (
 	usageBackoffMax = 8 * time.Minute
 	// usageBackoffCeiling bounds a Retry-After the endpoint asks for. A bogus or
 	// absurd header value must not be able to wedge an account out of the
-	// rotation for the life of the process.
-	usageBackoffCeiling = 15 * time.Minute
+	// rotation for the life of the process. Raised from 15 minutes: a live
+	// 429 was observed asking for ~31.6 minutes (Retry-After: 1895), which the
+	// old ceiling silently truncated — this bound now has to cover both what a
+	// real Retry-After can legitimately ask for and what a persisted deadline
+	// (see usageBackoffCachePath) is clamped to on load, so it needs the same
+	// headroom in both places.
+	usageBackoffCeiling = time.Hour
 )
 
 // usageBackoffUntil returns when an account whose last streak consecutive
@@ -701,6 +706,100 @@ func (b usageBackoff) due(now time.Time) bool { return !now.Before(b.nextAttempt
 func (b usageBackoff) next(now time.Time, retryAt time.Time) usageBackoff {
 	streak := b.streak + 1
 	return usageBackoff{streak: streak, nextAttempt: usageBackoffUntil(now, streak, retryAt)}
+}
+
+// usageBackoffSeed is what a disk-persisted wait seeds newUsageFetcher's
+// closure state with: the account the wait was armed against, and the wait
+// itself. A restart used to lose this — the wait lived only in the closure's
+// local vars, so a process killed mid-backoff came back up with no memory of
+// it and fetched for real on its very first pass, against an endpoint that
+// had just said not to. Persisting it closes that window the same way the
+// numbers cache already closes the "no bars after a restart" one.
+type usageBackoffSeed struct {
+	account string
+	backoff usageBackoff
+}
+
+// usageBackoffCachePath is where the live account's armed wait is persisted,
+// alongside (but separate from) usageCachePath's numbers — the two expire on
+// different events (a fetch vs. a 429) and there is no reason to couple their
+// files.
+func usageBackoffCachePath() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("claude-sessions-usage-backoff-%d.json", os.Getuid()))
+}
+
+// cachedUsageBackoff is the on-disk form of usageBackoffSeed.
+type cachedUsageBackoff struct {
+	Account     string    `json:"account"`
+	Streak      int       `json:"streak"`
+	NextAttempt time.Time `json:"next_attempt"`
+}
+
+// saveUsageBackoffCache persists the live account's current wait, or clears
+// the file once the wait ends (streak 0 — "not backed off" needs no file on
+// disk, and leaving a stale one would let the clamp in loadUsageBackoffCache
+// paper over a bug rather than there being nothing to load at all).
+// Best-effort, like saveUsageCache: a read-only /tmp just costs the warm start,
+// not correctness — the in-memory closure still enforces the wait either way.
+func saveUsageBackoffCache(account string, b usageBackoff) {
+	if b.streak <= 0 {
+		_ = os.Remove(usageBackoffCachePath())
+		return
+	}
+	data, err := json.Marshal(cachedUsageBackoff{Account: account, Streak: b.streak, NextAttempt: b.nextAttempt})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(usageBackoffCachePath(), data, 0600)
+}
+
+// loadUsageBackoffCache returns the persisted wait, or a zero seed if there is
+// none, it is unreadable, it is missing a field a real wait always has, or the
+// wait it names has already elapsed.
+//
+// An already-elapsed deadline drops the streak along with it rather than
+// carrying it forward: due() would report this account fetchable either way,
+// so nothing about the wait itself survives, and the streak is only
+// meaningful as "how many *consecutive* throttles led to this deadline" — a
+// deadline that ended who knows how long ago (the process could have been
+// down for a week) says nothing trustworthy about whether the next attempt is
+// still part of that run. Carrying it forward anyway would jump the very next
+// throttle straight into usageBackoffMax instead of the free first retry the
+// schedule promises everyone else.
+//
+// A deadline that has NOT yet elapsed is clamped to now+usageBackoffCeiling —
+// never trusted past that bound — for the same reason armed waits are capped
+// in the first place: a corrupt file, a backwards clock adjustment, or a
+// future bug that writes a garbage timestamp must not be able to wedge an
+// account out of rotation for longer than a live-armed wait ever could. The
+// clamp is what makes raising usageBackoffCeiling to cover a real long
+// Retry-After safe to persist at all. Clamping alone only bounds *this*
+// process, though — the bad value would still sit on disk waiting to be
+// re-clamped fresh on every future restart, which in a crash loop that never
+// lets the real deadline elapse is a slow-motion version of the exact wedge
+// the clamp exists to prevent. So a clamp writes the corrected value straight
+// back; best-effort, like every other save here.
+func loadUsageBackoffCache() usageBackoffSeed {
+	data, err := os.ReadFile(usageBackoffCachePath())
+	if err != nil {
+		return usageBackoffSeed{}
+	}
+	var c cachedUsageBackoff
+	if err := json.Unmarshal(data, &c); err != nil {
+		return usageBackoffSeed{}
+	}
+	if c.Streak <= 0 || c.Account == "" || c.NextAttempt.IsZero() {
+		return usageBackoffSeed{}
+	}
+	now := time.Now()
+	if !c.NextAttempt.After(now) {
+		return usageBackoffSeed{}
+	}
+	if max := now.Add(usageBackoffCeiling); c.NextAttempt.After(max) {
+		c.NextAttempt = max
+		saveUsageBackoffCache(c.Account, usageBackoff{streak: c.Streak, nextAttempt: c.NextAttempt})
+	}
+	return usageBackoffSeed{account: c.Account, backoff: usageBackoff{streak: c.Streak, nextAttempt: c.NextAttempt}}
 }
 
 // usageRetryAt digs a 429's Retry-After out of an error, or returns the zero
@@ -923,16 +1022,34 @@ func liveCarryable(last *AccountUsage, live string) bool {
 //
 // fetch is a parameter rather than a package var so a test can drive the whole
 // state machine with a counter and no seam into the network or the Keychain
-// (the same reason allKnownAccounts takes its per-account fetch as one). last,
-// backoff and armedFor are touched only inside the returned closure, which
+// (the same reason allKnownAccounts takes its per-account fetch as one).
+// saveBackoff is injected for the identical reason: persisting straight to
+// usageBackoffCachePath from inside the closure would make every test that
+// exercises the backoff path write to the real host's /tmp (several set HOME
+// via loginAs but not TMPDIR), the exact class of bug keychainRead's
+// TestMain-panic seam exists to catch. NewUsageHub passes the real
+// saveUsageBackoffCache; tests pass a no-op or a spy. last, backoff and
+// armedFor are touched only inside the returned closure, which
 // usagePoller.run calls one at a time from its single goroutine — the same
 // single-owner rule newKnownAccountsFetcher's maps rely on, so neither needs a
 // lock.
-func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) func() (*AccountUsage, error) {
+//
+// backoffSeed re-arms the wait a prior process instance had in flight — see
+// usageBackoffSeed. It is assigned straight into backoff/armedFor, never run
+// back through usageBackoffUntil: that deadline was already computed (and
+// ceiling-clamped) once, by loadUsageBackoffCache, against the now current
+// when the process last saved it; recomputing it here against a *new* now
+// would let a restart loop walk the deadline forward indefinitely instead of
+// counting down to the one that was actually armed. backoffSeed.account takes
+// priority over seed.Account when both are present — it names who the
+// *wait* belongs to, which is the more specific fact when they'd otherwise
+// disagree (e.g. a numbers seed from before a switch, a backoff seed from
+// after).
+func newUsageFetcher(seed *AccountUsage, backoffSeed usageBackoffSeed, fetch func() (*AccountUsage, error), saveBackoff func(account string, b usageBackoff)) func() (*AccountUsage, error) {
 	last := seed
-	var backoff usageBackoff
-	armedFor := ""
-	if seed != nil {
+	backoff := backoffSeed.backoff
+	armedFor := backoffSeed.account
+	if armedFor == "" && seed != nil {
 		armedFor = seed.Account
 	}
 	return func() (*AccountUsage, error) {
@@ -943,7 +1060,10 @@ func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) fu
 			case live != "" && armedFor != "" && !strings.EqualFold(armedFor, live):
 				// A different account is logged in now than the one this wait was
 				// armed against — that budget says nothing about this account, so
-				// both memories drop and this pass asks for real.
+				// both memories drop and this pass asks for real. No save call here:
+				// the unconditional fetch() below always saves again with the
+				// outcome, so persisting the drop first would only be overwritten —
+				// see the save calls after fetch().
 				last, backoff, armedFor = nil, usageBackoff{}, ""
 			case liveCarryable(last, live):
 				// A copy, never the stored pointer: last must keep its original
@@ -971,6 +1091,7 @@ func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) fu
 			} else {
 				backoff, armedFor = usageBackoff{}, ""
 			}
+			saveBackoff(armedFor, backoff)
 			return nil, err
 		}
 		last = u
@@ -983,6 +1104,7 @@ func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) fu
 		// backoff is always due, so armedFor is not read again until a 429 arms
 		// it, and that path already records live.
 		backoff, armedFor = usageBackoff{}, live
+		saveBackoff(armedFor, backoff)
 		return u, nil
 	}
 }
@@ -1022,8 +1144,11 @@ func saveOnceUsage(seed *AccountUsage, save func(*AccountUsage)) func(*AccountUs
 // kicked off asynchronously. A recent disk-cached snapshot seeds the header so
 // a restart while the endpoint is throttling still shows a (stale) bar — and
 // seeds the fetcher and the save wrapper alongside it, so a pass skipped by the
-// backoff re-serves that snapshot without restamping it on disk.
+// backoff re-serves that snapshot without restamping it on disk. A persisted
+// backoff deadline (loadUsageBackoffCache) seeds the same fetcher so a restart
+// mid-wait does not fire a real request before that deadline passes.
 func NewUsageHub() *UsageHub {
 	seed := loadUsageCache()
-	return newUsagePoller(seed, newUsageFetcher(seed, fetchUsage), saveOnceUsage(seed, saveUsageCache))
+	backoffSeed := loadUsageBackoffCache()
+	return newUsagePoller(seed, newUsageFetcher(seed, backoffSeed, fetchUsage, saveUsageBackoffCache), saveOnceUsage(seed, saveUsageCache))
 }

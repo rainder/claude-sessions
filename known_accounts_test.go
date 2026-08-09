@@ -14,6 +14,13 @@ import (
 	"time"
 )
 
+// noSaveKnownAccountsBackoff is the saveBackoff arg for tests that don't
+// exercise disk persistence of the backoff state — the real
+// saveKnownAccountsBackoffCache writes to os.TempDir(), and several tests in
+// this file set HOME via loginAs without also setting TMPDIR, so passing the
+// real function here would write to the developer's actual temp directory.
+func noSaveKnownAccountsBackoff(map[string]usageBackoff) {}
+
 // writeSnapshotFixture creates one claude-switch credential snapshot (and, when
 // email is non-empty, its account.json sibling) under home. It goes through
 // snapshotCredentialPath so the fixture matches whichever platform the test
@@ -170,7 +177,7 @@ func TestKnownAccountsFetcherWithNoSnapshots(t *testing.T) {
 	// A fresh machine with no claude-switch setup: an empty list, never an error
 	// — an error here would put the poller into backoff over nothing.
 	t.Setenv("HOME", t.TempDir())
-	got, err := newKnownAccountsFetcher(nil)()
+	got, err := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)()
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -605,7 +612,7 @@ func TestKnownAccountsFetcherRetriesAFailedAccountFirst(t *testing.T) {
 		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
 	})
 
-	fetcher := newKnownAccountsFetcher(nil)
+	fetcher := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)
 	if _, err := fetcher(); err != nil {
 		t.Fatalf("pass 1: %v", err)
 	}
@@ -621,6 +628,112 @@ func TestKnownAccountsFetcherRetriesAFailedAccountFirst(t *testing.T) {
 	}
 	if len(order) == 0 || order[0] != "tok-bravo" {
 		t.Fatalf("pass 2 fetch order = %v, want bravo first after failing pass 1", order)
+	}
+}
+
+// The actual point of persisting the backoff: a process restarted mid-wait
+// must not fire a real request for an account before its persisted deadline
+// passes. seedBackoff is seeded exactly as NewKnownAccountsHub seeds it (from
+// loadKnownAccountsBackoffCache).
+func TestKnownAccountsFetcherHonorsSeededBackoffAcrossRestart(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "avisoma", "tok-avisoma", "andy@avisoma.com")
+
+	calls := 0
+	swapFetch(t, func(string) (*UsageInfo, error) {
+		calls++
+		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+	})
+
+	seedBackoff := map[string]usageBackoff{
+		"avisoma": {streak: 3, nextAttempt: time.Now().Add(10 * time.Minute)},
+	}
+	fetcher := newKnownAccountsFetcher(nil, seedBackoff, noSaveKnownAccountsBackoff)
+	res, err := fetcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("fetches = %d, want a persisted future deadline to withhold the round trip", calls)
+	}
+	if len(res.Accounts) != 1 || res.Accounts[0].Reason != usageRateLimitedReason {
+		t.Fatalf("accounts = %#v, want a synthesized rate-limited entry with no round trip", res.Accounts)
+	}
+}
+
+// A persisted deadline that has already elapsed — the wait ran out while the
+// process was down — must not hold anything back.
+func TestKnownAccountsFetcherFetchesWhenSeededBackoffHasElapsed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "avisoma", "tok-avisoma", "andy@avisoma.com")
+
+	calls := 0
+	swapFetch(t, func(string) (*UsageInfo, error) {
+		calls++
+		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+	})
+
+	seedBackoff := map[string]usageBackoff{
+		"avisoma": {streak: 3, nextAttempt: time.Now().Add(-time.Minute)},
+	}
+	fetcher := newKnownAccountsFetcher(nil, seedBackoff, noSaveKnownAccountsBackoff)
+	res, err := fetcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("fetches = %d, want an already-elapsed persisted deadline to allow a real fetch", calls)
+	}
+	if len(res.Accounts) != 1 || res.Accounts[0].Info == nil {
+		t.Fatalf("accounts = %#v, want fresh numbers", res.Accounts)
+	}
+}
+
+// saveBackoff is called with each pass's final backoff map, so a restart
+// between passes sees an accurate picture of who is currently waiting: armed
+// after the first throttle (streak 1, still due immediately — the next
+// ordinary tick fetches for real — but a restart before the second throttle
+// should still know one already happened), cleared once a fetch succeeds.
+func TestKnownAccountsFetcherPersistsBackoffAfterEachPass(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "avisoma", "tok-avisoma", "andy@avisoma.com")
+
+	throttled := true
+	swapFetch(t, func(string) (*UsageInfo, error) {
+		if throttled {
+			return nil, &usageHTTPError{Status: 429}
+		}
+		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+	})
+
+	var saved []map[string]usageBackoff
+	saveBackoff := func(held map[string]usageBackoff) {
+		cp := make(map[string]usageBackoff, len(held))
+		for k, v := range held {
+			cp[k] = v
+		}
+		saved = append(saved, cp)
+	}
+	fetcher := newKnownAccountsFetcher(nil, nil, saveBackoff)
+	if _, err := fetcher(); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 1 || saved[0]["avisoma"].streak != 1 {
+		t.Fatalf("saved after first throttle = %+v, want avisoma streak 1", saved)
+	}
+
+	throttled = false
+	if _, err := fetcher(); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 2 || len(saved[1]) != 0 {
+		t.Fatalf("saved after success = %+v, want the wait cleared", saved)
 	}
 }
 
@@ -649,7 +762,7 @@ func TestKnownAccountsFetcherCarriesNumbersAcrossPolls(t *testing.T) {
 		return healthy[token], nil
 	})
 
-	fetcher := newKnownAccountsFetcher(nil)
+	fetcher := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)
 	first, err := fetcher()
 	if err != nil {
 		t.Fatal(err)
@@ -707,7 +820,7 @@ func TestKnownAccountsFetcherSeedsFromCache(t *testing.T) {
 		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
 		FetchedAt: time.Now().Add(-time.Minute),
 	}}}
-	res, err := newKnownAccountsFetcher(seed)()
+	res, err := newKnownAccountsFetcher(seed, nil, noSaveKnownAccountsBackoff)()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,6 +879,128 @@ func TestKnownAccountsCacheNeverPersistsExpired(t *testing.T) {
 	saveKnownAccountsCache(&onlyExpired)
 	if got := loadKnownAccountsCache(); got != nil {
 		t.Fatalf("all-expired cache seeded %#v, want nil", *got)
+	}
+}
+
+func TestKnownAccountsBackoffCacheRoundTrip(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	if got := loadKnownAccountsBackoffCache(); got != nil {
+		t.Fatalf("loadKnownAccountsBackoffCache with no file = %+v, want nil", got)
+	}
+	next := time.Now().Add(6 * time.Minute).UTC().Truncate(time.Second)
+	saveKnownAccountsBackoffCache(map[string]usageBackoff{
+		"avisoma": {streak: 2, nextAttempt: next},
+	})
+	got := loadKnownAccountsBackoffCache()
+	if got == nil || got["avisoma"].streak != 2 {
+		t.Fatalf("round-trip = %+v, want avisoma streak 2", got)
+	}
+	if !got["avisoma"].nextAttempt.Equal(next) {
+		t.Errorf("round-trip nextAttempt = %v, want %v", got["avisoma"].nextAttempt, next)
+	}
+}
+
+// Clearing every wait (an empty map) removes the file rather than writing an
+// empty envelope, mirroring saveUsageBackoffCache's rule for the live account.
+func TestKnownAccountsBackoffCacheClearedWhenEmpty(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	saveKnownAccountsBackoffCache(map[string]usageBackoff{
+		"avisoma": {streak: 2, nextAttempt: time.Now().Add(time.Minute)},
+	})
+	if got := loadKnownAccountsBackoffCache(); got == nil {
+		t.Fatal("setup: expected a wait to be persisted before clearing it")
+	}
+	saveKnownAccountsBackoffCache(nil)
+	if got := loadKnownAccountsBackoffCache(); got != nil {
+		t.Fatalf("after clearing, cache = %+v, want nil", got)
+	}
+	if _, err := os.Stat(knownAccountsBackoffCachePath()); !os.IsNotExist(err) {
+		t.Errorf("cache file still exists after clearing, err = %v", err)
+	}
+}
+
+// A deadline recorded before a long outage — or a corrupt/bogus one — must not
+// be able to wedge an account out of rotation past usageBackoffCeiling from
+// the moment it is loaded, mirroring loadUsageBackoffCache's clamp for the
+// live account.
+func TestKnownAccountsBackoffCacheClampsAnExcessiveDeadline(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	saveKnownAccountsBackoffCache(map[string]usageBackoff{
+		"avisoma": {streak: 5, nextAttempt: time.Now().Add(6 * time.Hour)},
+	})
+	got := loadKnownAccountsBackoffCache()
+	max := time.Now().Add(usageBackoffCeiling + 5*time.Second)
+	if got == nil || got["avisoma"].nextAttempt.After(max) {
+		t.Fatalf("loaded = %+v, want clamped to within %v of now", got, usageBackoffCeiling)
+	}
+	if got["avisoma"].streak != 5 {
+		t.Errorf("clamping the deadline also dropped the streak: got %d, want 5 preserved", got["avisoma"].streak)
+	}
+}
+
+// A zero streak, or a zero deadline, is not a real persisted wait — loading it
+// must not silently arm one.
+func TestKnownAccountsBackoffCacheRejectsIncompleteEntries(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	bad, _ := json.Marshal(cachedKnownAccountsBackoff{Entries: map[string]cachedKnownAccountsBackoffEntry{
+		"avisoma": {Streak: 0, NextAttempt: time.Now().Add(time.Minute)},
+	}})
+	if err := os.WriteFile(knownAccountsBackoffCachePath(), bad, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadKnownAccountsBackoffCache(); got != nil {
+		t.Fatalf("zero-streak entry = %+v, want rejected", got)
+	}
+	if err := os.WriteFile(knownAccountsBackoffCachePath(), []byte("not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadKnownAccountsBackoffCache(); got != nil {
+		t.Fatalf("corrupt cache = %+v, want nil", got)
+	}
+}
+
+// An elapsed deadline drops its streak along with it — mirrors
+// loadUsageBackoffCache's identical rule for the live account: due() reports
+// the account fetchable regardless of the streak, so carrying it forward would
+// only jump the next throttle straight into usageBackoffMax.
+func TestKnownAccountsBackoffCacheDropsAnElapsedWait(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	saveKnownAccountsBackoffCache(map[string]usageBackoff{
+		"avisoma": {streak: 3, nextAttempt: time.Now().Add(-time.Minute)},
+	})
+	if got := loadKnownAccountsBackoffCache(); got != nil {
+		t.Fatalf("elapsed wait loaded as %+v, want dropped along with its streak", got)
+	}
+}
+
+// A clamp that only lived in memory would leave the bogus value on disk to be
+// re-clamped fresh (and never actually fixed) on every future restart. The
+// correction must be written back.
+func TestKnownAccountsBackoffCacheClampSelfHeals(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	saveKnownAccountsBackoffCache(map[string]usageBackoff{
+		"avisoma": {streak: 5, nextAttempt: time.Now().Add(6 * time.Hour)},
+	})
+	if got := loadKnownAccountsBackoffCache(); got == nil || got["avisoma"].streak != 5 {
+		t.Fatalf("setup: loaded = %+v, want the clamped wait", got)
+	}
+	// Read the raw file directly rather than through loadKnownAccountsBackoffCache
+	// again, which would clamp a second time and hide whether the write-back
+	// actually happened.
+	data, err := os.ReadFile(knownAccountsBackoffCachePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c cachedKnownAccountsBackoff
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := c.Entries["avisoma"]
+	if !ok {
+		t.Fatal("raw file has no avisoma entry after the self-heal write")
+	}
+	if max := time.Now().Add(usageBackoffCeiling + 5*time.Second); entry.NextAttempt.After(max) {
+		t.Fatalf("raw file next_attempt = %v, want the clamped value persisted back, not the original 6h one", entry.NextAttempt)
 	}
 }
 
@@ -942,7 +1177,7 @@ func TestKnownAccountsFetcherBacksOffRepeatedThrottles(t *testing.T) {
 		defer mu.Unlock()
 		throttled = v
 	}
-	fetcher := newKnownAccountsFetcher(nil)
+	fetcher := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)
 	pass := func(t *testing.T, n int) KnownAccountUsage {
 		t.Helper()
 		res, err := fetcher()
@@ -1013,7 +1248,7 @@ func TestKnownAccountsFetcherResolvesActiveNameWhileBackedOff(t *testing.T) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	})
-	fetcher := newKnownAccountsFetcher(nil)
+	fetcher := newKnownAccountsFetcher(nil, nil, noSaveKnownAccountsBackoff)
 	for i := 1; i <= 2; i++ {
 		if _, err := fetcher(); err != nil {
 			t.Fatalf("pass %d: %v", i, err)
