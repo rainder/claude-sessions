@@ -60,6 +60,16 @@ func readModalEvents(dec *inputDecoder, wakes []wakeFD) ([]string, wakeKind) {
 	}
 }
 
+// inspectorPaneRowMultiplier oversizes the previewed tmux pane's height
+// relative to the inspector's own viewport: the pane is resized to
+// inspectorPaneRowMultiplier x innerRows while inspectorViewState's own
+// viewportRows stays at innerRows, so the extra rows the live app renders
+// into become scrollable history inside the inspector (PgUp/PgDn) that would
+// otherwise not exist for a pane running an alt-screen full-redraw app —
+// capture-pane on such a pane returns only the current WxH grid, never real
+// tmux scrollback, so a 1x pane leaves nothing to scroll into.
+const inspectorPaneRowMultiplier = 4
+
 // inspectorChromeRows is the number of *fixed* rows RenderInspector reserves
 // around the scrolling body (title, metadata, separator, footer). A loaded
 // ticket summary costs inspectorSummaryExtraRows on top of it, so the viewport
@@ -553,7 +563,7 @@ func RunTUI(interval time.Duration) error {
 			// timeout (remote_actions.go) — the same shape send_keys.go's
 			// local resolveLivePIDLocal path already accepts on the UI thread.
 			if innerRows := rows - inspectorChromeRows; innerRows > 0 {
-				resizeInspected(sess, cols, innerRows, false)
+				resizeInspected(sess, cols, innerRows*inspectorPaneRowMultiplier, false)
 			}
 		}
 		state.mode = screenInspector
