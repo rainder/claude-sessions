@@ -8,14 +8,19 @@ import (
 	"time"
 )
 
-// RemoteUsageHub polls remote /usage endpoints in a background goroutine so the
-// header's account bars never block the render loop.
+// RemoteUsageHub polls remote /usage endpoints in a background goroutine so
+// the header's per-host account label and the Ctrl+W switch picker's remote
+// entries never block the render loop.
 //
-// It is RemoteHub's smaller sibling, deliberately without the wake pipe: a
-// session appearing or vanishing wants an immediate repaint, a rate-limit
-// percentage does not, and the TUI's own tick paints the new numbers within a
-// couple of seconds anyway. What is left is usagePoller's plain ticker + kick
-// shape, at usagePoller's cadence, over RemoteHub's per-host fan-out.
+// /usage never calls Anthropic (see server.go): it reports each host's account
+// identity only, never rate-limit percentages, so this hub carries no numbers
+// and contributes no bars — only names, emails, and which one is live.
+//
+// It is RemoteHub's smaller sibling, deliberately without the wake pipe: an
+// account switch on a remote host wants a repaint eventually, not instantly,
+// and the TUI's own tick paints the refreshed identity within a couple of
+// seconds anyway. What is left is usagePoller's plain ticker + kick shape, at
+// usagePoller's cadence, over RemoteHub's per-host fan-out.
 type RemoteUsageHub struct {
 	mu      sync.Mutex
 	results map[string]usageResponse
@@ -23,7 +28,8 @@ type RemoteUsageHub struct {
 	kick    chan struct{}
 	stop    chan struct{}
 	// ignore yields the account emails this machine already has good numbers
-	// for, recomputed per tick (see localFreshAccountEmails).
+	// for, recomputed per tick (see localFreshAccountEmails). Sent to the
+	// server but no longer acted on there — see the doc on that field.
 	ignore func() []string
 }
 
@@ -45,13 +51,15 @@ func NewRemoteUsageHub(ignore func() []string) *RemoteUsageHub {
 
 // remoteUsagePhaseOffset separates this hub's recurring ticks from
 // KnownAccountsHub's. Both are started within a few lines of each other in the
-// same client process (tui.go), both run at usageRefreshInterval, and a remote
-// host has no ticker of its own — its /usage fetches happen only when this hub
-// asks. So without an offset, this machine's own fetch of an account and every
-// remote's fetch of that same account land in one tight window every two
-// minutes, which is exactly the shape that turns a shared account's per-token
-// budget into mutual 429s. Half a minute is enough to unstack them and far too
-// small for anyone to see in the header.
+// same client process (tui.go) and both run at usageRefreshInterval. This
+// predates GET /usage becoming fetch-free (see server.go) — back when a remote
+// host's /usage answer meant a real Anthropic round trip on this machine's
+// behalf, an unstaggered tick here would land in the same window as this
+// machine's own account poll, doubling up against a shared per-token budget.
+// That no longer happens — a remote /usage poll spends nothing — so the offset
+// is now just a mild, harmless spread of two identity-refresh ticks. Left in
+// place rather than removed: half a minute costs nothing and undoing it buys
+// nothing either.
 const remoteUsagePhaseOffset = 30 * time.Second
 
 // run polls on usageRefreshInterval, phase-shifted by remoteUsagePhaseOffset.
@@ -184,22 +192,10 @@ func (h *RemoteUsageHub) Snapshot() map[string]usageResponse {
 
 // localFreshAccountEmails lists the accounts this machine currently holds good
 // numbers for: the live account and every credential snapshot whose own poll
-// succeeded. Those are what a remote host can be told to skip — if two machines
-// are logged into the same account, only one of them needs to ask Anthropic
-// about it, and the client's own dedupeAccounts would throw the second answer
-// away regardless (a live local line always beats a remote's snapshot copy).
-//
-// An account whose local fetch FAILED is deliberately absent. Including it would
-// tell every remote host not to fetch the very account this machine has no
-// numbers for, turning one transient 429 here into a blank (or "auth expired")
-// bar everywhere — the opposite of what fewer pollers is meant to achieve. Same
-// for an account with no email: an empty ignore entry names nothing.
-//
-// Stale is excluded on both sides for that identical reason. Carried-forward
-// numbers are this machine's memory of an account it currently cannot reach, not
-// numbers it can vouch for, and a host that CAN reach the account must not be
-// told to skip it. The live account earns the rule the same way a snapshot
-// account does, now that newUsageFetcher carries its numbers forward too.
+// succeeded. Historically this was what a remote host could be told to skip
+// fetching; GET /usage no longer fetches at all (see server.go), so the list
+// this builds is sent as `ignore` but has nothing left to act on server-side.
+// Kept rather than removed — see RemoteUsageHub.ignore's doc.
 func localFreshAccountEmails(live *AccountUsage, known []KnownAccountUsage) []string {
 	seen := make(map[string]bool)
 	var out []string

@@ -170,13 +170,12 @@ func RunTUI(interval time.Duration) error {
 	defer knownAccountsHub.Shutdown()
 
 	// Each remote host's accounts come from its own /usage endpoint rather than
-	// riding /sessions, so a host nobody is watching never calls Anthropic at
-	// all. Each tick tells every host which accounts THIS machine already has
-	// good numbers for, so a remote host skips fetching an account this client
-	// is already showing from its own live poll — the redundant case this whole
-	// design exists to cut. It does not dedupe across remotes with no bearing on
-	// this client: two remotes sharing an account neither client account covers
-	// still each fetch it independently.
+	// riding /sessions. That endpoint never calls Anthropic at all any more — it
+	// reports identity only (names and emails, for the Ctrl+W switch picker and
+	// the header's account label), never percentages, so a remote host never
+	// spends another machine's account budget on this client's behalf. The
+	// `ignore` list this closure still builds is accepted but no longer acted on
+	// server-side; kept for a future scoped-fetch endpoint that would want it.
 	remoteUsageHub := NewRemoteUsageHub(func() []string {
 		return localFreshAccountEmails(
 			usageHub.Snapshot(),
@@ -862,9 +861,10 @@ func RunTUI(interval time.Duration) error {
 					usageHub.Kick()
 					knownAccountsHub.Kick()
 					// A remote switch needs no kick to be *correct* — every host
-					// re-resolves which account is live on each /usage call — but
-					// its percentages are cached per account, so refetch so the
-					// bars follow the switch instead of lagging a tick behind.
+					// re-resolves which account is live on each /usage call, with no
+					// cache to go stale — but refresh anyway so the picker's and
+					// header's remote labels catch up immediately instead of lagging
+					// a tick behind.
 					remoteUsageHub.Refresh()
 					refresh(true)
 				}

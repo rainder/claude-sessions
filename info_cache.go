@@ -18,12 +18,12 @@ type summaryCacheEntry struct {
 	done    chan struct{}
 }
 
-// summaryCache is a small single-flight + TTL + bounded-size cache, modeled
-// on usage_cache.go's GetOrFetch *shape* (single-flight + TTL), not reused
-// literally — usage_cache.go's key space ("accounts this host holds a
-// snapshot for") is small and explicitly documented as needing no size
-// bound; this cache's key spaces (ticket ids, and (host,session,mtime,size)
-// tuples) are not, so eviction-over-capacity is new logic here.
+// summaryCache is a small single-flight + TTL + bounded-size cache, modeled on
+// the same claim/join/publish GetOrFetch *shape* spawnDedupe uses, not reused
+// literally — a key space like "accounts this host holds a snapshot for" is
+// small enough to need no size bound; this cache's key spaces (ticket ids, and
+// (host,session,mtime,size) tuples) are not, so eviction-over-capacity is new
+// logic here.
 //
 // The underlying fetch always runs to its own bounded completion,
 // independent of any individual caller's context — ctx here only bounds how

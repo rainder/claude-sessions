@@ -331,15 +331,12 @@ func fetchUsage() (*AccountUsage, error) {
 // every caller falls back to the file read it used before, so an offline or
 // throttled profile endpoint costs nothing but the upgrade.
 //
-// **The two legs are sequential and their timeouts have to add up.** The usage
-// request allows 5s (fetchUsageInfo) and the profile request 2s
-// (profileFetchTimeout), so this function's worst case is ~7s. That has to fit
-// under two independent budgets: the server's own runBounded wrapper at
-// usageFetchTimeout (10s), which would otherwise discard perfectly good numbers
-// and cache a timeout in their place, and FetchRemoteUsage's 8s client timeout,
-// past which the client gives up on the whole /usage answer. 5+2 clears both;
-// 5+5 cleared neither. Anything added to this chain has to be re-checked against
-// those two numbers.
+// **The two legs are sequential.** The usage request allows 5s
+// (fetchUsageInfo) and the profile request 2s (profileFetchTimeout), so this
+// function's worst case is ~7s. This budget belongs to the client-side
+// fetchers only (newUsageFetcher, newKnownAccountsFetcher) — the server's
+// GET /usage handler no longer calls this function at all, so there is no
+// server-side timeout wrapper in this chain to check it against.
 //
 // The verified email is also cached per token (profileEmails), so the second
 // round trip is paid once per credential rather than on every poll tick.
@@ -473,9 +470,8 @@ var profileEmailFetch = fetchProfileEmail
 // profileFetchTimeout bounds the identity probe, and is deliberately much
 // tighter than fetchUsageInfo's 5s. The probe runs *after* a successful usage
 // fetch, so its budget is whatever is left over: see fetchVerifiedUsageInfo for
-// the 5+2 arithmetic against the server's 10s runBounded and the client's 8s
-// FetchRemoteUsage. Losing the identity upgrade to a slow probe costs a fallback
-// to the file read; losing the numbers to one costs a cached failure.
+// the 5+2 arithmetic. Losing the identity upgrade to a slow probe costs a
+// fallback to the file read; losing the numbers to one costs a cached failure.
 const profileFetchTimeout = 2 * time.Second
 
 // fetchProfileEmail asks the OAuth profile endpoint which account a token
@@ -740,20 +736,9 @@ func classifyUsageErr(err error) (expired bool, reason string) {
 			return false, fmt.Sprintf("HTTP %d", httpErr.Status)
 		}
 	}
-	// A fetch the server's cache declined to even attempt is reported as what it
-	// is standing in for: the account is in backoff because it kept being
-	// throttled, so the caller's row says "rate limited" exactly as it would have
-	// said after the round trip this skipped.
-	if errors.Is(err, errUsageBackoffActive) {
-		return false, usageRateLimitedReason
-	}
-	if errors.Is(err, errUsageFetchTimedOut) {
-		return false, "timed out"
-	}
 	// fetchUsageInfo's own http.Client{Timeout} expires as a *url.Error wrapping
-	// a context deadline, not errUsageFetchTimedOut (that sentinel belongs to
-	// usage_cache.go's separate runBounded watchdog) — net.Error.Timeout() is
-	// what actually distinguishes it from a DNS failure or a refused connection.
+	// a context deadline — net.Error.Timeout() is what distinguishes it from a
+	// DNS failure or a refused connection.
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return false, "timed out"

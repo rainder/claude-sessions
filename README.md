@@ -436,11 +436,10 @@ render.go            full/minimal views with multi-section layout
 config.go            view-mode load/save
 yaml.go              tiny YAML parser for servers.yaml
 remote.go            HTTP client + RemoteResult
-remote_usage.go      background poller for remote /usage (account bars)
+remote_usage.go      background poller for remote /usage (account identity only)
 server.go            HTTP server (Tailscale bind, bearer auth, all endpoints)
 tui.go               alt-screen + raw mode + key reader + main loop
 usage.go             account rate-limit polling (5h/weekly bars in header)
-usage_cache.go       per-account single-flight + TTL cache behind GET /usage
 known_accounts.go    per-account snapshot discovery + read-only usage polling
 account.go           account switching (credential + identity snapshots, flock)
 account_list.go      `account list` rows + table

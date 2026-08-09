@@ -501,14 +501,19 @@ of its own), and the answer rides back on `UsageInfo.VerifiedAccount` —
 `json:"-"`, since each host verifies where its own tokens live and a second
 writer on the wire would just make the winner depend on poll ordering.
 `usageAccountLabel` is the one attribution rule (verified beats the file read)
-and `verifiedIdentityMismatch` the one disagreement test; the live path, the
-known-accounts poller and the server's `/usage` all go through both, so they
-cannot drift. This closed a read-order race — the token was read at one instant
-and `~/.claude.json` at another, so a switch in between labelled one account's
+and `verifiedIdentityMismatch` the one disagreement test; the live path and the
+known-accounts poller both go through both, so they cannot drift from each
+other. This closed a read-order race — the token was read at one instant and
+`~/.claude.json` at another, so a switch in between labelled one account's
 numbers with another's — and it is what makes a *clobber* visible: a header
 showing an unexpected address means the credential store and the identity cache
 have drifted apart. A verified email that disagrees with the file **wins**;
 smoothing it over is what hid the problem.
+`/usage` no longer takes part: it never fetches, so it has no token to verify
+against and always reports the file's email (`loadAccountEmail`). A clobber on
+a *remote* host is therefore invisible through `/usage` — visible only from
+that host's own client, the same one place that can still afford to spend the
+token checking it.
 
 `usageInfoFetch`'s production value is therefore `fetchVerifiedUsageInfo`, not
 the bare `fetchUsageInfo` — one seam covers both legs, so a test fake with a
@@ -525,12 +530,11 @@ a property of the credential — a rotated token is a different key and re-probe
 naturally, so no TTL is needed to stay correct, and steady-state request volume
 is unchanged.
 
-**The two legs are sequential and their timeouts have to add up**: 5s for usage
-+ `profileFetchTimeout` (2s) ≈ 7s worst case, which has to fit under both the
-server's `runBounded` wrapper (`usageFetchTimeout`, 10s — past it, good numbers
-are discarded and a timeout is cached in their place) and `FetchRemoteUsage`'s
-8s client timeout. 5+2 clears both; 5+5 cleared neither. Anything added to this
-chain gets re-checked against those two numbers.
+**The two legs are sequential**: 5s for usage + `profileFetchTimeout` (2s) ≈ 7s
+worst case. This budget belongs to the client-side fetchers only
+(`newUsageFetcher`, `newKnownAccountsFetcher`) — the server's `/usage` handler
+no longer calls either leg (see below), so there is no longer a server-side
+timeout wrapper in this chain to check it against.
 
 **A failed fetch has five outcomes, not two.** `Expired` used to mean "the last
 fetch failed", which is how a 429 came to render as `auth expired` and send the
@@ -539,8 +543,9 @@ every Claude Code session shares the account's per-token budget. So
 `classifyUsageErr` (usage.go) splits the failure on the typed `usageHTTPError`
 that `fetchUsageInfo` now returns: **401/403 alone** is `Expired` (the only
 actionable state — that credential really is dead), while 429 → `rate limited`,
-5xx → `server error`, `errUsageFetchTimedOut` → `timed out`, and anything else
-(network, parse) → `unreachable`. A credential snapshot that cannot be read or
+5xx → `server error`, a client-side deadline (`net.Error.Timeout()`) → `timed
+out`, and anything else (network, parse) → `unreachable`. A credential
+snapshot that cannot be read or
 parsed at all never reaches `classifyUsageErr` — there was no answer to
 classify — and carries its own `bad snapshot` tag (`usageBadSnapshotReason`,
 known_accounts.go) rather than falling in with `unreachable`: nothing about it
@@ -558,8 +563,7 @@ placeholder and in the `/usage` JSON.
 
 A transient failure then **carries the last good numbers forward** rather than
 blanking the account — in `KnownAccountsHub`, the client-side poller, which is
-the only thing anywhere with memory of a previous pass (the server classifies
-identically but has no `prev`, see `/usage` below):
+the only thing anywhere with memory of a previous pass:
 `knownAccountUsage` takes a `prev` and re-serves its
 `Info` with `Stale: true`, the failure's `Reason`, and `prev`'s **original**
 `FetchedAt` — restamping it would let an account that fails forever look
@@ -606,29 +610,29 @@ written before per-account timestamps existed decodes to the zero time and is
 dropped whole on the first load; that is intended, and there is deliberately no
 fallback to the envelope's clock.
 
-`usageCache` (usage_cache.go) was left alone on purpose — it has no last-good
-layer. For any account **this machine** holds a snapshot for that is enough:
-`dedupeAccounts` already prefers the local known-account line over any remote's
-copy of the same email, so the local hub's carry-forward is what the header
-shows and the server's answer never gets a chance to matter. The gap is an
-account only a **remote** holds a snapshot for — nothing anywhere remembers its
-last good numbers, so a 429 there still renders as a bare `rate limited`
-placeholder with no bars. That is no worse than the `auth expired` placeholder
-it replaced, and it is left open rather than papered over: closing it means
-`usageCache` growing a last-good layer of its own — a second carry-forward with
-its own age bound, running on a different machine from the one whose header the
-numbers land in — and one place deciding how old is too old is worth more than
-a remote-only account's bars.
+There used to be a gap here worth documenting: an account only a **remote**
+host held a snapshot for had nothing anywhere remembering its last good
+numbers, so a 429 there rendered as a bare `rate limited` placeholder with no
+bars, and closing it would have meant growing a second carry-forward layer on
+a machine other than the one whose header the numbers land in. That gap is
+moot now — see "The `/usage` endpoint" below: a remote host no longer fetches
+numbers for anyone, so there is nothing left to carry forward on its behalf.
 
-**Both hubs run in the TUI client only.** A `claude-sessions -s` server used to
-start them too, so every host polled Anthropic every 2 minutes for the life of
-the process whether or not a client had ever connected — and hosts sharing an
-account each paid separately for numbers the client's own `dedupeAccounts`
-would then throw away, deepening exactly the 429s that surface as "auth
-expired" flicker in the header. The server now answers `GET /usage` on demand
-instead, and makes no request until a client asks. The Codex side
-(`codex_usage.go`) still polls on the server and still rides `/sessions`; only
-the Anthropic half moved.
+**Both hubs run in the TUI client only, and only against Anthropic directly.**
+A `claude-sessions -s` server used to start them too, so every host polled
+Anthropic every 2 minutes for the life of the process whether or not a client
+had ever connected — and hosts sharing an account each paid separately for
+numbers the client's own `dedupeAccounts` would then throw away, deepening
+exactly the 429s that surface as "auth expired" flicker in the header. The
+server's `GET /usage` used to fetch on demand instead of polling forever, which
+fixed the always-on cost but not the multiplication: one client machine polling
+every configured remote still meant every host holding a snapshot of a shared
+account spent that account's budget on the same tick. `/usage` now never calls
+Anthropic at all (see below) — the only thing that ever spends an account's
+budget is the one machine actually running a client against it, whether that's
+this host's own TUI/CLI (`UsageHub`/`KnownAccountsHub`) or a client SSHed
+into it and run there directly. The Codex side (`codex_usage.go`) still polls
+on the server and still rides `/sessions`; only the Anthropic half changed.
 
 `snapshotAccountNames` lists snapshots with `os.ReadDir` + a name filter, never
 `filepath.Glob`: the home directory is data, not a pattern, so a home path
@@ -638,89 +642,52 @@ read their credential snapshots. Nothing below an unresolvable `$HOME` errors �
 a missing or unreadable `~/.claude` is an empty list, which is what keeps the
 never-fail-the-batch property intact.
 
-**The `/usage` endpoint.** `GET /usage[?ignore=a@x.com&ignore=b@y.com]`
-(server.go, beside `sessions`) answers `usageResponse`: `usage` (the live
-account), `knownAccounts`, and `activeSnapshotName`. The whole account universe
-— names from `snapshotAccountNames`, emails from `snapshotAccountEmail`, and
-which snapshot matches `loadAccountEmail` — is resolved from disk on **every**
-call, mirroring `allKnownAccounts`' skip rule (every snapshot standing for the
-live account is left out of `knownAccounts`; the first one names
-`activeSnapshotName`) but split apart from fetching, since fetching is now
-conditional. That is what removed a whole class of staleness: an earlier
-revision of this code had `kickUsage`/`kickKnownAccounts` seams on the server
-and matching `Kick()` calls after a remote account switch, purely so
-`activeSnapshotName` would stop describing the pre-switch account before the
-next 2-minute tick. Nothing caches it now, so the next call is already right and
-those seams are gone.
+**The `/usage` endpoint.** `GET /usage` (server.go, beside `sessions`) answers
+`usageResponse`: `usage` (the live account), `knownAccounts`, and
+`activeSnapshotName`. It reports **identity only and never calls Anthropic** —
+no live-account fetch, no per-known-account fetch, nothing. The whole account
+universe — names from `snapshotAccountNames`, emails from
+`snapshotAccountEmail`, and which snapshot matches `loadAccountEmail` — is
+resolved from disk on **every** call, mirroring `allKnownAccounts`' skip rule
+(every snapshot standing for the live account is left out of `knownAccounts`;
+the first one names `activeSnapshotName`). Being pure disk reads is what keeps
+it always current: a picker opened right after a remote account switch is never
+stale, with no cache and no kick-on-switch machinery needed to keep it that way.
+Every `Info` field in the response is always `nil`.
 
-`ignore` names accounts the caller already holds good numbers for, so the host
-skips their fetch. It is a **repeated** parameter, never comma-joined — an
-email's local-part may legally contain a comma, and `r.URL.Query()["ignore"]`
-parses repeats natively. An ignored account is still reported, with a nil
-`Info`: `accountRowsFrom` (account_list.go) builds the Ctrl+W picker's and
-`account list`'s rows straight out of `knownAccounts`, so omitting it would
-silently remove it as a *switch target*, and the header is unaffected either way
-because `dedupeAccounts`' `addKnown` drops an entry with no `Info`, no `Expired`
-and no `Reason` — which an ignored account, never fetched, is exactly. The live
-account's `Account` (its email) is populated even when its
-numbers were ignored or failed — reading it is free, and it is what labels that
-host's heading. Per-account failures go through `classifyUsageErr` into that
-entry's `Expired`/`Reason`, never an error for the request, and a success
-stamps `FetchedAt`; the server keeps no cross-request memory, so it never
-produces a `Stale` entry — carrying numbers forward is the client hub's job.
-A snapshot whose verified email disagrees with its identity file gets
-`wrong identity` and no numbers, the same call `knownAccountUsage` makes.
-`activeSnapshotName` is resolved from the **file's** email while the live
-account's label uses the **verified** one, and that divergence is deliberate:
-the former answers "which snapshot does this host believe it is running" (a
-question about files, resolvable with no network and before any fetch), the
-latter "whose budget produced these numbers". When they disagree, that *is* the
-clobber signal — deriving both from the verified email would hide it again.
-Accounts are fetched **concurrently**, one goroutine each, because a
-cold cache with a handful of accounts would otherwise serialize into N × the
-endpoint's 5s timeout and outlive the client's own.
+This is deliberately narrower than the endpoint used to be. It originally also
+fetched each account's percentages on the caller's behalf — single-flighted and
+briefly cached per email (`usage_cache.go`, since removed) — which solved the
+always-on-poller problem above but not the multiplication one: the same
+Anthropic account is routinely held as a credential snapshot on two or more
+machines, and every one of them asking a remote host to check that account's
+numbers spent that account's shared per-token budget again, on top of whatever
+the machine actually using it was already spending locally. A client machine
+polling several configured remotes could rack up several times the request
+volume of the account it was actually trying to read a number for. The fix is
+to stop a remote host from ever spending Anthropic budget on another machine's
+behalf: only a client running *against* an account — this host's own
+`UsageHub`/`KnownAccountsHub`, or a client SSHed onto the host holding that
+account's live login or snapshot and run there directly — ever fetches its
+numbers. Every other machine sees that account only as a name and an email, for
+the Ctrl+W switch picker and `account list` (`accountRowsFrom`,
+account_list.go, builds both straight out of `knownAccounts` and needs nothing
+else). The consequence in the header: `dedupeAccounts`'s `add`/`addKnown` drop
+any line with `Info == nil` and nothing else to show, so a remote host's
+account bars simply don't appear — only its heading label does
+(`section.account`, fed by `Usage.Account`, which is still populated for free).
+That is the intended shape, not a regression: the header now shows bars only
+for accounts an actual poller somewhere is spending against.
 
-`usage_cache.go` is the only thing that remembers anything: a per-email
-single-flight + TTL cache modeled on `spawnDedupe` (same map-of-flights,
-claim/join/publish shape), wrapped in a single `GetOrFetch` so `begin`/`finish`
-can't be misused. It differs from `spawnDedupe` in two ways. Failures are
-*kept*, for a short `usageCacheFailTTL` (15s) rather than forgotten — nothing
-was created, so there is nothing making a retry unsafe, only an endpoint to stop
-hammering when a burst of clients arrives during a throttle (that window absorbs
-*concurrency*; the consecutive-429 backoff below absorbs *time*, and neither
-replaces the other); success keeps
-`usageCacheTTL` (100s, deliberately a little under `usageRefreshInterval` — a
-cache entry's clock starts when its fetch *completes*, strictly after the poll
-tick that triggered it, so a TTL exactly equal to the poll interval would mean
-the next tick almost always lands just before expiry and reuses a stale answer
-instead of refreshing, roughly doubling steady-state staleness). And an
-**empty email bypasses the cache entirely**: an account whose `.account.json`
-is missing or unreadable resolves to `""`, and two different such accounts
-would otherwise collide on one key and be served each other's limits, fetched
-with the wrong token. Entries are pruned on insert (no size cap — the key space
-is "accounts this host holds snapshots for"; pruning exists so a renamed
-snapshot stops occupying an entry, not to enforce a bound).
-
-Every fetch inside `GetOrFetch` is itself bounded (`runBounded`,
-`usageFetchTimeout` = 10s), independent of whatever `fetch` does. Without this,
-a fetch that never returns — a locked macOS Keychain prompting a SecurityAgent
-dialog nothing will ever answer in a headless launchd/systemd session
-(`loadOAuthToken`, usage.go), or a wedged filesystem read (`snapshotToken`) —
-would leave that email's flight permanently unfinished: `expired`/`prune` both
-treat an unfinished flight as never-expired, the same rule that correctly
-protects a genuinely in-flight fetch from eviction, so every later `GET /usage`
-call for that account would park a new goroutine on the same flight forever and
-the account would never be fetchable again for the life of the process — a
-strictly worse failure mode than the always-on poller this replaced, which just
-left one snapshot stale while every other request kept working. `runBounded`
-guarantees the flight always finishes, publishing `errUsageFetchTimedOut` that
-the short `usageCacheFailTTL` then lets a later caller retry past — self-healing
-if the hang was transient, and at worst one leaked goroutine every
-`usageCacheFailTTL` for a persistently wedged account, not one per client per
-`usageRefreshInterval` forever. Keying by email rather than by snapshot name
-also means two differently-named snapshots sharing one email share one fetch
-and outcome — accepted, since two snapshots for the identical account is an
-unusual setup and the alternative would refetch the same account once per name.
+**A mixed-version fleet has a transient window.** `RemoteUsageHub` still polls
+every configured remote's `/usage` regardless of that host's version. A remote
+still running the old handler answers with real numbers, spending its
+account's budget on this client's behalf exactly as before — the multiplying
+case this change exists to close. That window closes itself once the remote is
+upgraded, the same "the reverse mismatch needs no handling, since this repo's
+deploy order always upgrades the local machine first" precedent used elsewhere
+in this file; there is deliberately no version negotiation added to close it
+sooner.
 
 **Consecutive-429 backoff.** One Anthropic account is routinely held as a
 credential snapshot on *two* hosts, and each fetches it on its own
@@ -826,14 +793,8 @@ reason it already excluded a `Stale` known one, and `dedupeAccounts` threads
 `mine` are untouched, and a live line still wins its email's slot over any
 snapshot copy of the same account however old it is — showing your *own*
 account's last-known reading is the point of that rule.
-Server-side
-it is
-`usageCache.failures`, keyed by email and deliberately separate from `entries`
-(a flight is one attempt; a streak outlives many), swept by `prune` after
-`usageBackoffForget`. Only the goroutine that owned the flight records an
-outcome, so a burst of joiners is one attempt rather than one per caller; a
-turned-away caller gets `errUsageBackoffActive`, which `classifyUsageErr` maps to
-the same `rate limited` tag the skipped round trip would have produced.
+There is no server-side counterpart to any of this any more: `/usage` never
+fetches, so it has no streak to back off and nothing to classify.
 
 On the client, `FetchRemote` no longer decodes the three account fields at all,
 even from an older server that still sends them — two writers for one field
@@ -859,22 +820,20 @@ change that: it belongs to `KnownAccountsHub`'s per-account carry-forward, and
 `RemoteUsageHub` has no equivalent — it keeps no memory across passes, so a
 frozen remote reading would carry nothing marking it and would silently pass
 as live.
-`FetchRemoteUsage`'s own timeout is 8s, not `FetchRemote`'s 5s: a cold-cache
-`/usage` handler fans out one fetch per account concurrently against that same
-5s-per-account budget (server.go), so the handler's own wall-clock time can
-approach 5s before a 5s client would give up on it.
+`FetchRemoteUsage`'s own timeout is still 8s, not `FetchRemote`'s 5s — left
+generous even though the handler it calls is now pure disk reads with no
+per-account fan-out to wait on.
 
-The `ignore` list is recomputed each tick by `localFreshAccountEmails` from this
-machine's *own* hub snapshots, and only from entries it actually has numbers for
-(`Info != nil`, and neither `Expired` nor `Stale` for known accounts). A
-locally-**expired** email is deliberately excluded: telling every remote to skip
-the one account this machine has no numbers for would turn one transient 429
-here into a blank bar everywhere, which is the opposite of the point. **`Stale`
-is excluded for exactly the same reason** — carried-forward numbers are this
-machine's memory of an account it currently cannot reach, and a host that *can*
-reach it must not be told to skip it. (Local's own bars can be up to
-`usageCacheMaxAge` stale from a disk-cache warm start — accepted, since the
-remote's bar then just mirrors what local already shows.)
+`FetchRemoteUsage` still sends `?ignore=` (built by `localFreshAccountEmails`
+from this machine's own hub snapshots), but the handler no longer reads
+`r.URL.Query()` at all — an unrecognized query parameter a plain HTTP server
+just ignores. `/usage` no longer fetches for anyone, so there is nothing left
+for `ignore` to skip; sending it today changes nothing about the response. It
+is left in place on the client rather than ripped out: it costs one query
+string per poll, and a future server that ever re-adds a scoped fetch (a
+client explicitly asking one host to check one account, say) would want
+exactly this "accounts I already have numbers for" list without re-deriving
+it.
 
 One-shot CLI paths have nowhere to put a poller, so they pay for one extra
 parallel round instead: `mergeRemoteUsage` (remote.go) overlays `/usage` onto
@@ -907,10 +866,10 @@ bug — with two collision-promoted full-email labels at ~64 columns the bars
 sized to fill the entire budget, `cropTableFrame`'s clip then ate the marker,
 and the stale line rendered byte-identical to a live one, which is the single
 thing the marker exists to prevent. The one entry shape
-still dropped is `Info == nil && !Expired && Reason == ""` — that is precisely
-the **ignored** account `/usage` reports for identity only, and giving it a
-header line would undo what `ignore` is for. Snapshot-derived lines are never
-marked `mine`, so one
+still dropped is `Info == nil && !Expired && Reason == ""` — every remote
+account now, since `/usage` reports identity only; giving one a header line
+would show a bar-less row for every account any remote host merely knows
+about. Snapshot-derived lines are never marked `mine`, so one
 can never render bare and pass as this machine's live account. Host headings
 show each host's active account email, dimmed, after `LOAD` (`section.account`,
 fed by that host's `Usage.Account` — which is why `/usage` reports the live

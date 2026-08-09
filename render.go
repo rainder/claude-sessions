@@ -677,7 +677,10 @@ func accountLocalPart(email string) string {
 // nothing to carry as a dim placeholder naming its Reason ("rate limited",
 // "bad snapshot", …), and a Stale one as its carried-forward bars plus the dim
 // "stale" marker. Only the fourth shape is dropped — no Info, no Expired and no
-// Reason, which is exactly the account /usage was told to skip (see addKnown).
+// Reason, which describes every remote account now that GET /usage reports
+// identity only and never fetches numbers on a remote caller's behalf (see
+// addKnown). A remote host's own account bars therefore never appear in the
+// header; only its heading label does (Usage.Account, populated for free).
 func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes []RemoteResult) []accountUsageLine {
 	var lines []accountUsageLine
 	seen := make(map[string]bool)
@@ -712,10 +715,11 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 	knownSeen := make(map[string]int)
 	addKnown := func(k KnownAccountUsage) {
 		if !k.Expired && k.Info == nil && k.Reason == "" {
-			// Nothing to show and no placeholder asked for. This is the ignored
-			// account: /usage reports every account it was told to skip with
-			// bare identity and no numbers, so the picker keeps it as a switch
-			// target — it must not sprout a header line saying nothing.
+			// Nothing to show and no placeholder asked for. A remote host's
+			// known accounts always look like this now — GET /usage reports
+			// bare identity, never numbers — so the picker still keeps them
+			// as switch targets (accountRowsFrom reads KnownAccounts
+			// directly) without sprouting a header line saying nothing.
 			return
 		}
 		key := "name\x00" + k.Name
