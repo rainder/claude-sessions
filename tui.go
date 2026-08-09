@@ -70,6 +70,15 @@ func readModalEvents(dec *inputDecoder, wakes []wakeFD) ([]string, wakeKind) {
 // tmux scrollback, so a 1x pane leaves nothing to scroll into.
 const inspectorPaneRowMultiplier = 4
 
+// inspectorPaneSettleDelay is how long shrinkInspectorPaneToContent waits
+// after the oversize resize before capturing the pane to measure it: the
+// live app needs a moment to receive SIGWINCH and redraw at the new size, and
+// capturing too early would read its old, smaller frame as "blank" and shrink
+// the pane right back down. A too-early or otherwise failed probe is
+// harmless (capInspectorPaneRows refuses to shrink on a blank capture), so
+// this is a best-effort settle time, not a correctness requirement.
+const inspectorPaneSettleDelay = 80 * time.Millisecond
+
 // inspectorChromeRows is the number of *fixed* rows RenderInspector reserves
 // around the scrolling body (title, metadata, separator, footer). A loaded
 // ticket summary costs inspectorSummaryExtraRows on top of it, so the viewport
@@ -260,6 +269,28 @@ func RunTUI(interval time.Duration) error {
 			return
 		}
 		_, _ = resizeRemote(sess.Host, sess.PID, sess.SessionID, cols, rows, revert)
+	}
+
+	// shrinkInspectorPaneToContent follows the entry oversize resize
+	// (inspectorPaneRowMultiplier) with a measure-and-shrink pass: on a
+	// terminal much taller than the previewed session's actual content, an
+	// unconditional 4x pane leaves a block of blank space below the fold. It
+	// waits inspectorPaneSettleDelay for the live app to redraw at the new
+	// size, captures the pane exactly like the inspector hub itself does
+	// (defaultInspectorFetch — local LoadPreview or remote fetchRemotePreview,
+	// whichever sess.Host selects), and, when capInspectorPaneRows finds real
+	// content shorter than `big`, issues a second resize down to it. A failed
+	// or too-early probe just leaves the pane at its full oversized height —
+	// best-effort, same as every other resize call here.
+	shrinkInspectorPaneToContent := func(sess Session, cols, big, floor int) {
+		time.Sleep(inspectorPaneSettleDelay)
+		res, err := defaultInspectorFetch(sessionSelectionTarget(sess), PreviewLimits{MaxLines: big, MaxBytes: 512 << 10})
+		if err != nil {
+			return
+		}
+		if rows, ok := capInspectorPaneRows(res.Content, big, floor); ok {
+			resizeInspected(sess, cols, rows, false)
+		}
 	}
 
 	defer func() {
@@ -563,7 +594,9 @@ func RunTUI(interval time.Duration) error {
 			// timeout (remote_actions.go) — the same shape send_keys.go's
 			// local resolveLivePIDLocal path already accepts on the UI thread.
 			if innerRows := rows - inspectorChromeRows; innerRows > 0 {
-				resizeInspected(sess, cols, innerRows*inspectorPaneRowMultiplier, false)
+				big := innerRows * inspectorPaneRowMultiplier
+				resizeInspected(sess, cols, big, false)
+				shrinkInspectorPaneToContent(sess, cols, big, innerRows)
 			}
 		}
 		state.mode = screenInspector
