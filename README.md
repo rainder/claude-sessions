@@ -441,6 +441,7 @@ server.go            HTTP server (Tailscale bind, bearer auth, all endpoints)
 tui.go               alt-screen + raw mode + key reader + main loop
 usage.go             account rate-limit polling (5h/weekly bars in header)
 known_accounts.go    per-account snapshot discovery + read-only usage polling
+account_cache.go     per-account disk cache (numbers + backoff, one file each)
 account.go           account switching (credential + identity snapshots, flock)
 account_list.go      `account list` rows + table
 account_picker.go    Ctrl+W account picker overlay + switch action

@@ -657,8 +657,8 @@ const (
 	// 429 was observed asking for ~31.6 minutes (Retry-After: 1895), which the
 	// old ceiling silently truncated — this bound now has to cover both what a
 	// real Retry-After can legitimately ask for and what a persisted deadline
-	// (see usageBackoffCachePath) is clamped to on load, so it needs the same
-	// headroom in both places.
+	// (see account_cache.go's loadAccountCache) is clamped to on load, so it
+	// needs the same headroom in both places.
 	usageBackoffCeiling = time.Hour
 )
 
@@ -706,100 +706,6 @@ func (b usageBackoff) due(now time.Time) bool { return !now.Before(b.nextAttempt
 func (b usageBackoff) next(now time.Time, retryAt time.Time) usageBackoff {
 	streak := b.streak + 1
 	return usageBackoff{streak: streak, nextAttempt: usageBackoffUntil(now, streak, retryAt)}
-}
-
-// usageBackoffSeed is what a disk-persisted wait seeds newUsageFetcher's
-// closure state with: the account the wait was armed against, and the wait
-// itself. A restart used to lose this — the wait lived only in the closure's
-// local vars, so a process killed mid-backoff came back up with no memory of
-// it and fetched for real on its very first pass, against an endpoint that
-// had just said not to. Persisting it closes that window the same way the
-// numbers cache already closes the "no bars after a restart" one.
-type usageBackoffSeed struct {
-	account string
-	backoff usageBackoff
-}
-
-// usageBackoffCachePath is where the live account's armed wait is persisted,
-// alongside (but separate from) usageCachePath's numbers — the two expire on
-// different events (a fetch vs. a 429) and there is no reason to couple their
-// files.
-func usageBackoffCachePath() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("claude-sessions-usage-backoff-%d.json", os.Getuid()))
-}
-
-// cachedUsageBackoff is the on-disk form of usageBackoffSeed.
-type cachedUsageBackoff struct {
-	Account     string    `json:"account"`
-	Streak      int       `json:"streak"`
-	NextAttempt time.Time `json:"next_attempt"`
-}
-
-// saveUsageBackoffCache persists the live account's current wait, or clears
-// the file once the wait ends (streak 0 — "not backed off" needs no file on
-// disk, and leaving a stale one would let the clamp in loadUsageBackoffCache
-// paper over a bug rather than there being nothing to load at all).
-// Best-effort, like saveUsageCache: a read-only /tmp just costs the warm start,
-// not correctness — the in-memory closure still enforces the wait either way.
-func saveUsageBackoffCache(account string, b usageBackoff) {
-	if b.streak <= 0 {
-		_ = os.Remove(usageBackoffCachePath())
-		return
-	}
-	data, err := json.Marshal(cachedUsageBackoff{Account: account, Streak: b.streak, NextAttempt: b.nextAttempt})
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(usageBackoffCachePath(), data, 0600)
-}
-
-// loadUsageBackoffCache returns the persisted wait, or a zero seed if there is
-// none, it is unreadable, it is missing a field a real wait always has, or the
-// wait it names has already elapsed.
-//
-// An already-elapsed deadline drops the streak along with it rather than
-// carrying it forward: due() would report this account fetchable either way,
-// so nothing about the wait itself survives, and the streak is only
-// meaningful as "how many *consecutive* throttles led to this deadline" — a
-// deadline that ended who knows how long ago (the process could have been
-// down for a week) says nothing trustworthy about whether the next attempt is
-// still part of that run. Carrying it forward anyway would jump the very next
-// throttle straight into usageBackoffMax instead of the free first retry the
-// schedule promises everyone else.
-//
-// A deadline that has NOT yet elapsed is clamped to now+usageBackoffCeiling —
-// never trusted past that bound — for the same reason armed waits are capped
-// in the first place: a corrupt file, a backwards clock adjustment, or a
-// future bug that writes a garbage timestamp must not be able to wedge an
-// account out of rotation for longer than a live-armed wait ever could. The
-// clamp is what makes raising usageBackoffCeiling to cover a real long
-// Retry-After safe to persist at all. Clamping alone only bounds *this*
-// process, though — the bad value would still sit on disk waiting to be
-// re-clamped fresh on every future restart, which in a crash loop that never
-// lets the real deadline elapse is a slow-motion version of the exact wedge
-// the clamp exists to prevent. So a clamp writes the corrected value straight
-// back; best-effort, like every other save here.
-func loadUsageBackoffCache() usageBackoffSeed {
-	data, err := os.ReadFile(usageBackoffCachePath())
-	if err != nil {
-		return usageBackoffSeed{}
-	}
-	var c cachedUsageBackoff
-	if err := json.Unmarshal(data, &c); err != nil {
-		return usageBackoffSeed{}
-	}
-	if c.Streak <= 0 || c.Account == "" || c.NextAttempt.IsZero() {
-		return usageBackoffSeed{}
-	}
-	now := time.Now()
-	if !c.NextAttempt.After(now) {
-		return usageBackoffSeed{}
-	}
-	if max := now.Add(usageBackoffCeiling); c.NextAttempt.After(max) {
-		c.NextAttempt = max
-		saveUsageBackoffCache(c.Account, usageBackoff{streak: c.Streak, nextAttempt: c.NextAttempt})
-	}
-	return usageBackoffSeed{account: c.Account, backoff: usageBackoff{streak: c.Streak, nextAttempt: c.NextAttempt}}
 }
 
 // usageRetryAt digs a 429's Retry-After out of an error, or returns the zero
@@ -861,68 +767,14 @@ const usageRefreshInterval = 2 * time.Minute
 const usageRetryMin = 5 * time.Second
 
 // usageCacheMaxAge bounds how stale a disk-cached Codex snapshot may be and
-// still seed the header on startup (codex_usage.go's loadCodexUsageCache).
-// The Anthropic side used to share this bound for both its disk seed and its
-// live carry-forward; both were deliberately unbounded instead — see
-// liveCarryable and fresh — because the alternative was a bare "rate limited"
-// placeholder replacing perfectly informative (if aging) bars the moment an
-// outage ran long, which is worse than a number that says how old it is.
+// still seed the header on startup (codex_usage.go's loadCodexUsageCache) —
+// its only remaining use. The Anthropic side (live account + known accounts)
+// used to share this bound for both its disk seed and its live carry-forward;
+// both are deliberately unbounded instead — see liveCarryable and fresh —
+// because the alternative was a bare "rate limited" placeholder replacing
+// perfectly informative (if aging) bars the moment an outage ran long, which
+// is worse than a number that says how old it is.
 const usageCacheMaxAge = 15 * time.Minute
-
-// usageCachePath is where the last successful fetch is persisted so a
-// restart during an endpoint throttle still has something to show. UID in
-// the name keeps multi-user /tmp collisions (and permission errors) away.
-func usageCachePath() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("claude-sessions-usage-%d.json", os.Getuid()))
-}
-
-// cachedUsage is the on-disk envelope: the account-paired snapshot plus when it
-// was fetched. The snapshot lives under "usage" (account + info); a pre-relogin
-// cache that stored the bare snapshot under "info" decodes to a zero Usage (nil
-// Info), which loadUsageCache treats as a miss.
-type cachedUsage struct {
-	FetchedAt time.Time    `json:"fetched_at"`
-	Usage     AccountUsage `json:"usage"`
-}
-
-// saveUsageCache persists a successful fetch. Best-effort: a read-only /tmp
-// just means no warm start next launch.
-func saveUsageCache(u *AccountUsage) {
-	data, err := json.Marshal(cachedUsage{FetchedAt: time.Now(), Usage: *u})
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(usageCachePath(), data, 0600)
-}
-
-// loadUsageCache returns the cached snapshot, or nil if absent, unreadable,
-// unstamped, or missing its snapshot (nil Info — including a pre-relogin cache
-// written in the old "info" envelope, which is a miss, not an error). No
-// longer age-gated: a seed from hours ago still beats no seed at all.
-//
-// Always marked Stale — this is a disk read, not a completed poll, so nothing
-// here has confirmed the numbers as current. Without this, a seed loaded on a
-// cold start would render exactly like a live reading (saveOnceUsage never
-// persists Stale, so every saved file already reads false) and, on an outage
-// that never returns a 429 to arm the carry-forward path, would stay
-// indistinguishable from live for as long as the process runs — the same
-// failure this whole change exists to avoid, just moved from "drop the seed"
-// to "show it as if it were fresh."
-func loadUsageCache() *AccountUsage {
-	data, err := os.ReadFile(usageCachePath())
-	if err != nil {
-		return nil
-	}
-	var c cachedUsage
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil
-	}
-	if c.FetchedAt.IsZero() || c.Usage.Info == nil {
-		return nil
-	}
-	c.Usage.Stale = true
-	return &c.Usage
-}
 
 // UsageHub polls the Anthropic OAuth usage endpoint in the background so the
 // render loop never blocks on credentials or the network (see usagePoller for
@@ -950,7 +802,7 @@ type UsageHub = usagePoller[AccountUsage]
 // need to gate anything on top of that. The explicit zero check is still what
 // stops a disk seed written before AccountUsage carried a timestamp from
 // reading as carryable — an unstamped reading's vintage is unknown, not merely
-// old — the same one-time drop loadKnownAccountsCache takes for its own
+// old — the same one-time drop known_accounts.go's fresh() takes for its own
 // pre-timestamp entries.
 //
 // last.Account is the profile-verified email when the profile endpoint answered,
@@ -982,91 +834,211 @@ func liveCarryable(last *AccountUsage, live string) bool {
 // round trip. Nothing observable changes for the header either way — the poller
 // already keeps the previous value visible across a failed refresh.
 //
-// A re-serve is gated on liveCarryable — the account must still be the one
-// that is live. Re-serving is a *copy* marked Stale, so the stored last keeps
-// its original FetchedAt (restamping it would let a permanently throttled
-// account look permanently fresh, the failure KnownAccountUsage avoids the
-// same way) and downstream can tell carried numbers from live ones.
+// Unlike the version of this function that predates account_cache.go, there is
+// no in-memory state to speak of on the common path — every pass resolves
+// which account is live (resolveActiveSnapshotName) and loads THAT account's
+// own cache entry fresh from disk (loadAccountCache), the same cost
+// newKnownAccountsFetcher already pays every pass to resolve names. That is
+// what makes an account switch a non-event instead of a special case: switch
+// to an account that was previously tracked as "known" and this pass
+// resolves straight to its existing slot — same numbers, same backoff wait,
+// no special-casing needed to detect the switch happened. Before this, the
+// live and known-account caches were separate files per role, so switching
+// lost continuity in both directions — the incoming account started its
+// numbers over, and the outgoing account lost its backoff streak the moment
+// it reappeared on the known side. See CLAUDE.md's "Usage polling" section.
 //
-// When there is nothing safe to re-serve — no last at all (a cold start, or an
-// account that has never once succeeded), or an identity that cannot be
-// confirmed — an armed wait returns a bare identity placeholder (the live
+// A re-serve is gated on entryIdentityMatches/liveCarryable — the loaded
+// entry's account must still be the one that is live. This gates BOTH halves
+// of the entry, not just the numbers: an independent review caught an
+// earlier version of this function extracting the loaded backoff
+// unconditionally, so a claude-switch snapshot name reassigned to a
+// different account (`account save --force`) would inherit the outgoing
+// account's armed wait even though the new account was never itself
+// throttled. Re-serving numbers is a *copy* marked Stale, so the loaded
+// reading's own FetchedAt is preserved (restamping it would let a
+// permanently throttled account look permanently fresh, the failure
+// KnownAccountUsage avoids the same way); its Verified provenance is carried
+// from the loaded entry's own field, never recomputed from
+// UsageInfo.VerifiedAccount on a re-serve — that field is json:"-" and reads
+// as empty on anything that went through a JSON round trip, which silently
+// downgraded Verified to false on every carried/failed pass until an
+// independent review caught that too.
+//
+// When there is nothing safe to re-serve — no cached entry at all (a cold
+// start, or an account that has never once succeeded), or an identity
+// mismatch — an armed wait returns a bare identity placeholder (the live
 // email, no Info) as a success, and still does not fetch. There is no age
-// condition here any more: once last exists and the identity checks out, it
-// carries regardless of how long the backoff has been holding it.
-// This is the whole point of the wait: falling through to a real fetch here was
-// a no-op backoff, and it fired in exactly the case the mechanism exists for —
-// a fresh TUI launch against an already-throttled account, where the 429 became
-// an error and usagePoller.run answered it with its own 5s-doubling retry, the
-// burst this is meant to prevent. That path had no equivalent on the
-// known-accounts side, whose batch fetch never returns an error for one
-// account's failure and so can never wake the generic retry.
+// condition here: once a cached reading exists and the identity checks out, it
+// carries regardless of how long the backoff has been holding it. This is the
+// whole point of the wait: falling through to a real fetch here was a no-op
+// backoff, and it fired in exactly the case the mechanism exists for — a fresh
+// TUI launch against an already-throttled account, where the 429 became an
+// error and usagePoller.run answered it with its own 5s-doubling retry, the
+// burst this is meant to prevent.
 //
-// An unconfirmable identity used to fetch rather than re-serve, on the grounds
-// that showing an account's bars means knowing whose they are. The placeholder
-// is a third option that did not exist then and dominates both: it shows no
-// numbers at all, so there is nothing to misattribute, and it costs no request.
-// A *confirmed* switch is the one case that still forces a fetch — the wait was
-// armed against the previous account's budget and the numbers on hand are not
-// this one's, so both memories are dropped and this pass has nothing whatsoever
-// to say about the new account until it asks.
+// A loaded deadline further out than usageBackoffCeiling is clamped by
+// loadAccountCache, which reports whether it did so (clamped) rather than
+// writing the correction back itself — this closure holds the injected save
+// seam, loadAccountCache doesn't, so the self-heal write happens here.
 //
-// Switch detection cannot be keyed off last.Account: last is nil until the
-// first success, and can hold an empty Account forever if identity was
-// unreadable at the moment that success landed — either way it would leave the
-// wait permanently unable to recognise a switch, silently swallowing a Ctrl+W
-// kick for the rest of the backoff window. armedFor is tracked independently —
-// the email that was live at the moment the CURRENT streak was armed or
-// extended — precisely so switch detection works whether or not last carries a
-// usable identity of its own.
+// Two cases have no disk slot to work with at all — an unconfirmable identity
+// (loadAccountEmail returns "") and a live account that has never been
+// `account save`d (resolveActiveSnapshotName returns "") — and both fall
+// back to a small amount of in-memory state (fbLast/fbBackoff/fbArmedFor)
+// instead, mirroring the design this function had before account_cache.go
+// existed. This fallback is NOT optional polish: an earlier version of this
+// rewrite had no in-memory state at all, so an account with no snapshot got
+// a fresh, un-armed backoff on literally every single pass — not just after
+// a restart — meaning consecutive throttles never built past streak 1 and
+// the endpoint got hit every usageRefreshInterval tick forever, exactly the
+// hammering this whole mechanism exists to prevent. Independent review
+// caught it with an A/B fetch-count comparison against main.
+//
+// The fallback vars are also kept in sync on the disk path, at every one of
+// its return points, even though disk is authoritative whenever a name
+// resolves — this is what lets a wait armed while identity WAS readable
+// still hold once identity stops being readable mid-run (loadAccountEmail
+// starts returning "", or a snapshot's account.json is deleted): the
+// fallback already knows about it from the last pass that could see disk,
+// instead of starting blank and letting an armed wait go unenforced the
+// moment the file read breaks. Independent review's own reproduction for
+// this test case is what surfaced the gap.
+//
+// The fallback also does NOT refuse unconditionally on an unconfirmable
+// identity, unlike an earlier version of this function — it refuses only
+// while a wait is actually armed, exactly like the disk path. Refusing
+// unconditionally assumed the file read is the only route to identity, but
+// fetchVerifiedUsageInfo's profile probe can attribute numbers to a verified
+// account the file alone couldn't confirm (see usageAccountLabel) — so an
+// unconditional refusal would permanently blank the header the instant
+// ~/.claude.json becomes unreadable, even though a real fetch might recover
+// identity through the token itself. Independent review caught this too.
 //
 // fetch is a parameter rather than a package var so a test can drive the whole
 // state machine with a counter and no seam into the network or the Keychain
-// (the same reason allKnownAccounts takes its per-account fetch as one).
-// saveBackoff is injected for the identical reason: persisting straight to
-// usageBackoffCachePath from inside the closure would make every test that
-// exercises the backoff path write to the real host's /tmp (several set HOME
-// via loginAs but not TMPDIR), the exact class of bug keychainRead's
+// (the same reason newKnownAccountsFetcher's per-account fetch is injected).
+// save is injected for the identical reason: persisting straight to
+// accountCachePath from inside the closure would make every test that
+// exercises this path write to the real host's /tmp (several set HOME via
+// loginAs but not TMPDIR), the exact class of bug keychainRead's
 // TestMain-panic seam exists to catch. NewUsageHub passes the real
-// saveUsageBackoffCache; tests pass a no-op or a spy. last, backoff and
-// armedFor are touched only inside the returned closure, which
-// usagePoller.run calls one at a time from its single goroutine — the same
-// single-owner rule newKnownAccountsFetcher's maps rely on, so neither needs a
-// lock.
-//
-// backoffSeed re-arms the wait a prior process instance had in flight — see
-// usageBackoffSeed. It is assigned straight into backoff/armedFor, never run
-// back through usageBackoffUntil: that deadline was already computed (and
-// ceiling-clamped) once, by loadUsageBackoffCache, against the now current
-// when the process last saved it; recomputing it here against a *new* now
-// would let a restart loop walk the deadline forward indefinitely instead of
-// counting down to the one that was actually armed. backoffSeed.account takes
-// priority over seed.Account when both are present — it names who the
-// *wait* belongs to, which is the more specific fact when they'd otherwise
-// disagree (e.g. a numbers seed from before a switch, a backoff seed from
-// after).
-func newUsageFetcher(seed *AccountUsage, backoffSeed usageBackoffSeed, fetch func() (*AccountUsage, error), saveBackoff func(account string, b usageBackoff)) func() (*AccountUsage, error) {
-	last := seed
-	backoff := backoffSeed.backoff
-	armedFor := backoffSeed.account
-	if armedFor == "" && seed != nil {
-		armedFor = seed.Account
+// saveAccountCache; tests pass a no-op or a spy.
+// fbUnconfirmedOwner marks a fallback wait armed while identity was
+// unconfirmable (live == ""), as opposed to fbArmedFor == "" which means
+// nothing is armed at all. Without this distinction a wait armed with no
+// readable identity would look indistinguishable from "untracked" to
+// mirrorFallback's guard, and a later resolved account's disk pass could
+// clobber it — caught by independent review, no repro needed once named:
+// coalesceOwner is what makes fbArmedFor never legitimately equal "" while
+// something is armed, so "" reliably means untracked everywhere it's read.
+const fbUnconfirmedOwner = "\x00unconfirmed"
+
+func coalesceOwner(live string) string {
+	if live == "" {
+		return fbUnconfirmedOwner
 	}
+	return live
+}
+
+func newUsageFetcher(fetch func() (*AccountUsage, error), save func(name string, e accountCacheEntry)) func() (*AccountUsage, error) {
+	var fbLast *AccountUsage
+	var fbBackoff usageBackoff
+	var fbArmedFor string
+
 	return func() (*AccountUsage, error) {
 		now := time.Now()
 		live := loadAccountEmail()
+		name := ""
+		if live != "" {
+			name, _ = resolveActiveSnapshotName(live)
+		}
+
+		if name == "" {
+			if live != "" && fbArmedFor != "" && !strings.EqualFold(fbArmedFor, live) {
+				// A different account is logged in now than the one this
+				// fallback wait was armed against. live == "" (identity
+				// unreadable) never clears here — an unreadable identity
+				// isn't evidence of a *different* one, and clearing on it
+				// would drop a wait mirrored from a real, now-unreadable
+				// identity right when it's needed most.
+				fbLast, fbBackoff, fbArmedFor = nil, usageBackoff{}, ""
+			}
+			if !fbBackoff.due(now) {
+				switch {
+				case live != "" && liveCarryable(fbLast, live):
+					carried := *fbLast
+					carried.Stale = true
+					return &carried, nil
+				default:
+					return &AccountUsage{Account: live}, nil
+				}
+			}
+			u, err := fetch()
+			if err != nil {
+				if _, reason := classifyUsageErr(err); reason == usageRateLimitedReason {
+					fbBackoff = fbBackoff.next(now, usageRetryAt(err))
+					fbArmedFor = coalesceOwner(live)
+				} else {
+					fbBackoff, fbArmedFor = usageBackoff{}, ""
+				}
+				return nil, err
+			}
+			fbLast = u
+			fbBackoff, fbArmedFor = usageBackoff{}, coalesceOwner(live)
+			return u, nil
+		}
+
+		// A snapshot slot resolved: disk is authoritative from here, which is
+		// what gives switching accounts its continuity. Every return point
+		// below also mirrors its outcome into the fbXXX fallback vars — not
+		// because the fallback needs it while a name keeps resolving, but so
+		// that IF identity later becomes unconfirmable (name stops resolving
+		// mid-run), the fallback path above already knows about a wait that
+		// was armed while identity was still readable, instead of starting
+		// blank and letting an armed wait go unenforced the moment
+		// ~/.claude.json becomes unreadable. The mirror only fires when the
+		// fallback is untracked or already tracking THIS live email — a
+		// snapshotted account's disk pass must never clobber a *different*,
+		// still-unsnapshotted account's own armed wait (proven by
+		// TestUsageFetcherFallbackSurvivesAnUnrelatedDiskPass: without this
+		// guard, switching away to a snapshotted account and back loses the
+		// unsnapshotted account's streak).
+		mirrorFallback := func(b usageBackoff, u *AccountUsage) {
+			if fbArmedFor == "" || strings.EqualFold(fbArmedFor, live) {
+				fbBackoff, fbArmedFor, fbLast = b, live, u
+			}
+		}
+		cached, clamped := loadAccountCache(name)
+		if clamped {
+			save(name, cached)
+		}
+		matches := entryIdentityMatches(cached, live)
+		backoff := cached.backoff()
+		var last *AccountUsage
+		switch {
+		case matches && cached.Info != nil:
+			last = &AccountUsage{Account: cached.Account, Info: cached.Info, Stale: cached.Stale, FetchedAt: cached.FetchedAt}
+		case !matches && cached.Account != "":
+			// Neither half of a mismatched entry belongs to whoever is live
+			// now — see entryIdentityMatches.
+			backoff = usageBackoff{}
+		}
+
+		persist := func(b usageBackoff, u *AccountUsage, verified bool) {
+			e := accountCacheEntry{BackoffStreak: b.streak, BackoffNextAttempt: b.nextAttempt}
+			if u != nil {
+				e.Account, e.FetchedAt, e.Info, e.Verified = u.Account, u.FetchedAt, u.Info, verified
+			}
+			save(name, e)
+			mirrorFallback(b, u)
+		}
+
 		if !backoff.due(now) {
+			mirrorFallback(backoff, last)
 			switch {
-			case live != "" && armedFor != "" && !strings.EqualFold(armedFor, live):
-				// A different account is logged in now than the one this wait was
-				// armed against — that budget says nothing about this account, so
-				// both memories drop and this pass asks for real. No save call here:
-				// the unconditional fetch() below always saves again with the
-				// outcome, so persisting the drop first would only be overwritten —
-				// see the save calls after fetch().
-				last, backoff, armedFor = nil, usageBackoff{}, ""
 			case liveCarryable(last, live):
-				// A copy, never the stored pointer: last must keep its original
+				// A copy, never the loaded value: last must keep its original
 				// FetchedAt so the carry stays bounded, and must not itself become
 				// stale — a later real fetch replaces it wholesale anyway.
 				carried := *last
@@ -1074,9 +1046,7 @@ func newUsageFetcher(seed *AccountUsage, backoffSeed usageBackoffSeed, fetch fun
 				return &carried, nil
 			default:
 				// Nothing safe to re-serve. Identity only, no numbers, and no
-				// request — see the doc comment. last is deliberately left where it
-				// is: a too-old reading is not a wrong one, a success overwrites it,
-				// and clearing it would buy nothing.
+				// request — see the doc comment.
 				return &AccountUsage{Account: live}, nil
 			}
 		}
@@ -1084,71 +1054,32 @@ func newUsageFetcher(seed *AccountUsage, backoffSeed usageBackoffSeed, fetch fun
 		if err != nil {
 			// Only a throttle builds the streak; every other failure clears it, the
 			// same rule the known-accounts scheduler follows — the wait is an answer
-			// to being rate limited, not to being broken.
+			// to being rate limited, not to being broken. last (the numbers, if any)
+			// carries forward unchanged either way — only the backoff half changed.
 			if _, reason := classifyUsageErr(err); reason == usageRateLimitedReason {
 				backoff = backoff.next(now, usageRetryAt(err))
-				armedFor = live
 			} else {
-				backoff, armedFor = usageBackoff{}, ""
+				backoff = usageBackoff{}
 			}
-			saveBackoff(armedFor, backoff)
+			persist(backoff, last, matches && cached.Verified)
 			return nil, err
 		}
-		last = u
-		// armedFor tracks the *file's* live email, never u.Account: since
-		// fetchUsage began attributing numbers to the profile-verified account,
-		// the two can legitimately disagree (a clobbered credential is exactly
-		// that state), and seeding armedFor from the verified side would make
-		// every later pass read a standing disagreement as a fresh account
-		// switch. Nothing observable turns on the value here anyway — a cleared
-		// backoff is always due, so armedFor is not read again until a 429 arms
-		// it, and that path already records live.
-		backoff, armedFor = usageBackoff{}, live
-		saveBackoff(armedFor, backoff)
+		persist(usageBackoff{}, u, u.Info != nil && u.Info.VerifiedAccount != "")
 		return u, nil
 	}
 }
 
-// saveOnceUsage keeps a re-served snapshot out of the disk cache. saveUsageCache
-// stamps FetchedAt with time.Now(), and the poller saves on every success — so
-// without this, newUsageFetcher's skipped passes would rewrite the cache every
-// two minutes with numbers that never moved, and a warm start during a long
-// throttle would seed the header with arbitrarily old percentages presented as
-// current instead of properly marked Stale. That is precisely the failure
-// KnownAccountUsage avoids by carrying prev's *original* FetchedAt forward
-// rather than restamping it.
-//
-// Only a genuinely fetched reading reaches disk, which takes three tests. A
-// carried-forward reading is a fresh *copy* each pass, so pointer identity alone
-// no longer recognises it — Stale is what names it, and persisting one would
-// restamp the envelope with numbers that never moved, exactly the failure above.
-// A placeholder (no Info) is worse than useless on disk: loadUsageCache reads a
-// nil-Info entry as a miss, so writing one over a good cache file would not just
-// stale the warm start but destroy it. And identity still separates a re-served
-// pointer from a fetched one with no assumption about whether two fetches that
-// happen to agree should count as one; seed is the same snapshot the fetcher
-// starts as its last, so a first pass that lands mid-throttle re-serves it
-// without rewriting the cache entry it came from.
-func saveOnceUsage(seed *AccountUsage, save func(*AccountUsage)) func(*AccountUsage) {
-	saved := seed
-	return func(u *AccountUsage) {
-		if u == saved || u == nil || u.Info == nil || u.Stale {
-			return
-		}
-		saved = u
-		save(u)
-	}
-}
-
 // NewUsageHub starts the poller and returns immediately; the first fetch is
-// kicked off asynchronously. A recent disk-cached snapshot seeds the header so
-// a restart while the endpoint is throttling still shows a (stale) bar — and
-// seeds the fetcher and the save wrapper alongside it, so a pass skipped by the
-// backoff re-serves that snapshot without restamping it on disk. A persisted
-// backoff deadline (loadUsageBackoffCache) seeds the same fetcher so a restart
-// mid-wait does not fire a real request before that deadline passes.
+// kicked off asynchronously. A recent disk-cached entry for whichever account
+// is live right now seeds the header so a restart while the endpoint is
+// throttling still shows a (stale) bar without waiting on the fetcher's own
+// first pass, which reaches the identical cache entry a moment later anyway.
 func NewUsageHub() *UsageHub {
-	seed := loadUsageCache()
-	backoffSeed := loadUsageBackoffCache()
-	return newUsagePoller(seed, newUsageFetcher(seed, backoffSeed, fetchUsage, saveUsageBackoffCache), saveOnceUsage(seed, saveUsageCache))
+	var seed *AccountUsage
+	if name, _ := resolveActiveSnapshotName(loadAccountEmail()); name != "" {
+		if e, _ := loadAccountCache(name); e.Info != nil {
+			seed = &AccountUsage{Account: e.Account, Info: e.Info, Stale: e.Stale, FetchedAt: e.FetchedAt}
+		}
+	}
+	return newUsagePoller(seed, newUsageFetcher(fetchUsage, saveAccountCache), func(*AccountUsage) {})
 }
