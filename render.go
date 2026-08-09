@@ -312,8 +312,21 @@ func usageBar(pct float64, width int) string {
 }
 
 // formatUntil → time left until t, largest unit only: "<1m", "42m", "2h", "3d".
+// A zero or already-past t returns "" instead of "<1m" — a bucket's ResetsAt
+// only reads that way once its reset has already happened, and since carried
+// numbers stay on screen with no age bound (see liveCarryable/carryable), a
+// carry stale by hours would otherwise show a permanent, misleading "resets
+// in under a minute" beside its dim "stale" marker. Mirrors codexSegs' own
+// "better a blank than a misleading '<1m' countdown" rule, extended from
+// "unset" to "unset or elapsed".
 func formatUntil(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
 	d := time.Until(t)
+	if d <= 0 {
+		return ""
+	}
 	if d < time.Minute {
 		return "<1m"
 	}
@@ -986,16 +999,12 @@ func writeCodexUsage(w io.Writer, label string, info *CodexUsageInfo, cols int) 
 }
 
 // codexSegs builds one segment per Codex rate-limit window; a window with no
-// reset time (ResetsAt zero) gets an empty trailer — better a blank than a
-// misleading "<1m" countdown.
+// reset time gets an empty trailer, same as any other — formatUntil itself
+// returns "" for a zero (or elapsed) ResetsAt now.
 func codexSegs(info *CodexUsageInfo) []usageSeg {
 	segs := make([]usageSeg, 0, len(info.Windows))
 	for _, win := range info.Windows {
-		trailer := ""
-		if !win.ResetsAt.IsZero() {
-			trailer = formatUntil(win.ResetsAt)
-		}
-		segs = append(segs, usageSeg{label: win.Label, trailer: trailer, pct: win.Pct})
+		segs = append(segs, usageSeg{label: win.Label, trailer: formatUntil(win.ResetsAt), pct: win.Pct})
 	}
 	return segs
 }
