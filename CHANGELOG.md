@@ -300,6 +300,13 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A carried-forward account usage bar (numbers stay on screen with no age
+  bound once a fetch fails, marked `stale`) no longer shows every reset-time
+  trailer as "<1m" once its actual reset window has passed — that read as
+  "resets any second now" when the numbers were really just old, sometimes for
+  hours. The trailer is blank instead once a bucket's `ResetsAt` is unset or
+  already past, the same "better a blank than a misleading countdown" rule the
+  Codex usage line already applied to an unset reset time.
 - The resume picker no longer reports a busy host as unreachable.
   `GET /resumable` head-scanned and line-counted *every* transcript inside the
   30-day window and then discarded all but the newest 100 — on a host with

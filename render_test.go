@@ -960,7 +960,7 @@ func headerUsageLines(out string) []string {
 }
 
 func TestRenderHeaderSingleAccountRendersBareLine(t *testing.T) {
-	// Zero ResetsAt keeps formatUntil deterministic ("<1m"), so the byte
+	// Zero ResetsAt keeps formatUntil deterministic (""), so the byte
 	// comparison against the bare writeUsage output can't flake on a clock tick.
 	info := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	var out bytes.Buffer
@@ -1394,7 +1394,7 @@ func TestRenderHeaderTrailerColumnsAlign(t *testing.T) {
 		SevenDay: usageBucket{Pct: 20, ResetsAt: now.Add(2*24*time.Hour + 12*time.Hour)}, // "2d"
 	}
 	lineB := &UsageInfo{
-		FiveHour: usageBucket{Pct: 30, ResetsAt: now.Add(-time.Hour)},                     // "<1m"
+		FiveHour: usageBucket{Pct: 30, ResetsAt: now.Add(30 * time.Second)},               // "<1m"
 		SevenDay: usageBucket{Pct: 40, ResetsAt: now.Add(12*24*time.Hour + 12*time.Hour)}, // "12d"
 	}
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
@@ -1817,7 +1817,13 @@ func TestFormatUntil(t *testing.T) {
 		t    time.Time
 		want string
 	}{
-		{"past", now.Add(-time.Hour), "<1m"},
+		// A reset in the past is what a carried-forward bucket shows once its
+		// real reset window has long since passed (numbers carry with no age
+		// bound — see liveCarryable/carryable) — blank beats a permanent,
+		// misleading "resets in under a minute", the same rule codexSegs
+		// already applied to a zero ResetsAt.
+		{"past", now.Add(-time.Hour), ""},
+		{"zero", time.Time{}, ""},
 		{"seconds", now.Add(30 * time.Second), "<1m"},
 		{"minutes", now.Add(42*time.Minute + 30*time.Second), "42m"},
 		{"hours", now.Add(2*time.Hour + 5*time.Minute + 30*time.Second), "2h"},
@@ -1826,6 +1832,24 @@ func TestFormatUntil(t *testing.T) {
 	for _, c := range cases {
 		if got := formatUntil(c.t); got != c.want {
 			t.Errorf("%s: formatUntil = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The actual reported symptom: an account carried forward for hours (numbers
+// have no age bound — see liveCarryable) whose bucket reset windows are long
+// past must not show "<1m" on every segment forever, which reads as "about to
+// reset" beside the dim "stale" marker when the numbers are simply old.
+func TestClaudeSegsBlankTrailerForAnElapsedReset(t *testing.T) {
+	u := &UsageInfo{
+		FiveHour:          usageBucket{Pct: 0, ResetsAt: time.Time{}},
+		SevenDay:          usageBucket{Pct: 97, ResetsAt: time.Now().Add(-4 * time.Hour)},
+		WeeklyScoped:      usageBucket{Pct: 88, ResetsAt: time.Now().Add(-4 * time.Hour)},
+		WeeklyScopedLabel: "Fable",
+	}
+	for _, seg := range claudeSegs(u) {
+		if seg.trailer != "" {
+			t.Errorf("segment %q trailer = %q, want blank for an unset or already-elapsed reset", seg.label, seg.trailer)
 		}
 	}
 }
