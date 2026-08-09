@@ -944,28 +944,16 @@ func TestSessionsOmitsCodexUsageWhenSnapshotNilOrHubAbsent(t *testing.T) {
 	}
 }
 
-// newUsageServer builds a server whose account fetch is stubbed. The stub is
-// never optional: loadOAuthToken execs `security` directly rather than going
-// through the keychainRead var TestMain guards, so a /usage test with a nil
-// usageFetch would read the developer's own credential and spend it on a real
-// Anthropic request.
-func newUsageServer(fetch func(snapshot string) (*UsageInfo, error)) *server {
-	return &server{token: "secret", host: "devbox", usageFetch: fetch}
+// newUsageServer builds a bare server for /usage tests. Unlike before, the
+// handler makes no Anthropic call at all, so there is no fetch to stub out.
+func newUsageServer() *server {
+	return &server{token: "secret", host: "devbox"}
 }
 
-// getUsage issues one authorized GET /usage and decodes the body. ignore is
-// sent the way the client sends it: one repeated parameter per email.
-func getUsage(t *testing.T, s *server, ignore ...string) usageResponse {
+// getUsage issues one authorized GET /usage and decodes the body.
+func getUsage(t *testing.T, s *server) usageResponse {
 	t.Helper()
-	q := url.Values{}
-	for _, email := range ignore {
-		q.Add("ignore", email)
-	}
-	target := "/usage"
-	if encoded := q.Encode(); encoded != "" {
-		target += "?" + encoded
-	}
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req := httptest.NewRequest(http.MethodGet, "/usage", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	s.usage(rec, req)
@@ -990,69 +978,47 @@ func findKnownAccount(t *testing.T, resp usageResponse, name string) KnownAccoun
 	return KnownAccountUsage{}
 }
 
-// An ignored account must be reported without being fetched — dropping it
-// instead would quietly remove it as a Ctrl+W switch target, since the picker
-// and `account list` build their rows straight out of knownAccounts.
-func TestUsageEndpointReportsIgnoredAccountsWithoutFetchingThem(t *testing.T) {
+// GET /usage never calls Anthropic — it reports which accounts this host
+// knows about, never their numbers. A remote caller repeatedly hitting this
+// endpoint must not multiply the round trips an account already pays for on
+// the machine actually using it.
+func TestUsageEndpointReportsKnownAccountsWithNoNumbers(t *testing.T) {
 	f := newAccountFixture(t)
 	f.setIdentity("andy@avisoma.com")
 	f.snapshot("avisoma", "tok-a", "andy@avisoma.com")
 	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
 	f.snapshot("side", "tok-s", "andy@side.dev")
 
-	var mu sync.Mutex
-	var fetched []string
-	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
-		mu.Lock()
-		fetched = append(fetched, snapshot)
-		mu.Unlock()
-		return &UsageInfo{FiveHour: usageBucket{Pct: 33}}, nil
-	})
+	resp := getUsage(t, newUsageServer())
 
-	resp := getUsage(t, s, "ANDY@Trecs.aero")
-
-	mu.Lock()
-	got := append([]string(nil), fetched...)
-	mu.Unlock()
-	if len(got) != 2 {
-		t.Fatalf("fetched %v, want the live account and the one non-ignored snapshot", got)
+	if len(resp.KnownAccounts) != 2 {
+		t.Fatalf("knownAccounts = %#v, want the two non-live snapshots", resp.KnownAccounts)
 	}
-	for _, snapshot := range got {
-		if snapshot == "trecs" {
-			t.Fatalf("fetched the ignored account: %v", got)
-		}
+	trecs := findKnownAccount(t, resp, "trecs")
+	if trecs.Account != "andy@trecs.aero" || trecs.Info != nil || trecs.Expired || trecs.Reason != "" {
+		t.Fatalf("trecs entry = %#v, want the email with no fetch and no classification", trecs)
 	}
-	ignored := findKnownAccount(t, resp, "trecs")
-	if ignored.Info != nil || ignored.Expired {
-		t.Fatalf("ignored entry = %#v, want it present but unfetched (nil info, not expired)", ignored)
-	}
-	if ignored.Account != "andy@trecs.aero" {
-		t.Fatalf("ignored entry lost its email: %#v", ignored)
-	}
-	if other := findKnownAccount(t, resp, "side"); other.Info == nil || other.Info.FiveHour.Pct != 33 {
-		t.Fatalf("non-ignored entry = %#v, want its numbers", other)
+	side := findKnownAccount(t, resp, "side")
+	if side.Account != "andy@side.dev" || side.Info != nil {
+		t.Fatalf("side entry = %#v, want the email with no numbers", side)
 	}
 }
 
-// The live account's email is a free file read, so it is reported even when its
-// numbers were skipped — it is what labels this host's heading.
-func TestUsageEndpointKeepsTheLiveEmailWhenItsNumbersAreIgnored(t *testing.T) {
+// The live account's email is a free file read, so it is always reported —
+// with no numbers, since fetching them is exactly what this endpoint no
+// longer does.
+func TestUsageEndpointReportsTheLiveEmailWithNoNumbers(t *testing.T) {
 	f := newAccountFixture(t)
 	f.setIdentity("andy@avisoma.com")
 	f.snapshot("avisoma", "tok-a", "andy@avisoma.com")
 
-	s := newUsageServer(func(string) (*UsageInfo, error) {
-		t.Error("fetched an account the caller asked to skip")
-		return nil, nil
-	})
-
-	resp := getUsage(t, s, "andy@avisoma.com")
+	resp := getUsage(t, newUsageServer())
 
 	if resp.Usage == nil || resp.Usage.Account != "andy@avisoma.com" {
-		t.Fatalf("usage = %#v, want the live email reported regardless", resp.Usage)
+		t.Fatalf("usage = %#v, want the live email reported", resp.Usage)
 	}
 	if resp.Usage.Info != nil {
-		t.Fatalf("usage.info = %#v, want nil for an ignored account", resp.Usage.Info)
+		t.Fatalf("usage.info = %#v, want nil — this endpoint never fetches", resp.Usage.Info)
 	}
 	if resp.ActiveSnapshotName != "avisoma" {
 		t.Fatalf("activeSnapshotName = %q, want avisoma", resp.ActiveSnapshotName)
@@ -1060,17 +1026,14 @@ func TestUsageEndpointKeepsTheLiveEmailWhenItsNumbersAreIgnored(t *testing.T) {
 }
 
 // activeSnapshotName is resolved from disk on every call and never cached, so a
-// switch is visible on the very next request — the property that made the old
-// poller-kick machinery unnecessary.
+// switch is visible on the very next request.
 func TestUsageEndpointResolvesTheActiveSnapshotOnEveryCall(t *testing.T) {
 	f := newAccountFixture(t)
 	f.setIdentity("andy@avisoma.com")
 	f.snapshot("avisoma", "tok-a", "andy@avisoma.com")
 	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
 
-	s := newUsageServer(func(string) (*UsageInfo, error) {
-		return &UsageInfo{FiveHour: usageBucket{Pct: 12}}, nil
-	})
+	s := newUsageServer()
 
 	first := getUsage(t, s)
 	if first.ActiveSnapshotName != "avisoma" {
@@ -1096,174 +1059,10 @@ func TestUsageEndpointResolvesTheActiveSnapshotOnEveryCall(t *testing.T) {
 	}
 }
 
-// A per-account failure is that entry's own classification, never an error for
-// the request: one flaky snapshot must not cost every other account's numbers.
-func TestUsageEndpointMarksAFailedAccountExpired(t *testing.T) {
-	f := newAccountFixture(t)
-	f.setIdentity("andy@avisoma.com")
-	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
-	f.snapshot("side", "tok-s", "andy@side.dev")
-
-	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
-		if snapshot == "trecs" {
-			return nil, &usageHTTPError{Status: 401}
-		}
-		return &UsageInfo{FiveHour: usageBucket{Pct: 55}}, nil
-	})
-
-	resp := getUsage(t, s)
-
-	failed := findKnownAccount(t, resp, "trecs")
-	if !failed.Expired || failed.Info != nil {
-		t.Fatalf("failed entry = %#v, want Expired with no info", failed)
-	}
-	if failed.Reason != usageExpiredReason {
-		t.Fatalf("reason = %q, want %q", failed.Reason, usageExpiredReason)
-	}
-	healthy := findKnownAccount(t, resp, "side")
-	if healthy.Expired || healthy.Info == nil {
-		t.Fatalf("healthy entry = %#v, want its numbers despite the sibling's failure", healthy)
-	}
-	// The timestamp travels with the numbers: it is what a client judges
-	// staleness against, and a missing one means "vintage unknown, drop it".
-	if time.Since(healthy.FetchedAt) > time.Minute {
-		t.Fatalf("FetchedAt = %v, want the time of this fetch", healthy.FetchedAt)
-	}
-	if resp.Usage == nil || resp.Usage.Info == nil {
-		t.Fatalf("usage = %#v, want the live account unaffected", resp.Usage)
-	}
-}
-
-// The reason this endpoint reports a classification rather than a bare flag: a
-// 429 off the account's shared per-token budget is routine, and reporting it as
-// "auth expired" sent the user to re-login over a throttle that heals itself.
-func TestUsageEndpointDoesNotCallAThrottleExpired(t *testing.T) {
-	f := newAccountFixture(t)
-	f.setIdentity("andy@avisoma.com")
-	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
-
-	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
-		if snapshot == "trecs" {
-			return nil, &usageHTTPError{Status: 429}
-		}
-		return &UsageInfo{FiveHour: usageBucket{Pct: 55}}, nil
-	})
-
-	throttled := findKnownAccount(t, getUsage(t, s), "trecs")
-	if throttled.Expired {
-		t.Fatalf("throttled entry = %#v, want it not reported as a dead credential", throttled)
-	}
-	if throttled.Reason != "rate limited" || throttled.Info != nil {
-		t.Fatalf("throttled entry = %#v, want the classification with no numbers", throttled)
-	}
-}
-
-// Cache misses fan out rather than serializing: N accounts must not cost N
-// times the endpoint's timeout. Asserted by holding every fetch open until all
-// of them have started, which only completes if they really do run at once.
-func TestUsageEndpointFetchesAccountsConcurrently(t *testing.T) {
-	f := newAccountFixture(t)
-	f.setIdentity("andy@avisoma.com")
-	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
-	f.snapshot("side", "tok-s", "andy@side.dev")
-	const want = 3 // the live account plus both snapshots
-
-	started := make(chan struct{}, want)
-	release := make(chan struct{})
-	// On the failure path the handler and its stubs are still parked on release;
-	// unwind them rather than leaking goroutines into the rest of the suite.
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	}()
-	s := newUsageServer(func(string) (*UsageInfo, error) {
-		started <- struct{}{}
-		<-release
-		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
-	})
-
-	// The request runs off the test goroutine (it blocks until every fetch is
-	// released), so it uses the recorder directly rather than getUsage — t.Fatalf
-	// is not valid outside the test goroutine.
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		req := httptest.NewRequest(http.MethodGet, "/usage", nil)
-		req.Header.Set("Authorization", "Bearer secret")
-		rec := httptest.NewRecorder()
-		s.usage(rec, req)
-		done <- rec
-	}()
-
-	for i := 0; i < want; i++ {
-		select {
-		case <-started:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("only %d of %d fetches had started — they are running one after another", i, want)
-		}
-	}
-	close(release)
-
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
-		}
-		var resp usageResponse
-		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-			t.Fatal(err)
-		}
-		if len(resp.KnownAccounts) != 2 || resp.Usage == nil {
-			t.Fatalf("response = %#v, want all three accounts", resp)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("handler never returned")
-	}
-}
-
-// The cache is shared across requests, so a second call inside the TTL costs
-// nothing — while still reporting every account.
-func TestUsageEndpointServesRepeatCallsFromItsCache(t *testing.T) {
-	f := newAccountFixture(t)
-	f.setIdentity("andy@avisoma.com")
-	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
-
-	calls := 0
-	var mu sync.Mutex
-	s := newUsageServer(func(string) (*UsageInfo, error) {
-		mu.Lock()
-		calls++
-		mu.Unlock()
-		return &UsageInfo{FiveHour: usageBucket{Pct: 9}}, nil
-	})
-
-	getUsage(t, s)
-	resp := getUsage(t, s)
-
-	mu.Lock()
-	got := calls
-	mu.Unlock()
-	if got != 2 {
-		t.Fatalf("fetches = %d, want the second call served from the cache", got)
-	}
-	if resp.Usage == nil || resp.Usage.Info == nil {
-		t.Fatalf("usage = %#v, want the cached numbers replayed", resp.Usage)
-	}
-	if known := findKnownAccount(t, resp, "trecs"); known.Info == nil {
-		t.Fatalf("known entry = %#v, want the cached numbers replayed", known)
-	}
-}
-
 func TestUsageEndpointUnauthorized(t *testing.T) {
-	s := newUsageServer(func(string) (*UsageInfo, error) {
-		t.Error("an unauthorized request reached the fetch")
-		return nil, nil
-	})
 	req := httptest.NewRequest(http.MethodGet, "/usage", nil)
 	rec := httptest.NewRecorder()
-	s.usage(rec, req)
+	newUsageServer().usage(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
@@ -5217,73 +5016,7 @@ func TestFlagsHandlerReportsAStoreItCannotWrite(t *testing.T) {
 	}
 }
 
-// TestUsageEndpointFlagsMisattributedSnapshot proves the server classifies a
-// verified-identity mismatch exactly as the client-side poller does: the
-// stranger's numbers are dropped and the entry carries the tag instead, so no
-// host anywhere renders one account's bars under another's email.
-func TestUsageEndpointFlagsMisattributedSnapshot(t *testing.T) {
-	f := newAccountFixture(t)
-	f.setIdentity("andy@avisoma.com")
-	f.snapshot("avisoma", "tok-a", "andy@avisoma.com")
-	f.snapshot("trecs", "tok-t", "andy@trecs.aero")
-
-	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
-		return &UsageInfo{FiveHour: usageBucket{Pct: 55}, VerifiedAccount: "someone@elsewhere.example"}, nil
-	})
-	resp := getUsage(t, s)
-
-	entry := findKnownAccount(t, resp, "trecs")
-	if entry.Info != nil {
-		t.Fatalf("Info = %+v, want the stranger's numbers dropped", entry.Info)
-	}
-	if entry.Expired {
-		t.Fatal("Expired = true; a working credential under the wrong name is not a dead one")
-	}
-	if entry.Reason != usageWrongIdentityReason {
-		t.Fatalf("Reason = %q, want %q", entry.Reason, usageWrongIdentityReason)
-	}
-}
-
-// TestUsageEndpointLabelsLiveAccountWithVerifiedEmail proves the live half of
-// fix 2 on the server: the account the token itself belongs to labels the
-// reading, even when ~/.claude.json says otherwise — which is exactly the
-// clobber worth surfacing.
-func TestUsageEndpointLabelsLiveAccountWithVerifiedEmail(t *testing.T) {
-	f := newAccountFixture(t)
-	f.setIdentity("andy@avisoma.com")
-
-	s := newUsageServer(func(snapshot string) (*UsageInfo, error) {
-		if snapshot != "" {
-			t.Fatalf("fetched snapshot %q, want only the live account", snapshot)
-		}
-		return &UsageInfo{FiveHour: usageBucket{Pct: 55}, VerifiedAccount: "andy@trecs.aero"}, nil
-	})
-	resp := getUsage(t, s)
-
-	if resp.Usage == nil {
-		t.Fatal("usage missing")
-	}
-	if resp.Usage.Account != "andy@trecs.aero" {
-		t.Fatalf("account = %q, want the verified email to win over the identity cache", resp.Usage.Account)
-	}
-	if resp.Usage.Info == nil {
-		t.Fatal("info missing; the live account's numbers are still reported")
-	}
-}
-
-// TestUsageEndpointLiveAccountFallsBackToTheFile proves the fallback is intact:
-// with nothing verified, the endpoint labels the live account exactly as it
-// always did.
-func TestUsageEndpointLiveAccountFallsBackToTheFile(t *testing.T) {
-	f := newAccountFixture(t)
-	f.setIdentity("andy@avisoma.com")
-
-	s := newUsageServer(func(string) (*UsageInfo, error) {
-		return &UsageInfo{FiveHour: usageBucket{Pct: 55}}, nil
-	})
-	resp := getUsage(t, s)
-
-	if resp.Usage == nil || resp.Usage.Account != "andy@avisoma.com" {
-		t.Fatalf("usage = %+v, want the identity cache's email", resp.Usage)
-	}
-}
+// Identity-mismatch and verified-email-label behavior for a fetched reading
+// live entirely client-side now (usage.go / known_accounts.go), since GET
+// /usage no longer fetches anything to verify — see TestVerifiedIdentityMismatch
+// and the known_accounts_test.go coverage of knownAccountUsage.

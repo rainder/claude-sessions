@@ -100,20 +100,19 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 	}
 }
 
-// FetchRemoteUsage queries one server's /usage endpoint. Same shape as
+// FetchRemoteUsage queries one server's /usage endpoint — account identity
+// only; the handler never calls Anthropic, so the response never carries
+// rate-limit numbers for a remote host (see server.go). Same shape as
 // FetchRemote — bearer auth — but a returned error instead of an Error field,
 // since the account fields are overlaid onto a RemoteResult that may well have
-// succeeded on its own. The timeout is longer than FetchRemote's 5s: a
-// cold-cache handler fans out one fetch per account concurrently against the
-// same 5s endpoint timeout (usage.go), so the handler's own wall-clock time
-// can approach 5s before this client would. 8s gives it room to actually
-// finish instead of the client giving up right as the server was about to
-// succeed.
+// succeeded on its own. The 8s timeout (longer than FetchRemote's 5s) predates
+// the handler becoming pure disk reads and is left generous rather than
+// tightened.
 //
-// ignore names accounts (by email) the caller already holds good numbers for;
-// the host then reports those accounts without spending a fetch on them. It is
-// sent as a repeated parameter rather than one comma-joined value because an
-// email's local-part may legally contain a comma.
+// ignore names accounts (by email) the caller already holds good numbers for.
+// The server no longer acts on it — see RemoteUsageHub.ignore's doc — but it
+// is still sent, as a repeated parameter rather than one comma-joined value
+// because an email's local-part may legally contain a comma.
 //
 // A 404 from a server predating this route is just another per-host failure:
 // that host contributes no usage and everything else keeps working. The reverse

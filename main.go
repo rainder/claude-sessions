@@ -134,8 +134,11 @@ func cmdList() error {
 	sortMode := LoadSortMode()
 	SortSessions(local, sortMode)
 	remotes = sortRemotes(remotes, sortMode)
-	// Each host's account rate-limit bars come from its /usage endpoint, not
-	// /sessions; without this the remote half of the header would be blank.
+	// Each host's account identity (and, for the local host only, its
+	// rate-limit numbers) come from its /usage endpoint, not /sessions; without
+	// this even a remote host's account-email heading label would be blank.
+	// GET /usage never calls Anthropic on a remote host's behalf (server.go), so
+	// a remote's own numbers never appear here — only its identity does.
 	remotes = mergeRemoteUsage(remotes)
 	RenderAll(os.Stdout, LoadViewMode(), LocalHost{
 		Name:      shortHostname(),

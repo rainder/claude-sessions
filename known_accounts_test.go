@@ -423,18 +423,10 @@ func TestClassifyUsageErr(t *testing.T) {
 		{"503 is theirs", &usageHTTPError{Status: 503}, false, "server error"},
 		{"an unexpected status names itself", &usageHTTPError{Status: 418}, false, "HTTP 418"},
 		{"a wrapped status still classifies", fmt.Errorf("fetching: %w", &usageHTTPError{Status: 401}), true, usageExpiredReason},
-		{"the bounded-fetch timeout", errUsageFetchTimedOut, false, "timed out"},
-		// A fetch the server's cache declined to attempt reads as what it stands in
-		// for: the account is backed off because it kept being throttled.
-		{"a fetch the backoff declined", errUsageBackoffActive, false, usageRateLimitedReason},
-		{"a wrapped backoff refusal", fmt.Errorf("account: %w", errUsageBackoffActive), false, usageRateLimitedReason},
-		{"a wrapped timeout", fmt.Errorf("account: %w", errUsageFetchTimedOut), false, "timed out"},
 		// What fetchUsageInfo's own http.Client{Timeout: 5s} actually produces on
-		// expiry — a *url.Error wrapping a context deadline, not
-		// errUsageFetchTimedOut (that sentinel belongs to usage_cache.go's
-		// separate runBounded watchdog). Without a net.Error check this fell
-		// through to "unreachable", which reads as a network fault rather than
-		// what actually happened.
+		// expiry — a *url.Error wrapping a context deadline. Without a net.Error
+		// check this fell through to "unreachable", which reads as a network fault
+		// rather than what actually happened.
 		{"the HTTP client's own deadline", &url.Error{Op: "Get", URL: "https://api.anthropic.com/api/oauth/usage", Err: context.DeadlineExceeded}, false, "timed out"},
 		{"anything else", errors.New("dial tcp: no route to host"), false, "unreachable"},
 		{"no error at all", nil, false, ""},

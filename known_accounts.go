@@ -635,8 +635,10 @@ func loadKnownAccountsCache() *knownAccountsResult {
 // KnownAccountsHub polls every account this host holds a claude-switch
 // credential snapshot for, alongside UsageHub's poll of the live account (see
 // usagePoller for the shared mechanism: same 2-minute cadence, same
-// failed-fetch backoff, same pause/resume/kick surface). Runs in both roles —
-// on the server for remote hosts, and locally for the client's own snapshots.
+// failed-fetch backoff, same pause/resume/kick surface). Runs in the TUI
+// client only (tui.go), against this machine's own snapshots — a
+// `claude-sessions -s` server never starts one; a remote's known accounts are
+// read straight off disk on demand by GET /usage instead (server.go).
 type KnownAccountsHub = usagePoller[knownAccountsResult]
 
 // NewKnownAccountsHub starts the poller and returns immediately, seeded from a

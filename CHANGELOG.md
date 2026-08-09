@@ -371,6 +371,28 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `GET /usage` no longer calls Anthropic. It used to fetch the live account's
+  and every known account's rate-limit percentages on a remote caller's
+  behalf, single-flighted and briefly cached — which stopped the endpoint from
+  polling forever, but not from multiplying requests: the same account is
+  routinely held as a credential snapshot on two or more machines, so every
+  client polling every configured remote spent that account's shared
+  per-token budget again on top of whatever the machine actually using it
+  already spent locally. The endpoint now reports account identity only
+  (names, emails, which one is live) and never fetches numbers — only a
+  client running directly against an account, whether this machine's own TUI
+  or one SSHed onto the account's host and run there, ever spends its budget.
+  The header's remote account bars disappear as a result (a remote host's
+  heading still shows which account it's logged into); the Ctrl+W switch
+  picker and `account list` are unaffected, since they only ever needed the
+  identity half. Two smaller consequences: the live account's email in the
+  response is now always the file read (`~/.claude.json`), never the
+  token-verified one, since verifying it needs the very fetch this removes —
+  so a credential clobber on a remote host is now only visible from that
+  host's own client, not from `/usage`. And `usage.info` /
+  `knownAccounts[].info` in the wire response are always `null` for a remote
+  host now (the field shape is unchanged, only the values), which affects any
+  non-Go client reading this endpoint directly, not just this TUI.
 - `-s` prints the bearer token only when stdout is a terminal. Redirected or
   piped output gets the path to the token file instead, so `claude-sessions -s
   > server.log` no longer copies a secret that lives `0600` on disk into

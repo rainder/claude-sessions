@@ -513,10 +513,11 @@ func cmdListSessions(args []string) int {
 		return 0
 	}
 
-	// Only the rendered form shows account rate-limit bars, and they come from
-	// each host's /usage endpoint rather than /sessions. Fetching them after the
-	// --json branch has returned keeps a shell pipeline off a round of requests
-	// whose result it would never print.
+	// Only the rendered form shows account identity/bars, and they come from
+	// each host's /usage endpoint rather than /sessions (a remote host's own
+	// numbers never come back — GET /usage answers identity only, see
+	// server.go). Fetching after the --json branch has returned keeps a shell
+	// pipeline off a round of requests whose result it would never print.
 	remotes = mergeRemoteUsage(remotes)
 	RenderAll(os.Stdout, "1", LocalHost{
 		Name:      shortHostname(),
