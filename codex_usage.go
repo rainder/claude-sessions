@@ -203,7 +203,10 @@ func saveCodexUsageCache(u *CodexAccountUsage) {
 }
 
 // loadCodexUsageCache returns the cached snapshot, or nil if absent, unreadable,
-// or older than usageCacheMaxAge (shared with the Anthropic cache).
+// or older than usageCacheMaxAge. The Anthropic side used to share this same
+// bound for its own disk seed and live carry-forward; both went unbounded
+// instead (see usage.go's liveCarryable and known_accounts.go's fresh), so
+// this is now the constant's only remaining use.
 func loadCodexUsageCache() *CodexAccountUsage {
 	data, err := os.ReadFile(codexUsageCachePath())
 	if err != nil {

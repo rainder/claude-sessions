@@ -337,20 +337,23 @@ func TestKnownAccountUsage(t *testing.T) {
 		}
 	})
 
-	t.Run("numbers past the max age are not carried forward", func(t *testing.T) {
+	t.Run("numbers of any age are carried forward", func(t *testing.T) {
 		prev := &KnownAccountUsage{
 			Name:      "trecs",
 			Account:   "andy@trecs.aero",
 			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
-			FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute),
+			FetchedAt: time.Now().Add(-6 * time.Hour),
 		}
 		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 429})
 		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, throttled)
-		if got.Info != nil || got.Stale {
-			t.Fatalf("aged-out entry = %#v, want no numbers at all", got)
+		if got.Info == nil || got.Info.FiveHour.Pct != 63 || !got.Stale {
+			t.Fatalf("aged entry = %#v, want prev's numbers carried and marked stale", got)
+		}
+		if !got.FetchedAt.Equal(prev.FetchedAt) {
+			t.Fatalf("FetchedAt = %v, want prev's original %v", got.FetchedAt, prev.FetchedAt)
 		}
 		if got.Reason != "rate limited" {
-			t.Fatalf("reason = %q, want the placeholder to say what failed", got.Reason)
+			t.Fatalf("reason = %q, want the failure classification preserved", got.Reason)
 		}
 	})
 
@@ -543,6 +546,84 @@ func TestAllKnownAccountsThreadsEachAccountsOwnPrev(t *testing.T) {
 	}
 }
 
+func TestReconcileFetchOrder(t *testing.T) {
+	t.Run("keeps prior order for survivors and appends new names at the end", func(t *testing.T) {
+		got := reconcileFetchOrder([]string{"bravo", "alpha"}, []string{"alpha", "bravo", "charlie"})
+		want := []string{"bravo", "alpha", "charlie"}
+		if !equalStrings(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("a name prior remembered but that no longer exists just drops out", func(t *testing.T) {
+		got := reconcileFetchOrder([]string{"bravo", "gone", "alpha"}, []string{"alpha", "bravo"})
+		want := []string{"bravo", "alpha"}
+		if !equalStrings(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("a nil prior is every name in names order", func(t *testing.T) {
+		got := reconcileFetchOrder(nil, []string{"alpha", "bravo"})
+		want := []string{"alpha", "bravo"}
+		if !equalStrings(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+}
+
+func TestReorderFailedFirst(t *testing.T) {
+	order := []string{"alpha", "bravo", "charlie", "delta"}
+	got := reorderFailedFirst(order, map[string]bool{"charlie": true, "alpha": true})
+	want := []string{"alpha", "charlie", "bravo", "delta"}
+	if !equalStrings(got, want) {
+		t.Fatalf("got %v, want %v — failed names first, both groups keeping their own relative order", got, want)
+	}
+	// Nothing failed: the order is unchanged.
+	if got := reorderFailedFirst(order, nil); !equalStrings(got, order) {
+		t.Fatalf("got %v, want the input order unchanged when nothing failed", got)
+	}
+}
+
+// The fetch is sequential now, and any account this pass could not get fresh
+// numbers for — a genuine failure here — moves to the front of the next
+// pass's queue, ahead of accounts that were fine. A chronically struggling
+// account must not settle at the tail of a long list.
+func TestKnownAccountsFetcherRetriesAFailedAccountFirst(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "alpha", "tok-alpha", "andy@alpha.example")
+	writeSnapshotFixture(t, home, "bravo", "tok-bravo", "andy@bravo.example")
+	writeSnapshotFixture(t, home, "charlie", "tok-charlie", "andy@charlie.example")
+
+	var order []string
+	failBravo := true
+	swapFetch(t, func(token string) (*UsageInfo, error) {
+		order = append(order, token)
+		if token == "tok-bravo" && failBravo {
+			return nil, &usageHTTPError{Status: 429}
+		}
+		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+	})
+
+	fetcher := newKnownAccountsFetcher(nil)
+	if _, err := fetcher(); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	want1 := []string{"tok-alpha", "tok-bravo", "tok-charlie"}
+	if !equalStrings(order, want1) {
+		t.Fatalf("pass 1 fetch order = %v, want %v (plain directory order)", order, want1)
+	}
+
+	order = nil
+	failBravo = false
+	if _, err := fetcher(); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	if len(order) == 0 || order[0] != "tok-bravo" {
+		t.Fatalf("pass 2 fetch order = %v, want bravo first after failing pass 1", order)
+	}
+}
+
 // The hub's fetcher is the only thing with memory across polls: a failed second
 // pass must re-serve the first pass' numbers, and a snapshot that disappears
 // from disk must stop being remembered.
@@ -688,19 +769,22 @@ func TestKnownAccountsCacheNeverPersistsExpired(t *testing.T) {
 	}
 }
 
-// Age is judged per account, not per file: a stale entry's numbers are older
-// than the write that persisted them, so one envelope timestamp cannot speak
-// for every entry in the file.
-func TestKnownAccountsCacheAgesEachAccountSeparately(t *testing.T) {
+// Vintage is judged per account, not per file: each entry keeps its own
+// FetchedAt rather than the envelope's, and there is no age gate any more — a
+// carried-forward entry beside a freshly-fetched one both load, whatever their
+// individual ages.
+func TestKnownAccountsCacheHasNoAgeGatePerAccount(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	// One file, written at the same instant, holding numbers of two very
 	// different vintages — which is exactly what a carried-forward entry beside
 	// a freshly-fetched one is.
+	freshAt := time.Now().Add(-time.Minute)
+	ancientAt := time.Now().Add(-24 * time.Hour)
 	mixed, err := json.Marshal(cachedKnownAccounts{
 		FetchedAt: time.Now(),
 		Accounts: []KnownAccountUsage{
-			{Name: "fresh", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: time.Now().Add(-time.Minute)},
-			{Name: "ancient", Info: &UsageInfo{FiveHour: usageBucket{Pct: 99}}, FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute)},
+			{Name: "fresh", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: freshAt},
+			{Name: "ancient", Info: &UsageInfo{FiveHour: usageBucket{Pct: 99}}, FetchedAt: ancientAt},
 		},
 	})
 	if err != nil {
@@ -710,16 +794,26 @@ func TestKnownAccountsCacheAgesEachAccountSeparately(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := loadKnownAccountsCache()
-	if got == nil {
-		t.Fatal("a file with one usable entry seeded nothing")
+	if got == nil || len(got.Accounts) != 2 {
+		t.Fatalf("seeded %#v, want both entries regardless of age", got)
 	}
-	if len(got.Accounts) != 1 || got.Accounts[0].Name != "fresh" {
-		t.Fatalf("seeded %#v, want only the entry young enough to trust", got.Accounts)
+	byName := map[string]KnownAccountUsage{}
+	for _, a := range got.Accounts {
+		byName[a.Name] = a
+	}
+	if !byName["fresh"].FetchedAt.Equal(freshAt) || !byName["ancient"].FetchedAt.Equal(ancientAt) {
+		t.Fatalf("timestamps not preserved: %#v", byName)
+	}
+	// A disk seed is a read, not a completed poll: every entry must come back
+	// marked Stale, or it would render indistinguishable from a just-fetched
+	// account until the next real pass.
+	if !byName["fresh"].Stale || !byName["ancient"].Stale {
+		t.Fatalf("seeded entries = %#v, want every disk seed marked Stale", byName)
 	}
 
 	// A cache file written before per-account timestamps existed decodes to the
-	// zero time everywhere, so the whole thing drops — one poll replaces it, and
-	// numbers of unknown vintage are exactly what this gate rejects.
+	// zero time everywhere, so the whole thing drops — one poll replaces it,
+	// since there is no vintage at all to judge for numbers with no timestamp.
 	legacy, err := json.Marshal(cachedKnownAccounts{
 		FetchedAt: time.Now(),
 		Accounts:  []KnownAccountUsage{{Name: "avisoma", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}}},
@@ -765,22 +859,6 @@ func TestKnownAccountsCachePersistsStaleWithoutRestamping(t *testing.T) {
 
 func TestKnownAccountsCacheExpiryAndCorruption(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
-	stale := cachedKnownAccounts{
-		FetchedAt: time.Now(),
-		Accounts: []KnownAccountUsage{
-			{Name: "avisoma", Info: &UsageInfo{}, FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute)},
-		},
-	}
-	data, err := json.Marshal(stale)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(knownAccountsCachePath(), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadKnownAccountsCache(); got != nil {
-		t.Fatalf("stale cache seeded %#v, want nil", *got)
-	}
 
 	// An entry that decodes without Info is a miss, not a healthy-looking zero.
 	nilInfo, err := json.Marshal(cachedKnownAccounts{
