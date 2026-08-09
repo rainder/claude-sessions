@@ -89,10 +89,14 @@ type AccountUsage struct {
 	// currently vouch for.
 	Stale bool `json:"stale,omitempty"`
 	// FetchedAt is when Info was actually fetched, not when this struct was
-	// built — a carried-forward reading keeps the original timestamp, which is
-	// what bounds how long staleness may accumulate (usageCacheMaxAge). Only
-	// fetchUsage sets it; the server's on-demand /usage handler has no memory to
-	// carry anything forward, so it never produces a Stale reading either.
+	// built — a carried-forward reading keeps the original timestamp rather
+	// than being restamped on every re-serve. Nothing in this TUI's own header
+	// renders it (the Stale marker is a fixed "stale" label, not a computed
+	// age), but it still travels on the wire to any other consumer of
+	// AccountUsage, and restamping it would make a permanently throttled
+	// account's numbers look permanently fresh there too. Only fetchUsage sets
+	// it; the server's on-demand /usage handler has no memory to carry
+	// anything forward, so it never produces a Stale reading either.
 	//
 	// omitzero, not omitempty: encoding/json never considers a struct empty, so
 	// omitempty on a time.Time does nothing and every snapshot with no numbers
@@ -757,9 +761,13 @@ const usageRefreshInterval = 2 * time.Minute
 // instead of leaving the header bar blank until the next 2-minute tick.
 const usageRetryMin = 5 * time.Second
 
-// usageCacheMaxAge bounds how stale a disk-cached snapshot may be and still
-// seed the header on startup. Beyond this the percentages are more likely to
-// mislead than inform, so the bar waits for a live fetch instead.
+// usageCacheMaxAge bounds how stale a disk-cached Codex snapshot may be and
+// still seed the header on startup (codex_usage.go's loadCodexUsageCache).
+// The Anthropic side used to share this bound for both its disk seed and its
+// live carry-forward; both were deliberately unbounded instead — see
+// liveCarryable and fresh — because the alternative was a bare "rate limited"
+// placeholder replacing perfectly informative (if aging) bars the moment an
+// outage ran long, which is worse than a number that says how old it is.
 const usageCacheMaxAge = 15 * time.Minute
 
 // usageCachePath is where the last successful fetch is persisted so a
@@ -789,9 +797,18 @@ func saveUsageCache(u *AccountUsage) {
 }
 
 // loadUsageCache returns the cached snapshot, or nil if absent, unreadable,
-// older than usageCacheMaxAge, or missing its snapshot (nil Info — including a
-// pre-relogin cache written in the old "info" envelope, which is a miss, not an
-// error).
+// unstamped, or missing its snapshot (nil Info — including a pre-relogin cache
+// written in the old "info" envelope, which is a miss, not an error). No
+// longer age-gated: a seed from hours ago still beats no seed at all.
+//
+// Always marked Stale — this is a disk read, not a completed poll, so nothing
+// here has confirmed the numbers as current. Without this, a seed loaded on a
+// cold start would render exactly like a live reading (saveOnceUsage never
+// persists Stale, so every saved file already reads false) and, on an outage
+// that never returns a 429 to arm the carry-forward path, would stay
+// indistinguishable from live for as long as the process runs — the same
+// failure this whole change exists to avoid, just moved from "drop the seed"
+// to "show it as if it were fresh."
 func loadUsageCache() *AccountUsage {
 	data, err := os.ReadFile(usageCachePath())
 	if err != nil {
@@ -801,9 +818,10 @@ func loadUsageCache() *AccountUsage {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil
 	}
-	if c.FetchedAt.IsZero() || time.Since(c.FetchedAt) > usageCacheMaxAge || c.Usage.Info == nil {
+	if c.FetchedAt.IsZero() || c.Usage.Info == nil {
 		return nil
 	}
+	c.Usage.Stale = true
 	return &c.Usage
 }
 
@@ -817,7 +835,7 @@ type UsageHub = usagePoller[AccountUsage]
 
 // liveCarryable reports whether the live account's last good reading may be
 // re-served in place of a fetch the backoff is holding. It is carryable
-// (known_accounts.go) in the one-account shape: same numbers-and-age test as
+// (known_accounts.go) in the one-account shape: same numbers-and-info test as
 // fresh, plus the same identity test, against the email that is live right now.
 //
 // The identity half is what carryable documents at length — last is keyed by
@@ -826,12 +844,14 @@ type UsageHub = usagePoller[AccountUsage]
 // limits. An unconfirmable email on either side never carries: putting an
 // account's bars on screen means knowing whose they are.
 //
-// The age half is what stops a throttle that never lifts from showing hours-old
-// percentages as current, and it is what localFreshAccountEmails needs in order
-// to stop telling every remote host to skip an account nobody has current
-// numbers for. The explicit zero check is also how a disk seed written before
-// AccountUsage carried a timestamp reads as non-carryable rather than eternally
-// young — the same one-time drop loadKnownAccountsCache takes for its own
+// There is deliberately no age bound: numbers from an outage that ran long are
+// still more informative than a bare "rate limited" placeholder, and the Stale
+// marker (never cleared by a carry) already tells the header, and
+// localFreshAccountEmails, that these are not current — the age itself doesn't
+// need to gate anything on top of that. The explicit zero check is still what
+// stops a disk seed written before AccountUsage carried a timestamp from
+// reading as carryable — an unstamped reading's vintage is unknown, not merely
+// old — the same one-time drop loadKnownAccountsCache takes for its own
 // pre-timestamp entries.
 //
 // last.Account is the profile-verified email when the profile endpoint answered,
@@ -842,7 +862,6 @@ type UsageHub = usagePoller[AccountUsage]
 // reaches for a snapshot whose name has been reused.
 func liveCarryable(last *AccountUsage, live string) bool {
 	return last != nil && last.Info != nil && !last.FetchedAt.IsZero() &&
-		time.Since(last.FetchedAt) <= usageCacheMaxAge &&
 		last.Account != "" && live != "" && strings.EqualFold(last.Account, live)
 }
 
@@ -864,17 +883,18 @@ func liveCarryable(last *AccountUsage, live string) bool {
 // round trip. Nothing observable changes for the header either way — the poller
 // already keeps the previous value visible across a failed refresh.
 //
-// A re-serve is gated on liveCarryable — the account must still be the one that
-// is live, and its numbers must still be young enough to inform. Re-serving is a
-// *copy* marked Stale, so the stored last keeps its original FetchedAt and the
-// carry stays bounded (restamping it would let a permanently throttled account
-// look permanently fresh, the failure KnownAccountUsage avoids the same way),
-// and downstream can tell carried numbers from live ones.
+// A re-serve is gated on liveCarryable — the account must still be the one
+// that is live. Re-serving is a *copy* marked Stale, so the stored last keeps
+// its original FetchedAt (restamping it would let a permanently throttled
+// account look permanently fresh, the failure KnownAccountUsage avoids the
+// same way) and downstream can tell carried numbers from live ones.
 //
 // When there is nothing safe to re-serve — no last at all (a cold start, or an
-// account that has never once succeeded), an identity that cannot be confirmed,
-// or numbers past usageCacheMaxAge — an armed wait returns a bare identity
-// placeholder (the live email, no Info) as a success, and still does not fetch.
+// account that has never once succeeded), or an identity that cannot be
+// confirmed — an armed wait returns a bare identity placeholder (the live
+// email, no Info) as a success, and still does not fetch. There is no age
+// condition here any more: once last exists and the identity checks out, it
+// carries regardless of how long the backoff has been holding it.
 // This is the whole point of the wait: falling through to a real fetch here was
 // a no-op backoff, and it fired in exactly the case the mechanism exists for —
 // a fresh TUI launch against an already-throttled account, where the 429 became
@@ -970,11 +990,11 @@ func newUsageFetcher(seed *AccountUsage, fetch func() (*AccountUsage, error)) fu
 // saveOnceUsage keeps a re-served snapshot out of the disk cache. saveUsageCache
 // stamps FetchedAt with time.Now(), and the poller saves on every success — so
 // without this, newUsageFetcher's skipped passes would rewrite the cache every
-// two minutes with numbers that never moved, and usageCacheMaxAge would stop
-// bounding anything: a warm start during a long throttle would seed the header
-// with arbitrarily old percentages presented as current. That is precisely the
-// failure KnownAccountUsage avoids by carrying prev's *original* FetchedAt
-// forward rather than restamping it.
+// two minutes with numbers that never moved, and a warm start during a long
+// throttle would seed the header with arbitrarily old percentages presented as
+// current instead of properly marked Stale. That is precisely the failure
+// KnownAccountUsage avoids by carrying prev's *original* FetchedAt forward
+// rather than restamping it.
 //
 // Only a genuinely fetched reading reaches disk, which takes three tests. A
 // carried-forward reading is a fresh *copy* each pass, so pointer identity alone

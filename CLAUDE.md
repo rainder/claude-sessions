@@ -482,16 +482,20 @@ shows it as two progress bars (5-hour and weekly limits). The token is read-only
 (`~/.claude/.<name>.keychain-cred` on macOS, `.<name>.credentials.json`
 elsewhere, plus `.<name>.account.json` for the email), and `KnownAccountsHub`
 (same `usagePoller` generic, `T = knownAccountsResult`) fetches each one's
-limits with that snapshot's own token. Strictly read-only — nothing is ever
-swapped into the Keychain or the live credential file. Three rules hold. The
-**live** account is never read from its own snapshot (Claude Code rotates the
-live token in place while the snapshot keeps whatever was stashed at switch
-time, so the snapshot can look expired while the session is healthy) — it is
-skipped by email equality against `loadAccountEmail`. A per-account failure is
-never an error: it becomes that entry's own classification, so
-`allKnownAccounts` always returns a full slice and the poller's
-whole-batch backoff only ever fires on a host-level problem, never because one
-account is flaky. And only entries with numbers are cached, so a restart can
+limits with that snapshot's own token, **one account at a time**
+(`allKnownAccounts`) rather than fanned out — these are typically several
+different Anthropic accounts, each spending its own budget, but they are all
+requests from the same process to the same endpoint in the same moment, and
+going one at a time spreads that out instead of bursting it. Strictly
+read-only — nothing is ever swapped into the Keychain or the live credential
+file. Three rules hold. The **live** account is never read from its own
+snapshot (Claude Code rotates the live token in place while the snapshot
+keeps whatever was stashed at switch time, so the snapshot can look expired
+while the session is healthy) — it is skipped by email equality against
+`loadAccountEmail`. A per-account failure is never an error: it becomes that
+entry's own classification, so `allKnownAccounts` always returns a full slice
+and the poller's whole-batch backoff only ever fires on a host-level problem,
+never because one account is flaky. And only entries with numbers are cached, so a restart can
 seed a recently-good account but never resurrects an expired one.
 
 **Identity is bound to the token, not to a file.** Every usage fetch is paired
@@ -567,8 +571,9 @@ the only thing anywhere with memory of a previous pass:
 `knownAccountUsage` takes a `prev` and re-serves its
 `Info` with `Stale: true`, the failure's `Reason`, and `prev`'s **original**
 `FetchedAt` — restamping it would let an account that fails forever look
-forever fresh, when that timestamp is the only thing bounding the carry
-(`carryable`, `usageCacheMaxAge`). An `Expired` entry carries nothing forward:
+forever fresh, when that timestamp is the whole reason the header can tell a
+carried reading from a live one (`carryable`, which is deliberately not
+age-bounded — see below). An `Expired` entry carries nothing forward:
 bars beside a dead credential imply it still works. The four states are
 `Info` fresh / `Info` + `Stale` / `Expired` / neither-with-a-`Reason`, and
 `KnownAccountUsage` documents them.
@@ -587,8 +592,24 @@ warm start keeps the distinction, and gates this one path only. Every other
 failure keeps today's carry semantics regardless: a 429 or a network blip says
 nothing about whose numbers `prev` holds.
 
-Memory across polls lives in `newKnownAccountsFetcher`'s closure, because
-`usagePoller`'s `fetch` takes no arguments. Its `last` map is **rebuilt** from
+**Fetch order is a third memory the closure carries**, beside `last` and the
+backoff map, and it exists because going one account at a time means WHICH one
+goes first now matters — fanned out, every account got fetched every pass
+regardless of order, but a chronically struggling account fetched sequentially
+would otherwise always land wherever `snapshotAccountNames`' directory listing
+puts it, typically last. Any account this pass could not get fresh numbers for
+— `Expired`, or any `Reason` at all, which covers both a genuine failure and a
+synthesized backoff answer — moves to the front for the next pass
+(`reorderFailedFirst`), ahead of the accounts that were fine.
+`reconcileFetchOrder` runs first each pass to fold in additions and removals:
+a name the order slice still remembers but that `snapshotAccountNames` no
+longer lists (renamed or deleted) drops out, and a name newly listed but not
+yet in the order (a snapshot saved since the last pass) is appended at the
+end. Like `last` and the backoff map, order is read and written only inside
+the serial closure.
+
+All of this lives in `newKnownAccountsFetcher`'s closure because
+`usagePoller`'s `fetch` takes no arguments. `last` is **rebuilt** from
 each pass (intersected with the current snapshot names, entries with `Info`
 only), so a renamed or deleted snapshot stops being re-served instead of
 lingering for the life of the process. `NewKnownAccountsHub` reads the disk
@@ -602,13 +623,25 @@ exercise is how dead code survives — the test that used it now drives
 without a network (same pattern as `keychainRead`/`keychainWrite`).
 
 The disk cache ages **per account**, not per file. Entries in one file no
-longer share a vintage — a carried-forward entry's numbers can be
-`usageCacheMaxAge` older than the write that persisted them — so
-`loadKnownAccountsCache` gates each entry through the same `carryable` a live
-carry-forward uses and ignores the envelope timestamp entirely. A cache file
-written before per-account timestamps existed decodes to the zero time and is
-dropped whole on the first load; that is intended, and there is deliberately no
-fallback to the envelope's clock.
+longer share a vintage — a carried-forward entry's numbers can be much older
+than the write that persisted them — so `loadKnownAccountsCache` gates each
+entry through the same `fresh` a live carry-forward uses (no age bound, just
+"does this entry actually have numbers and a timestamp") and ignores the
+envelope timestamp entirely. A cache file written before per-account
+timestamps existed decodes to the zero time and is dropped whole on the first
+load; that is intended — there is no vintage to speak of for numbers with no
+timestamp at all, and no fallback to the envelope's clock either.
+
+Every entry `loadKnownAccountsCache` seeds is force-marked `Stale`, whatever
+it decoded as. This is load-bearing, not cosmetic: `saveKnownAccountsCache`
+only ever persists genuinely fetched entries (`Stale: false`), so without this
+a disk seed would be indistinguishable from a just-fetched reading, and on an
+account that never returns a 429 again (so the carry-forward branch that
+would otherwise mark it stale is never reached) it would render as live for
+as long as the process runs — the exact failure the age bound used to prevent
+by dropping the seed outright, reopened by removing that bound without this.
+`liveCarryable`'s disk counterpart, `loadUsageCache` (usage.go), does the same
+for the live account's seed for the identical reason.
 
 There used to be a gap here worth documenting: an account only a **remote**
 host held a snapshot for had nothing anywhere remembering its last good
@@ -720,7 +753,7 @@ round trip, so one place keeps deciding whether that name stands for the live
 account (which is what resolves `ActiveName`) and whether `prev`'s numbers may be
 carried forward — the entry renders as the same stale-with-`rate limited` line a
 real throttle produces. Both maps are read and written only in the serial
-closure, never inside the goroutines `allKnownAccounts` spawns. The **live**
+closure, never inside `allKnownAccounts`' sequential walk. The **live**
 account gets the same treatment from `newUsageFetcher` (usage.go), the
 one-account shape of that closure — it is the account every session on the host
 is actually spending, so it is the likeliest to be throttled. A skipped pass
@@ -730,8 +763,8 @@ shared with `CodexUsageHub`, and the right answer for a genuine transient, which
 is why it stays untouched — and that retry is the very burst this prevents. An
 armed wait holds **whether or not** there is anything to show: when nothing is
 safe to re-serve — no `last` at all (a cold start, or an account that has never
-once succeeded), an identity that cannot be confirmed, or numbers past
-`usageCacheMaxAge` — the pass answers with a bare identity placeholder
+once succeeded), or an identity that cannot be confirmed — the pass answers
+with a bare identity placeholder
 (`AccountUsage{Account: loadAccountEmail()}`, nil `Info`) and still makes no
 request. Falling through to a real fetch there, as it once did, was a **no-op
 backoff**, and it fired in precisely the case this exists for: a fresh TUI launch
@@ -767,8 +800,8 @@ a genuinely fetched reading off disk — **pointer identity** for a re-served se
 plus `Stale` and a nil `Info`, since a carry and a placeholder are each a fresh
 pointer per pass and identity alone stopped recognising them. `saveUsageCache`
 restamps `FetchedAt` with `time.Now()` and the poller saves on every success, so
-persisting a carry would rewrite the cache every two minutes and
-`usageCacheMaxAge` would stop bounding a warm start — the same restamping
+persisting a carry would rewrite the cache every two minutes and a warm start
+would show numbers as freshly fetched when they are not — the same restamping
 `KnownAccountUsage`'s carried-forward `FetchedAt` refuses; persisting a
 placeholder is worse still, since `loadUsageCache` reads a nil-`Info` entry as a
 miss, so it would *destroy* the warm start rather than merely stale it.
@@ -776,16 +809,17 @@ miss, so it would *destroy* the warm start rather than merely stale it.
 `AccountUsage` carries its own `FetchedAt` (stamped in `fetchUsage` and nowhere
 else — the server's on-demand `/usage` handler has no memory to carry anything
 forward, so it never produces a `Stale` reading, exactly as with
-`KnownAccountUsage`) and its own `Stale`, so the live carry is bounded the way a
-known account's already was. `liveCarryable` is `carryable` in one-account shape
-— `fresh`'s numbers-and-age test, including the explicit zero check, plus the
+`KnownAccountUsage`). `liveCarryable` is `carryable` in one-account shape —
+`fresh`'s numbers-and-info test, including the explicit zero check, plus the
 identity test — and a re-serve returns a **copy** marked `Stale` keeping the
-original timestamp, never the stored pointer, so `last` stays unmarked and keeps
-aging. Past `usageCacheMaxAge` the reading is dropped for the placeholder rather
-than shown, and the wait still stands: numbers going stale is no reason to
-override an endpoint that is throttling. A disk seed written before this field
-existed reads as unstamped and is simply not carryable — the same one-time drop
-`loadKnownAccountsCache` takes for its own pre-timestamp entries.
+original timestamp, never the stored pointer, so `last` stays unmarked and
+keeps aging. There is deliberately no age bound on either: an outage running
+long still leaves numbers that are more informative than a bare "rate limited"
+placeholder, and `Stale` (never cleared by a carry) is what tells the header,
+and `localFreshAccountEmails`, not to trust them as current. A disk seed
+written before this field existed reads as unstamped and is simply not
+carryable — the same one-time drop `loadKnownAccountsCache` takes for its own
+pre-timestamp entries.
 `localFreshAccountEmails` excludes a `Stale` live account for the identical
 reason it already excluded a `Stale` known one, and `dedupeAccounts` threads
 `Stale` into its pass-1 `add` so a carried live or remote line takes the same dim

@@ -393,6 +393,25 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `knownAccounts[].info` in the wire response are always `null` for a remote
   host now (the field shape is unchanged, only the values), which affects any
   non-Go client reading this endpoint directly, not just this TUI.
+- Account usage bars (both the live account and every known account) no
+  longer drop to a bare "rate limited" placeholder once an outage outlasts 15
+  minutes. Carried-forward numbers used to be dropped past that bound on the
+  theory that stale percentages mislead more than they inform; in practice an
+  account near its weekly cap can stay throttled far longer than that, and
+  the placeholder threw away perfectly readable (if aging) bars for no
+  numbers at all. There is no age bound now — a carried reading shows for as
+  long as an account stays down, still marked `stale` so it's never mistaken
+  for current, with its original fetch time preserved. The same removal
+  applies to the on-disk seed a cold TUI start reads before its first poll
+  lands; that seed is now always marked `stale` too, since without the old
+  age bound it would otherwise be indistinguishable from a live reading for
+  as long as the account stayed unreachable.
+- Known-account fetches (`account list`, the Ctrl+W picker, the header's
+  known-account bars) go one account at a time now instead of all at once, and
+  an account that failed to fetch this pass (a genuine failure, or a
+  synthesized backoff answer) is retried first next pass — a chronically
+  throttled account no longer settles at the back of the queue behind every
+  healthy one.
 - `-s` prints the bearer token only when stdout is a terminal. Redirected or
   piped output gets the path to the token file instead, so `claude-sessions -s
   > server.log` no longer copies a secret that lives `0600` on disk into

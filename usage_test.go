@@ -196,17 +196,32 @@ func TestUsageCacheOldEnvelopeMigratesToMiss(t *testing.T) {
 	}
 }
 
-func TestUsageCacheExpiry(t *testing.T) {
+// A disk seed has no age gate: an old-but-otherwise-valid cache still loads,
+// on the theory that a warm start showing hours-old bars (marked Stale once a
+// pass actually runs) beats showing none at all.
+func TestUsageCacheHasNoAgeGate(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
+	old := time.Now().Add(-24 * time.Hour)
 	stale, _ := json.Marshal(cachedUsage{
-		FetchedAt: time.Now().Add(-usageCacheMaxAge - time.Minute),
-		Usage:     AccountUsage{Account: "a@b.c", Info: &UsageInfo{FiveHour: usageBucket{Pct: 85}}},
+		FetchedAt: old,
+		Usage:     AccountUsage{Account: "a@b.c", Info: &UsageInfo{FiveHour: usageBucket{Pct: 85}}, FetchedAt: old},
 	})
 	if err := os.WriteFile(usageCachePath(), stale, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadUsageCache(); got != nil {
-		t.Errorf("stale cache returned %+v, want nil", got)
+	got := loadUsageCache()
+	if got == nil || got.Info == nil || got.Info.FiveHour.Pct != 85 {
+		t.Fatalf("old cache returned %+v, want its numbers regardless of age", got)
+	}
+	if !got.FetchedAt.Equal(old) {
+		t.Errorf("FetchedAt = %v, want the original %v preserved", got.FetchedAt, old)
+	}
+	// A disk seed is a read, not a completed poll: it must never render as
+	// indistinguishable from a live fetch, or an outage that never returns a
+	// 429 (so the carry-forward path that marks Stale is never reached) would
+	// leave arbitrarily old numbers on screen looking current forever.
+	if !got.Stale {
+		t.Error("seed from disk = not Stale, want every disk seed marked Stale")
 	}
 	if err := os.WriteFile(usageCachePath(), []byte("not json"), 0600); err != nil {
 		t.Fatal(err)
@@ -359,8 +374,8 @@ func liveUsageFixture(pct float64) *AccountUsage {
 	return liveUsageFixtureAged(pct, 0)
 }
 
-// liveUsageFixtureAged dates a reading, for the bound liveCarryable puts on how
-// long a carry may go on.
+// liveUsageFixtureAged dates a reading, for tests that need to show carrying
+// numbers works at any age, not just a fresh one.
 func liveUsageFixtureAged(pct float64, age time.Duration) *AccountUsage {
 	return &AccountUsage{
 		Account:   "andy@trecs.aero",
@@ -578,14 +593,13 @@ func TestUsageFetcherPlaceholdsWhenIdentityIsUnconfirmable(t *testing.T) {
 	placeholded(t, u, err, "")
 }
 
-// The carry is bounded by the age of the numbers themselves, the same bound a
-// warm start from disk obeys. Past it the reading is dropped rather than shown —
-// and the wait still stands, since numbers going stale is no reason to override
-// an endpoint that is throttling.
-func TestUsageFetcherWillNotCarryNumbersPastTheAgeBound(t *testing.T) {
+// The carry has no age bound: numbers from hours into an outage still beat a
+// bare "rate limited" placeholder, since the Stale marker already tells the
+// header (and localFreshAccountEmails) not to trust them as current.
+func TestUsageFetcherCarriesNumbersRegardlessOfAge(t *testing.T) {
 	loginAs(t, "andy@trecs.aero")
 	calls := 0
-	old := liveUsageFixtureAged(37, usageCacheMaxAge+time.Minute)
+	old := liveUsageFixtureAged(37, 6*time.Hour)
 	fetcher := newUsageFetcher(old, func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
@@ -597,9 +611,12 @@ func TestUsageFetcherWillNotCarryNumbersPastTheAgeBound(t *testing.T) {
 	}
 	u, err := fetcher()
 	if calls != 2 {
-		t.Fatalf("fetches = %d, want an expired carry to hold the wait rather than force a fetch", calls)
+		t.Fatalf("fetches = %d, want a still-carryable reading to hold the wait rather than force a fetch", calls)
 	}
-	placeholded(t, u, err, "andy@trecs.aero")
+	if err != nil {
+		t.Fatalf("backed-off pass = %v, want a success", err)
+	}
+	carriedFrom(t, u, old)
 }
 
 // A carry must not consume itself: re-serving hands out a copy, so the stored
@@ -787,7 +804,8 @@ func TestUsageFetcherRecognizesSwitchWhenLastHasNoAccount(t *testing.T) {
 
 // The poller saves on every success, and a re-served snapshot is a success — so
 // without this wrapper a long throttle would restamp FetchedAt every two
-// minutes and usageCacheMaxAge would stop bounding a warm start.
+// minutes and a warm start would show numbers as freshly fetched when they
+// are not.
 func TestSaveOnceUsageSkipsAReservedSnapshot(t *testing.T) {
 	seed := liveUsageFixture(37)
 	fresh := liveUsageFixture(21)
