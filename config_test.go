@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -36,6 +37,40 @@ func TestLoadSortModeValid(t *testing.T) {
 			SaveSortMode(mode)
 			if got := LoadSortMode(); got != mode {
 				t.Errorf("LoadSortMode() after SaveSortMode = %q, want %q", got, mode)
+			}
+		})
+	}
+}
+
+func TestLoadGroupSortMissing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if got := LoadGroupSort(); got != false {
+		t.Errorf("LoadGroupSort() with no file = %v, want false", got)
+	}
+}
+
+func TestLoadGroupSortGarbage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "claude-sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "group-sort"), []byte("nonsense\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadGroupSort(); got != false {
+		t.Errorf("LoadGroupSort() with garbage value = %v, want false", got)
+	}
+}
+
+func TestGroupSortRoundTrip(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("%v", on), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			SaveGroupSort(on)
+			if got := LoadGroupSort(); got != on {
+				t.Errorf("LoadGroupSort() after SaveGroupSort(%v) = %v, want %v", on, got, on)
 			}
 		})
 	}

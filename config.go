@@ -65,6 +65,32 @@ func SaveSortMode(mode string) {
 	_ = os.WriteFile(filepath.Join(dir, "sort-mode"), []byte(mode+"\n"), 0o644)
 }
 
+// LoadGroupSort reports whether group-first sort is enabled ("on" in the
+// group-sort file). Defaults to false (off) on any error or unrecognized
+// value.
+func LoadGroupSort() bool {
+	data, err := os.ReadFile(filepath.Join(ConfigDir(), "group-sort"))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == "on"
+}
+
+// SaveGroupSort persists the group-first sort toggle. Best-effort, like
+// SaveSortMode.
+func SaveGroupSort(on bool) {
+	dir := ConfigDir()
+	if dir == "" {
+		return
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	v := "off"
+	if on {
+		v = "on"
+	}
+	_ = os.WriteFile(filepath.Join(dir, "group-sort"), []byte(v+"\n"), 0o644)
+}
+
 // commandPresetIndex returns the index of the preset named remembered, or 0
 // (the default first preset) if remembered is empty, stale, or presets is empty.
 func commandPresetIndex(presets []CommandPreset, remembered string) int {
