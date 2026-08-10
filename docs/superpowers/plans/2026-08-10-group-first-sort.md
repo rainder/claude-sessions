@@ -666,12 +666,34 @@ func TestRenderHelpShowsGroupSortState(t *testing.T) {
 		t.Fatalf("help missing on state:\n%s", on)
 	}
 }
+
+// TestSortRemotesGroupFirst proves sortRemotes threads groupSort into each
+// host's own SortSessions call — the wrapper itself has no direct test
+// today (only its per-mode SortSessions delegate is covered elsewhere).
+func TestSortRemotesGroupFirst(t *testing.T) {
+	remotes := []RemoteResult{{Name: "dev", Sessions: []Session{
+		{SessionID: "ungrouped", CWD: "/a", Group: 0, StartedAt: 200},
+		{SessionID: "g1", CWD: "/z", Group: 1, StartedAt: 100},
+	}}}
+	out := sortRemotes(remotes, "dir", true)
+	got := []string{out[0].Sessions[0].SessionID, out[0].Sessions[1].SessionID}
+	want := []string{"g1", "ungrouped"}
+	if !equalStrings(got, want) {
+		t.Fatalf("sortRemotes(groupSort=true) order = %v, want %v", got, want)
+	}
+	// sortRemotes must not mutate the caller's slice — same invariant the
+	// existing implementation already relies on (settleRows sorts a copy so
+	// it never races the remote hub goroutine that owns the original).
+	if remotes[0].Sessions[0].SessionID != "ungrouped" {
+		t.Fatalf("sortRemotes mutated the input slice: %v", remotes[0].Sessions)
+	}
+}
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./... -run 'TestRenderHelp|TestRenderHelpIsPureContent' -v`
-Expected: FAIL — compile error (`too many arguments`/`not enough arguments`) since `renderHelp` still takes one argument.
+Run: `go test ./... -run 'TestRenderHelp|TestRenderHelpIsPureContent|TestSortRemotesGroupFirst' -v`
+Expected: FAIL — compile error (`too many arguments`/`not enough arguments`) since `renderHelp` and `sortRemotes` still take their old argument counts.
 
 - [ ] **Step 3: Implement**
 
@@ -740,6 +762,10 @@ func sortRemotes(remotes []RemoteResult, mode string, groupSort bool) []RemoteRe
 }
 ```
 
+`sortRemotes`'s signature just changed from 2 args to 3, so every other caller needs fixing too, not just `settleRows` above. `main.go:136` and `commands.go:486` both still call `sortRemotes(remotes, sortMode)` at this point — temporarily pass `false` there (the same pattern Task 2 used for `SortSessions`'s other callers); Task 6 replaces these with real `groupSortOn` wiring:
+- `main.go:136`: `remotes = sortRemotes(remotes, sortMode)` → `remotes = sortRemotes(remotes, sortMode, false)`
+- `commands.go:486`: `remotes = sortRemotes(remotes, sortMode)` → `remotes = sortRemotes(remotes, sortMode, false)`
+
 Update the `renderHelp` call site (around line 954):
 
 ```go
@@ -805,7 +831,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tui.go tui_test.go
+git add tui.go tui_test.go main.go commands.go
 git commit -m "feat: wire group-first sort toggle into the live TUI"
 ```
 
@@ -819,7 +845,7 @@ git commit -m "feat: wire group-first sort toggle into the live TUI"
 **Interfaces:**
 - Consumes: `LoadGroupSort` (Task 1), `SortSessions(rows, mode, groupSort)` / `sortRemotes(remotes, mode, groupSort)` (Tasks 2/5).
 
-These two non-interactive paths already call `LoadSortMode()` once and reuse it for both `SortSessions` and `sortRemotes`; group-first sort follows the same pattern so `claude-sessions list` / `list-sessions` render identically to what the TUI would show.
+These two non-interactive paths already call `LoadSortMode()` once and reuse it for both `SortSessions` and `sortRemotes`; group-first sort follows the same pattern so `claude-sessions list` / `list-sessions` render row order identically to what the TUI would show. Both paths render through `RenderAll` (main.go:143, commands.go:522), which always builds its own `groupView{}` internally (render.go:1719) rather than taking one from its caller — so the `group↑` header badge (Task 4) never appears in CLI output, the same way the existing group-filter badge never appears there either today. This is intentional, existing scope for `RenderAll`, not a gap this task needs to close — row order is what these two commands promise, and that is fully wired by Task 5's `groupSortOn`/`SortSessions`/`sortRemotes` plumbing plus this task's two call sites below.
 
 - [ ] **Step 1: Implement**
 
@@ -846,7 +872,7 @@ In `commands.go`'s `cmdListSessions`:
 - [ ] **Step 2: Run the full suite to verify nothing broke**
 
 Run: `go build ./... && go vet ./... && go test ./...`
-Expected: PASS — no new test is needed here since `cmdList`/`cmdListSessions` have no existing dedicated unit tests exercising sort order (verified: no test file references `cmdList(` or `cmdListSessions(` directly with sort-order assertions); this task's correctness rides entirely on `SortSessions`/`sortRemotes` already being covered by Task 2/5's tests, plus the build/vet/test gate here confirming the wiring compiles and nothing else regresses.
+Expected: PASS — no new test is needed here since `cmdList`/`cmdListSessions` have no existing dedicated unit tests exercising sort order (verified: no test file references `cmdList(` or `cmdListSessions(` directly with sort-order assertions); this task's correctness rides entirely on `SortSessions` (Task 2) and `sortRemotes` (Task 5's `TestSortRemotesGroupFirst`) already being covered, plus the build/vet/test gate here confirming the wiring compiles and nothing else regresses.
 
 - [ ] **Step 3: Commit**
 
