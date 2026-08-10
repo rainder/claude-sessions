@@ -199,7 +199,12 @@ func TestSessionLessGroupedOrdersByGroupFirst(t *testing.T) {
 	}
 }
 
-func TestSessionLessGroupedDisabledStillLast(t *testing.T) {
+// TestSessionLessGroupedDisabledSortsLastWithinItsGroup proves that under
+// group-first sort, a disabled row sorts last *within its own group* rather
+// than sinking below every group — group rank is checked ahead of the
+// disabled-last rule, so disabled-g1 (group 1) stays ahead of enabled-g2
+// (group 2) despite being disabled.
+func TestSessionLessGroupedDisabledSortsLastWithinItsGroup(t *testing.T) {
 	rows := []Session{
 		{SessionID: "disabled-g1", Group: 1, Disabled: true},
 		{SessionID: "enabled-g2", Group: 2},
@@ -210,7 +215,7 @@ func TestSessionLessGroupedDisabledStillLast(t *testing.T) {
 	for i, s := range rows {
 		got[i] = s.SessionID
 	}
-	want := []string{"enabled-g1", "enabled-g2", "disabled-g1"}
+	want := []string{"enabled-g1", "disabled-g1", "enabled-g2"}
 	if !equalStrings(got, want) {
 		t.Fatalf("disabled precedence under group-sort = %v, want %v", got, want)
 	}

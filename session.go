@@ -315,15 +315,14 @@ func groupSortRank(group int) int {
 	return group
 }
 
-// sessionLessGrouped wraps sessionLess with an optional group-first tier:
-// disabled rows still sort last unconditionally (unchanged from sessionLess),
-// then, when groupSort is on, rows rank by group number ascending with
-// ungrouped rows sinking to the bottom, then ties fall through to the normal
-// per-mode comparison via sessionLess.
+// sessionLessGrouped wraps sessionLess with an optional group-first tier: when
+// groupSort is on, rows rank by group number ascending first, with ungrouped
+// rows sinking to the bottom — checked ahead of sessionLess's own
+// disabled-last rule, so a disabled row sorts last *within its own group*
+// rather than sinking below every group. Ties (same group, or groupSort off)
+// fall through to sessionLess, which still applies disabled-last and the
+// per-mode comparison.
 func sessionLessGrouped(a, b Session, mode string, groupSort bool) bool {
-	if a.Disabled != b.Disabled {
-		return !a.Disabled
-	}
 	if groupSort {
 		ra, rb := groupSortRank(a.Group), groupSortRank(b.Group)
 		if ra != rb {
