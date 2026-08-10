@@ -119,6 +119,7 @@ type groupView struct {
 	filter       groupFilter
 	query        string
 	hideDisabled bool
+	groupSort    bool
 	showBadge    bool
 	showRail     bool
 	showNoTmux   bool
@@ -1561,7 +1562,7 @@ func groupFilterIndicator(filter groupFilter) string {
 	return b.String()
 }
 
-func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int, filter groupFilter, query string) {
+func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int, filter groupFilter, groupSort bool, query string) {
 	live, busy := 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -1576,12 +1577,16 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 	// colorize ends with a full reset, so re-assert bold after the busy count
 	// to keep the title bold.
 	busyStr := colorize(statusColor["busy"], fmt.Sprintf("%d busy", busy)) + ansiBold
-	// An active group filter shows a colored "only ③" / "hide ②③" indicator, and
-	// an active text query appends a dim "/query" after it (each ends in a reset),
-	// so re-assert bold after every segment to keep the trailing [mode] bright.
+	// An active group filter shows a colored "only ③" / "hide ②③" indicator, a
+	// dim "group↑" badge follows when group-first sort is on, and an active
+	// text query appends a dim "/query" after that (each ends in a reset), so
+	// re-assert bold after every segment to keep the trailing [mode] bright.
 	filterStr := ""
 	if ind := groupFilterIndicator(filter); ind != "" {
 		filterStr = "  " + ind + ansiBold
+	}
+	if groupSort {
+		filterStr += "  " + dim("group↑") + ansiBold
 	}
 	if query != "" {
 		filterStr += "  " + dim("/"+query) + ansiBold
@@ -1871,7 +1876,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 		tmuxW = max(tmuxW, len(t))
 	}
 
-	renderHeader(w, sections, "full", accounts, codexAccounts, cols, gv.filter, gv.query)
+	renderHeader(w, sections, "full", accounts, codexAccounts, cols, gv.filter, gv.groupSort, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -1994,7 +1999,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	renderHeader(w, sections, "intermediate", accounts, codexAccounts, cols, gv.filter, gv.query)
+	renderHeader(w, sections, "intermediate", accounts, codexAccounts, cols, gv.filter, gv.groupSort, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -2125,7 +2130,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 		nameW = max(nameW, len(r.display))
 	}
 
-	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols, gv.filter, gv.query)
+	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols, gv.filter, gv.groupSort, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(

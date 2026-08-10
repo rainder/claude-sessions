@@ -2749,6 +2749,21 @@ func TestGroupFilterHeaderIndicator(t *testing.T) {
 	}
 }
 
+func TestGroupSortHeaderIndicator(t *testing.T) {
+	local := testLocalHost(Session{PID: 1, Name: "n", CWD: "/w", SessionID: "s"})
+
+	on := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{groupSort: true}))
+	want := dim("group\u2191") // "group\u2191"
+	if !strings.Contains(on, want) {
+		t.Fatalf("header missing group-sort badge %q:\n%s", want, on)
+	}
+
+	off := frameText(BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{}))
+	if strings.Contains(off, "group\u2191") {
+		t.Fatalf("badge shown with group-sort off:\n%s", off)
+	}
+}
+
 func TestPassesGroupFilter(t *testing.T) {
 	groups := map[string]int{"g1": 1, "g2": 2}
 	matching := Session{SessionID: "g1"} // group 1
