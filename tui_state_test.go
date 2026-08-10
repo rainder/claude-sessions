@@ -299,20 +299,20 @@ func TestInspectorMouseSummaryToggle(t *testing.T) {
 	s.hits = []hitRegion{
 		{x0: 0, y0: 3, x1: 79, y1: 6, action: hitInspectorSummaryToggle},
 	}
-	if s.inspector.summaryExpanded {
-		t.Fatal("summaryExpanded = true on a freshly opened inspector, want false")
+	if !s.inspector.summaryExpanded {
+		t.Fatal("summaryExpanded = false on a freshly opened inspector, want true")
 	}
 	if cmd := s.handleInspectorMouse(mouseEvent{x: 10, y: 4, button: mouseLeft}); cmd != commandRender {
 		t.Fatalf("first click: cmd=%v, want commandRender", cmd)
 	}
-	if !s.inspector.summaryExpanded {
-		t.Fatal("first click did not expand the summary")
+	if s.inspector.summaryExpanded {
+		t.Fatal("first click did not collapse the summary")
 	}
 	if cmd := s.handleInspectorMouse(mouseEvent{x: 10, y: 6, button: mouseLeft}); cmd != commandRender {
 		t.Fatalf("second click: cmd=%v, want commandRender", cmd)
 	}
-	if s.inspector.summaryExpanded {
-		t.Fatal("second click did not collapse the summary")
+	if !s.inspector.summaryExpanded {
+		t.Fatal("second click did not expand the summary")
 	}
 }
 

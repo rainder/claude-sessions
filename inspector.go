@@ -54,15 +54,15 @@ type inspectorViewState struct {
 	composeStatusUntil time.Time
 	// summaryExpanded toggles the ticket-summary block between its fixed
 	// collapsed cap (inspectorTicketSummaryMaxLines) and however many lines the
-	// terminal has room for. It is flipped by clicking the block itself and is
-	// zero — collapsed — every time the inspector is (re)opened, since both
-	// newInspectorViewState and closeInspector replace the whole struct.
+	// terminal has room for. It is flipped by clicking the block itself and
+	// starts true — expanded — every time the inspector is (re)opened, since
+	// both newInspectorViewState and closeInspector replace the whole struct.
 	summaryExpanded bool
 }
 
-// newInspectorViewState starts in follow mode with no content.
+// newInspectorViewState starts in follow mode with no content, summary expanded.
 func newInspectorViewState(targetID string) inspectorViewState {
-	return inspectorViewState{targetID: targetID, follow: true}
+	return inspectorViewState{targetID: targetID, follow: true, summaryExpanded: true}
 }
 
 // maxTop is the largest valid top offset: enough to show the last viewportRows
