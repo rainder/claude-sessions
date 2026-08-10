@@ -2547,6 +2547,21 @@ func TestGroupBadgeRendersColoredGlyph(t *testing.T) {
 	}
 }
 
+// TestGroupBadgeKeepsColorWhenDisabled proves a disabled row's group badge
+// still renders in its group's color (not dimmed) — only the rest of the row
+// dims, so the group indicator stays identifiable at a glance.
+func TestGroupBadgeKeepsColorWhenDisabled(t *testing.T) {
+	gv := groupView{groups: map[string]int{"sid-a": 3}}
+	local := testLocalHost(Session{PID: 1, Name: "galpha", CWD: "/w", SessionID: "sid-a", Disabled: true})
+	frame := BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", gv)
+	row := findRow(t, frameText(frame), "galpha")
+	// Group 3 -> SGR 33, glyph ③ (U+2462) — same colored token as the enabled case.
+	want := "\033[33m\u2462 \033[0m"
+	if !strings.Contains(row, want) {
+		t.Fatalf("disabled row missing colored badge %q:\n%q", want, row)
+	}
+}
+
 func TestGroupBadgePaletteColors(t *testing.T) {
 	for group, sgr := range map[int]string{1: "36", 4: "32", 7: "96", 9: "97"} {
 		gv := groupView{groups: map[string]int{"s": group}}

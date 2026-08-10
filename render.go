@@ -206,12 +206,13 @@ func groupBadgeGlyph(group int) string {
 // not reserved (byte-identical to the pre-groups layout), two spaces for an
 // ungrouped row when the slot is reserved, or the colored circled digit + space
 // otherwise. style selects how the glyph is wrapped so it composes cleanly with
-// the surrounding dim/selected treatment in decorateSessionRow.
+// the surrounding dim/selected treatment in decorateSessionRow. The badge
+// always keeps its group color, even on a disabled row — only the rest of the
+// row dims, so the group indicator stays identifiable at a glance.
 type badgeStyle uint8
 
 const (
-	badgeColored badgeStyle = iota // stand-alone colored token (selected/bright rows)
-	badgeDim                       // self-contained dim token (disabled non-selected rows)
+	badgeColored badgeStyle = iota // stand-alone colored token (every non-headless row, incl. disabled)
 	badgePlain                     // bare glyph, wrapped by an outer dim() (headless rows)
 )
 
@@ -225,14 +226,10 @@ func (gv groupView) badge(s Session, style badgeStyle) string {
 		return "  "
 	}
 	token := glyph + " "
-	switch style {
-	case badgeDim:
-		return dim(token)
-	case badgePlain:
+	if style == badgePlain {
 		return token
-	default:
-		return colorize(groupSGR[group], token)
 	}
+	return colorize(groupSGR[group], token)
 }
 
 func decorateSessionRow(session Session, selected bool, body string, gv groupView) string {
@@ -256,7 +253,7 @@ func decorateSessionRow(session Session, selected bool, body string, gv groupVie
 	case selected:
 		row = gv.badge(session, badgeColored) + rail + noTmuxFor(true) + body
 	case session.Disabled:
-		row = gv.badge(session, badgeDim) + rail + noTmuxFor(false) + dim(body)
+		row = gv.badge(session, badgeColored) + rail + noTmuxFor(false) + dim(body)
 	case session.Headless():
 		row = dim(gv.badge(session, badgePlain) + rail + noTmuxFor(true) + body)
 	default:
