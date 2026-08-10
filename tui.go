@@ -923,7 +923,7 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "s", "S":
 				screen.Invalidate()
-				if picked, ok := pickSortMode(sortMode, modalWakes); ok && picked != sortMode {
+				if picked, _, ok := pickSortMode(sortMode, false, modalWakes); ok && picked != sortMode {
 					sortMode = picked
 					SaveSortMode(sortMode)
 					toast = "sort: " + sortDesc(sortMode)

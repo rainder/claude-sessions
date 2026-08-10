@@ -47,7 +47,7 @@ func TestSortPickerStateHandle(t *testing.T) {
 // on the row matching `current`, not necessarily the row matching `sel` —
 // the cursor can move away from the live mode before Enter is pressed.
 func TestRenderSortPicker(t *testing.T) {
-	out := renderSortPicker("created", 0, 80, 24)
+	out := renderSortPicker("created", 0, false, 80, 24)
 	if !strings.Contains(out, "sort by") {
 		t.Fatalf("title missing:\n%s", out)
 	}
@@ -81,12 +81,12 @@ func TestRenderSortPickerHighlightsSelection(t *testing.T) {
 		return -1
 	}
 
-	out0 := renderSortPicker("created", 0, 80, 24)
+	out0 := renderSortPicker("created", 0, false, 80, 24)
 	if got := highlightedIndex(out0); got != 0 {
 		t.Fatalf("sel=0: highlighted row index = %d, want 0\n%s", got, out0)
 	}
 
-	out2 := renderSortPicker("created", 2, 80, 24)
+	out2 := renderSortPicker("created", 2, false, 80, 24)
 	if got := highlightedIndex(out2); got != 2 {
 		t.Fatalf("sel=2: highlighted row index = %d, want 2\n%s", got, out2)
 	}
@@ -96,8 +96,45 @@ func TestRenderSortPickerHighlightsSelection(t *testing.T) {
 // unknown terminal size emits the box unpositioned rather than panicking on
 // negative padding.
 func TestRenderSortPickerUnknownSize(t *testing.T) {
-	out := renderSortPicker("dir", 0, 0, 0)
+	out := renderSortPicker("dir", 0, false, 0, 0)
 	if !strings.HasPrefix(out, confirmBoxTL) {
 		t.Fatalf("want an unpositioned box, got:\n%s", out)
+	}
+}
+
+// TestSortPickerStateHandleTogglesGroupSort proves 'g'/'G' flips groupSort
+// without confirming or cancelling the dialog — it's a redraw-only toggle,
+// same shape as up/down navigation.
+func TestSortPickerStateHandleTogglesGroupSort(t *testing.T) {
+	state := sortPickerState{rows: 6}
+	confirm, cancel := state.handle("g")
+	if confirm || cancel {
+		t.Fatalf("handle(g) = (%v, %v), want (false, false)", confirm, cancel)
+	}
+	if !state.groupSort {
+		t.Fatal("handle(g) did not set groupSort")
+	}
+	confirm, cancel = state.handle("G")
+	if confirm || cancel {
+		t.Fatalf("handle(G) = (%v, %v), want (false, false)", confirm, cancel)
+	}
+	if state.groupSort {
+		t.Fatal("handle(G) did not clear groupSort (expected toggle back off)")
+	}
+}
+
+// TestRenderSortPickerShowsGroupSortToggle proves the box reflects the
+// groupSort argument's on/off state and the hint documents the g key.
+func TestRenderSortPickerShowsGroupSortToggle(t *testing.T) {
+	off := renderSortPicker("created", 0, false, 80, 24)
+	if !strings.Contains(off, "group first: off") {
+		t.Fatalf("off state missing:\n%s", off)
+	}
+	on := renderSortPicker("created", 0, true, 80, 24)
+	if !strings.Contains(on, "group first: on") {
+		t.Fatalf("on state missing:\n%s", on)
+	}
+	if !strings.Contains(off, "g group first") {
+		t.Fatalf("hint missing g binding:\n%s", off)
 	}
 }

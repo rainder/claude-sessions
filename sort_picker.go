@@ -18,8 +18,9 @@ import (
 // selected, and what a keystroke does to it. Structurally identical to
 // accountPickerState (account_picker.go) — same four-key contract.
 type sortPickerState struct {
-	sel  int
-	rows int
+	sel       int
+	rows      int
+	groupSort bool
 }
 
 // handle applies one key event. confirm means "apply the selected row";
@@ -43,6 +44,9 @@ func (s *sortPickerState) handle(key string) (confirm, cancel bool) {
 			s.sel = (s.sel + 1) % s.rows
 		}
 		return false, false
+	case "g", "G":
+		s.groupSort = !s.groupSort
+		return false, false
 	case KeyEnter, "\r", "\n":
 		if s.rows == 0 {
 			return false, false
@@ -54,7 +58,7 @@ func (s *sortPickerState) handle(key string) (confirm, cancel bool) {
 }
 
 // sortPickerHint is the fixed hint row drawn below the mode rows.
-const sortPickerHint = "↑/↓ select    ⏎ confirm    esc cancel"
+const sortPickerHint = "↑/↓ select    g group first    ⏎ confirm    esc cancel"
 
 // sortPickerActiveGlyph marks the row matching the currently live sort mode.
 const sortPickerActiveGlyph = "●"
@@ -67,7 +71,7 @@ const sortPickerTitle = "sort by"
 // then the dimmed hint. Positioning, clipping and the unknown-size fallback
 // match renderAccountPicker / renderConfirmOverlay, so every small overlay in
 // this app looks like the same kind of dialog.
-func renderSortPicker(current string, sel, cols, rows int) string {
+func renderSortPicker(current string, sel int, groupSort bool, cols, rows int) string {
 	body := make([]string, 0, len(sortModeOrder))
 	for _, mode := range sortModeOrder {
 		marker := " "
@@ -77,8 +81,13 @@ func renderSortPicker(current string, sel, cols, rows int) string {
 		body = append(body, marker+" "+sortDesc(mode))
 	}
 
+	toggleLine := "group first: off"
+	if groupSort {
+		toggleLine = "group first: on"
+	}
+
 	innerWidth := visualLen(sortPickerTitle)
-	for _, l := range append(append([]string{}, body...), sortPickerHint) {
+	for _, l := range append(append([]string{toggleLine}, body...), sortPickerHint) {
 		if w := visualLen(l); w > innerWidth {
 			innerWidth = w
 		}
@@ -102,9 +111,10 @@ func renderSortPicker(current string, sel, cols, rows int) string {
 		return confirmBoxV + " " + line + " " + confirmBoxV
 	}
 
-	box := make([]string, 0, len(body)+5)
+	box := make([]string, 0, len(body)+6)
 	box = append(box, confirmBoxTL+strings.Repeat(confirmBoxH, innerWidth+2)+confirmBoxTR)
 	box = append(box, pad(bold(sortPickerTitle), false))
+	box = append(box, pad(dim(toggleLine), false))
 	box = append(box, pad("", false))
 	for i, l := range body {
 		box = append(box, pad(l, i == sel))
@@ -144,11 +154,13 @@ func renderSortPicker(current string, sel, cols, rows int) string {
 // carries the modal wake sources (resize) so the box stays centered across a
 // live resize.
 //
-// The selection starts on the mode matching `current`, so Enter without
-// moving reports that same mode back — the caller is responsible for
-// treating "confirmed but unchanged" as a no-op (see tui.go's wiring).
-func pickSortMode(current string, wakes []wakeFD) (picked string, ok bool) {
-	state := sortPickerState{rows: len(sortModeOrder)}
+// The selection starts on the mode matching `current`, seeded with
+// currentGroupSort as the toggle's starting state. Enter without changing
+// anything reports the same mode and toggle state back — the caller is
+// responsible for treating "confirmed but unchanged" as a no-op (see tui.go's
+// wiring).
+func pickSortMode(current string, currentGroupSort bool, wakes []wakeFD) (picked string, groupSort bool, ok bool) {
+	state := sortPickerState{rows: len(sortModeOrder), groupSort: currentGroupSort}
 	for i, mode := range sortModeOrder {
 		if mode == current {
 			state.sel = i
@@ -164,15 +176,15 @@ func pickSortMode(current string, wakes []wakeFD) (picked string, ok bool) {
 		if err != nil {
 			cols, rows = 0, 0
 		}
-		_ = renderer.Draw(renderSortPicker(current, state.sel, cols, rows), cols, rows)
+		_ = renderer.Draw(renderSortPicker(current, state.sel, state.groupSort, cols, rows), cols, rows)
 		keys, _ := readModalEvents(decoder, wakes)
 		for _, key := range keys {
 			confirm, cancel := state.handle(key)
 			if cancel {
-				return "", false
+				return "", false, false
 			}
 			if confirm {
-				return sortModeOrder[state.sel], true
+				return sortModeOrder[state.sel], state.groupSort, true
 			}
 		}
 	}
