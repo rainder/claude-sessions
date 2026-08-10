@@ -483,7 +483,7 @@ func cmdListSessions(args []string) int {
 	LoadFlagsStore().Overlay(local)
 	sortMode := LoadSortMode()
 	SortSessions(local, sortMode, false)
-	remotes = sortRemotes(remotes, sortMode)
+	remotes = sortRemotes(remotes, sortMode, false)
 	hostUsage := CollectHostUsage()
 
 	if jsonOut {

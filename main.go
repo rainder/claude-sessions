@@ -133,7 +133,7 @@ func cmdList() error {
 	LoadFlagsStore().Overlay(local)
 	sortMode := LoadSortMode()
 	SortSessions(local, sortMode, false)
-	remotes = sortRemotes(remotes, sortMode)
+	remotes = sortRemotes(remotes, sortMode, false)
 	// Each host's account identity (and, for the local host only, its
 	// rate-limit numbers) come from its /usage endpoint, not /sessions; without
 	// this even a remote host's account-email heading label would be blank.

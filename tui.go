@@ -115,6 +115,7 @@ func RunTUI(interval time.Duration) error {
 
 	viewMode := LoadViewMode()
 	sortMode := LoadSortMode()
+	groupSortOn := LoadGroupSort()
 	// flagsStore holds this host's shared per-session flags — group assignment
 	// and disabled state both (session_flags.go), host-owned and visible to
 	// every client polling this host. groupFilterState (zero value = no filter) is
@@ -354,11 +355,11 @@ func RunTUI(interval time.Duration) error {
 		// needed for them; the badge map below is then built from the rows
 		// themselves, whichever host each one's flags came from.
 		flagsStore.Overlay(local)
-		SortSessions(local, sortMode, false)
+		SortSessions(local, sortMode, groupSortOn)
 		// Snapshot() returns the hub's shared slices; sort remotes on copies so
 		// we never race the hub goroutine that owns them.
 		snap := hub.Snapshot()
-		remotes = sortRemotes(snap, sortMode)
+		remotes = sortRemotes(snap, sortMode, groupSortOn)
 		// The account fields ride their own poll now, not /sessions, so overlay
 		// them here — before anything reads `remotes`, whether that is the header's
 		// rate-limit bars, a host heading's account label, or the Ctrl+W picker.
@@ -372,7 +373,7 @@ func RunTUI(interval time.Duration) error {
 		// Targets mirror exactly what the frame renders: filtered by the active
 		// group and text query so a filtered-out selection falls back via
 		// validateTargetSel.
-		gv := groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled}
+		gv := groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled, groupSort: groupSortOn}
 		targets = buildSelectionTargets(
 			filterSessionRows(local, gv),
 			filterRemoteResults(remotes, gv),
@@ -457,7 +458,7 @@ func RunTUI(interval time.Duration) error {
 			Claude:        usageHub.Snapshot(),
 			Codex:         codexUsageHub.Snapshot(),
 			KnownAccounts: derefKnownAccounts(knownAccountsHub.Snapshot()),
-		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled})
+		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled, groupSort: groupSortOn})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if rows > 0 {
@@ -923,10 +924,15 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "s", "S":
 				screen.Invalidate()
-				if picked, _, ok := pickSortMode(sortMode, false, modalWakes); ok && picked != sortMode {
+				if picked, gs, ok := pickSortMode(sortMode, groupSortOn, modalWakes); ok && (picked != sortMode || gs != groupSortOn) {
 					sortMode = picked
+					groupSortOn = gs
 					SaveSortMode(sortMode)
+					SaveGroupSort(groupSortOn)
 					toast = "sort: " + sortDesc(sortMode)
+					if groupSortOn {
+						toast += " · group first"
+					}
 					toastUntil = time.Now().Add(4 * time.Second)
 					refresh(false)
 				}
@@ -951,7 +957,7 @@ func RunTUI(interval time.Duration) error {
 					if err != nil {
 						cols, rows = 0, 0
 					}
-					_ = screen.Draw(renderHelp(sortMode), cols, rows)
+					_ = screen.Draw(renderHelp(sortMode, groupSortOn), cols, rows)
 					keys, _ := readModalEvents(helpDecoder, modalWakes)
 					if len(keys) > 0 {
 						break
@@ -1108,11 +1114,11 @@ func sortDesc(mode string) string {
 	}
 }
 
-func sortRemotes(remotes []RemoteResult, mode string) []RemoteResult {
+func sortRemotes(remotes []RemoteResult, mode string, groupSort bool) []RemoteResult {
 	out := make([]RemoteResult, len(remotes))
 	for i, r := range remotes {
 		sorted := append([]Session(nil), r.Sessions...)
-		SortSessions(sorted, mode, false)
+		SortSessions(sorted, mode, groupSort)
 		r.Sessions = sorted
 		out[i] = r
 	}
@@ -1341,7 +1347,7 @@ func sessionBottomRow(toast string, toastActive bool) string {
 
 // renderHelp builds help-screen content. RunTUI owns terminal positioning and
 // sends this content through screenRenderer.
-func renderHelp(sortMode string) string {
+func renderHelp(sortMode string, groupSortOn bool) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, bold("claude-sessions  ·  help"))
 	fmt.Fprintln(&b)
@@ -1375,8 +1381,12 @@ func renderHelp(sortMode string) string {
 	fmt.Fprintln(&b, "    h then 1..9  hide group(s) (repeat to add/remove · last one shows all)")
 	fmt.Fprintln(&b, "    d            hide/show disabled sessions")
 	fmt.Fprintln(&b, "    /            filter rows by text (type to narrow · Enter commits · Esc clears)")
-	fmt.Fprintln(&b, "    s / S        open sort-by dialog (↑/↓ select · ⏎ confirm · esc cancel)")
-	fmt.Fprintln(&b, "                 current sort: "+sortMode)
+	fmt.Fprintln(&b, "    s / S        open sort-by dialog (↑/↓ select · g group first · ⏎ confirm · esc cancel)")
+	groupSortLabel := "off"
+	if groupSortOn {
+		groupSortLabel = "on"
+	}
+	fmt.Fprintln(&b, "                 current sort: "+sortMode+"  ·  group first: "+groupSortLabel)
 	fmt.Fprintln(&b, "    q / Ctrl-C   quit")
 	fmt.Fprintln(&b, "    ?            this help")
 	fmt.Fprintln(&b)

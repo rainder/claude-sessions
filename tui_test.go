@@ -196,7 +196,7 @@ func TestSessionDisableFooterAndHelp(t *testing.T) {
 		t.Fatalf("toast bottom row = %q", toast)
 	}
 
-	help := renderHelp("dir")
+	help := renderHelp("dir", false)
 	for _, want := range []string{
 		"- / +        disable / enable session",
 		"1..9         show only group (same digit or 0 shows all)",
@@ -352,7 +352,7 @@ func TestTextFilterEffectiveQueryAndPrompt(t *testing.T) {
 }
 
 func TestRenderHelpIsPureContent(t *testing.T) {
-	out := renderHelp("status")
+	out := renderHelp("status", false)
 	for _, want := range []string{"claude-sessions", "NAVIGATION", "current sort: status", "press any key to return"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("help missing %q: %q", want, out)
@@ -360,6 +360,42 @@ func TestRenderHelpIsPureContent(t *testing.T) {
 	}
 	if strings.Contains(out, "\x1b[H") || strings.Contains(out, "\x1b[J") || strings.Contains(out, "\x1b[2J") {
 		t.Fatalf("help contains terminal positioning or clear: %q", out)
+	}
+}
+
+func TestRenderHelpShowsGroupSortState(t *testing.T) {
+	off := renderHelp("dir", false)
+	if !strings.Contains(off, "group first: off") {
+		t.Fatalf("help missing off state:\n%s", off)
+	}
+	if !strings.Contains(off, "g group first") {
+		t.Fatalf("help missing g binding in sort-dialog line:\n%s", off)
+	}
+	on := renderHelp("dir", true)
+	if !strings.Contains(on, "group first: on") {
+		t.Fatalf("help missing on state:\n%s", on)
+	}
+}
+
+// TestSortRemotesGroupFirst proves sortRemotes threads groupSort into each
+// host's own SortSessions call — the wrapper itself has no direct test
+// today (only its per-mode SortSessions delegate is covered elsewhere).
+func TestSortRemotesGroupFirst(t *testing.T) {
+	remotes := []RemoteResult{{Name: "dev", Sessions: []Session{
+		{SessionID: "ungrouped", CWD: "/a", Group: 0, StartedAt: 200},
+		{SessionID: "g1", CWD: "/z", Group: 1, StartedAt: 100},
+	}}}
+	out := sortRemotes(remotes, "dir", true)
+	got := []string{out[0].Sessions[0].SessionID, out[0].Sessions[1].SessionID}
+	want := []string{"g1", "ungrouped"}
+	if !equalStrings(got, want) {
+		t.Fatalf("sortRemotes(groupSort=true) order = %v, want %v", got, want)
+	}
+	// sortRemotes must not mutate the caller's slice — same invariant the
+	// existing implementation already relies on (settleRows sorts a copy so
+	// it never races the remote hub goroutine that owns the original).
+	if remotes[0].Sessions[0].SessionID != "ungrouped" {
+		t.Fatalf("sortRemotes mutated the input slice: %v", remotes[0].Sessions)
 	}
 }
 
