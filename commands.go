@@ -482,8 +482,9 @@ func cmdListSessions(args []string) int {
 	// reaches `list-sessions --json` as each row's "group" key.
 	LoadFlagsStore().Overlay(local)
 	sortMode := LoadSortMode()
-	SortSessions(local, sortMode, false)
-	remotes = sortRemotes(remotes, sortMode, false)
+	groupSortOn := LoadGroupSort()
+	SortSessions(local, sortMode, groupSortOn)
+	remotes = sortRemotes(remotes, sortMode, groupSortOn)
 	hostUsage := CollectHostUsage()
 
 	if jsonOut {

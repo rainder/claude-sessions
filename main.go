@@ -132,8 +132,9 @@ func cmdList() error {
 	// here — it orders disabled rows last — but the overlay sets the group too.
 	LoadFlagsStore().Overlay(local)
 	sortMode := LoadSortMode()
-	SortSessions(local, sortMode, false)
-	remotes = sortRemotes(remotes, sortMode, false)
+	groupSortOn := LoadGroupSort()
+	SortSessions(local, sortMode, groupSortOn)
+	remotes = sortRemotes(remotes, sortMode, groupSortOn)
 	// Each host's account identity (and, for the local host only, its
 	// rate-limit numbers) come from its /usage endpoint, not /sessions; without
 	// this even a remote host's account-email heading label would be blank.
