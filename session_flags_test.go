@@ -736,8 +736,8 @@ func TestMigratedFlagsRenderIdenticalFrames(t *testing.T) {
 	for _, mode := range []string{"1", "2", "3"} {
 		for _, filter := range []groupFilter{{}, {mode: filterOnly, mask: 1 << uint(1)}, {mode: filterHide, mask: 1 << uint(9)}} {
 			for _, hideDisabled := range []bool{false, true} {
-				SortSessions(before, "dir")
-				SortSessions(after, "dir")
+				SortSessions(before, "dir", false)
+				SortSessions(after, "dir", false)
 				want := BuildTableFrame(mode, testLocalHost(before...), nil, "1", nil, 120, 0, "dir",
 					groupView{groups: beforeGroups, filter: filter, hideDisabled: hideDisabled})
 				got := BuildTableFrame(mode, testLocalHost(after...), nil, "1", nil, 120, 0, "dir",

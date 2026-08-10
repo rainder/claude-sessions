@@ -113,7 +113,7 @@ func TestSortSessions(t *testing.T) {
 	}
 	for _, c := range cases {
 		rows := append([]Session(nil), fixture...)
-		SortSessions(rows, c.mode)
+		SortSessions(rows, c.mode, false)
 		got := make([]string, len(rows))
 		for i, s := range rows {
 			got[i] = s.SessionID
@@ -136,7 +136,7 @@ func TestSortSessionsStatus(t *testing.T) {
 		{SessionID: "blank", UpdatedAt: 1000},
 	}
 
-	SortSessions(rows, "status")
+	SortSessions(rows, "status", false)
 	got := make([]string, len(rows))
 	for i, s := range rows {
 		got[i] = s.SessionID
@@ -153,7 +153,7 @@ func TestSortSessionsStatusStable(t *testing.T) {
 		{SessionID: "b", Status: "IDLE", UpdatedAt: 100},
 		{SessionID: "c", Status: "idle", UpdatedAt: 100},
 	}
-	SortSessions(rows, "status")
+	SortSessions(rows, "status", false)
 	got := []string{rows[0].SessionID, rows[1].SessionID, rows[2].SessionID}
 	if want := []string{"a", "b", "c"}; !equalStrings(got, want) {
 		t.Fatalf("stable status order = %v, want %v", got, want)
@@ -167,13 +167,52 @@ func TestSortSessionsStable(t *testing.T) {
 		{SessionID: "b", StartedAt: 100},
 		{SessionID: "c", StartedAt: 100},
 	}
-	SortSessions(rows, "created")
+	SortSessions(rows, "created", false)
 	got := make([]string, len(rows))
 	for i, s := range rows {
 		got[i] = s.SessionID
 	}
 	if want := []string{"a", "b", "c"}; !equalStrings(got, want) {
 		t.Errorf("SortSessions stability = %v, want %v", got, want)
+	}
+}
+
+func TestSessionLessGroupedOrdersByGroupFirst(t *testing.T) {
+	fixture := []Session{
+		{SessionID: "g2", CWD: "/z", Group: 2, StartedAt: 100},
+		{SessionID: "g1-old", CWD: "/a", Group: 1, StartedAt: 100},
+		{SessionID: "ungrouped", CWD: "/m", Group: 0, StartedAt: 500},
+		{SessionID: "g1-new", CWD: "/a", Group: 1, StartedAt: 200},
+	}
+	rows := append([]Session(nil), fixture...)
+	SortSessions(rows, "dir", true)
+	got := make([]string, len(rows))
+	for i, s := range rows {
+		got[i] = s.SessionID
+	}
+	// Group 1 rows first (tied on cwd within "dir" mode, StartedAt desc
+	// breaks the tie), then group 2, then ungrouped last regardless of its
+	// own recency (StartedAt 500, the newest of all four).
+	want := []string{"g1-new", "g1-old", "g2", "ungrouped"}
+	if !equalStrings(got, want) {
+		t.Fatalf("group-first order = %v, want %v", got, want)
+	}
+}
+
+func TestSessionLessGroupedDisabledStillLast(t *testing.T) {
+	rows := []Session{
+		{SessionID: "disabled-g1", Group: 1, Disabled: true},
+		{SessionID: "enabled-g2", Group: 2},
+		{SessionID: "enabled-g1", Group: 1},
+	}
+	SortSessions(rows, "dir", true)
+	got := make([]string, len(rows))
+	for i, s := range rows {
+		got[i] = s.SessionID
+	}
+	want := []string{"enabled-g1", "enabled-g2", "disabled-g1"}
+	if !equalStrings(got, want) {
+		t.Fatalf("disabled precedence under group-sort = %v, want %v", got, want)
 	}
 }
 
@@ -422,7 +461,7 @@ func TestSortSessionsKeepsDisabledRowsLastInEveryMode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
 			rows := append([]Session(nil), fixture...)
-			SortSessions(rows, tc.mode)
+			SortSessions(rows, tc.mode, false)
 			got := make([]string, len(rows))
 			for i := range rows {
 				got[i] = rows[i].SessionID

@@ -132,7 +132,7 @@ func cmdList() error {
 	// here — it orders disabled rows last — but the overlay sets the group too.
 	LoadFlagsStore().Overlay(local)
 	sortMode := LoadSortMode()
-	SortSessions(local, sortMode)
+	SortSessions(local, sortMode, false)
 	remotes = sortRemotes(remotes, sortMode)
 	// Each host's account identity (and, for the local host only, its
 	// rate-limit numbers) come from its /usage endpoint, not /sessions; without

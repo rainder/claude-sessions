@@ -354,7 +354,7 @@ func RunTUI(interval time.Duration) error {
 		// needed for them; the badge map below is then built from the rows
 		// themselves, whichever host each one's flags came from.
 		flagsStore.Overlay(local)
-		SortSessions(local, sortMode)
+		SortSessions(local, sortMode, false)
 		// Snapshot() returns the hub's shared slices; sort remotes on copies so
 		// we never race the hub goroutine that owns them.
 		snap := hub.Snapshot()
@@ -1112,7 +1112,7 @@ func sortRemotes(remotes []RemoteResult, mode string) []RemoteResult {
 	out := make([]RemoteResult, len(remotes))
 	for i, r := range remotes {
 		sorted := append([]Session(nil), r.Sessions...)
-		SortSessions(sorted, mode)
+		SortSessions(sorted, mode, false)
 		r.Sessions = sorted
 		out[i] = r
 	}

@@ -214,7 +214,7 @@ func CollectLocal() ([]Session, error) {
 	}
 	// Sort by cwd (case-insensitive), newest-started first as tiebreaker. This
 	// is the server-side default; the client re-sorts per its own mode.
-	SortSessions(out, "dir")
+	SortSessions(out, "dir", false)
 	return out, nil
 }
 
@@ -305,9 +305,37 @@ func sessionLess(a, b Session, mode string) bool {
 	}
 }
 
-func SortSessions(rows []Session, mode string) {
+// groupSortRank maps a group number to its group-first sort key: groups 1-9
+// rank by their own number; ungrouped (0, or any out-of-range value) ranks
+// last (10), sinking below every named group.
+func groupSortRank(group int) int {
+	if group < 1 || group > 9 {
+		return 10
+	}
+	return group
+}
+
+// sessionLessGrouped wraps sessionLess with an optional group-first tier:
+// disabled rows still sort last unconditionally (unchanged from sessionLess),
+// then, when groupSort is on, rows rank by group number ascending with
+// ungrouped rows sinking to the bottom, then ties fall through to the normal
+// per-mode comparison via sessionLess.
+func sessionLessGrouped(a, b Session, mode string, groupSort bool) bool {
+	if a.Disabled != b.Disabled {
+		return !a.Disabled
+	}
+	if groupSort {
+		ra, rb := groupSortRank(a.Group), groupSortRank(b.Group)
+		if ra != rb {
+			return ra < rb
+		}
+	}
+	return sessionLess(a, b, mode)
+}
+
+func SortSessions(rows []Session, mode string, groupSort bool) {
 	sort.SliceStable(rows, func(i, j int) bool {
-		return sessionLess(rows[i], rows[j], mode)
+		return sessionLessGrouped(rows[i], rows[j], mode, groupSort)
 	})
 }
 

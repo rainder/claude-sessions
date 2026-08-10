@@ -617,14 +617,14 @@ func TestSettleSelectionKeepsToggledSessionAfterDisabledSortMove(t *testing.T) {
 		{PID: 2, SessionID: "two", CWD: "/beta"},
 		{PID: 3, SessionID: "three", CWD: "/gamma"},
 	}
-	SortSessions(rows, "dir")
+	SortSessions(rows, "dir", false)
 
 	state := newTUIState()
 	state.sel = "2"
 	state.settleSelection(buildSelectionTargets(rows, nil))
 
 	rows[1].Disabled = true
-	SortSessions(rows, "dir")
+	SortSessions(rows, "dir", false)
 	if rows[2].SessionID != "two" {
 		t.Fatalf("disabled row index = %v, want session two last", rows)
 	}
