@@ -216,6 +216,27 @@ func TestSessionLessGroupedDisabledStillLast(t *testing.T) {
 	}
 }
 
+func TestSessionLessGroupedBoundaryAndStability(t *testing.T) {
+	// Two things at once: group 9 (top of the valid 1-9 range) still ranks
+	// ahead of ungrouped, and two rows tied on both group and the active
+	// sort mode's key (identically-zero CWD/StartedAt under "dir") keep
+	// their input order.
+	rows := []Session{
+		{SessionID: "ungrouped", Group: 0},
+		{SessionID: "g9-first", Group: 9},
+		{SessionID: "g9-second", Group: 9},
+	}
+	SortSessions(rows, "dir", true)
+	got := make([]string, len(rows))
+	for i, s := range rows {
+		got[i] = s.SessionID
+	}
+	want := []string{"g9-first", "g9-second", "ungrouped"}
+	if !equalStrings(got, want) {
+		t.Fatalf("group-9 boundary + stability order = %v, want %v", got, want)
+	}
+}
+
 func TestCollectLocalSetsHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

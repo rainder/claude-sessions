@@ -9,6 +9,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The `s`/`S` sort dialog gains a `g`/`G` toggle for group-first sort: when on,
+  sessions rank by their assigned group (Shift-1..9) first, ungrouped sessions
+  last, then by the normal sort mode within each group. Off by default; the
+  choice persists in `~/.config/claude-sessions/group-sort`, and a small
+  `group↑` badge appears in the header while it is active.
 - The resume picker (`r`, and `GET /resumable`) now memoizes its two expensive
   per-file reads — the transcript head scan and the full-file line count — in
   `~/.claude/.resumable-cache.json`, keyed by (path, mtime, size). Every open

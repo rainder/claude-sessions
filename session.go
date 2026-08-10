@@ -333,6 +333,10 @@ func sessionLessGrouped(a, b Session, mode string, groupSort bool) bool {
 	return sessionLess(a, b, mode)
 }
 
+// SortSessions orders rows in place, stably, per mode (see sessionLess). When
+// groupSort is true, rows rank by group number 1-9 ascending first, with
+// ungrouped sessions sinking last, before the normal per-mode comparison
+// breaks ties.
 func SortSessions(rows []Session, mode string, groupSort bool) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		return sessionLessGrouped(rows[i], rows[j], mode, groupSort)

@@ -113,7 +113,9 @@ var groupSGR = map[int]string{
 // exactly as before groups, the text filter, and conditional slots existed.
 // showNoTmux is only ever set for the intermediate/minimal views — the full
 // view already spells out tmux state in its own TMUX column, so it never
-// reserves this slot.
+// reserves this slot. groupSort is the odd one out: it plays no part in
+// filtering or slot reservation, and exists purely so renderHeader can draw
+// the header badge.
 type groupView struct {
 	groups       map[string]int
 	filter       groupFilter
