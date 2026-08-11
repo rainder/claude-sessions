@@ -65,6 +65,13 @@ type actionResult struct {
 	// (ungrouped) has to stay distinguishable from a field this endpoint
 	// never sets.
 	Group *int `json:"group,omitempty"`
+	// Warnings are advisory notes about an action that SUCCEEDED — currently
+	// only a spawn whose requested group could not be applied (see
+	// setGroupAfterSpawn). They ride the success response for the same reason
+	// accountSwitchResult.Warnings does: the thing asked for happened, and
+	// failing it over a badge would be worse than saying so. omitempty keeps
+	// them invisible to clients that don't read them.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // accountSwitchResult is POST /account/switch's response envelope. It is
@@ -663,6 +670,17 @@ type server struct {
 	// pattern as the three above, and the only way the request_id dedupe's
 	// concurrency can be tested without really starting tmux.
 	spawn func(cwd, name, command, suffix string) (string, error)
+	// setGroup records a spawn's requested group once the new session appears,
+	// returning a warning or ""; nil falls back to setGroupAfterSpawn against
+	// s.flags. Needed as a seam for the same reason spawn is: without it a
+	// handler test would poll this machine's real session files for a tmux
+	// name that will never show up, until the timeout.
+	setGroup func(tname string, group int) string
+	// groupGo runs that assignment. nil starts a real goroutine, which is the
+	// only thing production wants: the wait for a session to appear must never
+	// hold the response or the request_id slot. Tests set it to run inline, so
+	// an assertion about the group never has to chase a goroutine.
+	groupGo func(func())
 	// switchAcct makes a named claude-switch snapshot this host's active account;
 	// nil falls back to switchAccount. Injectable for the same reason as the
 	// seams above, and more urgently: without it a handler test would perform a
@@ -848,6 +866,51 @@ func (s *server) spawnNew(cwd, name, command, suffix string) (string, error) {
 		return s.spawn(cwd, name, command, suffix)
 	}
 	return SpawnNewWithSuffix(cwd, name, command, suffix)
+}
+
+// groupSpawned starts a spawn's requested group assignment and returns the
+// warning to put on the success response — which is only ever the one failure
+// knowable without waiting, since the assignment itself runs in the
+// background.
+//
+// It has to. Resolving the new session takes seconds (spawnGroupTimeout allows
+// 15), and this runs inside the request_id single-flight: waiting for it would
+// hold the response toward remoteRequest's 30s ceiling and keep the dedupe
+// slot occupied long past the point the spawn's outcome is known, which is
+// exactly what "publication goes through a defer … the moment the outcome is
+// known" exists to prevent. A client that gives up and retries builds a fresh
+// request_id, so a response held too long is not a slow spawn — it is a second
+// one.
+//
+// The price is that a background failure cannot ride the response; it goes to
+// this host's log instead, since nothing else will ever mention it. The badge
+// is best effort and the session is not: that trade is the whole design.
+// group 0 (nothing asked for) is answered here rather than in the seam, so an
+// injected setGroup only ever sees a request that was actually made.
+func (s *server) groupSpawned(tname string, group int) string {
+	if group == 0 {
+		return ""
+	}
+	assign := s.setGroup
+	if assign == nil {
+		if s.flags == nil {
+			// Knowable right now, with nothing to wait for: this host has
+			// nowhere to persist a badge, so say so on the response while
+			// there is still a response to say it on.
+			return spawnGroupNotSavedWarning
+		}
+		assign = func(t string, g int) string { return setGroupAfterSpawn(s.flags, t, g) }
+	}
+	run := s.groupGo
+	if run == nil {
+		run = func(f func()) { go f() }
+	}
+	run(func() {
+		if warn := assign(tname, group); warn != "" {
+			fmt.Fprintf(os.Stderr, "claude-sessions: %s (tmux session %q, group %d)\n", warn, tname, group)
+		}
+	})
+	return ""
 }
 
 // spawnSuffix derives the tmux name suffix for a request_id, so the same id
@@ -1646,6 +1709,12 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		// that timed out at 30s while the spawn was still going, and a user who
 		// tapped again.
 		RequestID string `json:"request_id"`
+		// Group is the group (1..9) to record for the spawned session in this
+		// host's own flags store, once it appears. A pointer so an absent
+		// field — every client that predates this — stays "no group asked
+		// for", while a value outside the range is reported rather than
+		// silently rounded into one.
+		Group *int `json:"group"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -1659,8 +1728,16 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request_id", http.StatusBadRequest)
 		return
 	}
+	group := 0
+	if body.Group != nil {
+		if !validSpawnGroup(*body.Group) {
+			http.Error(w, "bad group", http.StatusBadRequest)
+			return
+		}
+		group = *body.Group
+	}
 	if body.RequestID == "" {
-		writeJSON(w, http.StatusOK, s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, ""))
+		writeJSON(w, http.StatusOK, s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, "", group))
 		return
 	}
 	flight, claim := s.spawns.begin(body.RequestID)
@@ -1703,7 +1780,7 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 	// read hold a finished spawn's slot, and a later request would then be
 	// refused for capacity nothing is actually using.
 	defer publish()
-	result = s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, body.RequestID)
+	result = s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, body.RequestID, group)
 	publish()
 	writeJSON(w, http.StatusOK, result)
 }
@@ -1711,9 +1788,12 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 // spawnSession is newSession's work without the HTTP or the idempotency:
 // validate the directory and the preset, spawn, and return the envelope the
 // handler writes. Split out so the request_id dedupe wraps exactly one call to
-// it, which is what keeps the side effects here — the cache invalidation and the
-// trust-prompt dismissal — from running twice for one request id.
-func (s *server) spawnSession(cwd, name, command, prompt, requestID string) actionResult {
+// it, which is what keeps the side effects here — the cache invalidation, the
+// trust-prompt dismissal and the group assignment — from running twice for one
+// request id. A replayed request replays the stored envelope, warnings and
+// all, which is the same answer re-running would produce: the group is already
+// on that session.
+func (s *server) spawnSession(cwd, name, command, prompt, requestID string, group int) actionResult {
 	cwd = expandTilde(cwd)
 	if !isDir(cwd) {
 		return actionResult{Error: "not a directory: " + cwd}
@@ -1748,8 +1828,16 @@ func (s *server) spawnSession(cwd, name, command, prompt, requestID string) acti
 		// shows, without blocking the response on the poll.
 		go dismissTrustPrompt(tname)
 	}
+	result := actionResult{OK: true, Tmux: tname}
+	// Started, not waited for: the badge lands in the background some seconds
+	// from now, well after this response and after the cache invalidation
+	// below, so the row appears first and picks its group up on a later poll.
+	// Only a failure knowable immediately comes back here (see groupSpawned).
+	if warn := s.groupSpawned(tname, group); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+	}
 	s.invalidateSessions()
-	return actionResult{OK: true, Tmux: tname}
+	return result
 }
 
 // registerDevice records an APNs device token for push delivery.

@@ -5020,3 +5020,253 @@ func TestFlagsHandlerReportsAStoreItCannotWrite(t *testing.T) {
 // live entirely client-side now (usage.go / known_accounts.go), since GET
 // /usage no longer fetches anything to verify — see TestVerifiedIdentityMismatch
 // and the known_accounts_test.go coverage of knownAccountUsage.
+
+// --- group on POST /sessions/new -------------------------------------------
+
+// newSessionRawRequest builds an authed /sessions/new request from literal
+// JSON, for the bodies newSessionRequest's map[string]string cannot express —
+// a numeric group, and the malformed ones this endpoint has to refuse.
+func newSessionRawRequest(body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/sessions/new", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	return req
+}
+
+// groupRecorder is a server whose spawn and setGroup seams both record, so a
+// requested group can be followed from the wire to the assignment without tmux
+// or a real session ever existing. groupGo runs the assignment inline: in
+// production it is a goroutine, and an assertion that has to chase one is a
+// flake waiting to happen — the async-ness itself is what
+// TestNewSessionDoesNotWaitForTheGroup covers instead.
+func groupRecorder(t *testing.T, warn string) (s *server, names *[]string, groups *[]int) {
+	t.Helper()
+	var gotNames []string
+	var gotGroups []int
+	s = &server{
+		token:   "secret",
+		spawn:   func(string, string, string, string) (string, error) { return "work-abc123", nil },
+		groupGo: func(f func()) { f() },
+		setGroup: func(tname string, group int) string {
+			gotNames = append(gotNames, tname)
+			gotGroups = append(gotGroups, group)
+			return warn
+		},
+	}
+	return s, &gotNames, &gotGroups
+}
+
+// TestNewSessionAppliesRequestedGroup: the group named on the wire reaches the
+// assignment, against the tmux session the spawn actually created.
+func TestNewSessionAppliesRequestedGroup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, names, groups := groupRecorder(t, "")
+
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRawRequest(fmt.Sprintf(`{"cwd":%q,"group":3}`, home)))
+
+	if r := decodeAction(t, rec); !r.OK || r.Tmux != "work-abc123" || len(r.Warnings) != 0 {
+		t.Fatalf("result = %#v", r)
+	}
+	if len(*groups) != 1 || (*groups)[0] != 3 {
+		t.Fatalf("groups applied = %v, want [3]", *groups)
+	}
+	if (*names)[0] != "work-abc123" {
+		t.Fatalf("group applied to tmux %q, want the spawned session", (*names)[0])
+	}
+}
+
+// TestNewSessionWithoutAGroupNeverAsksForOne: an absent field is every client
+// that predates this, and must not reach the assignment at all.
+func TestNewSessionWithoutAGroupNeverAsksForOne(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, _, groups := groupRecorder(t, "")
+
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRawRequest(fmt.Sprintf(`{"cwd":%q}`, home)))
+
+	if r := decodeAction(t, rec); !r.OK {
+		t.Fatalf("result = %#v", r)
+	}
+	if len(*groups) != 0 {
+		t.Fatalf("group assignment ran for a request that named none: %v", *groups)
+	}
+}
+
+// TestNewSessionRejectsABadGroup: the range is the store's own 1-9, and 0 —
+// which means "ungrouped" everywhere else — is a typo here, not a request.
+// Nothing is spawned in any of these cases.
+func TestNewSessionRejectsABadGroup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cases := []struct {
+		name  string
+		group string
+		want  string
+	}{
+		{name: "zero", group: "0", want: "bad group"},
+		{name: "above the range", group: "10", want: "bad group"},
+		{name: "negative", group: "-1", want: "bad group"},
+		{name: "not a number", group: `"abc"`, want: "bad json"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, calls := spawnRecorder(t, func(int) (string, error) { return "work-abc123", nil })
+			rec := httptest.NewRecorder()
+			s.newSession(rec, newSessionRawRequest(fmt.Sprintf(`{"cwd":%q,"group":%s}`, home, c.group)))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body.String())
+			}
+			if got := strings.TrimSpace(rec.Body.String()); got != c.want {
+				t.Errorf("body = %q, want %q", got, c.want)
+			}
+			if calls() != 0 {
+				t.Error("a refused group still spawned a session")
+			}
+		})
+	}
+}
+
+// TestNewSessionGroupFailureNeverReachesTheResponse: the assignment runs in
+// the background, so its warning has nowhere to ride by the time it is known —
+// it goes to this host's log instead, and the spawn's own outcome is untouched.
+func TestNewSessionGroupFailureNeverReachesTheResponse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, _, groups := groupRecorder(t, spawnGroupNotSeenWarning)
+
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRawRequest(fmt.Sprintf(`{"cwd":%q,"group":5}`, home)))
+
+	r := decodeAction(t, rec)
+	if !r.OK || r.Tmux != "work-abc123" {
+		t.Fatalf("a failed group assignment changed the spawn's own outcome: %#v", r)
+	}
+	if len(r.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none — a background failure cannot ride the response", r.Warnings)
+	}
+	if len(*groups) != 1 {
+		t.Fatalf("group assignment ran %d times, want 1", len(*groups))
+	}
+}
+
+// TestNewSessionWarnsImmediatelyWithNowhereToSaveAGroup: the one failure that
+// IS knowable without waiting — this host has no flags store — still reaches
+// the client, because there is a response to put it on.
+func TestNewSessionWarnsImmediatelyWithNowhereToSaveAGroup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// No setGroup seam and no flags store: the production path with nowhere to
+	// write, which groupSpawned answers before starting anything.
+	s := &server{
+		token: "secret",
+		spawn: func(string, string, string, string) (string, error) { return "work-abc123", nil },
+	}
+
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRawRequest(fmt.Sprintf(`{"cwd":%q,"group":5}`, home)))
+
+	r := decodeAction(t, rec)
+	if !r.OK || r.Tmux != "work-abc123" {
+		t.Fatalf("result = %#v", r)
+	}
+	if len(r.Warnings) != 1 || r.Warnings[0] != spawnGroupNotSavedWarning {
+		t.Fatalf("warnings = %v, want [%q]", r.Warnings, spawnGroupNotSavedWarning)
+	}
+}
+
+// TestNewSessionDoesNotWaitForTheGroup is the reason the assignment is
+// backgrounded at all: resolving a session takes seconds, and this runs inside
+// the request_id single-flight, where a held response holds the dedupe slot —
+// long enough and the client gives up, retries with a fresh request_id, and
+// gets a SECOND session. The seam here blocks until the test releases it; the
+// handler must have answered long before that.
+func TestNewSessionDoesNotWaitForTheGroup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	s := &server{
+		token: "secret",
+		spawn: func(string, string, string, string) (string, error) { return "work-abc123", nil },
+		setGroup: func(string, int) string {
+			close(entered)
+			<-release
+			return ""
+		},
+	}
+	defer close(release)
+
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	go func() {
+		defer close(done)
+		s.newSession(rec, newSessionRawRequest(fmt.Sprintf(`{"cwd":%q,"group":5,"request_id":"group-async-0001"}`, home)))
+	}()
+
+	<-entered // the assignment is running, and parked
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the response is waiting on the group assignment")
+	}
+	if r := decodeAction(t, rec); !r.OK || r.Tmux != "work-abc123" {
+		t.Fatalf("result = %#v", r)
+	}
+}
+
+// TestNewSessionAppliesGroupThroughTheRealStore exercises what every other
+// test here injects past: no setGroup seam, so groupSpawned falls back to
+// setGroupAfterSpawn against this server's own flags store.
+func TestNewSessionAppliesGroupThroughTheRealStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fastSpawnGroupPolling(t, func() ([]Session, error) {
+		return []Session{{SessionID: "fresh-one", Tmux: "work-abc123:0.0"}}, nil
+	})
+	store := tempFlagsStore(t)
+	s := &server{
+		token:   "secret",
+		flags:   store,
+		spawn:   func(string, string, string, string) (string, error) { return "work-abc123", nil },
+		groupGo: func(f func()) { f() },
+	}
+
+	rec := httptest.NewRecorder()
+	s.newSession(rec, newSessionRawRequest(fmt.Sprintf(`{"cwd":%q,"group":6}`, home)))
+
+	if r := decodeAction(t, rec); !r.OK || len(r.Warnings) != 0 {
+		t.Fatalf("result = %#v", r)
+	}
+	if got := store.Group("fresh-one"); got != 6 {
+		t.Fatalf("group of the spawned session = %d, want 6", got)
+	}
+}
+
+// TestNewSessionSameRequestIDGroupsOnce: a replayed spawn replays its stored
+// envelope and re-runs no side effect — including this one. The group can only
+// run from inside spawnSession, which the replay never reaches, so one spawn
+// call is one assignment.
+func TestNewSessionSameRequestIDGroupsOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, _, groups := groupRecorder(t, "")
+
+	body := fmt.Sprintf(`{"cwd":%q,"group":2,"request_id":"group-replay-0001"}`, home)
+	first := httptest.NewRecorder()
+	s.newSession(first, newSessionRawRequest(body))
+	second := httptest.NewRecorder()
+	s.newSession(second, newSessionRawRequest(body))
+
+	if len(*groups) != 1 {
+		t.Fatalf("group assignment ran %d times, want 1", len(*groups))
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replay differs:\nfirst  %s\nsecond %s", first.Body.String(), second.Body.String())
+	}
+	if r := decodeAction(t, second); !r.OK || r.Tmux != "work-abc123" {
+		t.Fatalf("replayed result = %#v", r)
+	}
+}

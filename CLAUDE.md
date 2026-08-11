@@ -404,6 +404,43 @@ when all `spawnDedupeMax` are in flight the handler answers **503** rather than
 growing past the bound. `s.spawn` and `s.attest` are the injectable seams
 alongside `collect`/`terminate`/`removeTree`.
 
+`POST /sessions/new` and `new --group N` also accept a **group** (1..9) for the
+session about to exist, so a spawned child can inherit its parent's badge (the
+`/spawn` skill walks its own ppid chain against `list-sessions --local --json`
+to find it). The range is the store's own; **0 is refused** rather than read as
+"ungrouped" — there is nothing to clear on a session that did not exist a
+moment ago — which is why the server decodes it as a `*int` (absent is an older
+client, present is checked) and answers `400 bad group`. The whole thing is
+best effort *after* the spawn, never a precondition of it: `spawn_group.go`
+polls `CollectLocal` for the session whose tmux pane sits in the name
+`SpawnNew` returned, then calls `FlagsStore.SetGroup`. The wait exists because
+the flags store is keyed by session id, which does not exist until the new
+claude process writes its own session file — seconds later, longer behind a
+first-run trust dialog. It ends early rather than spending
+`spawnGroupTimeout` (15s) when `tmux has-session` says the session is gone: a
+command that died on its first line is never going to produce an id.
+
+**The server does that in the background; the CLI waits.** `groupSpawned`
+starts the assignment and returns immediately, because it runs inside the
+`request_id` single-flight: waiting would push the response toward
+`remoteRequest`'s 30s ceiling and hold the dedupe slot long past the point the
+spawn's outcome is known — and a client that gives up retries with a *fresh*
+request_id, so a response held too long is not a slow spawn, it is a second
+one. The cost is that a background failure has no response left to ride: it
+goes to the host's own stderr, and a remote caller simply never learns the
+badge did not land. Only a failure knowable with nothing to wait for — this
+host has no flags store at all — still comes back in
+`actionResult.Warnings` (the shape `accountSwitchResult.Warnings` already
+established). `cmdNewLocal` keeps waiting: stdout already carries the tmux
+name, the user is right there, and a warning on stderr is worth the seconds.
+Nothing on either path may turn a session that was created into a failure the
+caller might retry. `s.setGroup` (the assignment) and `s.groupGo` (what runs
+it — a goroutine in production, inline in tests) are the seams beside
+`s.spawn`; `spawnGroupCollect`/`spawnGroupTmuxAlive`/`spawnGroupPollInterval`/
+`spawnGroupTimeout` are the package-level ones, so no test spends the real
+wait or shells out to tmux. A replayed `request_id` replays the stored
+envelope and never re-enters `spawnSession`, so one spawn is one assignment.
+
 `POST /sessions/{pid}/send-keys` (`{"session_id", "text"}`, send_keys.go) is
 the inspector's `i`-to-compose feature: it types `text` into `pid`'s tmux pane
 as literal keystrokes plus Enter. Unlike kill/migrate's legacy optional

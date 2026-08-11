@@ -76,8 +76,10 @@ const usage = `usage: claude-sessions [SUBCOMMAND] [args]
 subcommands:
   (no args), list                 live auto-refreshing view (TUI)
   list --once, -1                 print local sessions and exit
-  list-sessions [--json]          print local + remote sessions in full-mode
-                                  layout (or as JSON) and exit
+  list-sessions [--json] [--local]
+                                  print local + remote sessions in full-mode
+                                  layout (or as JSON) and exit; --local skips
+                                  the remote hosts entirely
   -s, --server [--port N] [--bind ADDR]
                                   run HTTP server (default 127.0.0.1:8765;
                                   --bind tailscale auto-detects Tailscale IPv4)
