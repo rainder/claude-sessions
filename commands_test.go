@@ -1,8 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseNewArgs(t *testing.T) {
@@ -33,8 +38,41 @@ func TestParseNewArgs(t *testing.T) {
 			want: newArgs{dir: "/tmp/proj", prompt: "hello world"},
 		},
 		{
+			name: "group",
+			args: []string{"--dir", "/tmp/proj", "--group", "3"},
+			want: newArgs{dir: "/tmp/proj", group: 3},
+		},
+		{
 			name:    "missing value for flag",
 			args:    []string{"--dir"},
+			wantErr: true,
+		},
+		{
+			name:    "missing value for group",
+			args:    []string{"--dir", "/tmp", "--group"},
+			wantErr: true,
+		},
+		{
+			// 0 is how the store spells "ungrouped"; a spawn asking for it is a
+			// typo, not a request, so it is rejected with everything else out
+			// of the 1-9 range.
+			name:    "group zero",
+			args:    []string{"--dir", "/tmp", "--group", "0"},
+			wantErr: true,
+		},
+		{
+			name:    "group above the range",
+			args:    []string{"--dir", "/tmp", "--group", "10"},
+			wantErr: true,
+		},
+		{
+			name:    "negative group",
+			args:    []string{"--dir", "/tmp", "--group", "-1"},
+			wantErr: true,
+		},
+		{
+			name:    "non-numeric group",
+			args:    []string{"--dir", "/tmp", "--group", "abc"},
 			wantErr: true,
 		},
 		{
@@ -61,6 +99,120 @@ func TestParseNewArgs(t *testing.T) {
 				t.Errorf("parseNewArgs(%v) = %+v, want %+v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestListSessionsJSONCarriesGroup drives the real `list-sessions --json` in a
+// temp home: a session file for this test process (so the pid is genuinely
+// alive) plus a group for its session id in this host's shared flags store.
+// The group is host-owned and never read from the session file, so this is the
+// only way to prove the overlay reaches the JSON rather than just the table.
+func TestListSessionsJSONCarriesGroup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const sessionID = "list-json-group-session"
+
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess := Session{
+		PID:        os.Getpid(),
+		SessionID:  sessionID,
+		CWD:        home,
+		Status:     "idle",
+		Entrypoint: "cli",
+		Group:      9, // must be ignored: the session file never sets a badge
+	}
+	data, err := json.Marshal(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", os.Getpid()))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := newFlagsStore(filepath.Join(home, ".config", "claude-sessions", flagsFileName), time.Now, noResolver)
+	if !store.SetGroup(sessionID, 4) {
+		t.Fatal("could not record the group under the temp home")
+	}
+
+	var rc int
+	out := captureStdout(t, func() { rc = cmdListSessions([]string{"--json"}) })
+	if rc != 0 {
+		t.Fatalf("list-sessions --json exit = %d, want 0", rc)
+	}
+	var hosts []struct {
+		Sessions []Session `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(out), &hosts); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	if len(hosts) == 0 {
+		t.Fatalf("no hosts in output:\n%s", out)
+	}
+	found := false
+	for _, s := range hosts[0].Sessions {
+		if s.SessionID != sessionID {
+			continue
+		}
+		found = true
+		if s.Group != 4 {
+			t.Errorf("group = %d, want 4 (the store's, not the session file's)", s.Group)
+		}
+	}
+	if !found {
+		t.Fatalf("session %s missing from the local host's rows:\n%s", sessionID, out)
+	}
+}
+
+// TestListSessionsLocalSkipsRemotes: --local is for scripted callers that only
+// read this host's rows (the /spawn skill's parent-group lookup), where a
+// configured-but-unreachable remote costs a timeout for output nobody reads.
+// The remote here refuses instantly, so the non-local half of the comparison
+// stays fast while still proving the host is normally there.
+func TestListSessionsLocalSkipsRemotes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".config", "claude-sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A configured host with no token: FetchRemote refuses it before opening a
+	// connection, so the non-local half of this comparison touches no network
+	// and spends no timeout while still producing a real remote row. (A
+	// loopback address would not do — dropSelfServer filters out any entry
+	// pointing back at this machine.)
+	yaml := "servers:\n  - name: nowhere\n    host: nowhere.example\n    port: 8765\n"
+	if err := os.WriteFile(filepath.Join(home, ".config", "claude-sessions", "servers.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hostsIn := func(args []string) []string {
+		t.Helper()
+		var rc int
+		out := captureStdout(t, func() { rc = cmdListSessions(args) })
+		if rc != 0 {
+			t.Fatalf("list-sessions %v exit = %d", args, rc)
+		}
+		var hosts []struct {
+			Hostname string `json:"hostname"`
+		}
+		if err := json.Unmarshal([]byte(out), &hosts); err != nil {
+			t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+		}
+		names := make([]string, len(hosts))
+		for i, h := range hosts {
+			names[i] = h.Hostname
+		}
+		return names
+	}
+
+	full := hostsIn([]string{"--json"})
+	if len(full) != 2 || full[1] != "nowhere" {
+		t.Fatalf("without --local, hosts = %v, want the local host plus nowhere", full)
+	}
+	local := hostsIn([]string{"--json", "--local"})
+	if len(local) != 1 {
+		t.Fatalf("with --local, hosts = %v, want only this host", local)
 	}
 }
 

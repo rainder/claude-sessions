@@ -164,12 +164,18 @@ func cmdMigrate(args []string) int {
 // newArgs is cmdNew's parsed flags plus the joined trailing prompt.
 type newArgs struct {
 	dir, name, command, server, prompt string
+	group                              int // 1..9, 0 = none requested
 }
 
 // parseNewArgs parses `new`'s flags. --dir and --cwd are synonyms (--dir is
 // preferred, --cwd kept for backward compatibility). Any non-flag args are
 // joined with spaces to form the optional initial prompt, so callers can
 // write it unquoted: `new --dir X some initial prompt`.
+//
+// --group is validated here rather than at spawn time so a typo costs nothing:
+// the range is the store's own 1..9, and 0 is rejected along with everything
+// else outside it — asking to ungroup a session that does not exist yet is a
+// mistake, not a request.
 func parseNewArgs(args []string) (newArgs, error) {
 	var a newArgs
 	var promptParts []string
@@ -199,6 +205,16 @@ func parseNewArgs(args []string) (newArgs, error) {
 			}
 			a.server = args[i+1]
 			i++
+		case "--group":
+			if i+1 >= len(args) {
+				return newArgs{}, fmt.Errorf("--group needs a value")
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || !validSpawnGroup(n) {
+				return newArgs{}, fmt.Errorf("--group must be a number %d-%d, got %q", spawnGroupMin, spawnGroupMax, args[i+1])
+			}
+			a.group = n
+			i++
 		default:
 			if strings.HasPrefix(args[i], "--") {
 				return newArgs{}, fmt.Errorf("unknown arg %q", args[i])
@@ -210,7 +226,7 @@ func parseNewArgs(args []string) (newArgs, error) {
 	return a, nil
 }
 
-const newUsage = "usage: claude-sessions new --dir PATH [--name NAME] [--command PRESET] [--server SERVER] [PROMPT...]"
+const newUsage = "usage: claude-sessions new --dir PATH [--name NAME] [--command PRESET] [--group 1-9] [--server SERVER] [PROMPT...]"
 
 func cmdNew(args []string) int {
 	a, err := parseNewArgs(args)
@@ -270,7 +286,16 @@ func cmdNewLocal(a newArgs) int {
 		// trustPromptTimeout, so this adds at most a few seconds.
 		dismissTrustPrompt(tname)
 	}
+	// Printed before the group is resolved: the tmux name is what a caller
+	// pipes on, and setGroupAfterSpawn can spend seconds waiting for the new
+	// session to write its session file. A group that never lands is a warning
+	// on stderr, never a non-zero exit — the session exists either way.
 	fmt.Println(tname)
+	if a.group != 0 {
+		if warn := setGroupAfterSpawn(LoadFlagsStore(), tname, a.group); warn != "" {
+			fmt.Fprintln(os.Stderr, "new:", warn)
+		}
+	}
 	return 0
 }
 
@@ -308,13 +333,20 @@ func cmdNewRemote(a newArgs) int {
 	// No local ~ expansion or directory check: dir lives on the remote host,
 	// whose home and filesystem differ from ours. The server resolves and
 	// validates it.
-	body, _ := json.Marshal(map[string]string{
+	req := map[string]any{
 		"cwd":        a.dir,
 		"name":       a.name,
 		"command":    a.command,
 		"prompt":     a.prompt,
 		"request_id": newSpawnRequestID(),
-	})
+	}
+	// Sent only when asked for: the flags file is per host, so the remote sets
+	// the group on its own store, and an omitted key is what an unrequested
+	// group looks like on the wire (an explicit 0 is a bad group there).
+	if a.group != 0 {
+		req["group"] = a.group
+	}
+	body, _ := json.Marshal(req)
 	resp, err := remoteRequest(a.server, "/sessions/new", "POST", body)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "new:", err)
@@ -330,6 +362,12 @@ func cmdNewRemote(a newArgs) int {
 		return 1
 	}
 	fmt.Println(r.Tmux)
+	// Advisory notes about a spawn that SUCCEEDED — currently only a group the
+	// remote host could not apply. Same stderr/stdout split as
+	// printAccountWarnings: stdout stays the one line a pipeline reads.
+	for _, w := range r.Warnings {
+		fmt.Fprintln(os.Stderr, "new:", w)
+	}
 	return 0
 }
 
@@ -455,13 +493,21 @@ func clipRequestRelay(paneID string, port int) bool {
 // local + configured remote sessions and exits. --json emits the same data
 // as JSON instead, one object per host (local first, then remotes in the
 // same sorted order), shaped like the server's GET /sessions response.
+//
+// --local drops the remote hosts entirely. It exists for the scripted callers
+// that only ever read this host's rows — the `/spawn` skill looks up its own
+// parent session's group — where a configured-but-unreachable remote costs
+// FetchRemote's whole 5s timeout for output that is then thrown away.
 func cmdListSessions(args []string) int {
-	const usageMsg = "usage: claude-sessions list-sessions [--json]"
+	const usageMsg = "usage: claude-sessions list-sessions [--json] [--local]"
 	jsonOut := false
+	localOnly := false
 	for _, a := range args {
 		switch a {
 		case "--json":
 			jsonOut = true
+		case "--local":
+			localOnly = true
 		default:
 			fmt.Fprintf(os.Stderr, "list-sessions: unknown flag: %s\n%s\n", a, usageMsg)
 			return 2
@@ -473,7 +519,10 @@ func cmdListSessions(args []string) int {
 		fmt.Fprintln(os.Stderr, "claude-sessions:", err)
 		return 1
 	}
-	remotes := FetchAllRemote()
+	var remotes []RemoteResult
+	if !localOnly {
+		remotes = FetchAllRemote()
+	}
 	// Disabled state and group assignments are host-owned (session_flags.go).
 	// Local sessions are this host, so overlay directly; remote sessions
 	// already carry authoritative flags from the wire (each remote host's own
@@ -518,8 +567,11 @@ func cmdListSessions(args []string) int {
 	// each host's /usage endpoint rather than /sessions (a remote host's own
 	// numbers never come back — GET /usage answers identity only, see
 	// server.go). Fetching after the --json branch has returned keeps a shell
-	// pipeline off a round of requests whose result it would never print.
-	remotes = mergeRemoteUsage(remotes)
+	// pipeline off a round of requests whose result it would never print, and
+	// --local (no remotes at all) skips that round for the same reason.
+	if !localOnly {
+		remotes = mergeRemoteUsage(remotes)
+	}
 	RenderAll(os.Stdout, "1", LocalHost{
 		Name:      shortHostname(),
 		Sessions:  local,
