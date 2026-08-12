@@ -657,6 +657,133 @@ func TestUsageFetcherReservesAPersistedEntry(t *testing.T) {
 	carriedFrom(t, u, seed)
 }
 
+// The whole point: a fresh disk entry (written moments ago, by this process
+// or another) means a pass that would otherwise fetch skips the network
+// call entirely and re-serves those numbers as fresh, not stale.
+func TestUsageFetcherCoalescesARecentReading(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
+	clock := fakeClock(t, time.Now())
+	good := liveUsageFixture(37)
+	// Stamp from the fetcher's own (frozen) clock, not real time: liveUsageFixture
+	// stamps FetchedAt with a fresh time.Now() call, which lands a few
+	// nanoseconds AFTER the instant fakeClock froze — real clocks always
+	// advance between two sequential time.Now() calls. Left as real time, that
+	// makes last.FetchedAt.After(now) true and the coalescing branch's future-
+	// timestamp guard (deliberately strict — see its comment) refuses to fire,
+	// failing this test for a reason that has nothing to do with coalescing
+	// itself. Backdating to the frozen clock is what "no advance" (this test's
+	// whole premise) actually means.
+	good.FetchedAt = *clock
+	saveAccountCache("trecs", accountCacheEntry{Account: good.Account, Info: good.Info, FetchedAt: good.FetchedAt})
+	calls := 0
+	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	}, noSaveAccountCache)
+
+	u, err := fetcher()
+	if calls != 0 {
+		t.Fatalf("fetches = %d, want a fresh disk entry to be coalesced instead of fetched", calls)
+	}
+	if err != nil {
+		t.Fatalf("coalesced pass = %v, want a success", err)
+	}
+	if u == nil || u.Stale {
+		t.Fatalf("coalesced result = %#v, want fresh (non-stale) numbers", u)
+	}
+	if u.Account != good.Account || !reflect.DeepEqual(u.Info, good.Info) {
+		t.Fatalf("coalesced numbers = %#v, want %#v", u, good)
+	}
+	if !u.FetchedAt.Equal(good.FetchedAt) {
+		t.Errorf("coalesced pass restamped FetchedAt (%v, want %v)", u.FetchedAt, good.FetchedAt)
+	}
+}
+
+// Past the coalesce window, a disk entry is old enough that this pass must
+// fetch for real — coalescing must not suppress ordinary polling forever.
+func TestUsageFetcherFetchesPastTheCoalesceWindow(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
+	good := liveUsageFixture(37)
+	saveAccountCache("trecs", accountCacheEntry{Account: good.Account, Info: good.Info, FetchedAt: good.FetchedAt})
+	clock := fakeClock(t, time.Now())
+	*clock = clock.Add(usageCoalesceWindow + time.Second)
+	fresh := liveUsageFixture(55)
+	calls := 0
+	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
+		calls++
+		return fresh, nil
+	}, noSaveAccountCache)
+
+	u, err := fetcher()
+	if calls != 1 {
+		t.Fatalf("fetches = %d, want an entry past the coalesce window to trigger a real fetch", calls)
+	}
+	if err != nil || u != fresh {
+		t.Fatalf("pass = (%#v, %v), want the fresh fetch's own numbers", u, err)
+	}
+}
+
+// A lone process must never coalesce against its own prior fetch at its next
+// natural tick — usageCoalesceWindow is half of usageRefreshInterval
+// specifically so this can't happen. Regression pin for the self-throttle
+// bug an independent review caught in the first version of this design.
+func TestUsageFetcherDoesNotSelfCoalesceAtItsOwnNextTick(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
+	clock := fakeClock(t, time.Now())
+	first := liveUsageFixture(21)
+	calls := 0
+	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
+		calls++
+		if calls == 1 {
+			return first, nil
+		}
+		return liveUsageFixture(99), nil
+	}, saveAccountCache)
+
+	if _, err := fetcher(); err != nil {
+		t.Fatalf("pass 1 = %v, want a success", err)
+	}
+	if calls != 1 {
+		t.Fatalf("fetches = %d, want the first pass to fetch", calls)
+	}
+	*clock = clock.Add(usageRefreshInterval)
+	if _, err := fetcher(); err != nil {
+		t.Fatalf("pass 2 (one full interval later) = %v, want a success", err)
+	}
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want a lone process's own next natural tick to fetch for real, not coalesce against itself", calls)
+	}
+}
+
+// An identity mismatch must never be coalesced onto — the same rule that
+// already governs the carry-forward path. Reuses liveCarryable, so this is
+// really pinning that reuse rather than new logic.
+func TestUsageFetcherDoesNotCoalesceAMismatchedEntry(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
+	saveAccountCache("trecs", accountCacheEntry{
+		Account:   "someone@else.example",
+		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 99}},
+		FetchedAt: time.Now(),
+	})
+	fresh := liveUsageFixture(21)
+	calls := 0
+	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
+		calls++
+		return fresh, nil
+	}, noSaveAccountCache)
+	u, err := fetcher()
+	if calls != 1 {
+		t.Fatalf("fetches = %d, want a mismatched entry to be ignored, forcing a real fetch", calls)
+	}
+	if err != nil || u != fresh {
+		t.Fatalf("pass = (%#v, %v), want the fresh fetch's own numbers", u, err)
+	}
+}
+
 // A switch during an armed wait must end the re-serving: bars carried under
 // the wrong email misattribute usage across accounts, which is the failure
 // carryable exists to prevent for snapshot accounts. Both accounts need their

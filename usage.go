@@ -781,6 +781,19 @@ func classifyUsageErr(err error) (expired bool, reason string) {
 // the endpoint.
 const usageRefreshInterval = 2 * time.Minute
 
+// usageCoalesceWindow bounds how recently another process (or this same
+// process's own prior pass) must have fetched an account for a pass that
+// would otherwise make a real request to skip it and re-serve that reading
+// as fresh instead. Deliberately half of usageRefreshInterval: a lone
+// process's own next natural tick lands one full usageRefreshInterval after
+// its own fetch, comfortably outside this window, so it never coalesces
+// against itself (see TestUsageFetcherDoesNotSelfCoalesceAtItsOwnNextTick) —
+// only two fetches landing close together (a launch burst, or two processes
+// whose tickers happen to be closely phased) ever trigger it. An earlier
+// version of this design used the full interval and was rejected on
+// independent review for exactly this self-throttle failure mode.
+const usageCoalesceWindow = usageRefreshInterval / 2
+
 // usageRetryMin seeds the failed-fetch backoff. The endpoint 429s readily
 // (every Claude Code session shares the account's per-token budget), so a
 // failed fetch retries at 5s, 10s, 20s… capped at the refresh interval,
@@ -1070,6 +1083,20 @@ func newUsageFetcher(fetch func() (*AccountUsage, error), save func(name string,
 				// request — see the doc comment.
 				return &AccountUsage{Account: live}, nil
 			}
+		}
+		// Read-before-fetch coalescing: another process (or this one, a
+		// moment ago) already has a reading recent enough that a fetch here
+		// would be redundant. liveCarryable is the same identity gate the
+		// carry-forward branch above already trusts, so nothing is served
+		// here that wasn't already safe to re-serve — this only changes HOW
+		// recently trusted, not WHETHER. No persist: disk already reflects
+		// this reading. See usageCoalesceWindow's doc comment for why a lone
+		// process's own next tick can never trigger this.
+		if liveCarryable(last, live) && !last.FetchedAt.After(now) && now.Sub(last.FetchedAt) < usageCoalesceWindow {
+			coalesced := *last
+			coalesced.Stale = false
+			mirrorFallback(backoff, &coalesced)
+			return &coalesced, nil
 		}
 		u, err := fetch()
 		if err != nil {
