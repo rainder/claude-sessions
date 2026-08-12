@@ -584,8 +584,8 @@ func TestResumeRowsAlignmentAndFilter(t *testing.T) {
 func TestResumeSearchTextSurvivesPromptTruncation(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	sessions := []ResumableSession{
-		{SessionID: "remote01", Host: "agent-workstation", CWD: "/home/u/repo/.claude/worktrees/feature-x", GitBranch: "feature-x-branch", FirstPrompt: "new worktree. DR-3173", MessageCount: 5, ModifiedAt: now.Add(-1 * time.Hour)},
-		{SessionID: "local001", CWD: "/home/u/other", GitBranch: "main", FirstPrompt: "unrelated work", MessageCount: 2, ModifiedAt: now.Add(-2 * time.Hour)},
+		{SessionID: "remote01", Host: "agent-workstation", CWD: "/home/u/repo/.claude/worktrees/feature-x", GitBranch: "feature-x-branch", FirstPrompt: "new worktree. DR-3173", Prompts: []string{"new worktree. DR-3173"}, MessageCount: 5, ModifiedAt: now.Add(-1 * time.Hour)},
+		{SessionID: "local001", CWD: "/home/u/other", GitBranch: "main", FirstPrompt: "unrelated work", Prompts: []string{"unrelated work"}, MessageCount: 2, ModifiedAt: now.Add(-2 * time.Hour)},
 	}
 
 	// A narrow width forces PROMPT down toward its floor, cutting "new
@@ -599,6 +599,36 @@ func TestResumeSearchTextSurvivesPromptTruncation(t *testing.T) {
 	searchText := resumeSearchText(sessions, "mac")
 	if _, idx := filterNewPickerLines(searchText, "3173"); len(idx) != 1 || idx[0] != 0 {
 		t.Errorf("resumeSearchText filter '3173' matched %v, want [0]", idx)
+	}
+}
+
+// TestResumeSearchTextSurvivesFirstPromptCap pins a second truncation the
+// picker's search missed: FirstPrompt is capped to resumePromptMax (60
+// runes) at capture time, well before display even enters the picture, while
+// the → overlay's Prompts[0] carries the same text out to
+// resumePromptDetailMax (200 runes). A search term sitting between the two
+// cutoffs (or in the 2nd/3rd prompt) must still match.
+func TestResumeSearchTextSurvivesFirstPromptCap(t *testing.T) {
+	long := "New worktree. Work through the 13 follow-up DR tickets created from the 2026-08-10 develop review triage."
+	if len(long[:resumePromptMax]) >= strings.Index(long, "2026") {
+		t.Fatalf("test fixture invalid: %q must place '2026' past resumePromptMax=%d", long, resumePromptMax)
+	}
+	sessions := []ResumableSession{
+		{
+			SessionID:   "s1",
+			CWD:         "/home/u/repo",
+			GitBranch:   "develop",
+			FirstPrompt: truncateRunes(long, resumePromptMax),
+			Prompts:     []string{truncateRunes(long, resumePromptDetailMax), "second prompt"},
+		},
+	}
+
+	searchText := resumeSearchText(sessions, "mac")
+	if _, idx := filterNewPickerLines(searchText, "2026"); len(idx) != 1 || idx[0] != 0 {
+		t.Errorf("resumeSearchText filter '2026' matched %v, want [0]", idx)
+	}
+	if _, idx := filterNewPickerLines(searchText, "second prompt"); len(idx) != 1 || idx[0] != 0 {
+		t.Errorf("resumeSearchText filter 'second prompt' matched %v, want [0]", idx)
 	}
 }
 

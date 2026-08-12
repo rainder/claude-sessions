@@ -858,11 +858,17 @@ func (s *resumePickerState) handle(key string) (confirm, cancel bool) {
 }
 
 // resumeSearchText builds one filter haystack per session, joining the raw
-// (untruncated) host/name/dir/branch/prompt fields. resumeRows' autocompact
-// ladder truncates these same fields for display once the terminal is too
-// narrow to show them in full, and previously that truncated text was what
-// got searched — a term past the cutoff (e.g. deep into a shrunk PROMPT
-// column) silently never matched even though the underlying session had it.
+// (untruncated) host/name/dir/branch fields with every captured prompt.
+// resumeRows' autocompact ladder truncates these same fields for display
+// once the terminal is too narrow to show them in full, and previously that
+// truncated text was what got searched — a term past the cutoff (e.g. deep
+// into a shrunk PROMPT column) silently never matched even though the
+// underlying session had it. Prompts is used rather than FirstPrompt for the
+// same reason at the data layer: FirstPrompt is capped to the 60-rune PROMPT
+// column budget (resumePromptMax) at capture time, while Prompts[0] carries
+// the same text out to resumePromptDetailMax (200 runes) — the → overlay's
+// budget — so a term past 60 runes but within 200 (or in the 2nd/3rd prompt)
+// is still searchable even though FirstPrompt never had it.
 func resumeSearchText(sessions []ResumableSession, localName string) []string {
 	out := make([]string, len(sessions))
 	for i, s := range sessions {
@@ -870,7 +876,9 @@ func resumeSearchText(sessions []ResumableSession, localName string) []string {
 		if host == "" {
 			host = localName
 		}
-		out[i] = strings.Join([]string{host, s.Name, s.CWD, s.GitBranch, s.FirstPrompt}, " ")
+		fields := []string{host, s.Name, s.CWD, s.GitBranch}
+		fields = append(fields, s.Prompts...)
+		out[i] = strings.Join(fields, " ")
 	}
 	return out
 }
