@@ -236,12 +236,16 @@ func newTUIState() *tuiState {
 // intent; while the pane is still absent it keeps both the pending intent and
 // the current selection. Otherwise (or once settled) it falls back to
 // validateTargetSel so a vanished selected row drops to a valid target,
-// anchoring whenever the effective selection changes.
+// anchoring whenever the effective selection changes. prevTargets is the
+// target list from the settle before this one — validateTargetSel uses it to
+// find sel's old neighbor when sel itself is gone (e.g. a killed session)
+// rather than snapping to the first row; pass nil to skip that (the caller
+// has no previous list, e.g. the very first settle).
 func (s *tuiState) requestSelectionAnchor() {
 	s.anchorSelection = true
 }
 
-func (s *tuiState) settleSelection(targets []selectionTarget) {
+func (s *tuiState) settleSelection(prevTargets, targets []selectionTarget) {
 	if s.pending != nil {
 		if id := selectionForTmux(targets, s.pending.host, s.pending.tmux); id != "" {
 			if s.sel != id {
@@ -253,7 +257,7 @@ func (s *tuiState) settleSelection(targets []selectionTarget) {
 		}
 	}
 	prevSel := s.sel
-	s.sel = validateTargetSel(targets, s.sel)
+	s.sel = validateTargetSel(prevTargets, targets, s.sel)
 	if s.sel != prevSel {
 		s.anchorSelection = true
 	}

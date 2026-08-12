@@ -419,7 +419,7 @@ func TestSettleSelectionPendingSpawnSettlesWhenTargetAppears(t *testing.T) {
 	// still present, so the selection and the pending intent are both retained
 	// and nothing is anchored.
 	absent := buildSelectionTargets([]Session{{PID: 11, CWD: "/tmp/a"}}, nil)
-	s.settleSelection(absent)
+	s.settleSelection(nil, absent)
 	if s.sel != "11" {
 		t.Fatalf("phase1 sel = %q, want 11 (retained)", s.sel)
 	}
@@ -436,7 +436,7 @@ func TestSettleSelectionPendingSpawnSettlesWhenTargetAppears(t *testing.T) {
 		{PID: 11, CWD: "/tmp/a"},
 		{PID: 22, CWD: "/tmp/b", Tmux: "spawn-abc:0.0"},
 	}, nil)
-	s.settleSelection(present)
+	s.settleSelection(nil, present)
 	if s.sel != "22" {
 		t.Fatalf("phase2 sel = %q, want 22", s.sel)
 	}
@@ -461,7 +461,7 @@ func TestSettleSelectionRemoteHostMatch(t *testing.T) {
 			{PID: 5, CWD: "/tmp/r", Tmux: "spawn-xyz:0.0", Host: "dev"},
 		}}},
 	)
-	s.settleSelection(targets)
+	s.settleSelection(nil, targets)
 	if s.sel != "dev:5" {
 		t.Fatalf("sel = %q, want dev:5 (remote host match, not the local tmux twin)", s.sel)
 	}
@@ -482,7 +482,7 @@ func TestSettleSelectionRetainsPendingWithFallbackWhenOldRowVanishes(t *testing.
 	// is gone: validateTargetSel falls back to the first row (anchoring the
 	// change) while the pending intent survives for a later refresh.
 	targets := buildSelectionTargets([]Session{{PID: 11, CWD: "/tmp/a"}}, nil)
-	s.settleSelection(targets)
+	s.settleSelection(nil, targets)
 	if s.sel != "11" {
 		t.Fatalf("sel = %q, want 11 (validateTargetSel fallback)", s.sel)
 	}
@@ -621,14 +621,14 @@ func TestSettleSelectionKeepsToggledSessionAfterDisabledSortMove(t *testing.T) {
 
 	state := newTUIState()
 	state.sel = "2"
-	state.settleSelection(buildSelectionTargets(rows, nil))
+	state.settleSelection(nil, buildSelectionTargets(rows, nil))
 
 	rows[1].Disabled = true
 	SortSessions(rows, "dir", false)
 	if rows[2].SessionID != "two" {
 		t.Fatalf("disabled row index = %v, want session two last", rows)
 	}
-	state.settleSelection(buildSelectionTargets(rows, nil))
+	state.settleSelection(nil, buildSelectionTargets(rows, nil))
 	if state.sel != "2" {
 		t.Fatalf("selection = %q, want toggled session 2", state.sel)
 	}

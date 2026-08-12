@@ -142,6 +142,30 @@ returns `"<pid>"`. Remote rows have `Host == "<name>"` and `ID()` returns
 `"<name>:<pid>"`. Action dispatch uses `s.Host != ""` to route between local and
 remote handlers.
 
+**A killed selection lands on its neighbor, not the top of the list.**
+`validateTargetSel` (selection.go) takes both the previous and the current
+target list: when the selected row is gone, it looks up where that id sat in
+the *previous* list and selects whatever now sits at that same index in the
+current one (clamped to the new, possibly shorter, length) — the row that
+shifted up into the killed row's slot, or the new last row if it was the
+last one. This relies on an invariant `settleSelection` maintains by
+construction: every settle assigns `s.sel` from the very target list it was
+just given (the pending-spawn branch, the neighbor branch, and the
+`targets[0]` fallback all return ids sourced from that call's `targets`), so
+`s.sel` is always a member of the most recently settled list. That's what
+guarantees `prevTargets` — the previous settle's `targets` — still contains
+`sel` at the moment a row disappears, even though `settleRows` runs on every
+2s tick and both kill paths refresh asynchronously once their background job
+lands (see "Worktree cleanup on kill"). Passing `nil` as `prevTargets` skips
+the neighbor lookup and falls back to `targets[0]`, the original behavior —
+`tui.go`'s `settleRows(neighborFallback bool)` uses that deliberately for the
+three view-filter call sites (text filter typing, group digit filter,
+hide-disabled toggle): those narrow what's shown by the user's own explicit
+action, not by a row actually disappearing, and a "neighbor" computed against
+last keystroke's filtered view has no relation to this keystroke's. Only
+`refresh()` (the data-changed path every action — kill, disable/group toggle,
+wall-clock tick, remote poll — funnels through) passes the real list.
+
 ### Resume picker
 
 `resume.go` owns the whole `r`-key feature: collect past transcripts

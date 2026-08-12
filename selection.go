@@ -114,7 +114,17 @@ func firstStatusTarget(targets []selectionTarget, status string) string {
 	return ""
 }
 
-func validateTargetSel(targets []selectionTarget, sel string) string {
+// validateTargetSel returns sel unchanged if it is still present in targets.
+// Otherwise it falls back, in order: for a vanished empty-host placeholder,
+// jump to any other row on that host; otherwise select whichever target now
+// sits at sel's old index in prevTargets, clamped to the new (possibly
+// shorter) list. That means a killed row's neighbor — the row after it
+// shifts up into its old slot, or the new last row if it was the last one —
+// takes the selection instead of the view snapping to the top of the list.
+// If sel isn't found in prevTargets either (e.g. the very first settle, or a
+// jump like Ctrl+W account switch that didn't go through prevTargets), this
+// falls back to the first target, the original behavior.
+func validateTargetSel(prevTargets, targets []selectionTarget, sel string) string {
 	for _, target := range targets {
 		if target.id == sel {
 			return sel
@@ -128,8 +138,17 @@ func validateTargetSel(targets []selectionTarget, sel string) string {
 			}
 		}
 	}
-	if len(targets) > 0 {
-		return targets[0].id
+	if len(targets) == 0 {
+		return ""
 	}
-	return ""
+	for i, target := range prevTargets {
+		if target.id == sel {
+			idx := i
+			if idx >= len(targets) {
+				idx = len(targets) - 1
+			}
+			return targets[idx].id
+		}
+	}
+	return targets[0].id
 }

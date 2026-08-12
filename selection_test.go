@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -150,7 +151,7 @@ func TestValidateTargetSelFollowsPopulatedHost(t *testing.T) {
 		}},
 	})
 
-	got := validateTargetSel(targets, emptyHostSelectionID("beluga"))
+	got := validateTargetSel(nil, targets, emptyHostSelectionID("beluga"))
 	if got != "beluga:30" {
 		t.Fatalf("validateTargetSel followed empty host to %q, want %q", got, "beluga:30")
 	}
@@ -195,11 +196,64 @@ func TestSelectionForTmuxReturnsEmptyWhenNothingSpawnedOrNotFoundYet(t *testing.
 
 func TestValidateTargetSelUsesExistingFallbackForOtherMissingRows(t *testing.T) {
 	targets := buildSelectionTargets([]Session{{PID: 10}, {PID: 11}}, nil)
-	if got := validateTargetSel(targets, "999"); got != "10" {
+	// sel "999" isn't in prevTargets either, so there's no neighbor to find —
+	// falls back to the first target, same as before this had a prevTargets arg.
+	if got := validateTargetSel(nil, targets, "999"); got != "10" {
 		t.Fatalf("validateTargetSel missing session = %q, want first target", got)
 	}
-	if got := validateTargetSel(nil, "999"); got != "" {
+	if got := validateTargetSel(nil, nil, "999"); got != "" {
 		t.Fatalf("validateTargetSel empty targets = %q, want empty", got)
+	}
+}
+
+// TestValidateTargetSelSelectsClosestNeighborOnRemoval pins the exact spec: a
+// killed row's neighbor takes the selection, never the top of the list. Same
+// index in the new (shorter) list as sel had in prevTargets, clamped to the
+// new list's own last index when sel was the last row.
+func TestValidateTargetSelSelectsClosestNeighborOnRemoval(t *testing.T) {
+	prev := buildSelectionTargets([]Session{{PID: 10}, {PID: 11}, {PID: 12}}, nil)
+
+	cases := []struct {
+		name string
+		sel  string
+		want string
+	}{
+		{"first row killed, selection stays at index 0 (now PID 11)", "10", "11"},
+		{"middle row killed, selection stays at its index (now PID 12)", "11", "12"},
+		{"last row killed, selection clamps to the new last (PID 11)", "12", "11"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Remove tc.sel's session from a copy of the row list, mirroring what a
+			// kill does to the next settle's targets.
+			var remaining []Session
+			for _, s := range []Session{{PID: 10}, {PID: 11}, {PID: 12}} {
+				if strconv.Itoa(s.PID) != tc.sel {
+					remaining = append(remaining, s)
+				}
+			}
+			next := buildSelectionTargets(remaining, nil)
+			if got := validateTargetSel(prev, next, tc.sel); got != tc.want {
+				t.Fatalf("validateTargetSel(%q) = %q, want %q", tc.sel, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateTargetSelSelectsClosestNeighborDownToOneRow: the 2-item case the
+// spec was phrased around — killing index 0 leaves selection at index 0
+// (unchanged), killing index 1 (the only other row) clamps down to index 0.
+func TestValidateTargetSelSelectsClosestNeighborDownToOneRow(t *testing.T) {
+	prev := buildSelectionTargets([]Session{{PID: 10}, {PID: 11}}, nil)
+
+	killFirst := buildSelectionTargets([]Session{{PID: 11}}, nil)
+	if got := validateTargetSel(prev, killFirst, "10"); got != "11" {
+		t.Fatalf("selected index 0 killed = %q, want the sole remaining row (index stays 0)", got)
+	}
+
+	killSecond := buildSelectionTargets([]Session{{PID: 10}}, nil)
+	if got := validateTargetSel(prev, killSecond, "11"); got != "10" {
+		t.Fatalf("selected index 1 killed = %q, want it clamped to index 0", got)
 	}
 }
 

@@ -350,7 +350,16 @@ func RunTUI(interval time.Duration) error {
 	// settleRows sorts the latest local and remote snapshots, then reconciles
 	// selection. It chases a pending post-spawn landing until its tmux pane
 	// appears, otherwise falling back if a vanished selected row needs replacing.
-	settleRows := func() {
+	// neighborFallback controls that fallback's shape: true passes the previous
+	// target list through so a row that vanished because the underlying data
+	// changed (a kill landing, a toggle moving it out of the current filter)
+	// lands on its nearest surviving neighbor rather than snapping to the top.
+	// false passes nil, keeping the original snap-to-first behavior — used by
+	// the view-filter call sites (text filter typing, group digit filter,
+	// hide-disabled toggle) where the user is deliberately narrowing what's
+	// shown, not losing a row to a background event; a "neighbor" computed
+	// against yesterday's filtered view has no relation to today's.
+	settleRows := func(neighborFallback bool) {
 		// Overlay this host's shared flags onto local sessions before sorting —
 		// the sort orders disabled rows last. Remote sessions already carry
 		// authoritative flags from the wire (each remote host's own FlagsStore,
@@ -377,11 +386,15 @@ func RunTUI(interval time.Duration) error {
 		// group and text query so a filtered-out selection falls back via
 		// validateTargetSel.
 		gv := groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled, groupSort: groupSortOn}
+		prevTargets := targets
 		targets = buildSelectionTargets(
 			filterSessionRows(local, gv),
 			filterRemoteResults(remotes, gv),
 		)
-		state.settleSelection(targets)
+		if !neighborFallback {
+			prevTargets = nil
+		}
+		state.settleSelection(prevTargets, targets)
 		prefetchTicketSummaries()
 	}
 
@@ -398,7 +411,7 @@ func RunTUI(interval time.Duration) error {
 		if kickRemote {
 			hub.Refresh()
 		}
-		settleRows()
+		settleRows(true)
 	}
 
 	// markInspectorEndedIfGone flags the inspector as ended when the session it
@@ -855,7 +868,7 @@ func RunTUI(interval time.Duration) error {
 					pendingHide = false
 				}
 				textFilter = next
-				settleRows()
+				settleRows(false)
 				state.requestSelectionAnchor()
 				render()
 				continue
@@ -874,7 +887,7 @@ func RunTUI(interval time.Duration) error {
 				pendingHide = nextArmed
 				if nextFilter != groupFilterState {
 					groupFilterState = nextFilter
-					settleRows()
+					settleRows(false)
 					state.requestSelectionAnchor()
 					render()
 				}
@@ -953,7 +966,7 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "d", "D":
 				hideDisabled = !hideDisabled
-				settleRows()
+				settleRows(false)
 				state.requestSelectionAnchor()
 				render()
 			case "!", "@", "#", "$", "%", "^", "&", "*", "(":
