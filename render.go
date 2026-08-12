@@ -576,6 +576,11 @@ const usageExpiredText = usageExpiredReason
 // usageStaleText marks a line whose bars are carried forward from an earlier
 // poll because the latest one failed. Short and dim on purpose: the numbers are
 // still worth reading, and the marker only has to stop them passing as live.
+//
+// It is the marker's *prefix*, not the whole of it: the call site appends the
+// reading's age from accountUsageLine.fetchedAt ("stale 12m"), so the rendered
+// marker is variable width and everything sizing it has to measure the composed
+// text rather than this constant.
 const usageStaleText = "stale"
 
 // renderUsagePlaceholder writes one header line for an account with no numbers

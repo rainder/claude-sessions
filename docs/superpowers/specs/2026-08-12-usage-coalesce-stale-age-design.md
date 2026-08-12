@@ -85,9 +85,16 @@ Fix 2 was accepted with caveats (below).
   before it — an armed backoff is untouched; this only ever replaces "I'm
   about to fetch" with "someone already has, skip the call."
 - It reuses the **existing** `liveCarryable`/`carryable` eligibility check
-  (already identity- and `Verified`-gated) rather than a new ad-hoc
+  (already identity-gated) rather than a new ad-hoc
   condition — this closes hole 3 for free: anything not safe to carry
-  forward today is not safe to coalesce onto either.
+  forward today is not safe to coalesce onto either. To be precise about
+  what that gate is and is not: neither `carryable` nor `liveCarryable`
+  consults `Verified` — they test numbers-present plus claimed-identity
+  equality only. `Verified` gates one narrower path, the wrong-identity
+  carry inside `knownAccountUsage`'s `failed` helper, which coalescing does
+  not go through. So coalescing inherits exactly the ordinary carry-forward
+  path's trust, no more; the consequence (a wrong-identity mismatch can be
+  masked for up to one window) is bounded and self-healing.
 - Additional guard: `!cached.FetchedAt.After(now)` — reject a future-dated
   entry (closes hole 5).
 - Net condition, evaluated only when `backoff.due(now)` is true: eligible

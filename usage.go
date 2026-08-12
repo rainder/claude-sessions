@@ -90,13 +90,13 @@ type AccountUsage struct {
 	Stale bool `json:"stale,omitempty"`
 	// FetchedAt is when Info was actually fetched, not when this struct was
 	// built — a carried-forward reading keeps the original timestamp rather
-	// than being restamped on every re-serve. Nothing in this TUI's own header
-	// renders it (the Stale marker is a fixed "stale" label, not a computed
-	// age), but it still travels on the wire to any other consumer of
-	// AccountUsage, and restamping it would make a permanently throttled
-	// account's numbers look permanently fresh there too. Only fetchUsage sets
-	// it; the server's on-demand /usage handler has no memory to carry
-	// anything forward, so it never produces a Stale reading either.
+	// than being restamped on every re-serve. The header now renders it: the
+	// Stale marker carries the reading's age ("stale 12m"), formatAge over
+	// now-FetchedAt, threaded in as accountUsageLine.fetchedAt — so restamping
+	// would not merely mislead a wire consumer, it would show a permanently
+	// throttled account's numbers as permanently fresh right here. Only
+	// fetchUsage sets it; the server's on-demand /usage handler has no memory
+	// to carry anything forward, so it never produces a Stale reading either.
 	//
 	// omitzero, not omitempty: encoding/json never considers a struct empty, so
 	// omitempty on a time.Time does nothing and every snapshot with no numbers
@@ -642,8 +642,12 @@ const usageRateLimitedReason = "rate limited"
 // each host fetches it on its own usageRefreshInterval tick, so a chronically
 // 429ing account otherwise costs a failed round trip per host per 2 minutes for
 // the life of every process — against the very endpoint that is already
-// throttling. The first 429 is free (throttles usually heal within one tick);
-// only a *consecutive* second one starts thinning the retries.
+// throttling. The first 429 buys no wait from the *schedule* (throttles usually
+// heal within one tick); only a *consecutive* second one starts thinning the
+// retries. "Free" is no longer literal, though: usageBackoffSafetyMargin puts a
+// hard 1-minute floor under every deadline this schedule computes, so even the
+// streak-1 zero wait costs a minute before due() lets the next real fetch
+// through.
 const (
 	// usageBackoffSecond is the wait after two consecutive 429s.
 	usageBackoffSecond = 4 * time.Minute
@@ -673,8 +677,18 @@ const (
 )
 
 // usageBackoffUntil returns when an account whose last streak consecutive
-// fetches were rate limited may be tried again. streak <= 1 returns now — the
-// first 429 imposes no wait at all, so the next ordinary tick fetches normally.
+// fetches were rate limited may be tried again. streak <= 1 returns now — this
+// function itself imposes no wait at all for a first 429.
+//
+// That is a statement about this function, not about the system: due() does not
+// compare against what this returns, it compares against this plus
+// usageBackoffSafetyMargin (1 minute, applied unconditionally — see that
+// constant). So "returns now" means "the schedule adds nothing of its own", not
+// "the next ordinary tick fetches normally": the very next attempt after ANY
+// throttle, including the streak-1 one this arm computes, still waits out the
+// margin first. Keep the two readings separate — the arithmetic here stays the
+// pure schedule, and the floor stays in one place rather than being smeared
+// across every branch below.
 //
 // retryAt is the endpoint's own Retry-After (zero when it gave none, see
 // parseRetryAfter): it can only *extend* the computed deadline, never shorten
@@ -792,6 +806,15 @@ const usageRefreshInterval = 2 * time.Minute
 // whose tickers happen to be closely phased) ever trigger it. An earlier
 // version of this design used the full interval and was rejected on
 // independent review for exactly this self-throttle failure mode.
+//
+// One consequence worth naming, because it looks like a bug and is not: this is
+// also why usagePoller.Resume's immediate re-fetch kick — the one that fires on
+// returning from an interactive program — can now be answered by a reading from
+// within the last minute instead of a real request. That is the desirable
+// direction. A resume/attach cycle is exactly the moment a burst of fresh
+// requests is least justified (the numbers cannot have moved far in a minute)
+// and most likely (attach, detach, attach again), so coalescing it away is the
+// kick behaving well rather than being suppressed.
 const usageCoalesceWindow = usageRefreshInterval / 2
 
 // usageRetryMin seeds the failed-fetch backoff. The endpoint 429s readily

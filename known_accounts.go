@@ -58,11 +58,11 @@ type KnownAccountUsage struct {
 	Verified bool `json:"verified,omitempty"`
 	// FetchedAt is when Info was actually fetched, not when this struct was
 	// built — a carried-forward entry keeps the original timestamp rather than
-	// being restamped on every re-serve. Nothing in this TUI's own header
-	// renders it (the Stale marker is a fixed "stale" label, not a computed
-	// age), but it still travels on the wire to any other consumer, and
-	// restamping it would make a permanently throttled account's numbers look
-	// permanently fresh there too.
+	// being restamped on every re-serve. The header now renders it: the Stale
+	// marker carries the reading's age ("stale 12m"), formatAge over
+	// now-FetchedAt, threaded in as accountUsageLine.fetchedAt — so restamping
+	// would not merely mislead a wire consumer, it would show a permanently
+	// throttled account's numbers as permanently fresh right here.
 	//
 	// omitzero, not omitempty: encoding/json never considers a struct empty, so
 	// omitempty on a time.Time does nothing and every entry with no numbers
@@ -253,9 +253,10 @@ const usageBadSnapshotReason = "bad snapshot"
 // would imply it still works. Any other failure (429, 5xx, timeout, network, an
 // unreadable credential file) re-serves prev's numbers marked Stale, with
 // prev's ORIGINAL FetchedAt: restamping it to now would let an account that
-// fails forever look permanently fresh to any consumer of the timestamp, even
-// though this TUI's own header shows only a fixed "stale" label rather than a
-// computed age. Carrying is not age-bounded — old numbers beside a visible
+// fails forever look permanently fresh to any consumer of the timestamp — this
+// TUI's own header included, since the Stale marker now renders that age
+// ("stale 12m") rather than a bare fixed label. Carrying is not age-bounded —
+// old numbers beside a visible
 // Stale marker still beat no numbers at all — so this keeps working for as
 // long as the account stays down. With nothing to carry, the entry keeps only
 // its identity and the reason.
