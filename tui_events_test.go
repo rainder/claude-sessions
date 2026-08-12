@@ -54,6 +54,41 @@ func TestInputDecoderCtrlDigitKeys(t *testing.T) {
 	}
 }
 
+// TestInputDecoderModifyOtherKeysFoldsCtrlLettersToClassicByte pins the
+// regression this shape exists to guard against: a terminal that reports
+// Ctrl+letter through the same CSI 27;5;<code>~ form Ctrl+digit uses (rather
+// than the plain single control byte) must still land on the classic byte
+// ("\x18" for Ctrl+X etc.), since every existing hotkey switches on that byte
+// directly.
+func TestInputDecoderModifyOtherKeysFoldsCtrlLettersToClassicByte(t *testing.T) {
+	cases := map[string]string{
+		"\x1b[27;5;88~": "\x18", // Ctrl+X ('X' = 88)
+		"\x1b[27;5;99~": "\x03", // Ctrl+C ('c' = 99)
+		"\x1b[27;5;87~": "\x17", // Ctrl+W ('W' = 87)
+	}
+	for seq, want := range cases {
+		d := newInputDecoder()
+		got := d.Feed([]byte(seq), time.Unix(0, 0))
+		if len(got) != 1 || got[0].key != want {
+			t.Errorf("%q = %#v, want %q", seq, got, want)
+		}
+	}
+}
+
+// TestInputDecoderModifyOtherKeysIgnoresOtherModifiers pins that only mod 5
+// (Ctrl alone) is decoded — Shift/Alt/Meta combinations aren't bound to
+// anything and must be discarded like any other unmapped CSI sequence, not
+// misread as a Ctrl combination.
+func TestInputDecoderModifyOtherKeysIgnoresOtherModifiers(t *testing.T) {
+	for _, seq := range []string{"\x1b[27;2;49~", "\x1b[27;3;88~", "\x1b[27;6;49~"} {
+		d := newInputDecoder()
+		got := d.Feed([]byte(seq), time.Unix(0, 0))
+		if len(got) != 0 {
+			t.Errorf("%q = %#v, want no events", seq, got)
+		}
+	}
+}
+
 func TestInputDecoderSGRMouse(t *testing.T) {
 	cases := []struct {
 		seq     string

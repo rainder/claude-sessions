@@ -33,11 +33,17 @@ func writeMouseMode(w io.Writer, enabled bool) {
 // modifyOtherKeys sequences ask the terminal to report keystrokes that have no
 // standard single-byte control-code form — Ctrl+1..9 among them, unlike
 // Ctrl+A..Z — as "CSI 27;<mod>;<code>~" instead of passing them through
-// unreported. Mode 2 is the level that covers ordinary keys like digits; mode
-// 0 restores the terminal's default (no such reporting). tui_events.go's
-// fixedSequences decodes the Ctrl+1..9 forms this produces.
+// unreported. Mode 1 is the level that extends reporting only to
+// combinations with no existing byte form (Ctrl+digit); mode 2 goes further
+// and also reports well-known combinations like Ctrl+C/Ctrl+X this way
+// instead of their classic single control byte, which broke every existing
+// "\x18"-style hotkey the first time this shipped — mode 1 is the one every
+// terminal app that wants this (neovim among them) actually requests, for
+// exactly that compatibility reason. Mode 0 restores the terminal's default
+// (no such reporting). tui_events.go's decodeModifyOtherKeys decodes what
+// this produces.
 const (
-	modifyOtherKeysEnableSequence  = "\x1b[>4;2m"
+	modifyOtherKeysEnableSequence  = "\x1b[>4;1m"
 	modifyOtherKeysDisableSequence = "\x1b[>4;0m"
 )
 

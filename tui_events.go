@@ -53,17 +53,57 @@ var fixedSequences = map[string]string{
 	"\x1bOH": KeyHome, "\x1bOF": KeyEnd,
 	"\x1b[1~": KeyHome, "\x1b[4~": KeyEnd,
 	"\x1b[5~": KeyPageUp, "\x1b[6~": KeyPageDown,
-	// Ctrl+1..9: xterm's modifyOtherKeys=2 protocol reports "CSI 27;<mod>;<code>~"
-	// for keystrokes with no standard control-code form, which digits are —
-	// unlike Ctrl+A..Z, ASCII has no Ctrl+1..9 byte. Mod 5 is Ctrl alone
-	// (1 base + 4 Ctrl); codes 49-57 are '1'-'9'. enableModifyOtherKeys (tui.go)
-	// turns this reporting on for the life of the TUI, so these only ever
-	// arrive while it's active.
-	"\x1b[27;5;49~": KeyCtrl1, "\x1b[27;5;50~": KeyCtrl2,
-	"\x1b[27;5;51~": KeyCtrl3, "\x1b[27;5;52~": KeyCtrl4,
-	"\x1b[27;5;53~": KeyCtrl5, "\x1b[27;5;54~": KeyCtrl6,
-	"\x1b[27;5;55~": KeyCtrl7, "\x1b[27;5;56~": KeyCtrl8,
-	"\x1b[27;5;57~": KeyCtrl9,
+}
+
+// ctrlDigitByCode maps a modifyOtherKeys report's ASCII code for '1'-'9' to
+// the corresponding KeyCtrl1..9 constant. Digits have no standard
+// single-byte control form (unlike Ctrl+A..Z, which fold back to their
+// classic control byte in decodeModifyOtherKeys below), so this is the only
+// representation they ever arrive in.
+var ctrlDigitByCode = map[int]string{
+	'1': KeyCtrl1, '2': KeyCtrl2, '3': KeyCtrl3,
+	'4': KeyCtrl4, '5': KeyCtrl5, '6': KeyCtrl6,
+	'7': KeyCtrl7, '8': KeyCtrl8, '9': KeyCtrl9,
+}
+
+// decodeModifyOtherKeys parses an xterm modifyOtherKeys report of the form
+// "CSI 27;<mod>;<code>~" (helpers.go enables reporting level 1 for the life
+// of the TUI) and returns the key it represents, or ok=false if the sequence
+// isn't this shape or isn't a combination this app recognizes.
+//
+// Only mod 5 (Ctrl alone: 1 base + 4 Ctrl) is handled — Shift/Alt/Meta
+// combinations aren't bound to anything. A letter code folds back to its
+// classic single-byte control code (code & 0x1f, e.g. 'X' 0x58 -> 0x18,
+// identical to the plain Ctrl+X byte every terminal has always sent) so the
+// existing "\x18"-style case labels keep matching regardless of whether a
+// given terminal reports Ctrl+letter this way or as the plain byte — level 1
+// is documented to leave well-known control combinations alone, but this
+// keeps the decoder correct even if that assumption doesn't hold everywhere.
+// A digit code has no such classic byte, so it maps to the dedicated
+// KeyCtrl1..9 constants via ctrlDigitByCode instead.
+func decodeModifyOtherKeys(seq string) (string, bool) {
+	const prefix = "\x1b[27;"
+	if !strings.HasPrefix(seq, prefix) || !strings.HasSuffix(seq, "~") {
+		return "", false
+	}
+	body := seq[len(prefix) : len(seq)-1]
+	parts := strings.SplitN(body, ";", 2)
+	if len(parts) != 2 {
+		return "", false
+	}
+	mod, err1 := strconv.Atoi(parts[0])
+	code, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || mod != 5 {
+		return "", false
+	}
+	switch {
+	case code >= 'a' && code <= 'z', code >= 'A' && code <= 'Z':
+		return string(rune(code & 0x1f)), true
+	case code >= '1' && code <= '9':
+		return ctrlDigitByCode[code], true
+	default:
+		return "", false
+	}
 }
 
 // eventKind distinguishes the payload carried by an inputEvent.
@@ -191,6 +231,9 @@ func (d *inputDecoder) decodeOne() (ev *inputEvent, n int, complete bool) {
 			if b >= 0x40 && b <= 0x7e {
 				seq := string(buf[:i+1])
 				if key, ok := fixedSequences[seq]; ok {
+					return &inputEvent{kind: eventKey, key: key}, i + 1, true
+				}
+				if key, ok := decodeModifyOtherKeys(seq); ok {
 					return &inputEvent{kind: eventKey, key: key}, i + 1, true
 				}
 				// Recognized CSI shape but not a mapped key (modified
