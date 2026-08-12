@@ -360,6 +360,33 @@ func loginAsWithSnapshot(t *testing.T, name, email string) string {
 	return home
 }
 
+// fakeClock points usageClockNow — shared by newUsageFetcher and
+// newKnownAccountsFetcher — at a controllable instant, so a test can
+// simulate elapsed wall-clock time (past the backoff safety margin, or past
+// the coalesce window) without a real sleep. The returned pointer IS the
+// fetcher's "now" for every call until advanced with clock.Add; t.Cleanup
+// restores the real clock so later tests in the same run are unaffected.
+func fakeClock(t *testing.T, start time.Time) *time.Time {
+	t.Helper()
+	now := start
+	orig := usageClockNow
+	usageClockNow = func() time.Time { return now }
+	t.Cleanup(func() { usageClockNow = orig })
+	return &now
+}
+
+func TestFakeClockControlsUsageClockNow(t *testing.T) {
+	start := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	clock := fakeClock(t, start)
+	if got := usageClockNow(); !got.Equal(start) {
+		t.Fatalf("usageClockNow() = %v, want %v", got, start)
+	}
+	*clock = clock.Add(90 * time.Second)
+	if got := usageClockNow(); !got.Equal(start.Add(90 * time.Second)) {
+		t.Fatalf("usageClockNow() after advance = %v, want %v", got, start.Add(90*time.Second))
+	}
+}
+
 // The armed wait is 4 minutes, so nothing here can wait one out; the ordering
 // itself is the proof, exactly as in the known-accounts equivalent. Two
 // consecutive throttles are what arm the wait, so a pass that still fetches

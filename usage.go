@@ -690,6 +690,13 @@ func usageBackoffUntil(now time.Time, streak int, retryAt time.Time) time.Time {
 	return until
 }
 
+// usageClockNow is newUsageFetcher's and newKnownAccountsFetcher's shared
+// clock — a package var, not a parameter, so tests can advance it without
+// changing either function's signature (the same reason usageInfoFetch and
+// keychainRead are package vars: TestMain never needs to know it exists).
+// Production code never touches it; it is always time.Now.
+var usageClockNow = time.Now
+
 // usageBackoff is one account's consecutive-429 state. nextAttempt is always
 // set (it equals the recording instant while streak is 1, i.e. "due now"), so
 // "is this account backed off" is one comparison and nothing has to special-case
@@ -947,7 +954,7 @@ func newUsageFetcher(fetch func() (*AccountUsage, error), save func(name string,
 	var fbArmedFor string
 
 	return func() (*AccountUsage, error) {
-		now := time.Now()
+		now := usageClockNow()
 		live := loadAccountEmail()
 		name := ""
 		if live != "" {

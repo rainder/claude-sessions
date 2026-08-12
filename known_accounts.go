@@ -476,7 +476,7 @@ func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func()
 		if err != nil {
 			return nil, err
 		}
-		now := time.Now()
+		now := usageClockNow()
 		mu.Lock()
 		fetchOrder := reconcileFetchOrder(order, names)
 		mu.Unlock()
