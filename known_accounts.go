@@ -530,9 +530,12 @@ func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func()
 			var r *KnownAccountUsage
 			switch {
 			case coalesced:
-				fresh := *prev
-				fresh.Stale, fresh.Reason = false, ""
-				r = &fresh
+				// served, not fresh: the package-level fresh() lives in this
+				// same file, and shadowing it here would be a trap for the
+				// next reader even though nothing in this arm calls it.
+				served := *prev
+				served.Stale, served.Reason = false, ""
+				r = &served
 				attempted = false
 			case attempted:
 				r, _ = fetchKnownAccountUsage(name, liveEmail, prev)

@@ -890,13 +890,22 @@ func TestKnownAccountsFetcherCoalescesARecentReading(t *testing.T) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	})
-	fetcher := newKnownAccountsFetcher(noSaveAccountCache)
+	// A recording save, not noSaveAccountCache: a coalesced pass must not
+	// re-persist what disk already holds, and a no-op save would leave that
+	// half of the change untested.
+	var saved []string
+	fetcher := newKnownAccountsFetcher(func(name string, _ accountCacheEntry) {
+		saved = append(saved, name)
+	})
 	res, err := fetcher()
 	if err != nil {
 		t.Fatalf("pass = %v, want a success", err)
 	}
 	if calls != 0 {
 		t.Fatalf("fetches = %d, want a fresh disk entry to be coalesced instead of fetched", calls)
+	}
+	if len(saved) != 0 {
+		t.Fatalf("saves = %v, want a coalesced pass to write nothing — disk already holds this reading", saved)
 	}
 	if len(res.Accounts) != 1 {
 		t.Fatalf("accounts = %#v, want exactly trecs", res.Accounts)
