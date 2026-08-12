@@ -260,6 +260,29 @@ func TestUsageBackoffUntil(t *testing.T) {
 	}
 }
 
+func TestUsageBackoffDueSafetyMargin(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name        string
+		nextAttempt time.Time
+		want        bool
+	}{
+		{"nextAttempt exactly now is not due — the margin must still be met", now, false},
+		{"nextAttempt just under the margin is not due", now.Add(-59 * time.Second), false},
+		{"nextAttempt exactly one margin in the past is due", now.Add(-time.Minute), true},
+		{"nextAttempt well past the margin is due", now.Add(-time.Hour), true},
+		{"a streak-1 'free' wait (nextAttempt == the arming instant) is not due before the margin elapses", now, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b := usageBackoff{streak: 1, nextAttempt: c.nextAttempt}
+			if got := b.due(now); got != c.want {
+				t.Fatalf("due() = %v, want %v (nextAttempt %v, now %v)", got, c.want, c.nextAttempt, now)
+			}
+		})
+	}
+}
+
 // liveUsageFixture is one live-account reading, distinct enough that a test can
 // tell a re-served snapshot from a freshly fetched one by its numbers.
 // FetchedAt is stamped because a reading with none is deliberately not

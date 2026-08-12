@@ -660,6 +660,16 @@ const (
 	// (see account_cache.go's loadAccountCache) is clamped to on load, so it
 	// needs the same headroom in both places.
 	usageBackoffCeiling = time.Hour
+	// usageBackoffSafetyMargin is a hard floor added on top of nextAttempt:
+	// due() never allows a real fetch earlier than nextAttempt+this, even for
+	// a streak-1 "free" wait (nextAttempt == the recording instant, wait=0
+	// above). Applied unconditionally, not just once a real multi-minute wait
+	// is armed — insurance against two processes racing to reload the same
+	// disk entry (see account_cache.go: writes are best-effort, no lock), and
+	// a deliberate, requested tightening of the "first 429 costs nothing"
+	// rule: the very next attempt after ANY throttle now waits at least this
+	// long, not zero.
+	usageBackoffSafetyMargin = time.Minute
 )
 
 // usageBackoffUntil returns when an account whose last streak consecutive
@@ -706,8 +716,12 @@ type usageBackoff struct {
 	nextAttempt time.Time
 }
 
-// due reports whether an account may be fetched again now.
-func (b usageBackoff) due(now time.Time) bool { return !now.Before(b.nextAttempt) }
+// due reports whether an account may be fetched again now. nextAttempt+
+// usageBackoffSafetyMargin, not nextAttempt alone — see that constant's doc
+// comment for why the margin applies even to a streak-1 "free" wait.
+func (b usageBackoff) due(now time.Time) bool {
+	return !now.Before(b.nextAttempt.Add(usageBackoffSafetyMargin))
+}
 
 // next advances the state after one rate-limited outcome.
 func (b usageBackoff) next(now time.Time, retryAt time.Time) usageBackoff {
