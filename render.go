@@ -611,6 +611,12 @@ type accountUsageLine struct {
 	// backoff. It still renders bars — old numbers beat no numbers — plus a dim
 	// marker so they can't pass as live.
 	stale bool
+	// fetchedAt is when info was actually fetched — used to render the stale
+	// marker's age ("stale 12m") instead of a bare fixed word. Zero when the
+	// source never stamped one (a pre-timestamp disk entry, or a line with
+	// nothing to carry): the bare "stale" word is rendered in that case, not
+	// a nonsensical multi-decade duration.
+	fetchedAt time.Time
 	// placeholder is the dim text a known account with no numbers renders
 	// instead of bars: "auth expired" for a dead credential (the actionable
 	// one — claude-switch into it and log in again), or whatever reason the
@@ -697,13 +703,13 @@ func accountLocalPart(email string) string {
 func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes []RemoteResult) []accountUsageLine {
 	var lines []accountUsageLine
 	seen := make(map[string]bool)
-	add := func(account, host string, info *UsageInfo, stale, isLocal bool) {
+	add := func(account, host string, info *UsageInfo, stale bool, fetchedAt time.Time, isLocal bool) {
 		if info == nil {
 			return
 		}
 		mine := isLocal || (account != "" && strings.EqualFold(account, local.Account))
 		if account == "" {
-			lines = append(lines, accountUsageLine{label: host, info: info, mine: mine, stale: stale})
+			lines = append(lines, accountUsageLine{label: host, info: info, mine: mine, stale: stale, fetchedAt: fetchedAt})
 			return
 		}
 		key := strings.ToLower(account)
@@ -711,12 +717,12 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 			return
 		}
 		seen[key] = true
-		lines = append(lines, accountUsageLine{label: accountLocalPart(account), email: account, info: info, mine: mine, stale: stale})
+		lines = append(lines, accountUsageLine{label: accountLocalPart(account), email: account, info: info, mine: mine, stale: stale, fetchedAt: fetchedAt})
 	}
-	add(local.Account, "local", local.Info, local.Stale, true)
+	add(local.Account, "local", local.Info, local.Stale, local.FetchedAt, true)
 	for _, r := range remotes {
 		if r.Usage != nil {
-			add(r.Usage.Account, r.Name, r.Usage.Info, r.Usage.Stale, false)
+			add(r.Usage.Account, r.Name, r.Usage.Info, r.Usage.Stale, r.Usage.FetchedAt, false)
 		}
 	}
 	// Pass 2: known (snapshot-derived) accounts. knownSeen maps each key (namespaced
@@ -751,6 +757,7 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 			email:       k.Account,
 			info:        k.Info,
 			stale:       k.Stale,
+			fetchedAt:   k.FetchedAt,
 			placeholder: knownAccountPlaceholder(k),
 		}
 		if idx, ok := knownSeen[key]; ok {
@@ -825,6 +832,9 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		suffixW int
 	}
 	var entries []entry
+	// now is captured once so every stale line in this render agrees on its
+	// age relative to a single instant, rather than drifting line to line.
+	now := time.Now()
 	codexPresent := len(codexAccounts) > 0
 
 	addClaude := func(label string, a accountUsageLine) {
@@ -838,7 +848,11 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		if segs := claudeSegs(a.info); len(segs) > 0 {
 			suffix, suffixW := "", 0
 			if a.stale {
-				suffix, suffixW = " "+dim(usageStaleText), 1+len(usageStaleText)
+				text := usageStaleText
+				if !a.fetchedAt.IsZero() {
+					text += " " + formatAge(now.Sub(a.fetchedAt).Seconds())
+				}
+				suffix, suffixW = " "+dim(text), 1+len(text)
 			}
 			entries = append(entries, entry{label: label, segs: segs, suffix: suffix, suffixW: suffixW})
 		}
