@@ -857,6 +857,24 @@ func (s *resumePickerState) handle(key string) (confirm, cancel bool) {
 	return false, false
 }
 
+// resumeSearchText builds one filter haystack per session, joining the raw
+// (untruncated) host/name/dir/branch/prompt fields. resumeRows' autocompact
+// ladder truncates these same fields for display once the terminal is too
+// narrow to show them in full, and previously that truncated text was what
+// got searched — a term past the cutoff (e.g. deep into a shrunk PROMPT
+// column) silently never matched even though the underlying session had it.
+func resumeSearchText(sessions []ResumableSession, localName string) []string {
+	out := make([]string, len(sessions))
+	for i, s := range sessions {
+		host := s.Host
+		if host == "" {
+			host = localName
+		}
+		out[i] = strings.Join([]string{host, s.Name, s.CWD, s.GitBranch, s.FirstPrompt}, " ")
+	}
+	return out
+}
+
 // resumeRowIndent is the left margin the column header and every picker row
 // share. Rows used to sit 3 columns in behind a " ▶ " marker while the header
 // sat 1 column in; the marker is gone (selection is a background highlight now)
@@ -902,9 +920,20 @@ func pickResumeSession(title string, sessions []ResumableSession, localHome, loc
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
 
+	// searchText holds one untruncated haystack per session, independent of
+	// terminal width. Filtering against the rendered lines instead (as this
+	// used to) misses matches that fall past a column the autocompact ladder
+	// has shrunk — e.g. a narrow PROMPT column cut to its 10-char floor hides
+	// "DR-3173" from a search over "new worktree. DR-3173".
+	searchText := resumeSearchText(sessions, localName)
+
 	var lines []string
 	sync := func() (filtered []string, indices []int) {
-		filtered, indices = filterNewPickerLines(lines, state.Filter)
+		_, indices = filterNewPickerLines(searchText, state.Filter)
+		filtered = make([]string, len(indices))
+		for i, idx := range indices {
+			filtered[i] = lines[idx]
+		}
 		state.RowCount = len(filtered)
 		if state.Row >= state.RowCount {
 			state.Row = 0

@@ -576,6 +576,32 @@ func TestResumeRowsAlignmentAndFilter(t *testing.T) {
 	}
 }
 
+// TestResumeSearchTextSurvivesPromptTruncation pins the bug where searching
+// the resume picker missed a match because the term sat past the cutoff of a
+// PROMPT column the autocompact ladder had shrunk to fit a narrow terminal —
+// filtering must use the raw session data, not the width-truncated rendered
+// row.
+func TestResumeSearchTextSurvivesPromptTruncation(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	sessions := []ResumableSession{
+		{SessionID: "remote01", Host: "agent-workstation", CWD: "/home/u/repo/.claude/worktrees/feature-x", GitBranch: "feature-x-branch", FirstPrompt: "new worktree. DR-3173", MessageCount: 5, ModifiedAt: now.Add(-1 * time.Hour)},
+		{SessionID: "local001", CWD: "/home/u/other", GitBranch: "main", FirstPrompt: "unrelated work", MessageCount: 2, ModifiedAt: now.Add(-2 * time.Hour)},
+	}
+
+	// A narrow width forces PROMPT down toward its floor, cutting "new
+	// worktree. DR-3173" well before "3173" — filtering the rendered lines
+	// (the old behavior) would find nothing.
+	lines, _ := resumeRows(sessions, "/home/u", "mac", 60, now)
+	if _, idx := filterNewPickerLines(lines, "3173"); len(idx) != 0 {
+		t.Fatalf("rendered-line filter unexpectedly matched %v at narrow width; row = %q", idx, stripSGR(lines[0]))
+	}
+
+	searchText := resumeSearchText(sessions, "mac")
+	if _, idx := filterNewPickerLines(searchText, "3173"); len(idx) != 1 || idx[0] != 0 {
+		t.Errorf("resumeSearchText filter '3173' matched %v, want [0]", idx)
+	}
+}
+
 // colStart returns the rune index where sub first appears in s, or -1.
 func colStart(s, sub string) int {
 	i := strings.Index(s, sub)
