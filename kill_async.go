@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sync"
 	"syscall"
 
@@ -37,10 +38,14 @@ type killJob struct {
 	closed  bool
 }
 
-// startKillJob kicks off the kill in the background and returns immediately.
-// If the pipe cannot be created the job still runs — it simply never wakes
-// the main loop, so its result surfaces on the next tick/keypress instead.
-func startKillJob(s Session, worktree string) *killJob {
+// startKillJob kicks off run in the background and returns immediately. If
+// the pipe cannot be created the job still runs — it simply never wakes the
+// main loop, so its result surfaces on the next tick/keypress instead (see
+// partitionKillJobs, which polls unconditionally for exactly this reason).
+// run is the injectable seam between the two kill paths: startLocalKillJob
+// and startRemoteKillJob below supply it, so this function itself knows
+// nothing about tmux, HTTP, or worktrees.
+func startKillJob(s Session, run func() killJobResult) *killJob {
 	j := &killJob{session: s, wakeR: -1, wakeW: -1}
 	var fds [2]int
 	if err := unix.Pipe(fds[:]); err == nil {
@@ -51,17 +56,7 @@ func startKillJob(s Session, worktree string) *killJob {
 		j.wakeR, j.wakeW = fds[0], fds[1]
 	}
 	go func() {
-		res := killJobResult{session: s}
-		if err := localReattest(s.PID, s.SessionID); err != nil {
-			res.err = err
-		} else if err := KillSession(s); err != nil {
-			res.err = err
-		} else if worktree != "" {
-			res.worktree = worktree
-			if err := RemoveWorktree(worktree); err != nil {
-				res.removeErr = err
-			}
-		}
+		res := run()
 		j.mu.Lock()
 		j.done = true
 		j.result = res
@@ -73,6 +68,66 @@ func startKillJob(s Session, worktree string) *killJob {
 		j.mu.Unlock()
 	}()
 	return j
+}
+
+// startLocalKillJob runs a local session kill (and any worktree cleanup) in
+// the background. It exists because killSessionWith (migrate.go) waits up to
+// 5s for a tmux pane's process to actually die after `tmux kill-session`
+// returns — blocking the TUI on that wait after every confirmed kill was the
+// "killing dialog" hang this replaces.
+func startLocalKillJob(s Session, worktree string) *killJob {
+	return startKillJob(s, func() killJobResult {
+		res := killJobResult{session: s}
+		if err := localReattest(s.PID, s.SessionID); err != nil {
+			res.err = err
+		} else if err := KillSession(s); err != nil {
+			res.err = err
+		} else if worktree != "" {
+			res.worktree = worktree
+			if err := RemoveWorktree(worktree); err != nil {
+				res.removeErr = err
+			}
+		}
+		return res
+	})
+}
+
+// startRemoteKillJob runs a remote session kill (and any worktree cleanup
+// the server reports) in the background. Sibling of startLocalKillJob: the
+// HTTP round trip to killRemote/removeRemoteWorktree is exactly the same
+// kind of multi-second wait a local kill's tmux-death poll is, so it gets
+// the same treatment — actKillRemote used to block the TUI in cooked mode
+// for the life of both requests.
+func startRemoteKillJob(s Session) *killJob {
+	return startKillJob(s, func() killJobResult {
+		res := killJobResult{session: s}
+		r, err := killRemote(s.Host, s.PID, s.SessionID)
+		if err != nil {
+			res.err = err
+			return res
+		}
+		if !r.OK {
+			// codeSessionMismatch/codeNotLive mean "your row is stale,
+			// refresh" — never "retry" (see CLAUDE.md's action-precondition
+			// section) — so a row that outlived its own already-successful
+			// kill (still shown because the refresh hasn't landed yet) reads
+			// as a second, no-op kill rather than a failure: killInFlight
+			// only guards a job still running, not the gap between one
+			// landing and the list catching up.
+			if r.Code == codeSessionMismatch || r.Code == codeNotLive {
+				return res
+			}
+			res.err = fmt.Errorf("%s", r.Error)
+			return res
+		}
+		if r.Worktree != nil {
+			res.worktree = r.Worktree.Path
+			if err := removeRemoteWorktree(s.Host, r.Worktree.Path); err != nil {
+				res.removeErr = err
+			}
+		}
+		return res
+	})
 }
 
 // snapshot reports the job's result and whether it has finished yet.

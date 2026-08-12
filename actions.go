@@ -262,17 +262,19 @@ func actKill(c *actCtx) {
 	// already ran without leaving raw mode, so there is nothing left to tear
 	// down here — the caller picks up c.killJob and reports progress via the
 	// toast instead of a blocking cooked-mode dialog.
-	c.killJob = startKillJob(*s, worktree)
+	c.killJob = startLocalKillJob(*s, worktree)
 }
 
 // finishKillJob applies a completed background kill's result and returns the
 // toast text to show, or "" when the result was already reported some other
 // way (the interactive resurrect prompt below, or a successful attach into
-// the resumed worktree). A worktree left dirty by the kill still needs a
+// the resumed worktree). A worktree left dirty by a LOCAL kill still needs a
 // human decision, which is why this — unlike the kill itself — runs
 // synchronously on the main loop: it owns the raw/cooked terminal handoff
 // that a background goroutine can't safely perform (see CLAUDE.md's "single
-// stdin consumer" invariant).
+// stdin consumer" invariant). A remote kill has no such prompt — resurrecting
+// into a worktree needs local git state, so a dirty remote worktree just
+// reports the failure in the toast, same as actKillRemote always has.
 func finishKillJob(c *actCtx, res killJobResult) string {
 	if res.err != nil {
 		return fmt.Sprintf("kill failed: %v", res.err)
@@ -280,6 +282,9 @@ func finishKillJob(c *actCtx, res killJobResult) string {
 	label, _ := res.session.DisplayName()
 	if res.worktree == "" || res.removeErr == nil {
 		return fmt.Sprintf("killed %s", label)
+	}
+	if res.session.Host != "" {
+		return fmt.Sprintf("killed %s, worktree removal failed: %v", label, res.removeErr)
 	}
 	c.prepareLineOutput()
 	defer c.enterRaw()

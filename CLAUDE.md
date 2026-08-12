@@ -287,54 +287,71 @@ worktree remove` from the main checkout — never `--force`, so a dirty worktree
 survives and git's refusal is what the user sees — in `actKill` that refusal
 now offers a recovery step, below. The branch is never deleted.
 
-**Local kill (and its worktree cleanup) runs in the background, not inline in
-`actKill`** (`kill_async.go`): `KillSession` can block up to 5s waiting for a
-tmux pane's process to actually die after `tmux kill-session` returns
-(`killSessionWith`, migrate.go), and blocking the whole TUI on that wait after
-every confirmed kill was the "killing dialog" hang this replaced. Once the
-overlay confirms, `actKill` resolves the worktree target (still synchronous —
-the survivors check needs the pre-kill session list) then hands
-`localReattest` + `KillSession` + any `RemoveWorktree` to `startKillJob`,
-which runs them in a goroutine and returns a `*killJob` immediately; the TUI
-stays fully interactive with a "killing …" toast in place of the old blocking
-prompt. `startKillJob` follows `previewPane`'s wake-pipe pattern so the main
-loop's `select` wakes the instant the job lands, but `finishDoneKillJobs`
-(tui.go) also checks every poll tick unconditionally — via the pure
-`partitionKillJobs` (kill_async.go) — so a job whose pipe failed to create
-still gets picked up rather than hanging forever silently. A second Ctrl+X on
-the same row while its job is still in flight is refused
-(`actCtx.killInFlight`, backed by `killJobs` in tui.go): the row stays in the
-list until the job lands, so without the guard a duplicate confirm would race
-a still-live `localReattest` and re-attempt worktree removal the first job
-already handled.
+**Both TUI kill paths run in the background, not inline in `actKill`/
+`actKillRemote`** (`kill_async.go`). Locally, `KillSession` can block up to 5s
+waiting for a tmux pane's process to actually die after `tmux kill-session`
+returns (`killSessionWith`, migrate.go); remotely, `killRemote` and
+`removeRemoteWorktree` are each a multi-second HTTP round trip. Blocking the
+whole TUI in cooked mode on either — as both paths used to — was the "killing
+dialog" hang this replaced. Once the overlay confirms, `actKill` resolves the
+worktree target (still synchronous — the survivors check needs the pre-kill
+session list) then hands `localReattest` + `KillSession` + any
+`RemoveWorktree` to `startLocalKillJob`; `actKillRemote` hands `killRemote` +
+any `removeRemoteWorktree` to `startRemoteKillJob`. Both are thin wrappers
+around the shared `startKillJob(s, run)`, which runs `run` in a goroutine and
+returns a `*killJob` immediately — the TUI stays fully interactive with a
+"killing …" toast in place of the old blocking prompt. `startKillJob` follows
+`previewPane`'s wake-pipe pattern so the main loop's `select` wakes the
+instant the job lands, but `finishDoneKillJobs` (tui.go) also checks every
+poll tick unconditionally — via the pure `partitionKillJobs` (kill_async.go)
+— so a job whose pipe failed to create still gets picked up rather than
+hanging forever silently. A second Ctrl+X on the same row while its job is
+still in flight is refused (`actCtx.killInFlight`, backed by `killJobs` in
+tui.go, keyed on host+PID so it covers both paths): the row stays in the list
+until the job lands, so without the guard a duplicate confirm would race a
+still-live `localReattest`/`killRemote` and re-attempt worktree removal the
+first job already handled. `killInFlight` only covers a job that is still
+*running*, not the gap between one landing and the session-list refresh
+catching up — a row can still show a session whose kill already succeeded.
+`startRemoteKillJob` treats that gap as a no-op rather than a failure: a
+second remote kill against an already-gone session answers `not_live` or
+`session_mismatch` (`codeNotLive`/`codeSessionMismatch`, server.go — "your row
+is stale, refresh", never "retry"), and the job reports success instead of
+surfacing a `kill failed` toast over a kill that actually worked. Local kill
+has no equivalent path: `localReattest`'s own refusal on an already-gone PID
+is a genuine failure to report, since there is no server-side second kill to
+have already succeeded.
 
-`finishKillJob`'s worktree-remove failure offers to resurrect: `git worktree
-remove` refuses on a dirty/untracked tree, and the alternative to leaving the
-user stranded is resuming the session that was just killed, right back into
-the same still-on-disk worktree checkout. This step — unlike the kill itself —
-runs synchronously on the main loop once the background job's result lands,
-because it owns the raw/cooked terminal handoff a background goroutine can't
-safely perform (see "Single stdin consumer" above). A `y` answer calls
-`ResumeSessionInWorktree(s.SessionID, repoRoot, name)` — the same primitive the
-`r` resume picker uses for a worktree session, which works whether or not the
-checkout survived, since `--worktree <name>` recreates it if needed. On success
-the new tmux name is stashed on `c.spawnedTmux` (the same field `actResume` and
-`actNew` use) and `runTmuxAttach` takes over the terminal immediately, mirroring
-`actResume`'s own resume→attach sequence rather than leaving the user back at
-the session list. A `N` answer, or a failed resume, falls through to the
-existing `pauseForKey` pause. This is local-TUI-only (`actKill`/`finishKillJob`);
-`cmdKill` and the remote kill path (`actKillRemote`) still block synchronously
-and report the failure inline — the 5s tmux-death wait is tolerable there
-since a CLI invocation or a remote round trip was never going to be instant
-anyway.
+`finishKillJob`'s worktree-remove failure offers to resurrect **only for a
+local kill**: `git worktree remove` refuses on a dirty/untracked tree, and the
+alternative to leaving the user stranded is resuming the session that was
+just killed, right back into the same still-on-disk worktree checkout. This
+step — unlike the kill itself — runs synchronously on the main loop once the
+background job's result lands, because it owns the raw/cooked terminal
+handoff a background goroutine can't safely perform (see "Single stdin
+consumer" above). A `y` answer calls `ResumeSessionInWorktree(s.SessionID,
+repoRoot, name)` — the same primitive the `r` resume picker uses for a
+worktree session, which works whether or not the checkout survived, since
+`--worktree <name>` recreates it if needed. On success the new tmux name is
+stashed on `c.spawnedTmux` (the same field `actResume` and `actNew` use) and
+`runTmuxAttach` takes over the terminal immediately, mirroring `actResume`'s
+own resume→attach sequence rather than leaving the user back at the session
+list. A `N` answer, or a failed resume, falls through to the existing
+`pauseForKey` pause. A **remote** kill's worktree-remove failure has no such
+prompt — resurrecting needs local git state `finishKillJob` has no access to
+over HTTP — so it just reports the failure straight to the toast, matching
+what `actKillRemote` always did on this path, just non-blocking now.
+`cmdKill` still blocks synchronously and reports the failure inline — a CLI
+invocation was never going to be instant anyway, so there is no dialog to
+unblock.
 
 Three entry points: `actKill`/`finishKillJob` (local TUI — the kill itself is
 confirmed up front, but a worktree left idle by it is removed outright once
-the background job lands, no second confirm), the TUI's remote kill path
-(`actKillRemote`, same no-second-confirm rule against the server's `worktree`
-response, still synchronous), `cmdKill` (`--remove-worktree`, or a prompt when
-interactive; a bare `-y` run keeps the worktree), and the server, which puts a
-`worktree` object in the kill response and removes via authed
+the background job lands, no second confirm), `actKillRemote`/`finishKillJob`
+(remote TUI, same no-second-confirm rule and now also backgrounded, but no
+resurrect prompt — see above), `cmdKill` (`--remove-worktree`, or a prompt
+when interactive; a bare `-y` run keeps the worktree), and the server, which
+puts a `worktree` object in the kill response and removes via authed
 `POST /worktree/remove`. That endpoint takes a client-supplied path, so
 `validateWorktreePath` gates it (absolute, clean, worktree root, real
 worktree) and the handler re-checks the live session list.
@@ -770,15 +787,9 @@ exactly what a chronically throttled account never becomes. So both sides kept
 paying a failed round trip every 2 minutes, forever, against the endpoint doing
 the throttling. Every fetch path now counts consecutive `rate limited` outcomes
 per account and skips the fetch outright while a wait is armed: the first 429
-adds nothing to the schedule (most heal within one tick — only an explicit
+imposes no wait of its own (most heal within one tick — only an explicit
 `Retry-After` can delay it), the second waits `usageBackoffSecond` (4min), the
-third and beyond `usageBackoffMax` (8min, the cap). "Adds nothing to the
-schedule" is not "retries immediately": `usageBackoff.due()` compares against
-`nextAttempt + usageBackoffSafetyMargin` (1min), **unconditionally**, so the
-next attempt after ANY throttle — the streak-1 one included — waits out that
-floor first. See "A hard floor on the backoff schedule" below for why the
-blanket form was chosen over arming the margin only alongside a real
-multi-minute wait. A 429's `Retry-After`
+third and beyond `usageBackoffMax` (8min, the cap). A 429's `Retry-After`
 (`parseRetryAfter`, either RFC 9110 form) may only *lengthen* that wait, bounded
 by `usageBackoffCeiling` (1h — raised from 15min after a live 429 was observed
 asking for ~31.6min, Retry-After: 1895, which the old ceiling silently
@@ -862,10 +873,7 @@ trustworthy about whether the next attempt is part of the same run) — this
 was fine when backoff state was loaded once at process startup, but became a
 live bug once loading happens on **every pass**: a streak of 1 always has
 `BackoffNextAttempt` equal to the instant it was recorded (the first throttle
-adds no wait of its own to the schedule, by design — see `usageBackoffUntil`;
-`usageBackoffSafetyMargin` came later and lives in `due()`, not in the
-recorded deadline, so what is stored is still exactly the recording instant),
-which means it reads
+imposes no wait, by design — see `usageBackoffUntil`), which means it reads
 as "elapsed" on the very next load, microseconds later, as an entirely
 ordinary part of back-to-back polling. Dropping the streak there silently
 prevented it from EVER reaching 2 and arming a real wait —
@@ -949,11 +957,7 @@ disk seed with a non-nil `Info` is force-marked `Stale` by `loadAccountCache`
 itself — this is a disk read, not a completed poll, so nothing has confirmed
 the numbers as current — and an unstamped reading (a pre-timestamp disk
 write) is simply not carryable, since its vintage is unknown rather than
-merely old. The coalescing path (see "Read-before-fetch coalescing" below) is
-the one place that force-marked `Stale` is un-marked again, and only for an
-entry inside `usageCoalesceWindow`: at under a minute old, the poll that wrote
-it is recent enough to stand in for this pass's own. Everywhere else the flag
-holds, including on a carry, which is never cleared.
+merely old.
 
 There is no more `saveOnceUsage`-style wrapper needed on the live side:
 `saveAccountCache` is called by `newUsageFetcher` itself, directly, only from
@@ -1132,125 +1136,6 @@ fixed in this pass:**
   fetcher hands back for the current pass. Not a bug: nothing reads the
   on-disk field expecting anything else.
 
-**Read-before-fetch coalescing.** One file per account bought a second thing
-beyond continuity across a switch: two `claude-sessions` processes on the same
-host — two TUIs, or a TUI and a one-shot CLI invocation — now share it, so the
-second one does not have to ask Anthropic what the first asked a moment ago.
-Both were spending the same account's shared per-token budget on requests
-whose answers were byte-identical. So before either fetcher makes a real call
-— `newUsageFetcher` (usage.go) and `newKnownAccountsFetcher`'s per-account
-loop (known_accounts.go) — it looks at the entry it has **already loaded** for
-this pass and skips the round trip when that reading is eligible, not
-future-dated, and younger than `usageCoalesceWindow`.
-
-The check sits **inside** the `backoff.due(now)` branch — the one already
-about to hit the network — never in front of it. An armed wait is untouched;
-this only ever replaces "I am about to fetch" with "someone already has".
-Three things about what it then serves:
-
-Eligibility is the **existing** `liveCarryable`/`carryable` gate, not a new
-ad-hoc condition. Anything not safe to carry forward today is not safe to
-coalesce onto either, so this changes only HOW recently a trusted reading must
-have been taken, never WHETHER it is trusted.
-
-The re-serve is marked `Stale: false` — fresh, not carried — and the
-known-accounts arm clears `Reason` alongside it. That is the whole point: a
-reading under a minute old *is* current, and dressing it as stale would hang a
-dim `stale` marker off a perfectly live number and drop the account out of
-`localFreshAccountEmails`. A coalesce is a success standing in for a request,
-not a failure standing in for one (which is what the backoff branch above
-synthesizes, and why the two branches read differently).
-
-And nothing is persisted — no `save`, no `persist`. Partly because the disk
-entry already *is* this reading, so a write would be a no-op; but the
-load-bearing half is that **not** re-stamping `FetchedAt` is what stops a
-coalesced read from refreshing the window's own clock. If it did, two
-closely-phased processes would each keep pushing the deadline forward off the
-other's read and neither would ever fetch again — the account would freeze on
-one reading forever. The two paths express this differently and are pinned
-differently. The live one returns before `persist` is ever reached, so there
-is no call to omit; the known-accounts one has to write *something* every pass
-(the backoff half) and so carries an explicit `if !coalesced { save(...) }`
-guard, which `TestKnownAccountsFetcherCoalescesARecentReading` pins with a
-recording `save` — an earlier version of that test passed `noSaveAccountCache`
-and stayed green with the guard deleted, which is how it came to be written
-that way. Note that "nothing is persisted" is a *disk* statement only: the
-live path still calls `mirrorFallback` on the coalesced return, so the `fbXXX`
-fallback stays in step with what the disk path just served.
-
-`usageCoalesceWindow` is `usageRefreshInterval / 2` (60s), and half is
-deliberate rather than tidy: a lone process's own next natural tick lands one
-full `usageRefreshInterval` after its own fetch, comfortably outside the
-window, so it can never coalesce against itself and throttle its own polling
-down to nothing (`TestUsageFetcherDoesNotSelfCoalesceAtItsOwnNextTick`). An
-earlier version of this design used the full interval and was rejected on
-independent review for exactly that self-throttle. Only two fetches genuinely
-landing close together — a launch burst, or two long-running processes whose
-tickers happen to stay closely phased — ever trigger it. One visible
-consequence of the window is that `usagePoller.Resume`'s immediate re-fetch
-kick (returning from an interactive program) can now be answered by an
-under-a-minute-old reading instead of a request. That is the desirable
-direction, not a suppressed kick: an attach/detach/attach cycle is the least
-justified moment for a burst of fresh requests and one of the likeliest.
-
-A coalesced reading is not `Stale`, so it does enter `localFreshAccountEmails`
-and rides along in `FetchRemoteUsage`'s `?ignore=` list exactly like a fetched
-one. No consequence today — `/usage` no longer reads that parameter at all
-(below) — and the right answer anyway if a scoped fetch is ever re-added,
-since the reading really is fresh.
-
-**A hard floor on the backoff schedule.** `usageBackoff.due()` now requires
-`now >= nextAttempt + usageBackoffSafetyMargin` (1min), applied
-**unconditionally** — including to the streak-1 "free" deadline, which
-`usageBackoffUntil` still computes as the recording instant itself. This is a
-deliberate blanket floor, chosen by explicit user decision during design over
-the narrower alternative of arming the margin only once a real multi-minute
-wait exists. It changes a rule documented above for as long as the backoff has
-existed: "the first 429 is free, retry on the next ordinary tick" is now "the
-first 429 adds nothing of its own, and the next attempt still waits a minute".
-
-The tightening is the second of the margin's two reasons, and the first is the
-one that ties this half of the change to the other: two processes share one
-per-account file that is written best-effort with **no lock** (see the
-lost-write discussion above), so a streak recorded by one can be overwritten by
-the other's own pass reading a moment-older value. A floor under every deadline
-is insurance against that race — whatever streak survives the scramble, the
-account still gets at least a minute of quiet. Coalescing answers the same
-underlying fact from the other side (share the reading rather than the wait),
-which is why the two landed together: both are what "one unlocked file, two
-processes" costs, and neither needs a lock to be worth having.
-The margin lives in `due()` rather than in the recorded deadline on purpose —
-`usageBackoffUntil` stays the pure schedule, the floor stays in one place, and
-what `account_cache.go` persists is unchanged (which is why the
-already-elapsed-deadline narrative above still describes the stored value
-correctly).
-
-Two gaps coalescing opens are accepted rather than closed:
-
-- *An unsnapshotted live account gets no cross-process coalescing.* Coalescing
-  is a property of the **disk-backed** path: it reads the shared per-account
-  file, which is what another process can have written. The `name == ""` arm
-  of `newUsageFetcher` — a live account with no claude-switch snapshot, or an
-  unreadable identity — returns before ever reaching the coalesce check and
-  runs entirely off the in-memory `fbLast`/`fbBackoff`/`fbArmedFor` vars,
-  which no other process can see. So that account keeps paying a request per
-  process per tick, exactly as before. Consistent with what the `fbXXX`
-  fallback already is: a narrow degradation for an account with nowhere to
-  persist anything, not a second implementation of the disk path.
-- *A wrong-identity mismatch can be masked for up to one window (60s).*
-  `carryable`/`liveCarryable` do **not** consult `Verified` — they test
-  numbers-present plus claimed-identity equality, and `Verified` gates only
-  the narrower wrong-identity carry inside `knownAccountUsage`'s `failed`
-  helper. So a pass whose real fetch would have run the profile probe and
-  caught a `wrong identity` can instead coalesce onto a prior reading that
-  still looks plausible. Bounded (the reading has to be under 60s old) and
-  self-healing (the first pass past the window fetches and detects it), and
-  the same on both the live and known-accounts paths. Tightening it would
-  mean giving coalescing a *stricter* gate than the ordinary carry-forward
-  path it borrows from, which would be a strange asymmetry to defend: the
-  header already shows carried numbers for far longer than 60s under exactly
-  the same identity rules.
-
 `localFreshAccountEmails` excludes a `Stale` live account for the identical
 reason it already excluded a `Stale` known one, and `dedupeAccounts` threads
 `Stale` into its pass-1 `add` so a carried live or remote line takes the same dim
@@ -1320,22 +1205,11 @@ pass — a live line always wins over any host's snapshot copy of the same email
 and a failed entry keeps its line instead of being dropped: an `Expired` one as
 the dim `auth expired` placeholder, a transient one as a dim placeholder naming
 its `Reason` (`rate limited`, `bad snapshot`, …), and a `Stale` one as its bars
-plus a dim `stale` marker. That marker now carries the reading's **age** —
-`stale 12m`, `stale 2h` — rather than a bare fixed word: `usageStaleText` is
-only its prefix, and `writeUsageHeader` appends `formatAge` (render.go, the
-same helper the AGE column uses) over `now - a.fetchedAt`, threaded in from
-`AccountUsage`/`KnownAccountUsage.FetchedAt` as `accountUsageLine.fetchedAt`.
-A zero `fetchedAt` — a pre-timestamp disk entry, or a line with nothing to
-carry — falls back to the bare word rather than printing a multi-decade
-duration. This makes the marker **variable width**, which the sizing rule
-below has to measure rather than assume. (A coalesced reading is not `Stale`
-and so shows no marker and no age at all: it is current, not carried.)
-The marker is appended after the **last** segment,
+plus a dim `stale` marker. That marker is appended after the **last** segment,
 which is the one place `segTrailerText` never pads or aligns, so it shifts no
 column on any other line (`usageSegsLine` exists to make that append possible).
 It does still take part in **sizing**: `writeUsageHeader` carries its display
-width — of the composed text, age included — as that entry's `suffixW` into
-`lineBarW`/`usageLineFixedWidth`, so the
+width as that entry's `suffixW` into `lineBarW`/`usageLineFixedWidth`, so the
 shared bar width shrinks to leave room for it. Alignment and sizing pulling
 apart like that is deliberate, and leaving the marker out of *both* was a real
 bug — with two collision-promoted full-email labels at ~64 columns the bars

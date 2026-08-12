@@ -332,14 +332,18 @@ func fetchRemotePresets(host string) ([]CommandPreset, error) {
 	return response.Presets, nil
 }
 
-// actKillRemote handles `k` on a remote-selected row.
+// actKillRemote handles `k` on a remote-selected row. Like actKill's local
+// path, the actual kill (and any worktree cleanup the server reports) runs in
+// the background via startRemoteKillJob: killRemote/removeRemoteWorktree are
+// each a multi-second HTTP round trip, and blocking the TUI in cooked mode
+// for both — as this used to — is the same "killing dialog" hang actKill's
+// local path was fixed for.
 func actKillRemote(c *actCtx) {
 	s := c.selected()
 	if s == nil {
 		return
 	}
-	host, pid := s.Host, s.PID
-	question := fmt.Sprintf("kill PID %d on %s?", pid, host)
+	question := fmt.Sprintf("kill PID %d on %s?", s.PID, s.Host)
 	if s.NotIdle() {
 		question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — killing will interrupt it", s.StatusDisplay())) + "\n" + question
 	}
@@ -349,30 +353,7 @@ func actKillRemote(c *actCtx) {
 	if !confirmed {
 		return
 	}
-	c.prepareLineOutput()
-	defer c.enterRaw()
-
-	fmt.Print("\nsending remote kill... ")
-	r, err := killRemote(host, pid, s.SessionID)
-	if err != nil {
-		fmt.Printf("failed: %v\n", err)
-		pauseForKey(c.fd, c.oldState)
-		return
-	}
-	if !r.OK {
-		fmt.Printf("failed: %s\n", r.Error)
-		pauseForKey(c.fd, c.oldState)
-		return
-	}
-	if r.Worktree == nil {
-		return
-	}
-	// The server decided this kill emptied a worktree; remove it outright.
-	fmt.Print("\nremoving worktree... ")
-	if err := removeRemoteWorktree(host, r.Worktree.Path); err != nil {
-		fmt.Printf("failed: %v\n", err)
-		pauseForKey(c.fd, c.oldState)
-	}
+	c.killJob = startRemoteKillJob(*s)
 }
 
 // removeRemoteWorktree asks host's server to remove a worktree checkout.
