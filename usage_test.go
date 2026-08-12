@@ -420,6 +420,7 @@ func TestFakeClockControlsUsageClockNow(t *testing.T) {
 func TestUsageFetcherBacksOffRepeatedThrottles(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
+	clock := fakeClock(t, time.Now())
 	calls := 0
 	throttled := true
 	good := liveUsageFixture(21)
@@ -431,7 +432,8 @@ func TestUsageFetcherBacksOffRepeatedThrottles(t *testing.T) {
 		return good, nil
 	}, saveAccountCache)
 
-	// A first throttle imposes no wait at all — most heal within one tick.
+	// A first throttle imposes no wait of its own, but the safety margin
+	// still requires real elapsed time before the next attempt.
 	if _, err := fetcher(); err == nil {
 		t.Fatal("pass 1 = nil error, want the throttle reported")
 	}
@@ -440,6 +442,7 @@ func TestUsageFetcherBacksOffRepeatedThrottles(t *testing.T) {
 	}
 	// A success ends the streak before it can build.
 	throttled = false
+	*clock = clock.Add(2 * time.Minute)
 	u, err := fetcher()
 	if err != nil || u != good {
 		t.Fatalf("pass 2 = (%#v, %v), want the fresh numbers", u, err)
@@ -448,23 +451,30 @@ func TestUsageFetcherBacksOffRepeatedThrottles(t *testing.T) {
 		t.Fatalf("fetches = %d, want the pass after one throttle to fetch", calls)
 	}
 
-	// Now two consecutive throttles. The second is what arms the wait — which
-	// also proves the success above cleared the streak, since otherwise this
-	// second pass would already have been skipped.
+	// Now two consecutive throttles, each separated by enough simulated time
+	// to clear both the margin and the coalesce window. The second throttle
+	// is what arms the wait — which also proves the success above cleared
+	// the streak, since otherwise this second pass would already have been
+	// skipped.
 	throttled = true
-	for i := 3; i <= 4; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("pass %d = nil error, want the throttle reported", i)
-		}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 3 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 4 = nil error, want the throttle reported")
 	}
 	if calls != 4 {
 		t.Fatalf("fetches = %d, want both throttled passes to have fetched", calls)
 	}
 
-	// Inside the armed wait the endpoint is not touched, and the skip reads as an
-	// ordinary success carrying the last good numbers: an error here would engage
-	// usagePoller.run's generic 5s-doubling retry, which is the burst this whole
-	// mechanism exists to prevent.
+	// Inside the armed wait (4 minutes) the endpoint is not touched, and the
+	// skip reads as an ordinary success carrying the last good numbers: an
+	// error here would engage usagePoller.run's generic 5s-doubling retry,
+	// which is the burst this whole mechanism exists to prevent. No further
+	// clock advance — this call happens immediately after pass 4, well
+	// inside the 4-minute wait plus its own 1-minute margin.
 	u, err = fetcher()
 	if calls != 4 {
 		t.Fatalf("fetches = %d, want the pass inside the backoff to skip the endpoint", calls)
@@ -509,6 +519,7 @@ func TestUsageFetcherBacksOffOnlyOnThrottles(t *testing.T) {
 func TestUsageFetcherColdStartStopsFetchingOnceBackedOff(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
+	clock := fakeClock(t, time.Now())
 	calls := 0
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		calls++
@@ -516,10 +527,12 @@ func TestUsageFetcherColdStartStopsFetchingOnceBackedOff(t *testing.T) {
 	}, saveAccountCache)
 	// The first throttle imposes no wait; the second is what arms it. Both are
 	// real attempts, and both report the error they actually got.
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("pass %d = nil error, want the throttle reported", i)
-		}
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 2 = nil error, want the throttle reported")
 	}
 	if calls != 2 {
 		t.Fatalf("fetches = %d, want both throttled passes to have fetched", calls)
@@ -542,16 +555,19 @@ func TestUsageFetcherPlaceholdsWhenIdentityIsUnconfirmable(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeLiveAccount(t, home, "andy@trecs.aero")
 	writeSnapshotFixture(t, home, "trecs", "tok-trecs", "andy@trecs.aero")
+	clock := fakeClock(t, time.Now())
 
 	calls := 0
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	}, saveAccountCache)
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("pass %d = nil error, want the throttle reported", i)
-		}
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 2 = nil error, want the throttle reported")
 	}
 	// Whose numbers these are can no longer be established.
 	if err := os.Remove(filepath.Join(home, ".claude.json")); err != nil {
@@ -572,15 +588,18 @@ func TestUsageFetcherCarriesNumbersRegardlessOfAge(t *testing.T) {
 	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
 	old := liveUsageFixtureAged(37, 6*time.Hour)
 	saveAccountCache("trecs", accountCacheEntry{Account: old.Account, Info: old.Info, FetchedAt: old.FetchedAt})
+	clock := fakeClock(t, time.Now())
 	calls := 0
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	}, saveAccountCache)
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("pass %d = nil error, want the throttle reported", i)
-		}
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 2 = nil error, want the throttle reported")
 	}
 	u, err := fetcher()
 	if calls != 2 {
@@ -600,15 +619,19 @@ func TestUsageFetcherReservesRepeatedlyWithoutMarkingItsOwnCopy(t *testing.T) {
 	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
 	good := liveUsageFixture(37)
 	saveAccountCache("trecs", accountCacheEntry{Account: good.Account, Info: good.Info, FetchedAt: good.FetchedAt})
+	clock := fakeClock(t, time.Now())
+	*clock = clock.Add(usageCoalesceWindow + time.Second)
 	calls := 0
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	}, saveAccountCache)
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("pass %d = nil error, want the throttle reported", i)
-		}
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 2 = nil error, want the throttle reported")
 	}
 	first, err := fetcher()
 	if err != nil {
@@ -637,15 +660,19 @@ func TestUsageFetcherReservesAPersistedEntry(t *testing.T) {
 	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
 	seed := liveUsageFixture(37)
 	saveAccountCache("trecs", accountCacheEntry{Account: seed.Account, Info: seed.Info, FetchedAt: seed.FetchedAt})
+	clock := fakeClock(t, time.Now())
+	*clock = clock.Add(usageCoalesceWindow + time.Second)
 	calls := 0
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	}, saveAccountCache)
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("pass %d = nil error, want the throttle reported", i)
-		}
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 2 = nil error, want the throttle reported")
 	}
 	u, err := fetcher()
 	if calls != 2 {
@@ -800,14 +827,18 @@ func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
 	calls := 0
 	seed := liveUsageFixture(37)
 	saveAccountCache("trecs", accountCacheEntry{Account: seed.Account, Info: seed.Info, FetchedAt: seed.FetchedAt})
+	clock := fakeClock(t, time.Now())
+	*clock = clock.Add(usageCoalesceWindow + time.Second)
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	}, saveAccountCache)
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("pass %d = nil error, want the throttle reported", i)
-		}
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 2 = nil error, want the throttle reported")
 	}
 	u, err := fetcher()
 	if calls != 2 || err != nil {
@@ -824,14 +855,14 @@ func TestUsageFetcherDropsAnotherAccountsNumbers(t *testing.T) {
 	if calls != 3 {
 		t.Fatalf("fetches = %d, want the switch to have forced a fetch", calls)
 	}
-	// avisoma's first throttle imposes no wait at all, so the very next pass is
-	// due again — proof this is genuinely a fresh slot, not trecs's streak
-	// carried over under a new name.
+	// avisoma's first throttle imposes no wait of its own, but the safety
+	// margin still requires real elapsed time before the very next pass.
+	*clock = clock.Add(2 * time.Minute)
 	if _, err := fetcher(); err == nil {
 		t.Fatal("pass after the switch's throttle = nil error, want a real fetch")
 	}
 	if calls != 4 {
-		t.Fatalf("fetches = %d, want the new account's first throttle to impose no wait", calls)
+		t.Fatalf("fetches = %d, want the new account's second throttle to also have fetched", calls)
 	}
 }
 
@@ -938,6 +969,7 @@ func TestUsageFetcherFetchesWhenSeededBackoffHasElapsed(t *testing.T) {
 func TestUsageFetcherPersistsBackoffTransitions(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
+	clock := fakeClock(t, time.Now())
 	type saveCall struct {
 		name   string
 		streak int
@@ -962,6 +994,7 @@ func TestUsageFetcherPersistsBackoffTransitions(t *testing.T) {
 		t.Fatalf("saved after first throttle = %+v, want [{trecs 1}]", saved)
 	}
 	throttled = false
+	*clock = clock.Add(2 * time.Minute)
 	if _, err := fetcher(); err != nil {
 		t.Fatalf("pass 2 = %v, want a success", err)
 	}
@@ -980,17 +1013,21 @@ func TestUsageFetcherPersistsBackoffTransitions(t *testing.T) {
 // a permanently-429ing endpoint, matching main's own two).
 func TestUsageFetcherBacksOffEvenWithNoMatchingSnapshot(t *testing.T) {
 	loginAs(t, "andy@trecs.aero") // no snapshot for trecs — deliberately
+	clock := fakeClock(t, time.Now())
 	calls := 0
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		calls++
 		return nil, &usageHTTPError{Status: 429}
 	}, noSaveAccountCache)
 
-	// First throttle imposes no wait; the second arms it.
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("pass %d = nil error, want the throttle reported", i)
-		}
+	// First throttle imposes no wait of its own; the second arms it. Both
+	// still need real elapsed time between them to clear the safety margin.
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("pass 2 = nil error, want the throttle reported")
 	}
 	if calls != 2 {
 		t.Fatalf("fetches = %d, want both throttled passes to have fetched", calls)
@@ -1018,6 +1055,7 @@ func TestUsageFetcherFallbackSurvivesAnUnrelatedDiskPass(t *testing.T) {
 	// avisoma has no snapshot (fallback path); trecs has one (disk path).
 	writeLiveAccount(t, home, "andy@avisoma.com")
 	writeSnapshotFixture(t, home, "trecs", "tok-trecs", "andy@trecs.aero")
+	clock := fakeClock(t, time.Now())
 
 	calls := 0
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
@@ -1029,11 +1067,13 @@ func TestUsageFetcherFallbackSurvivesAnUnrelatedDiskPass(t *testing.T) {
 	}, noSaveAccountCache)
 
 	// Arm avisoma's fallback streak to 2 (first throttle imposes no wait, the
-	// second does).
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("avisoma pass %d = nil error, want the throttle reported", i)
-		}
+	// second does — each still needs real elapsed time to clear the margin).
+	if _, err := fetcher(); err == nil {
+		t.Fatal("avisoma pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("avisoma pass 2 = nil error, want the throttle reported")
 	}
 	if calls != 2 {
 		t.Fatalf("fetches = %d, want both avisoma passes to have fetched", calls)
@@ -1051,7 +1091,8 @@ func TestUsageFetcherFallbackSurvivesAnUnrelatedDiskPass(t *testing.T) {
 	}
 
 	// Switch back to avisoma: its wait (armed two passes ago) must still be
-	// honored, not reset by the intervening trecs pass.
+	// honored, not reset by the intervening trecs pass. No clock advance —
+	// avisoma's 4-minute armed wait must still be holding.
 	writeLiveAccount(t, home, "andy@avisoma.com")
 	if _, err := fetcher(); err != nil {
 		t.Fatalf("avisoma pass after unrelated trecs pass = %v, want a success (fallback wait still armed)", err)
@@ -1076,6 +1117,7 @@ func TestUsageFetcherUnconfirmedIdentityWaitSurvivesALaterResolvedAccount(t *tes
 	t.Setenv("TMPDIR", t.TempDir())
 	writeSnapshotFixture(t, home, "trecs", "tok-trecs", "andy@trecs.aero")
 	// No ~/.claude.json yet: identity starts unconfirmable.
+	clock := fakeClock(t, time.Now())
 
 	calls := 0
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
@@ -1087,10 +1129,12 @@ func TestUsageFetcherUnconfirmedIdentityWaitSurvivesALaterResolvedAccount(t *tes
 	}, noSaveAccountCache)
 
 	// Arm the ownerless wait to streak 2.
-	for i := 1; i <= 2; i++ {
-		if _, err := fetcher(); err == nil {
-			t.Fatalf("unconfirmed pass %d = nil error, want the throttle reported", i)
-		}
+	if _, err := fetcher(); err == nil {
+		t.Fatal("unconfirmed pass 1 = nil error, want the throttle reported")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if _, err := fetcher(); err == nil {
+		t.Fatal("unconfirmed pass 2 = nil error, want the throttle reported")
 	}
 	if calls != 2 {
 		t.Fatalf("fetches = %d, want both unconfirmed passes to have fetched", calls)
@@ -1109,7 +1153,8 @@ func TestUsageFetcherUnconfirmedIdentityWaitSurvivesALaterResolvedAccount(t *tes
 	}
 
 	// Identity becomes unconfirmable again: the ownerless wait armed at the
-	// start must still be honored.
+	// start must still be honored. No clock advance — still inside the
+	// 4-minute armed wait.
 	if err := os.Remove(filepath.Join(home, ".claude.json")); err != nil {
 		t.Fatal(err)
 	}
@@ -1159,6 +1204,8 @@ func TestUsageFetcherPreservesVerifiedAcrossACarry(t *testing.T) {
 	saveAccountCache("trecs", accountCacheEntry{
 		Account: good.Account, Info: good.Info, FetchedAt: good.FetchedAt, Verified: true,
 	})
+	clock := fakeClock(t, time.Now())
+	*clock = clock.Add(usageCoalesceWindow + time.Second)
 	fetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		return nil, &usageHTTPError{Status: 503} // non-throttle failure: due() stays true, carries last
 	}, save)
