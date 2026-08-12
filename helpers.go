@@ -30,43 +30,12 @@ func writeMouseMode(w io.Writer, enabled bool) {
 	_, _ = io.WriteString(w, mouseDisableSequence)
 }
 
-// modifyOtherKeys sequences ask the terminal to report keystrokes that have no
-// standard single-byte control-code form — Ctrl+1..9 among them, unlike
-// Ctrl+A..Z — as "CSI 27;<mod>;<code>~" instead of passing them through
-// unreported. Mode 1 is the level that extends reporting only to
-// combinations with no existing byte form (Ctrl+digit); mode 2 goes further
-// and also reports well-known combinations like Ctrl+C/Ctrl+X this way
-// instead of their classic single control byte, which broke every existing
-// "\x18"-style hotkey the first time this shipped — mode 1 is the one every
-// terminal app that wants this (neovim among them) actually requests, for
-// exactly that compatibility reason. Mode 0 restores the terminal's default
-// (no such reporting). tui_events.go's decodeModifyOtherKeys decodes what
-// this produces.
-const (
-	modifyOtherKeysEnableSequence  = "\x1b[>4;1m"
-	modifyOtherKeysDisableSequence = "\x1b[>4;0m"
-)
-
-// writeModifyOtherKeysMode writes the enable or disable modifyOtherKeys
-// sequence to w. Mirrors writeMouseMode's split so callers can sequence both
-// explicitly around terminal-mode transitions instead of leaving either on
-// across a handoff to a subprocess that doesn't expect it.
-func writeModifyOtherKeysMode(w io.Writer, enabled bool) {
-	if enabled {
-		_, _ = io.WriteString(w, modifyOtherKeysEnableSequence)
-		return
-	}
-	_, _ = io.WriteString(w, modifyOtherKeysDisableSequence)
-}
-
 // enterCooked restores the terminal to its original (cooked) mode and shows
 // the cursor. Used around prompts and subprocesses that need normal input.
-// Disables mouse reporting and modifyOtherKeys first so a subprocess or
-// prompt reading stdin doesn't see stray SGR mouse or CSI 27;... byte
-// sequences.
+// Disables mouse reporting first so a subprocess or prompt reading stdin
+// doesn't see a stray SGR mouse sequence.
 func enterCooked(fd int, oldState *term.State) {
 	writeMouseMode(os.Stdout, false)
-	writeModifyOtherKeysMode(os.Stdout, false)
 	_ = term.Restore(fd, oldState)
 	fmt.Print("\033[?25h")
 }
@@ -117,16 +86,13 @@ func pauseForKey(fd int, oldState *term.State) {
 }
 
 // writeInteractiveHandoff writes the terminal-mode transition that hands the
-// terminal off to an interactive subprocess: disable mouse reporting and
-// modifyOtherKeys, restore wrap, exit the alternate screen, clear the
-// revealed primary screen, home the cursor, show the cursor — in that exact
-// order. Clearing (2J+H) after leaving the alt-screen suppresses the flicker
-// of stale primary-buffer shell contents before the subprocess (tmux attach /
-// ssh -t) paints. modifyOtherKeys goes off alongside mouse reporting: the
-// subprocess (tmux, a nested vim, ...) doesn't expect Ctrl+digit to arrive as
-// a CSI 27;... sequence instead of the plain byte it would otherwise see.
+// terminal off to an interactive subprocess: disable mouse reporting, restore
+// wrap, exit the alternate screen, clear the revealed primary screen, home
+// the cursor, show the cursor — in that exact order. Clearing (2J+H) after
+// leaving the alt-screen suppresses the flicker of stale primary-buffer shell
+// contents before the subprocess (tmux attach / ssh -t) paints.
 func writeInteractiveHandoff(w io.Writer) {
-	_, _ = io.WriteString(w, mouseDisableSequence+modifyOtherKeysDisableSequence+"\033[?7h\033[?1049l\033[2J\033[H\033[?25h")
+	_, _ = io.WriteString(w, mouseDisableSequence+"\033[?7h\033[?1049l\033[2J\033[H\033[?25h")
 }
 
 // runInteractive leaves the alt-screen + raw mode so the named program owns
@@ -145,11 +111,10 @@ func runInteractive(fd int, oldState *term.State, prog string, args ...string) e
 	cmd.Stderr = os.Stderr
 	err := cmd.Run()
 	// Re-enter our UI mode (raw with OPOST preserved), then re-enable mouse
-	// reporting and modifyOtherKeys last so they take effect only once we're
-	// back in the TUI.
+	// reporting last so it takes effect only once we're back in the TUI.
 	_, _ = term.MakeRaw(fd)
 	enableOutputProcessing(fd)
-	fmt.Print("\033[?1049h\033[?25l\033[?7l" + mouseEnableSequence + modifyOtherKeysEnableSequence)
+	fmt.Print("\033[?1049h\033[?25l\033[?7l" + mouseEnableSequence)
 	return err
 }
 

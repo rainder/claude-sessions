@@ -103,15 +103,12 @@ func RunTUI(interval time.Duration) error {
 	// Re-enable output processing so '\n' still translates to '\r\n'.
 	enableOutputProcessing(fd)
 
-	// Enable mouse reporting and modifyOtherKeys (so Ctrl+1..9 arrive as
-	// distinct keystrokes — see helpers.go), then alt-screen, hide cursor,
-	// disable line-wrap. All restored on return (reverse of the setup order).
+	// Enable mouse reporting, then alt-screen, hide cursor, disable line-wrap.
+	// All restored on return (reverse of the setup order).
 	writeMouseMode(os.Stdout, true)
-	writeModifyOtherKeysMode(os.Stdout, true)
 	fmt.Print("\033[?1049h\033[?25l\033[?7l")
 	defer func() {
 		writeMouseMode(os.Stdout, false)
-		writeModifyOtherKeysMode(os.Stdout, false)
 		fmt.Print("\033[?7h\033[?25h\033[?1049l")
 	}()
 
@@ -959,13 +956,13 @@ func RunTUI(interval time.Duration) error {
 				settleRows()
 				state.requestSelectionAnchor()
 				render()
-			case KeyCtrl1, KeyCtrl2, KeyCtrl3, KeyCtrl4, KeyCtrl5, KeyCtrl6, KeyCtrl7, KeyCtrl8, KeyCtrl9:
-				// Ctrl+1..9 assign the selected session's group (single membership;
+			case "!", "@", "#", "$", "%", "^", "&", "*", "(":
+				// Shift+1..9 assign the selected session's group (single membership;
 				// same group again ungroups). Sessions with no SessionID are ignored.
 				// The group is written on the host that owns the session, so a
 				// remote row goes over HTTP — hence the same refresh(true) kick
 				// the disable toggle uses, rather than a bare settleRows().
-				if group := ctrlDigitGroup(k); group != 0 {
+				if group := shiftDigitGroup(k); group != 0 {
 					screen.Invalidate()
 					if actSetGroup(makeCtx(), group) {
 						refresh(true)
@@ -1283,19 +1280,15 @@ func groupFilterTransition(cur groupFilter, armed bool, k string) (next groupFil
 	return cur, false, false
 }
 
-// ctrlDigitKeys orders the Ctrl+1..9 key constants so their index (+1) is the
-// group number — mirrors the digit order in the escape sequences themselves.
-var ctrlDigitKeys = [9]string{
-	KeyCtrl1, KeyCtrl2, KeyCtrl3, KeyCtrl4, KeyCtrl5, KeyCtrl6, KeyCtrl7, KeyCtrl8, KeyCtrl9,
-}
-
-// ctrlDigitGroup maps a decoded Ctrl+1..9 keystroke to its group number
+// shiftDigitGroup maps a US-layout Shift+1..9 keystroke to its group number
 // (1..9), or 0 for any other key.
-func ctrlDigitGroup(key string) int {
-	for i, k := range ctrlDigitKeys {
-		if key == k {
-			return i + 1
-		}
+func shiftDigitGroup(key string) int {
+	const shifted = "!@#$%^&*("
+	if len(key) != 1 {
+		return 0
+	}
+	if i := strings.IndexByte(shifted, key[0]); i >= 0 {
+		return i + 1
 	}
 	return 0
 }
@@ -1445,7 +1438,7 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command · p prompt in background)")
 	fmt.Fprintln(&b, "    r            resume a past session (searchable · local + remote)")
 	fmt.Fprintln(&b, "    - / +        disable / enable session")
-	fmt.Fprintln(&b, "    Ctrl-1..9    assign session to group ①..⑨ (same group again ungroups)")
+	fmt.Fprintln(&b, "    Shift-1..9   assign session to group ①..⑨ (same group again ungroups)")
 	fmt.Fprintln(&b, "    Ctrl-X       kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
