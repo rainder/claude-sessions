@@ -287,10 +287,34 @@ worktree remove` from the main checkout — never `--force`, so a dirty worktree
 survives and git's refusal is what the user sees — in `actKill` that refusal
 now offers a recovery step, below. The branch is never deleted.
 
-`actKill`'s worktree-remove failure offers to resurrect: `git worktree remove`
-refuses on a dirty/untracked tree, and the alternative to leaving the user
-stranded is resuming the session that was just killed, right back into the
-same still-on-disk worktree checkout. A `y` answer calls
+**Local kill (and its worktree cleanup) runs in the background, not inline in
+`actKill`** (`kill_async.go`): `KillSession` can block up to 5s waiting for a
+tmux pane's process to actually die after `tmux kill-session` returns
+(`killSessionWith`, migrate.go), and blocking the whole TUI on that wait after
+every confirmed kill was the "killing dialog" hang this replaced. Once the
+overlay confirms, `actKill` resolves the worktree target (still synchronous —
+the survivors check needs the pre-kill session list) then hands
+`localReattest` + `KillSession` + any `RemoveWorktree` to `startKillJob`,
+which runs them in a goroutine and returns a `*killJob` immediately; the TUI
+stays fully interactive with a "killing …" toast in place of the old blocking
+prompt. `startKillJob` follows `previewPane`'s wake-pipe pattern so the main
+loop's `select` wakes the instant the job lands, but `finishDoneKillJobs`
+(tui.go) also checks every poll tick unconditionally — via the pure
+`partitionKillJobs` (kill_async.go) — so a job whose pipe failed to create
+still gets picked up rather than hanging forever silently. A second Ctrl+X on
+the same row while its job is still in flight is refused
+(`actCtx.killInFlight`, backed by `killJobs` in tui.go): the row stays in the
+list until the job lands, so without the guard a duplicate confirm would race
+a still-live `localReattest` and re-attempt worktree removal the first job
+already handled.
+
+`finishKillJob`'s worktree-remove failure offers to resurrect: `git worktree
+remove` refuses on a dirty/untracked tree, and the alternative to leaving the
+user stranded is resuming the session that was just killed, right back into
+the same still-on-disk worktree checkout. This step — unlike the kill itself —
+runs synchronously on the main loop once the background job's result lands,
+because it owns the raw/cooked terminal handoff a background goroutine can't
+safely perform (see "Single stdin consumer" above). A `y` answer calls
 `ResumeSessionInWorktree(s.SessionID, repoRoot, name)` — the same primitive the
 `r` resume picker uses for a worktree session, which works whether or not the
 checkout survived, since `--worktree <name>` recreates it if needed. On success
@@ -298,13 +322,17 @@ the new tmux name is stashed on `c.spawnedTmux` (the same field `actResume` and
 `actNew` use) and `runTmuxAttach` takes over the terminal immediately, mirroring
 `actResume`'s own resume→attach sequence rather than leaving the user back at
 the session list. A `N` answer, or a failed resume, falls through to the
-existing `pauseForKey` pause. This is local-TUI-only (`actKill`); `cmdKill` and
-the remote kill path (`actKillRemote`) still just report the failure.
+existing `pauseForKey` pause. This is local-TUI-only (`actKill`/`finishKillJob`);
+`cmdKill` and the remote kill path (`actKillRemote`) still block synchronously
+and report the failure inline — the 5s tmux-death wait is tolerable there
+since a CLI invocation or a remote round trip was never going to be instant
+anyway.
 
-Three entry points: `actKill` (local TUI — the kill itself is confirmed, but a
-worktree left idle by it is removed outright, no second confirm), the TUI's
-remote kill path (`actKillRemote`, same no-second-confirm rule against the
-server's `worktree` response), `cmdKill` (`--remove-worktree`, or a prompt when
+Three entry points: `actKill`/`finishKillJob` (local TUI — the kill itself is
+confirmed up front, but a worktree left idle by it is removed outright once
+the background job lands, no second confirm), the TUI's remote kill path
+(`actKillRemote`, same no-second-confirm rule against the server's `worktree`
+response, still synchronous), `cmdKill` (`--remove-worktree`, or a prompt when
 interactive; a bare `-y` run keeps the worktree), and the server, which puts a
 `worktree` object in the kill response and removes via authed
 `POST /worktree/remove`. That endpoint takes a client-supplied path, so

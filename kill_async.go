@@ -118,3 +118,23 @@ func (j *killJob) close() {
 		_ = unix.Close(j.wakeW)
 	}
 }
+
+// partitionKillJobs splits jobs into those still running (kept, in their
+// original order) and the results of those that finished this call — each
+// finished job is closed here so callers never have to remember to. A pure
+// function (no terminal/toast side effects) so the drain logic itself —
+// which jobs are kept vs. reported — is testable without RunTUI's plumbing;
+// tui.go's finishDoneKillJobs wraps this with the toast/refresh behavior.
+func partitionKillJobs(jobs []*killJob) (remaining []*killJob, done []killJobResult) {
+	remaining = jobs[:0]
+	for _, job := range jobs {
+		res, ok := job.snapshot()
+		if !ok {
+			remaining = append(remaining, job)
+			continue
+		}
+		job.close()
+		done = append(done, res)
+	}
+	return remaining, done
+}

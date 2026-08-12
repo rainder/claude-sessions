@@ -574,31 +574,23 @@ func RunTUI(interval time.Duration) error {
 	// resurrect prompt via finishKillJob) and reports whether the session
 	// list needs a refresh.
 	finishDoneKillJobs := func() bool {
-		if len(killJobs) == 0 {
+		remaining, done := partitionKillJobs(killJobs)
+		killJobs = remaining
+		if len(done) == 0 {
 			return false
 		}
-		changed := false
-		remaining := killJobs[:0]
-		for _, job := range killJobs {
-			res, done := job.snapshot()
-			if !done {
-				remaining = append(remaining, job)
-				continue
-			}
-			job.close()
-			changed = true
-			// finishKillJob may switch to cooked mode (the resurrect prompt)
-			// and print over rows screenRenderer still thinks are the last
-			// painted frame; invalidate so the next render() repaints in
-			// full instead of diffing against a now-stale model.
-			screen.Invalidate()
+		// finishKillJob may switch to cooked mode (the resurrect prompt) and
+		// print over rows screenRenderer still thinks are the last painted
+		// frame; invalidate so the next render() repaints in full instead of
+		// diffing against a now-stale model.
+		screen.Invalidate()
+		for _, res := range done {
 			if msg := finishKillJob(makeCtx(), res); msg != "" {
 				toast = msg
 				toastUntil = time.Now().Add(4 * time.Second)
 			}
 		}
-		killJobs = remaining
-		return changed
+		return true
 	}
 
 	// registerKillJob tracks a job actKill just started, and shows a sticky
