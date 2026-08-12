@@ -83,14 +83,13 @@ func (c *actCtx) runInteractive(prog string, args ...string) error {
 	return runInteractive(c.fd, c.oldState, prog, args...)
 }
 
-// enterRaw returns to the main raw-mode TUI and re-enables mouse reporting and
-// modifyOtherKeys. Bare enterRaw(fd) is deliberately mouse-neutral (see
-// helpers.go), so every action handler that finishes a cooked prompt or
-// subprocess must re-enable both; centralizing that here keeps the calls paired.
+// enterRaw returns to the main raw-mode TUI and re-enables mouse reporting.
+// Bare enterRaw(fd) is deliberately mouse-neutral (see helpers.go), so every
+// action handler that finishes a cooked prompt or subprocess must re-enable
+// it; centralizing that here keeps the calls paired.
 func (c *actCtx) enterRaw() {
 	enterRaw(c.fd)
 	writeMouseMode(terminalOutput, true)
-	writeModifyOtherKeysMode(terminalOutput, true)
 }
 
 // prepareLineOutput parks the cursor in a cleared bottom row before restoring
@@ -181,7 +180,7 @@ func actToggleDisabled(c *actCtx) bool {
 }
 
 // actSetGroup assigns the selected session to group (1..9), or ungroups it
-// when it already carries that group — the single-membership toggle Ctrl+1..9
+// when it already carries that group — the single-membership toggle Shift+1..9
 // has always had, now resolved against the row's own flag rather than a
 // client-local store. Same split as actToggleDisabled, for the same reason:
 // the group lives on the host that owns the session, so a local row writes

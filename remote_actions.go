@@ -565,7 +565,7 @@ func actToggleDisabledRemote(c *actCtx) bool {
 	return true
 }
 
-// actSetGroupRemote handles Ctrl+1..9 on a remote-selected row: the group
+// actSetGroupRemote handles Shift+1..9 on a remote-selected row: the group
 // belongs to the host that owns the session, so it is written there rather
 // than locally. No confirmation dialog — grouping isn't destructive. Reports
 // whether anything changed, matching actSetGroup's local-path contract. A host
