@@ -519,10 +519,24 @@ func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func()
 				backoff = usageBackoff{}
 			}
 			attempted := backoff.due(now)
+			// Read-before-fetch coalescing: another process (or this one, a
+			// moment ago) already has a reading recent enough that a round
+			// trip here would be redundant. carryable is the same identity
+			// gate the ordinary carry-forward path (inside knownAccountUsage's
+			// failed helper) already trusts, so nothing is served here that
+			// wasn't already safe to re-serve. Reason is cleared: this is
+			// being treated as equivalent to a fresh success, not a failure.
+			coalesced := attempted && carryable(prev, email) && !prev.FetchedAt.After(now) && now.Sub(prev.FetchedAt) < usageCoalesceWindow
 			var r *KnownAccountUsage
-			if attempted {
+			switch {
+			case coalesced:
+				fresh := *prev
+				fresh.Stale, fresh.Reason = false, ""
+				r = &fresh
+				attempted = false
+			case attempted:
 				r, _ = fetchKnownAccountUsage(name, liveEmail, prev)
-			} else {
+			default:
 				// A backed-off account still goes through knownAccountUsage, with the
 				// answer a throttled endpoint would have given substituted for the
 				// round trip. That keeps one place deciding whether this name stands
@@ -557,7 +571,9 @@ func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func()
 			if r.Info != nil {
 				e.Account, e.FetchedAt, e.Info, e.Verified = r.Account, r.FetchedAt, r.Info, r.Verified
 			}
-			save(name, e)
+			if !coalesced {
+				save(name, e)
+			}
 		}
 
 		mu.Lock()

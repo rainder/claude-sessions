@@ -549,6 +549,11 @@ func TestKnownAccountsFetcherThreadsEachAccountsOwnEntry(t *testing.T) {
 	})
 	swapFetch(t, func(string) (*UsageInfo, error) { return nil, &usageHTTPError{Status: 429} })
 
+	// Past usageCoalesceWindow: this test is about the 429 stub reaching each
+	// account with its OWN entry threaded in, so the seeded entry must be old
+	// enough that read-before-fetch coalescing doesn't skip the round trip.
+	clock := fakeClock(t, time.Now())
+	*clock = clock.Add(2 * time.Minute)
 	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
 	if err != nil {
 		t.Fatal(err)
@@ -813,6 +818,7 @@ func TestKnownAccountsFetcherCarriesNumbersAcrossPolls(t *testing.T) {
 
 	// Real persistence, not a no-op: this test's whole point is that pass 2
 	// reads back what pass 1 wrote, so the numbers survive a throttle.
+	clock := fakeClock(t, time.Now())
 	fetcher := newKnownAccountsFetcher(saveAccountCache)
 	first, err := fetcher()
 	if err != nil {
@@ -825,6 +831,9 @@ func TestKnownAccountsFetcherCarriesNumbersAcrossPolls(t *testing.T) {
 	mu.Lock()
 	throttled = true
 	mu.Unlock()
+	// Past usageCoalesceWindow, so pass 2 genuinely reaches the (now
+	// throttled) endpoint instead of coalescing pass 1's fresh disk entries.
+	*clock = clock.Add(2 * time.Minute)
 	second, err := fetcher()
 	if err != nil {
 		t.Fatalf("a throttled pass must not fail the batch: %v", err)
@@ -856,6 +865,51 @@ func TestKnownAccountsFetcherCarriesNumbersAcrossPolls(t *testing.T) {
 	}
 }
 
+// The known-accounts sibling of TestUsageFetcherCoalescesARecentReading: a
+// fresh disk entry for a non-live snapshot account means the next pass
+// skips the network round trip and re-serves it as fresh, not stale.
+func TestKnownAccountsFetcherCoalescesARecentReading(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeLiveAccount(t, home, "andy@avisoma.com")
+	writeSnapshotFixture(t, home, "trecs", "tok-trecs", "andy@trecs.aero")
+	clock := fakeClock(t, time.Now())
+
+	saveAccountCache("trecs", accountCacheEntry{
+		Account: "andy@trecs.aero",
+		Info:    &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+		// Pinned to the frozen clock, not a fresh time.Now(): the latter runs
+		// microseconds AFTER fakeClock froze now, which the guard's own
+		// !FetchedAt.After(now) check would (correctly) reject as future-dated.
+		FetchedAt: *clock,
+		Verified:  true,
+	})
+	calls := 0
+	swapFetch(t, func(token string) (*UsageInfo, error) {
+		calls++
+		return nil, &usageHTTPError{Status: 429}
+	})
+	fetcher := newKnownAccountsFetcher(noSaveAccountCache)
+	res, err := fetcher()
+	if err != nil {
+		t.Fatalf("pass = %v, want a success", err)
+	}
+	if calls != 0 {
+		t.Fatalf("fetches = %d, want a fresh disk entry to be coalesced instead of fetched", calls)
+	}
+	if len(res.Accounts) != 1 {
+		t.Fatalf("accounts = %#v, want exactly trecs", res.Accounts)
+	}
+	got := res.Accounts[0]
+	if got.Stale || got.Reason != "" {
+		t.Fatalf("coalesced entry = %#v, want fresh (non-stale, no reason)", got)
+	}
+	if got.Info == nil || got.Info.FiveHour.Pct != 63 {
+		t.Fatalf("coalesced entry numbers = %#v, want the seeded 63%%", got.Info)
+	}
+}
+
 // A warm start carries forward too: each account's own disk cache is what the
 // fetcher reads on its very first pass (no separate seed needed — the fetcher
 // has no in-memory state of its own at all), so a first poll that lands
@@ -868,9 +922,12 @@ func TestKnownAccountsFetcherSeedsFromCache(t *testing.T) {
 	swapFetch(t, func(string) (*UsageInfo, error) { return nil, &usageHTTPError{Status: 429} })
 
 	saveAccountCache("trecs", accountCacheEntry{
-		Account:   "andy@trecs.aero",
-		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
-		FetchedAt: time.Now().Add(-time.Minute),
+		Account: "andy@trecs.aero",
+		Info:    &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+		// Comfortably past usageCoalesceWindow (60s), not right on its
+		// boundary: a seed the fetcher would coalesce is re-served fresh,
+		// which is the opposite of the stale carry this test asserts.
+		FetchedAt: time.Now().Add(-90 * time.Second),
 	})
 	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
 	if err != nil {
@@ -904,10 +961,12 @@ func TestDerefKnownAccounts(t *testing.T) {
 // same account is commonly held as a snapshot on more than one host, so a
 // chronic 429 otherwise costs a failed round trip per host per poll forever.
 //
-// Wall-clock time is real here, and deliberately: every pass below runs inside
-// milliseconds, which is far inside any armed wait, so "was the endpoint
-// touched" is exactly what the call count reports. The schedule's arithmetic is
-// tested separately (TestUsageBackoffUntil).
+// Time is driven by fakeClock here, and deliberately: a pass meant to reach
+// the endpoint is advanced 2 minutes first — clear of both usageBackoffSafetyMargin
+// and usageCoalesceWindow — while the pass meant to be held back by an armed
+// wait shares its predecessor's instant. So "was the endpoint touched" is
+// exactly what the call count reports. The schedule's arithmetic is tested
+// separately (TestUsageBackoffUntil).
 func TestKnownAccountsFetcherBacksOffRepeatedThrottles(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -939,6 +998,7 @@ func TestKnownAccountsFetcherBacksOffRepeatedThrottles(t *testing.T) {
 	// Real persistence, not a no-op: this fetcher keeps no in-memory state at
 	// all any more, so building a real streak across passes (and carrying
 	// numbers past a throttle) requires the disk round-trip.
+	clock := fakeClock(t, time.Now())
 	fetcher := newKnownAccountsFetcher(saveAccountCache)
 	pass := func(t *testing.T, n int) KnownAccountUsage {
 		t.Helper()
@@ -957,8 +1017,10 @@ func TestKnownAccountsFetcherBacksOffRepeatedThrottles(t *testing.T) {
 	if count() != 1 {
 		t.Fatalf("fetches = %d, want the first pass to fetch", count())
 	}
-	// A success ends the streak before it can build.
+	// A success ends the streak before it can build. Two minutes on, so the
+	// streak-1 wait has cleared its safety margin.
 	setThrottled(false)
+	*clock = clock.Add(2 * time.Minute)
 	if got := pass(t, 2); got.Info == nil || got.Reason != "" {
 		t.Fatalf("pass 2 = %#v, want fresh numbers", got)
 	}
@@ -969,8 +1031,12 @@ func TestKnownAccountsFetcherBacksOffRepeatedThrottles(t *testing.T) {
 	// Now two consecutive throttles. The second is what arms the wait — which
 	// also proves the success above cleared the streak, since otherwise this pass
 	// would already have been skipped.
+	// Each advance clears both gates: the previous pass's armed wait plus its
+	// safety margin, and usageCoalesceWindow against the numbers pass 2 wrote.
 	setThrottled(true)
+	*clock = clock.Add(2 * time.Minute)
 	pass(t, 3)
+	*clock = clock.Add(2 * time.Minute)
 	pass(t, 4)
 	if count() != 4 {
 		t.Fatalf("fetches = %d, want both throttled passes to have fetched", count())
@@ -1014,8 +1080,14 @@ func TestKnownAccountsFetcherResolvesActiveNameWhileBackedOff(t *testing.T) {
 	// (streak building requires the disk round-trip, since this fetcher keeps
 	// no in-memory state), which is the "backed off" precondition this test
 	// is named for.
+	clock := fakeClock(t, time.Now())
 	fetcher := newKnownAccountsFetcher(saveAccountCache)
 	for i := 1; i <= 2; i++ {
+		if i > 1 {
+			// Clear of the streak-1 wait's safety margin, so the second pass
+			// really does reach the endpoint and arm the wait.
+			*clock = clock.Add(2 * time.Minute)
+		}
 		if _, err := fetcher(); err != nil {
 			t.Fatalf("pass %d: %v", i, err)
 		}
