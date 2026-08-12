@@ -391,6 +391,29 @@ func TestKillSessionWithoutTmuxSignalsPID(t *testing.T) {
 	}
 }
 
+// TestKillSessionWithTmuxWaitsForPIDToDie: tmux kill-session tears down the
+// pane and returns before its process has necessarily exited. A caller
+// (worktree cleanup) that checks liveness right after KillSession returns
+// needs the PID actually gone by then, not just the tmux session gone.
+func TestKillSessionWithTmuxWaitsForPIDToDie(t *testing.T) {
+	aliveCalls := 0
+	deps := killDeps{
+		killTmux: func(string) error { return nil },
+		signal:   func(int, syscall.Signal) error { t.Fatalf("signal must not be called on tmux path"); return nil },
+		alive: func(int) bool {
+			aliveCalls++
+			return aliveCalls < 3
+		},
+		sleep: func(time.Duration) {},
+	}
+	if err := killSessionWith(Session{PID: 42, Tmux: "work:1.0"}, deps); err != nil {
+		t.Fatalf("killSessionWith: %v", err)
+	}
+	if aliveCalls != 3 {
+		t.Fatalf("alive called %d times, want 3 (poll until dead)", aliveCalls)
+	}
+}
+
 // TestKillSessionWithoutTmuxEscalates: a non-tmux session that stays alive gets
 // SIGTERM then SIGKILL.
 func TestKillSessionWithoutTmuxEscalates(t *testing.T) {

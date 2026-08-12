@@ -332,6 +332,17 @@ func killSessionWith(s Session, deps killDeps) error {
 		if err := deps.killTmux(name); err != nil {
 			return fmt.Errorf("tmux kill-session %s: %w", name, err)
 		}
+		// tmux kill-session returns as soon as tmux tears down the pane, not
+		// once the pane's process has actually exited (it SIGHUPs and moves
+		// on). A caller that checks worktree survivors right after — see
+		// worktreeCleanupTarget / removeWorktree — needs the PID to actually
+		// be gone, so wait for it here instead of racing.
+		for i := 0; i < 5; i++ {
+			if !deps.alive(s.PID) {
+				return nil
+			}
+			deps.sleep(time.Second)
+		}
 		return nil
 	}
 	if err := deps.signal(s.PID, syscall.SIGTERM); err != nil {
