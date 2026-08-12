@@ -58,11 +58,11 @@ type KnownAccountUsage struct {
 	Verified bool `json:"verified,omitempty"`
 	// FetchedAt is when Info was actually fetched, not when this struct was
 	// built — a carried-forward entry keeps the original timestamp rather than
-	// being restamped on every re-serve. Nothing in this TUI's own header
-	// renders it (the Stale marker is a fixed "stale" label, not a computed
-	// age), but it still travels on the wire to any other consumer, and
-	// restamping it would make a permanently throttled account's numbers look
-	// permanently fresh there too.
+	// being restamped on every re-serve. The header now renders it: the Stale
+	// marker carries the reading's age ("stale 12m"), formatAge over
+	// now-FetchedAt, threaded in as accountUsageLine.fetchedAt — so restamping
+	// would not merely mislead a wire consumer, it would show a permanently
+	// throttled account's numbers as permanently fresh right here.
 	//
 	// omitzero, not omitempty: encoding/json never considers a struct empty, so
 	// omitempty on a time.Time does nothing and every entry with no numbers
@@ -253,9 +253,10 @@ const usageBadSnapshotReason = "bad snapshot"
 // would imply it still works. Any other failure (429, 5xx, timeout, network, an
 // unreadable credential file) re-serves prev's numbers marked Stale, with
 // prev's ORIGINAL FetchedAt: restamping it to now would let an account that
-// fails forever look permanently fresh to any consumer of the timestamp, even
-// though this TUI's own header shows only a fixed "stale" label rather than a
-// computed age. Carrying is not age-bounded — old numbers beside a visible
+// fails forever look permanently fresh to any consumer of the timestamp — this
+// TUI's own header included, since the Stale marker now renders that age
+// ("stale 12m") rather than a bare fixed label. Carrying is not age-bounded —
+// old numbers beside a visible
 // Stale marker still beat no numbers at all — so this keeps working for as
 // long as the account stays down. With nothing to carry, the entry keeps only
 // its identity and the reason.
@@ -476,7 +477,7 @@ func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func()
 		if err != nil {
 			return nil, err
 		}
-		now := time.Now()
+		now := usageClockNow()
 		mu.Lock()
 		fetchOrder := reconcileFetchOrder(order, names)
 		mu.Unlock()
@@ -519,10 +520,27 @@ func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func()
 				backoff = usageBackoff{}
 			}
 			attempted := backoff.due(now)
+			// Read-before-fetch coalescing: another process (or this one, a
+			// moment ago) already has a reading recent enough that a round
+			// trip here would be redundant. carryable is the same identity
+			// gate the ordinary carry-forward path (inside knownAccountUsage's
+			// failed helper) already trusts, so nothing is served here that
+			// wasn't already safe to re-serve. Reason is cleared: this is
+			// being treated as equivalent to a fresh success, not a failure.
+			coalesced := attempted && carryable(prev, email) && !prev.FetchedAt.After(now) && now.Sub(prev.FetchedAt) < usageCoalesceWindow
 			var r *KnownAccountUsage
-			if attempted {
+			switch {
+			case coalesced:
+				// served, not fresh: the package-level fresh() lives in this
+				// same file, and shadowing it here would be a trap for the
+				// next reader even though nothing in this arm calls it.
+				served := *prev
+				served.Stale, served.Reason = false, ""
+				r = &served
+				attempted = false
+			case attempted:
 				r, _ = fetchKnownAccountUsage(name, liveEmail, prev)
-			} else {
+			default:
 				// A backed-off account still goes through knownAccountUsage, with the
 				// answer a throttled endpoint would have given substituted for the
 				// round trip. That keeps one place deciding whether this name stands
@@ -557,7 +575,9 @@ func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func()
 			if r.Info != nil {
 				e.Account, e.FetchedAt, e.Info, e.Verified = r.Account, r.FetchedAt, r.Info, r.Verified
 			}
-			save(name, e)
+			if !coalesced {
+				save(name, e)
+			}
 		}
 
 		mu.Lock()

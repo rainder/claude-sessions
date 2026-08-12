@@ -770,9 +770,15 @@ exactly what a chronically throttled account never becomes. So both sides kept
 paying a failed round trip every 2 minutes, forever, against the endpoint doing
 the throttling. Every fetch path now counts consecutive `rate limited` outcomes
 per account and skips the fetch outright while a wait is armed: the first 429
-imposes no wait of its own (most heal within one tick — only an explicit
+adds nothing to the schedule (most heal within one tick — only an explicit
 `Retry-After` can delay it), the second waits `usageBackoffSecond` (4min), the
-third and beyond `usageBackoffMax` (8min, the cap). A 429's `Retry-After`
+third and beyond `usageBackoffMax` (8min, the cap). "Adds nothing to the
+schedule" is not "retries immediately": `usageBackoff.due()` compares against
+`nextAttempt + usageBackoffSafetyMargin` (1min), **unconditionally**, so the
+next attempt after ANY throttle — the streak-1 one included — waits out that
+floor first. See "A hard floor on the backoff schedule" below for why the
+blanket form was chosen over arming the margin only alongside a real
+multi-minute wait. A 429's `Retry-After`
 (`parseRetryAfter`, either RFC 9110 form) may only *lengthen* that wait, bounded
 by `usageBackoffCeiling` (1h — raised from 15min after a live 429 was observed
 asking for ~31.6min, Retry-After: 1895, which the old ceiling silently
@@ -856,7 +862,10 @@ trustworthy about whether the next attempt is part of the same run) — this
 was fine when backoff state was loaded once at process startup, but became a
 live bug once loading happens on **every pass**: a streak of 1 always has
 `BackoffNextAttempt` equal to the instant it was recorded (the first throttle
-imposes no wait, by design — see `usageBackoffUntil`), which means it reads
+adds no wait of its own to the schedule, by design — see `usageBackoffUntil`;
+`usageBackoffSafetyMargin` came later and lives in `due()`, not in the
+recorded deadline, so what is stored is still exactly the recording instant),
+which means it reads
 as "elapsed" on the very next load, microseconds later, as an entirely
 ordinary part of back-to-back polling. Dropping the streak there silently
 prevented it from EVER reaching 2 and arming a real wait —
@@ -940,7 +949,11 @@ disk seed with a non-nil `Info` is force-marked `Stale` by `loadAccountCache`
 itself — this is a disk read, not a completed poll, so nothing has confirmed
 the numbers as current — and an unstamped reading (a pre-timestamp disk
 write) is simply not carryable, since its vintage is unknown rather than
-merely old.
+merely old. The coalescing path (see "Read-before-fetch coalescing" below) is
+the one place that force-marked `Stale` is un-marked again, and only for an
+entry inside `usageCoalesceWindow`: at under a minute old, the poll that wrote
+it is recent enough to stand in for this pass's own. Everywhere else the flag
+holds, including on a carry, which is never cleared.
 
 There is no more `saveOnceUsage`-style wrapper needed on the live side:
 `saveAccountCache` is called by `newUsageFetcher` itself, directly, only from
@@ -1119,6 +1132,125 @@ fixed in this pass:**
   fetcher hands back for the current pass. Not a bug: nothing reads the
   on-disk field expecting anything else.
 
+**Read-before-fetch coalescing.** One file per account bought a second thing
+beyond continuity across a switch: two `claude-sessions` processes on the same
+host — two TUIs, or a TUI and a one-shot CLI invocation — now share it, so the
+second one does not have to ask Anthropic what the first asked a moment ago.
+Both were spending the same account's shared per-token budget on requests
+whose answers were byte-identical. So before either fetcher makes a real call
+— `newUsageFetcher` (usage.go) and `newKnownAccountsFetcher`'s per-account
+loop (known_accounts.go) — it looks at the entry it has **already loaded** for
+this pass and skips the round trip when that reading is eligible, not
+future-dated, and younger than `usageCoalesceWindow`.
+
+The check sits **inside** the `backoff.due(now)` branch — the one already
+about to hit the network — never in front of it. An armed wait is untouched;
+this only ever replaces "I am about to fetch" with "someone already has".
+Three things about what it then serves:
+
+Eligibility is the **existing** `liveCarryable`/`carryable` gate, not a new
+ad-hoc condition. Anything not safe to carry forward today is not safe to
+coalesce onto either, so this changes only HOW recently a trusted reading must
+have been taken, never WHETHER it is trusted.
+
+The re-serve is marked `Stale: false` — fresh, not carried — and the
+known-accounts arm clears `Reason` alongside it. That is the whole point: a
+reading under a minute old *is* current, and dressing it as stale would hang a
+dim `stale` marker off a perfectly live number and drop the account out of
+`localFreshAccountEmails`. A coalesce is a success standing in for a request,
+not a failure standing in for one (which is what the backoff branch above
+synthesizes, and why the two branches read differently).
+
+And nothing is persisted — no `save`, no `persist`. Partly because the disk
+entry already *is* this reading, so a write would be a no-op; but the
+load-bearing half is that **not** re-stamping `FetchedAt` is what stops a
+coalesced read from refreshing the window's own clock. If it did, two
+closely-phased processes would each keep pushing the deadline forward off the
+other's read and neither would ever fetch again — the account would freeze on
+one reading forever. The two paths express this differently and are pinned
+differently. The live one returns before `persist` is ever reached, so there
+is no call to omit; the known-accounts one has to write *something* every pass
+(the backoff half) and so carries an explicit `if !coalesced { save(...) }`
+guard, which `TestKnownAccountsFetcherCoalescesARecentReading` pins with a
+recording `save` — an earlier version of that test passed `noSaveAccountCache`
+and stayed green with the guard deleted, which is how it came to be written
+that way. Note that "nothing is persisted" is a *disk* statement only: the
+live path still calls `mirrorFallback` on the coalesced return, so the `fbXXX`
+fallback stays in step with what the disk path just served.
+
+`usageCoalesceWindow` is `usageRefreshInterval / 2` (60s), and half is
+deliberate rather than tidy: a lone process's own next natural tick lands one
+full `usageRefreshInterval` after its own fetch, comfortably outside the
+window, so it can never coalesce against itself and throttle its own polling
+down to nothing (`TestUsageFetcherDoesNotSelfCoalesceAtItsOwnNextTick`). An
+earlier version of this design used the full interval and was rejected on
+independent review for exactly that self-throttle. Only two fetches genuinely
+landing close together — a launch burst, or two long-running processes whose
+tickers happen to stay closely phased — ever trigger it. One visible
+consequence of the window is that `usagePoller.Resume`'s immediate re-fetch
+kick (returning from an interactive program) can now be answered by an
+under-a-minute-old reading instead of a request. That is the desirable
+direction, not a suppressed kick: an attach/detach/attach cycle is the least
+justified moment for a burst of fresh requests and one of the likeliest.
+
+A coalesced reading is not `Stale`, so it does enter `localFreshAccountEmails`
+and rides along in `FetchRemoteUsage`'s `?ignore=` list exactly like a fetched
+one. No consequence today — `/usage` no longer reads that parameter at all
+(below) — and the right answer anyway if a scoped fetch is ever re-added,
+since the reading really is fresh.
+
+**A hard floor on the backoff schedule.** `usageBackoff.due()` now requires
+`now >= nextAttempt + usageBackoffSafetyMargin` (1min), applied
+**unconditionally** — including to the streak-1 "free" deadline, which
+`usageBackoffUntil` still computes as the recording instant itself. This is a
+deliberate blanket floor, chosen by explicit user decision during design over
+the narrower alternative of arming the margin only once a real multi-minute
+wait exists. It changes a rule documented above for as long as the backoff has
+existed: "the first 429 is free, retry on the next ordinary tick" is now "the
+first 429 adds nothing of its own, and the next attempt still waits a minute".
+
+The tightening is the second of the margin's two reasons, and the first is the
+one that ties this half of the change to the other: two processes share one
+per-account file that is written best-effort with **no lock** (see the
+lost-write discussion above), so a streak recorded by one can be overwritten by
+the other's own pass reading a moment-older value. A floor under every deadline
+is insurance against that race — whatever streak survives the scramble, the
+account still gets at least a minute of quiet. Coalescing answers the same
+underlying fact from the other side (share the reading rather than the wait),
+which is why the two landed together: both are what "one unlocked file, two
+processes" costs, and neither needs a lock to be worth having.
+The margin lives in `due()` rather than in the recorded deadline on purpose —
+`usageBackoffUntil` stays the pure schedule, the floor stays in one place, and
+what `account_cache.go` persists is unchanged (which is why the
+already-elapsed-deadline narrative above still describes the stored value
+correctly).
+
+Two gaps coalescing opens are accepted rather than closed:
+
+- *An unsnapshotted live account gets no cross-process coalescing.* Coalescing
+  is a property of the **disk-backed** path: it reads the shared per-account
+  file, which is what another process can have written. The `name == ""` arm
+  of `newUsageFetcher` — a live account with no claude-switch snapshot, or an
+  unreadable identity — returns before ever reaching the coalesce check and
+  runs entirely off the in-memory `fbLast`/`fbBackoff`/`fbArmedFor` vars,
+  which no other process can see. So that account keeps paying a request per
+  process per tick, exactly as before. Consistent with what the `fbXXX`
+  fallback already is: a narrow degradation for an account with nowhere to
+  persist anything, not a second implementation of the disk path.
+- *A wrong-identity mismatch can be masked for up to one window (60s).*
+  `carryable`/`liveCarryable` do **not** consult `Verified` — they test
+  numbers-present plus claimed-identity equality, and `Verified` gates only
+  the narrower wrong-identity carry inside `knownAccountUsage`'s `failed`
+  helper. So a pass whose real fetch would have run the profile probe and
+  caught a `wrong identity` can instead coalesce onto a prior reading that
+  still looks plausible. Bounded (the reading has to be under 60s old) and
+  self-healing (the first pass past the window fetches and detects it), and
+  the same on both the live and known-accounts paths. Tightening it would
+  mean giving coalescing a *stricter* gate than the ordinary carry-forward
+  path it borrows from, which would be a strange asymmetry to defend: the
+  header already shows carried numbers for far longer than 60s under exactly
+  the same identity rules.
+
 `localFreshAccountEmails` excludes a `Stale` live account for the identical
 reason it already excluded a `Stale` known one, and `dedupeAccounts` threads
 `Stale` into its pass-1 `add` so a carried live or remote line takes the same dim
@@ -1188,11 +1320,22 @@ pass — a live line always wins over any host's snapshot copy of the same email
 and a failed entry keeps its line instead of being dropped: an `Expired` one as
 the dim `auth expired` placeholder, a transient one as a dim placeholder naming
 its `Reason` (`rate limited`, `bad snapshot`, …), and a `Stale` one as its bars
-plus a dim `stale` marker. That marker is appended after the **last** segment,
+plus a dim `stale` marker. That marker now carries the reading's **age** —
+`stale 12m`, `stale 2h` — rather than a bare fixed word: `usageStaleText` is
+only its prefix, and `writeUsageHeader` appends `formatAge` (render.go, the
+same helper the AGE column uses) over `now - a.fetchedAt`, threaded in from
+`AccountUsage`/`KnownAccountUsage.FetchedAt` as `accountUsageLine.fetchedAt`.
+A zero `fetchedAt` — a pre-timestamp disk entry, or a line with nothing to
+carry — falls back to the bare word rather than printing a multi-decade
+duration. This makes the marker **variable width**, which the sizing rule
+below has to measure rather than assume. (A coalesced reading is not `Stale`
+and so shows no marker and no age at all: it is current, not carried.)
+The marker is appended after the **last** segment,
 which is the one place `segTrailerText` never pads or aligns, so it shifts no
 column on any other line (`usageSegsLine` exists to make that append possible).
 It does still take part in **sizing**: `writeUsageHeader` carries its display
-width as that entry's `suffixW` into `lineBarW`/`usageLineFixedWidth`, so the
+width — of the composed text, age included — as that entry's `suffixW` into
+`lineBarW`/`usageLineFixedWidth`, so the
 shared bar width shrinks to leave room for it. Alignment and sizing pulling
 apart like that is deliberate, and leaving the marker out of *both* was a real
 bug — with two collision-promoted full-email labels at ~64 columns the bars

@@ -815,6 +815,65 @@ func TestWriteUsageHeaderMarksStaleNumbers(t *testing.T) {
 	}
 }
 
+func TestWriteUsageHeaderShowsStaleAge(t *testing.T) {
+	now := time.Now()
+	accounts := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{
+			label: "trecs", email: "andy@trecs.aero",
+			info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true,
+			fetchedAt: now.Add(-12 * time.Minute),
+		},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, 0)
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %#v, want one per account", lines)
+	}
+	want := usageStaleText + " 12m"
+	if !strings.HasSuffix(lines[1], " "+dim(want)) {
+		t.Fatalf("stale line = %q, want it suffixed with %q", lines[1], want)
+	}
+	if strings.Contains(lines[0], usageStaleText) {
+		t.Fatalf("fresh line picked up the marker: %q", lines[0])
+	}
+}
+
+// A longer suffix ("stale 12m" vs "stale") must still be accounted for in
+// bar-width sizing at a narrow terminal — render.go's own history documents
+// a real prior bug from getting stale-marker sizing wrong (a marker sized
+// out of the shared bar width, then clipped away by cropTableFrame).
+func TestWriteUsageHeaderStaleAgeSurvivesNarrowWidth(t *testing.T) {
+	now := time.Now()
+	accounts := []accountUsageLine{
+		{
+			label: "trecs", email: "andy@trecs.aero", mine: true,
+			info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true,
+			fetchedAt: now.Add(-3 * time.Hour),
+		},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, 40)
+	line := strings.TrimRight(b.String(), "\n")
+	want := usageStaleText + " 3h"
+	if !strings.Contains(line, want) {
+		t.Fatalf("narrow-width stale line = %q, want it to still contain %q", line, want)
+	}
+}
+
+func TestWriteUsageHeaderStaleWithoutAgeStaysBare(t *testing.T) {
+	accounts := []accountUsageLine{
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, 0)
+	line := strings.TrimRight(b.String(), "\n")
+	if !strings.HasSuffix(line, " "+dim(usageStaleText)) {
+		t.Fatalf("stale line with zero FetchedAt = %q, want the bare word with no age", line)
+	}
+}
+
 // A sole line attributable to this machine renders bare — no label at all — and
 // that is now a shape a carried-forward reading can take, since newUsageFetcher
 // re-serves the live account through a throttle. The marker hangs off the last
