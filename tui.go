@@ -103,13 +103,15 @@ func RunTUI(interval time.Duration) error {
 	// Re-enable output processing so '\n' still translates to '\r\n'.
 	enableOutputProcessing(fd)
 
-	// Enable mouse reporting, then alt-screen, hide cursor, disable line-wrap.
-	// All restored on return (mouse off first, mirroring the setup order in
-	// reverse).
+	// Enable mouse reporting and modifyOtherKeys (so Ctrl+1..9 arrive as
+	// distinct keystrokes — see helpers.go), then alt-screen, hide cursor,
+	// disable line-wrap. All restored on return (reverse of the setup order).
 	writeMouseMode(os.Stdout, true)
+	writeModifyOtherKeysMode(os.Stdout, true)
 	fmt.Print("\033[?1049h\033[?25l\033[?7l")
 	defer func() {
 		writeMouseMode(os.Stdout, false)
+		writeModifyOtherKeysMode(os.Stdout, false)
 		fmt.Print("\033[?7h\033[?25h\033[?1049l")
 	}()
 
@@ -139,6 +141,10 @@ func RunTUI(interval time.Duration) error {
 	var local []Session
 	var remotes []RemoteResult
 	var targets []selectionTarget
+	// killJobs tracks kills started by actKill that are still running in the
+	// background (see kill_async.go). Declared here (ahead of makeCtx) so
+	// makeCtx's killInFlight closure can read it directly.
+	var killJobs []*killJob
 
 	// Remote fetches run in a background goroutine so the render loop never
 	// blocks on a slow/unreachable host (the per-host HTTP timeout is 5s,
@@ -542,7 +548,71 @@ func RunTUI(interval time.Duration) error {
 				remoteUsageHub.Resume()
 				hostUsageHub.Resume()
 			},
+			// killInFlight reports whether a background kill is already
+			// running for this PID, so actKill can refuse a second Ctrl+X on
+			// the same row instead of starting a duplicate job — the row
+			// stays in the list until the first job lands, so without this a
+			// second confirm can race a still-live localReattest and then
+			// re-attempt worktree removal, spuriously popping the resurrect
+			// prompt over a worktree the first job already cleaned up.
+			killInFlight: func(host string, pid int) bool {
+				for _, j := range killJobs {
+					if j.session.Host != host || j.session.PID != pid {
+						continue
+					}
+					if _, done := j.snapshot(); !done {
+						return true
+					}
+				}
+				return false
+			},
 		}
+	}
+
+	// finishDoneKillJobs drains any killJobs that have completed, applies
+	// their result (a toast, or — on a dirty worktree — the interactive
+	// resurrect prompt via finishKillJob) and reports whether the session
+	// list needs a refresh.
+	finishDoneKillJobs := func() bool {
+		if len(killJobs) == 0 {
+			return false
+		}
+		changed := false
+		remaining := killJobs[:0]
+		for _, job := range killJobs {
+			res, done := job.snapshot()
+			if !done {
+				remaining = append(remaining, job)
+				continue
+			}
+			job.close()
+			changed = true
+			// finishKillJob may switch to cooked mode (the resurrect prompt)
+			// and print over rows screenRenderer still thinks are the last
+			// painted frame; invalidate so the next render() repaints in
+			// full instead of diffing against a now-stale model.
+			screen.Invalidate()
+			if msg := finishKillJob(makeCtx(), res); msg != "" {
+				toast = msg
+				toastUntil = time.Now().Add(4 * time.Second)
+			}
+		}
+		killJobs = remaining
+		return changed
+	}
+
+	// registerKillJob tracks a job actKill just started, and shows a sticky
+	// "killing…" toast in its place — it self-heals from finishDoneKillJobs'
+	// own toast the moment the job lands, so 60s is just a safety cap for a
+	// job that never wakes the loop (e.g. its pipe failed to create).
+	registerKillJob := func(ctx *actCtx) {
+		if ctx.killJob == nil {
+			return
+		}
+		killJobs = append(killJobs, ctx.killJob)
+		label, _ := ctx.killJob.session.DisplayName()
+		toast = "killing " + label + "…"
+		toastUntil = time.Now().Add(60 * time.Second)
 	}
 
 	// openInspector enters the fullscreen inspector for the selected session.
@@ -694,7 +764,21 @@ func RunTUI(interval time.Duration) error {
 		// No nil guard: pane() and wake() are both nil-receiver-safe and wake()
 		// reports fd -1 when there is nothing to wait on, which pollEvents skips.
 		wakes = append(wakes, ticketSummarySec.pane().wake())
+		for _, job := range killJobs {
+			wakes = append(wakes, job.wake())
+		}
 		events, woke := pollEvents(decoder, timeout, wakes)
+
+		// Checked unconditionally rather than gated on woke&wakeKill: a job
+		// whose wake pipe failed to create never sets that bit (see
+		// startKillJob), and finishDoneKillJobs is a cheap no-op when
+		// killJobs is empty. Applying a finished job may run the interactive
+		// resurrect prompt (finishKillJob), which owns the raw/cooked handoff
+		// itself; either way the list needs a refresh to drop the now-dead
+		// session.
+		if finishDoneKillJobs() {
+			refresh(true)
+		}
 
 		if len(events) == 0 {
 			switch {
@@ -740,7 +824,9 @@ func RunTUI(interval time.Duration) error {
 					refresh(true)
 				}, func() {
 					screen.Invalidate()
-					actKill(makeCtx())
+					ctx := makeCtx()
+					actKill(ctx)
+					registerKillJob(ctx)
 					refresh(true)
 				}, sendKeysToInspected)
 				if quit {
@@ -826,7 +912,9 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "\x18": // Ctrl+X
 				screen.Invalidate()
-				actKill(makeCtx())
+				ctx := makeCtx()
+				actKill(ctx)
+				registerKillJob(ctx)
 				refresh(true)
 				render()
 			case "i", "I":
@@ -879,13 +967,13 @@ func RunTUI(interval time.Duration) error {
 				settleRows()
 				state.requestSelectionAnchor()
 				render()
-			case "!", "@", "#", "$", "%", "^", "&", "*", "(":
-				// Shift+1..9 assign the selected session's group (single membership;
+			case KeyCtrl1, KeyCtrl2, KeyCtrl3, KeyCtrl4, KeyCtrl5, KeyCtrl6, KeyCtrl7, KeyCtrl8, KeyCtrl9:
+				// Ctrl+1..9 assign the selected session's group (single membership;
 				// same group again ungroups). Sessions with no SessionID are ignored.
 				// The group is written on the host that owns the session, so a
 				// remote row goes over HTTP — hence the same refresh(true) kick
 				// the disable toggle uses, rather than a bare settleRows().
-				if group := shiftDigitGroup(k); group != 0 {
+				if group := ctrlDigitGroup(k); group != 0 {
 					screen.Invalidate()
 					if actSetGroup(makeCtx(), group) {
 						refresh(true)
@@ -1203,15 +1291,19 @@ func groupFilterTransition(cur groupFilter, armed bool, k string) (next groupFil
 	return cur, false, false
 }
 
-// shiftDigitGroup maps a US-layout Shift+1..9 keystroke to its group number
+// ctrlDigitKeys orders the Ctrl+1..9 key constants so their index (+1) is the
+// group number — mirrors the digit order in the escape sequences themselves.
+var ctrlDigitKeys = [9]string{
+	KeyCtrl1, KeyCtrl2, KeyCtrl3, KeyCtrl4, KeyCtrl5, KeyCtrl6, KeyCtrl7, KeyCtrl8, KeyCtrl9,
+}
+
+// ctrlDigitGroup maps a decoded Ctrl+1..9 keystroke to its group number
 // (1..9), or 0 for any other key.
-func shiftDigitGroup(key string) int {
-	const shifted = "!@#$%^&*("
-	if len(key) != 1 {
-		return 0
-	}
-	if i := strings.IndexByte(shifted, key[0]); i >= 0 {
-		return i + 1
+func ctrlDigitGroup(key string) int {
+	for i, k := range ctrlDigitKeys {
+		if key == k {
+			return i + 1
+		}
 	}
 	return 0
 }
@@ -1361,7 +1453,7 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command · p prompt in background)")
 	fmt.Fprintln(&b, "    r            resume a past session (searchable · local + remote)")
 	fmt.Fprintln(&b, "    - / +        disable / enable session")
-	fmt.Fprintln(&b, "    Shift-1..9   assign session to group ①..⑨ (same group again ungroups)")
+	fmt.Fprintln(&b, "    Ctrl-1..9    assign session to group ①..⑨ (same group again ungroups)")
 	fmt.Fprintln(&b, "    Ctrl-X       kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")

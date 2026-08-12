@@ -430,3 +430,16 @@ func TestGroupsOfRows(t *testing.T) {
 		}
 	}
 }
+
+func TestCtrlDigitGroup(t *testing.T) {
+	cases := map[string]int{
+		KeyCtrl1: 1, KeyCtrl2: 2, KeyCtrl3: 3, KeyCtrl4: 4, KeyCtrl5: 5,
+		KeyCtrl6: 6, KeyCtrl7: 7, KeyCtrl8: 8, KeyCtrl9: 9,
+		"1": 0, "!": 0, KeyUp: 0, "": 0,
+	}
+	for key, want := range cases {
+		if got := ctrlDigitGroup(key); got != want {
+			t.Errorf("ctrlDigitGroup(%q) = %d, want %d", key, got, want)
+		}
+	}
+}

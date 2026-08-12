@@ -37,6 +37,23 @@ func TestInputDecoderExtendedKeys(t *testing.T) {
 	}
 }
 
+func TestInputDecoderCtrlDigitKeys(t *testing.T) {
+	cases := map[string]string{
+		"\x1b[27;5;49~": KeyCtrl1, "\x1b[27;5;50~": KeyCtrl2,
+		"\x1b[27;5;51~": KeyCtrl3, "\x1b[27;5;52~": KeyCtrl4,
+		"\x1b[27;5;53~": KeyCtrl5, "\x1b[27;5;54~": KeyCtrl6,
+		"\x1b[27;5;55~": KeyCtrl7, "\x1b[27;5;56~": KeyCtrl8,
+		"\x1b[27;5;57~": KeyCtrl9,
+	}
+	for seq, want := range cases {
+		d := newInputDecoder()
+		got := d.Feed([]byte(seq), time.Unix(0, 0))
+		if len(got) != 1 || got[0].key != want {
+			t.Errorf("%q = %#v, want %q", seq, got, want)
+		}
+	}
+}
+
 func TestInputDecoderSGRMouse(t *testing.T) {
 	cases := []struct {
 		seq     string

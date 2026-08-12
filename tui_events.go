@@ -29,6 +29,15 @@ const (
 	KeyEnd      = "\x00end"
 	KeyPageUp   = "\x00page-up"
 	KeyPageDown = "\x00page-down"
+	KeyCtrl1    = "\x00ctrl-1"
+	KeyCtrl2    = "\x00ctrl-2"
+	KeyCtrl3    = "\x00ctrl-3"
+	KeyCtrl4    = "\x00ctrl-4"
+	KeyCtrl5    = "\x00ctrl-5"
+	KeyCtrl6    = "\x00ctrl-6"
+	KeyCtrl7    = "\x00ctrl-7"
+	KeyCtrl8    = "\x00ctrl-8"
+	KeyCtrl9    = "\x00ctrl-9"
 )
 
 // fixedSequences maps complete escape sequences to their key constant.
@@ -44,6 +53,17 @@ var fixedSequences = map[string]string{
 	"\x1bOH": KeyHome, "\x1bOF": KeyEnd,
 	"\x1b[1~": KeyHome, "\x1b[4~": KeyEnd,
 	"\x1b[5~": KeyPageUp, "\x1b[6~": KeyPageDown,
+	// Ctrl+1..9: xterm's modifyOtherKeys=2 protocol reports "CSI 27;<mod>;<code>~"
+	// for keystrokes with no standard control-code form, which digits are —
+	// unlike Ctrl+A..Z, ASCII has no Ctrl+1..9 byte. Mod 5 is Ctrl alone
+	// (1 base + 4 Ctrl); codes 49-57 are '1'-'9'. enableModifyOtherKeys (tui.go)
+	// turns this reporting on for the life of the TUI, so these only ever
+	// arrive while it's active.
+	"\x1b[27;5;49~": KeyCtrl1, "\x1b[27;5;50~": KeyCtrl2,
+	"\x1b[27;5;51~": KeyCtrl3, "\x1b[27;5;52~": KeyCtrl4,
+	"\x1b[27;5;53~": KeyCtrl5, "\x1b[27;5;54~": KeyCtrl6,
+	"\x1b[27;5;55~": KeyCtrl7, "\x1b[27;5;56~": KeyCtrl8,
+	"\x1b[27;5;57~": KeyCtrl9,
 }
 
 // eventKind distinguishes the payload carried by an inputEvent.
@@ -332,6 +352,7 @@ const (
 	wakeInspector
 	wakeResize
 	wakePreview
+	wakeKill
 )
 
 // wakeFD pairs a wake pipe's read-end descriptor with the kind reported when
