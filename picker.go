@@ -168,14 +168,16 @@ func extractCWDFromJSONL(path string) string {
 }
 
 // hiddenCwd reports cwds that are never worth suggesting: everything under
-// /private, which on macOS is where scratchpads and /tmp (a symlink to
-// /private/tmp) live, worktree checkouts (.claude/worktrees/<name>) —
+// /private (macOS's home for scratchpads and the resolved form of /tmp) or
+// the unresolved /tmp itself, worktree checkouts (.claude/worktrees/<name>) —
 // short-lived, per-task dirs that clutter the list and usually don't outlive
 // the session that made them — and the user's own ~/tmp scratch dir. The
 // selected row's own cwd bypasses this — it's an explicit context, not a
 // suggestion.
 func hiddenCwd(cwd string) bool {
-	if strings.HasPrefix(cwd, "/private/") || cwd == "/private" || worktreeName(cwd) != "" {
+	if strings.HasPrefix(cwd, "/private/") || cwd == "/private" ||
+		cwd == "/tmp" || strings.HasPrefix(cwd, "/tmp/") ||
+		worktreeName(cwd) != "" {
 		return true
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
