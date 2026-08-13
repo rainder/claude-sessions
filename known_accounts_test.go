@@ -418,6 +418,142 @@ func TestKnownAccountUsage(t *testing.T) {
 	})
 }
 
+// writeSnapshotExpiry rewrites one snapshot's credential with an explicit
+// access-token expiry, keeping the refresh token writeSnapshotFixture's
+// credBlob puts there. Overwriting the fixture rather than growing a parallel
+// helper keeps every other test's snapshot exactly what it was: credBlob omits
+// expiresAt entirely, which msExpiry reads as "unknown" and this check
+// therefore never treats as expired.
+func writeSnapshotExpiry(t *testing.T, home, name, token string, expiresAt time.Time) {
+	t.Helper()
+	blob := credBlobAt(token, expiresAt, time.Time{})
+	if err := os.WriteFile(snapshotCredentialPath(home, name), []byte(blob), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A parked snapshot's access token ages out on its own and nothing here ever
+// refreshes it (snapshots are strictly read-only), so a request spent on one
+// cannot succeed today or on any later pass. Worse, the endpoint answers an
+// expired access token 429 rather than 401 — verified live — so before this
+// check the account rendered as "rate limited" and armed the consecutive-429
+// backoff forever, over a stale credential one `account save` would fix.
+func TestKnownAccountUsageExpiredAccessToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	fakeClock(t, now)
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+
+	// A spy, not stubUsageFetch: the whole point is that no request is made, so
+	// the assertion has to be on the call count, not on the answer.
+	calls := 0
+	spy := func(string) (*UsageInfo, error) {
+		calls++
+		return &UsageInfo{FiveHour: usageBucket{Pct: 41}}, nil
+	}
+
+	t.Run("an expired access token is answered from the file, unfetched", func(t *testing.T) {
+		calls = 0
+		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
+		// prev is nil deliberately: needs-refresh goes through failed() like
+		// every other non-expired outcome, so a carryable prev WOULD have its
+		// numbers re-served here (the bad-snapshot rule) — asserting Info == nil
+		// with a prev would pass for the wrong reason.
+		got, skipped := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if skipped {
+			t.Fatal("skipped = true, want false for a non-live account")
+		}
+		if calls != 0 {
+			t.Fatalf("fetches = %d, want none — a token known to be expired must cost no request", calls)
+		}
+		if got.Reason != usageNeedsRefreshReason {
+			t.Fatalf("reason = %q, want %q", got.Reason, usageNeedsRefreshReason)
+		}
+		if got.Expired {
+			// "auth expired" means re-login; the refresh token here is fine and
+			// `account save <name>` is the whole fix.
+			t.Fatalf("entry = %#v, want Expired false — the credential needs re-saving, not a new login", got)
+		}
+		if got.Info != nil || got.Name != "trecs" || got.Account != "andy@trecs.aero" {
+			t.Fatalf("entry = %#v, want identity kept with no numbers", got)
+		}
+	})
+
+	t.Run("a carryable prev still carries through needs-refresh, unfetched", func(t *testing.T) {
+		// Pinning a deliberate design choice, not just documenting it: needs-refresh
+		// goes through the same failed() carry-forward every other non-Expired
+		// reason gets, so an account with a recent healthy reading keeps showing
+		// those numbers (Stale, aging) instead of ever rendering the "needs
+		// refresh" text — matching bad snapshot's existing behavior, and this
+		// codebase's stated "old numbers beside a visible Stale marker still beat
+		// no numbers at all" philosophy. A later change that routes needs-refresh
+		// around failed() to surface the tag instead should have to touch this
+		// test, not break it silently.
+		calls = 0
+		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
+		prev := &KnownAccountUsage{
+			Name: "trecs", Account: "andy@trecs.aero",
+			Info: &UsageInfo{FiveHour: usageBucket{Pct: 7}}, FetchedAt: now.Add(-10 * time.Minute),
+		}
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, spy)
+		if calls != 0 {
+			t.Fatalf("fetches = %d, want none even with a carryable prev", calls)
+		}
+		if got.Reason != usageNeedsRefreshReason || !got.Stale || got.Info == nil || got.Info.FiveHour.Pct != 7 {
+			t.Fatalf("entry = %#v, want prev's numbers carried forward, marked Stale, tagged %q",
+				got, usageNeedsRefreshReason)
+		}
+		if !got.FetchedAt.Equal(prev.FetchedAt) {
+			t.Fatalf("FetchedAt = %v, want prev's original timestamp preserved", got.FetchedAt)
+		}
+	})
+
+	t.Run("a live access token is still fetched", func(t *testing.T) {
+		calls = 0
+		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(time.Hour))
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if calls != 1 {
+			t.Fatalf("fetches = %d, want 1 — the expiry check must not over-trigger", calls)
+		}
+		if got.Reason != "" || got.Info == nil || got.Info.FiveHour.Pct != 41 {
+			t.Fatalf("entry = %#v, want an ordinary clean fetch", got)
+		}
+	})
+
+	t.Run("an absent expiry is unknown, not expired", func(t *testing.T) {
+		// An older snapshot format that never wrote expiresAt: msExpiry reads 0
+		// as "unknown", and guessing "expired" from a missing field would blank
+		// a perfectly good account.
+		calls = 0
+		writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if calls != 1 {
+			t.Fatalf("fetches = %d, want 1 — an unknown expiry must not read as expired", calls)
+		}
+		if got.Reason != "" || got.Info == nil {
+			t.Fatalf("entry = %#v, want an ordinary clean fetch", got)
+		}
+	})
+
+	t.Run("the clock-skew tolerance is one-directional", func(t *testing.T) {
+		// Just past the stated expiry but still inside the skew window: a
+		// disagreeing clock must not withhold a reading from a token that very
+		// likely still works. Once the window itself elapses, it does.
+		clock := fakeClock(t, now)
+		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-usageExpiryClockSkew/2))
+		calls = 0
+		if got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy); got.Reason != "" || calls != 1 {
+			t.Fatalf("inside the skew window: reason = %q, fetches = %d, want a normal fetch", got.Reason, calls)
+		}
+		*clock = now.Add(usageExpiryClockSkew)
+		calls = 0
+		if got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy); got.Reason != usageNeedsRefreshReason || calls != 0 {
+			t.Fatalf("past the skew window: reason = %q, fetches = %d, want %q unfetched", got.Reason, calls, usageNeedsRefreshReason)
+		}
+	})
+}
+
 func TestClassifyUsageErr(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -788,6 +924,94 @@ func TestKnownAccountsFetcherPersistsBackoffAfterEachPass(t *testing.T) {
 	}
 	if len(saved) != 2 || saved[1].streak != 0 {
 		t.Fatalf("saved after success = %+v, want the wait cleared", saved)
+	}
+}
+
+// A pass that produced no numbers still persists WHOSE pass it was. Account
+// used to be written only alongside Info, so a chronically failing account
+// persisted its backoff state under Account "" — an entry entryIdentityMatches
+// can never match and, because of the `cached.Account != ""` guard beside it,
+// can never reject either, so a snapshot name reassigned to a different
+// account would inherit the outgoing account's armed wait unchallenged. Same
+// hole entryIdentityMatches exists to close, reached through the one entry
+// shape it could not see.
+func TestKnownAccountsFetcherPersistsIdentityOnAFailedPass(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	fakeClock(t, now)
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+	writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
+
+	calls := 0
+	swapFetch(t, func(string) (*UsageInfo, error) {
+		calls++
+		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+	})
+	var saved []accountCacheEntry
+	save := func(_ string, e accountCacheEntry) { saved = append(saved, e) }
+
+	res, err := newKnownAccountsFetcher(save)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("fetches = %d, want none — the expiry check must short-circuit the whole pass", calls)
+	}
+	if len(res.Accounts) != 1 || res.Accounts[0].Reason != usageNeedsRefreshReason {
+		t.Fatalf("accounts = %#v, want one entry tagged %q", res.Accounts, usageNeedsRefreshReason)
+	}
+	if len(saved) != 1 {
+		t.Fatalf("saves = %d, want 1", len(saved))
+	}
+	if saved[0].Account != "andy@trecs.aero" {
+		t.Fatalf("persisted Account = %q, want the snapshot's email even with no numbers", saved[0].Account)
+	}
+	if saved[0].Info != nil || !saved[0].FetchedAt.IsZero() {
+		t.Fatalf("persisted entry = %#v, want no numbers and no timestamp beside them", saved[0])
+	}
+	// needs-refresh is not a throttle, so it flows through the outer loop's
+	// existing bookkeeping unchanged and clears the streak — which is what lets
+	// the (free, local) expiry check re-run on every ordinary tick instead of
+	// being held back by a wait it can never satisfy.
+	if saved[0].BackoffStreak != 0 {
+		t.Fatalf("persisted streak = %d, want 0 — only consecutive 429s arm a wait", saved[0].BackoffStreak)
+	}
+}
+
+// The regression the previous test's spy save cannot show: needs-refresh
+// clears the streak to 0, and accountCacheEntry.empty() (Info == nil &&
+// streak <= 0) means the REAL saveAccountCache deletes that entry's file —
+// Account never actually reaches disk in that shape. A genuine, repeated
+// 429 with no carryable prev is the shape that survives: streak > 0 keeps
+// the file, so this is the one that proves the fix through the real
+// save/load round trip rather than a spy that bypasses empty()'s deletion.
+func TestKnownAccountsFetcherAccountSurvivesRealCacheOnRepeatedThrottle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+
+	swapFetch(t, func(string) (*UsageInfo, error) {
+		return nil, &usageHTTPError{Status: 429}
+	})
+
+	fetcher := newKnownAccountsFetcher(saveAccountCache)
+	if _, err := fetcher(); err != nil {
+		t.Fatal(err)
+	}
+
+	cached, _ := loadAccountCache("trecs")
+	if cached.empty() {
+		t.Fatalf("cached = %+v, want a surviving entry (streak > 0), not the shape saveAccountCache deletes", cached)
+	}
+	if cached.Account != "andy@trecs.aero" {
+		t.Fatalf("persisted Account = %q, want the snapshot's email — this is what lets a later account save --force "+
+			"reassignment be rejected by entryIdentityMatches instead of silently inheriting this wait", cached.Account)
+	}
+	if cached.BackoffStreak == 0 {
+		t.Fatalf("streak = %d, want > 0 after a genuine throttle with nothing to carry forward", cached.BackoffStreak)
 	}
 }
 
