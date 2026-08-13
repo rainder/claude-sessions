@@ -647,7 +647,7 @@ worst case. This budget belongs to the client-side fetchers only
 no longer calls either leg (see below), so there is no longer a server-side
 timeout wrapper in this chain to check it against.
 
-**A failed fetch has five outcomes, not two.** `Expired` used to mean "the last
+**A failed fetch has six outcomes, not two.** `Expired` used to mean "the last
 fetch failed", which is how a 429 came to render as `auth expired` and send the
 user off to re-login over a throttle — and the endpoint 429s constantly, since
 every Claude Code session shares the account's per-token budget. So
@@ -671,6 +671,31 @@ is perfectly readable); the fix is the same `account save <name>`. `Reason`
 is a short fixed tag and never the underlying error's text: a `*url.Error`
 stringifies with the whole request URL, which would land in a one-line header
 placeholder and in the `/usage` JSON.
+
+The sixth is `needs refresh` (`usageNeedsRefreshReason`, known_accounts.go): a
+parked snapshot's *access* token has aged out while its *refresh* token is
+still good. `knownAccountUsage` catches this before spending a request —
+`snapshotAccessTokenExpiresAt` reads the same credential's `expiresAt` field
+`validateSnapshotCredential` (account.go) also reads — there for a different
+reason (an expired access token there just skips the profile-identity probe;
+it is never itself a reason to refuse a switch, only an expired *refresh*
+token is) — applied here as an actual gate on the polling path instead. It
+shares `bad snapshot`'s shape (set
+directly, no `classifyUsageErr` branch, since no request was made) and is
+deliberately neither of the two tags it would otherwise resemble: not `Expired`
+(the refresh token is fine, no re-login needed) and not `rate limited` (which
+is what this state rendered as before this tag existed — confirmed live
+against the real endpoint, an expired access token gets **429**, not 401, from
+`/api/oauth/usage` specifically, even though the same token gets a correct 401
+from `/api/oauth/profile`; the usage endpoint's own quirk, not a real
+throttle). The fix is the same `account save <name>` while logged into that
+account. Like every other non-`Expired` reason, a carryable `prev` still gets
+served with a `Stale` marker ahead of this tag taking effect, so a
+recently-healthy account that goes into this state keeps showing its last
+numbers with a growing staleness age rather than the `needs refresh` text
+itself — consistent with how `bad snapshot` already behaves, and with this
+section's own "old numbers beside a visible Stale marker still beat no numbers
+at all" reasoning above; the age is the discoverability signal, not the tag.
 
 A transient failure then **carries the last good numbers forward** rather than
 blanking the account — in `KnownAccountsHub`, the client-side poller, which is

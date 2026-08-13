@@ -27,15 +27,20 @@ import (
 //	                             no numbers are carried forward beside it
 //	Info == nil, Reason != ""    transient failure with nothing to carry
 //
-// Reason is the classification tag from classifyUsageErr, never raw error text.
+// Reason is a short fixed tag: classifyUsageErr's classification for an actual
+// HTTP answer ("rate limited", "server error", …), or set directly for a
+// failure with no HTTP answer to classify ("bad snapshot", "needs refresh").
+// Never raw error text.
 type KnownAccountUsage struct {
 	Name    string     `json:"name"`    // snapshot name, e.g. "avisoma"
 	Account string     `json:"account"` // email, "" if account.json missing/unreadable
 	Info    *UsageInfo `json:"info"`    // fresh, or (with Stale) carried forward; nil when Expired
 	Expired bool       `json:"expired"` // a genuine 401/403 only — the actionable "re-login" state
 	Stale   bool       `json:"stale,omitempty"`
-	// Reason is set whenever the latest attempt failed: alongside Expired, and
-	// alongside either carried-forward or absent numbers. Empty on a clean fetch.
+	// Reason is set whenever this entry isn't a clean fetch: alongside Expired,
+	// alongside either carried-forward or absent numbers, or — for a failure
+	// that never reached the network, like needs-refresh — alone with neither.
+	// Empty only on a clean fetch.
 	Reason string `json:"reason,omitempty"`
 	// Verified records that Info's identity was confirmed by the profile probe —
 	// this token really does belong to Account — rather than merely assumed from
@@ -171,6 +176,43 @@ func snapshotToken(name string) (string, error) {
 	return parseOAuthCredentials(data)
 }
 
+// snapshotAccessTokenExpiresAt reads when one snapshot's OAuth *access* token
+// ages out, or the zero time when the credential does not say (msExpiry's
+// "0 means unknown" contract, the same reading validateSnapshotCredential
+// takes of the identical field).
+//
+// It deliberately re-reads the file snapshotToken just read rather than
+// widening that function's return: snapshotToken is the shared parse the live
+// path uses too, and its one-string contract is what several call sites and
+// tests are written against. Two small local file reads per account per pass
+// cost nothing next to the HTTP round trip this pair of reads exists to avoid,
+// and the only way they can disagree is an `account save` landing between
+// them — worth one wasted request, or one spurious "needs refresh" that the
+// next pass corrects, neither of which is worth coupling the two reads to
+// prevent.
+func snapshotAccessTokenExpiresAt(name string) (time.Time, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return time.Time{}, err
+	}
+	data, err := os.ReadFile(snapshotCredentialPath(home, name))
+	if err != nil {
+		return time.Time{}, err
+	}
+	creds, err := parseOAuthCredentialBlob(data)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return msExpiry(creds.ExpiresAt), nil
+}
+
+// usageExpiryClockSkew tolerates a small clock disagreement between this host
+// and Anthropic's before a parked access token is treated as expired. It is
+// deliberately one-directional: being a minute late to notice costs one
+// request that would have failed anyway, while being a minute early would
+// withhold a reading from a token that still works.
+const usageExpiryClockSkew = 60 * time.Second
+
 // snapshotAccountEmail reads a snapshot's login email from
 // ~/.claude/.<name>.account.json, mirroring loadAccountEmail's read of the live
 // ~/.claude.json (same oauthAccount.emailAddress shape). Returns "" on any
@@ -245,6 +287,28 @@ var usageInfoFetch = fetchVerifiedUsageInfo
 // because that is the only place the fix lives.
 const usageBadSnapshotReason = "bad snapshot"
 
+// usageNeedsRefreshReason is the classification for a parked snapshot whose
+// OAuth *access* token has aged out while its refresh token is still good.
+// Nothing in this codebase can fix that: claude-switch snapshots are strictly
+// read-only here (see snapshotToken), so the token can never rotate in place
+// the way the live credential's does, and the account stays in this state
+// until a human runs `account save <name>` while logged into it.
+//
+// It shares usageBadSnapshotReason's shape — set on the entry directly, no
+// classifyUsageErr branch, because no request was made — and is deliberately
+// neither of the two tags it would otherwise fall in with:
+//
+//   - not usageExpiredReason: "auth expired" means re-login, and the refresh
+//     token here is still perfectly valid. Only the snapshot is stale.
+//   - not usageRateLimitedReason: which is what this state used to render as,
+//     and the whole reason this tag exists. Verified live against the real
+//     endpoint — an expired access token is answered 429 (with a Retry-After
+//     of ~30 minutes), not 401 — so classifyUsageErr saw an ordinary throttle,
+//     the consecutive-429 backoff armed a real wait, and an account that
+//     could never heal on its own sat there cycling "rate limited" forever
+//     against a fix that is one command away.
+const usageNeedsRefreshReason = "needs refresh"
+
 // knownAccountUsage is fetchKnownAccountUsage with the HTTP leg injected, so
 // tests exercise every branch without a network or a real token.
 //
@@ -301,6 +365,25 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 		// the snapshot is rewritten (`account save <name>` while logged into
 		// it, the same recovery switchAccount's identity precondition names).
 		return failed(false, usageBadSnapshotReason, false)
+	}
+	// The token parses, but has it aged out? A parked snapshot's access token
+	// expires like any other, and unlike the live credential nothing ever
+	// refreshes this copy, so spending a request on it is a request that cannot
+	// succeed today and cannot succeed on any later pass either. Answering it
+	// from the file is both cheaper and more truthful — see
+	// usageNeedsRefreshReason for what the endpoint actually says instead.
+	//
+	// usageClockNow, not time.Now: this is a *decision* the fetcher tests drive
+	// through the same clock seam they drive backoff with (fakeClock), unlike
+	// the FetchedAt stamp below, which records when a fetch really happened.
+	//
+	// A zero expiry means the credential never said (msExpiry's contract), and
+	// an unreadable one means the file changed under us between snapshotToken
+	// and here — neither is evidence of expiry, so both fall through to the
+	// fetch that would have happened anyway.
+	if exp, expErr := snapshotAccessTokenExpiresAt(name); expErr == nil && !exp.IsZero() &&
+		usageClockNow().After(exp.Add(usageExpiryClockSkew)) {
+		return failed(false, usageNeedsRefreshReason, false)
 	}
 	info, err := fetch(tok)
 	if err != nil {
@@ -571,9 +654,32 @@ func newKnownAccountsFetcher(save func(name string, e accountCacheEntry)) func()
 					backoff = usageBackoff{}
 				}
 			}
-			e := accountCacheEntry{BackoffStreak: backoff.streak, BackoffNextAttempt: backoff.nextAttempt}
+			// Account is persisted whether or not this pass produced numbers:
+			// knownAccountUsage sets it from snapshotAccountEmail on every
+			// outcome, and it is what binds the backoff half beside it to an
+			// identity. Written only alongside Info — as it was — a chronically
+			// failing account persisted its armed wait under Account "", which
+			// entryIdentityMatches (above) can never match and, worse, can never
+			// even *reject*: the `cached.Account != ""` guard meant a snapshot
+			// name reassigned to a different account inherited the outgoing
+			// account's wait unchallenged. That is the same hole
+			// entryIdentityMatches was introduced to close, reached through the
+			// one entry shape it could not see. FetchedAt/Info/Verified stay
+			// inside the conditional — they describe numbers, and there are none.
+			//
+			// This closes the hole only from this side. usage.go's own persist
+			// (the live account's poller) has the identical gap on a failed pass
+			// with nothing carryable — untouched here — and both hubs write the
+			// SAME per-account file across a switch (see account_cache.go), so a
+			// live-side failure can still leave Account "" for the next reader.
+			// Not fixed in this change; a real gap, not a regression from it.
+			e := accountCacheEntry{
+				Account:            r.Account,
+				BackoffStreak:      backoff.streak,
+				BackoffNextAttempt: backoff.nextAttempt,
+			}
 			if r.Info != nil {
-				e.Account, e.FetchedAt, e.Info, e.Verified = r.Account, r.FetchedAt, r.Info, r.Verified
+				e.FetchedAt, e.Info, e.Verified = r.FetchedAt, r.Info, r.Verified
 			}
 			if !coalesced {
 				save(name, e)
