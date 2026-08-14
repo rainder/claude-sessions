@@ -78,7 +78,7 @@ func startKillJob(s Session, run func() killJobResult) *killJob {
 func startLocalKillJob(s Session, worktree string) *killJob {
 	return startKillJob(s, func() killJobResult {
 		res := killJobResult{session: s}
-		if err := localReattest(s.PID, s.SessionID); err != nil {
+		if err := localReattestSession(s); err != nil {
 			res.err = err
 		} else if err := KillSession(s); err != nil {
 			res.err = err

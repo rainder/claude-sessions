@@ -936,7 +936,15 @@ func (s *server) switchAccountTo(name string) (string, []string, error) {
 	return switchAccount(name)
 }
 
-func (s *server) attestSession(pid int) (Session, bool) {
+// attestSession re-reads the one file that establishes identity for pid,
+// picking the store the row's own tool names. Claude's per-pid session file is
+// behind the s.attest seam; grok's registry is behind grokSessionLookup
+// (grok.go), which is a package var for the same reason — neither leg may be
+// asked to touch a real home directory from a handler test.
+func (s *server) attestSession(pid int, tool string) (Session, bool) {
+	if tool == toolGrok {
+		return grokSessionLookup(pid)
+	}
 	if s.attest != nil {
 		return s.attest(pid)
 	}
@@ -957,14 +965,17 @@ func (s *server) attestSession(pid int) (Session, bool) {
 // Only when the client named a session: with no precondition there is nothing
 // to attest against, and the unconditional path must not acquire a new way to
 // fail.
-func (s *server) reattest(pid int, wantSession string) *actionResult {
+// tool names the store that owns the row — it comes from the server's own
+// freshly collected list (resolveLivePID), never from the request body, so a
+// client cannot steer which file is consulted.
+func (s *server) reattest(pid int, wantSession, tool string) *actionResult {
 	if wantSession == "" {
 		return nil
 	}
-	sess, ok := s.attestSession(pid)
+	sess, ok := s.attestSession(pid, tool)
 	if !ok {
 		return &actionResult{
-			Error: fmt.Sprintf("PID %d is not a live Claude session", pid),
+			Error: fmt.Sprintf("PID %d is not a live %s session", pid, sessionToolLabel(tool)),
 			Code:  codeNotLive,
 		}
 	}
@@ -1007,8 +1018,11 @@ func (s *server) resolveLivePID(pid int, wantSession string) (*Session, []Sessio
 		}
 		return target, sessions, nil
 	}
+	// No row resolved, so no tool is known — the message stays tool-neutral
+	// rather than naming Claude and misdescribing a grok pid the collector
+	// simply did not list.
 	return nil, nil, &actionResult{
-		Error: fmt.Sprintf("PID %d is not a live Claude session", pid),
+		Error: fmt.Sprintf("PID %d is not a live session", pid),
 		Code:  codeNotLive,
 	}
 }
@@ -1458,7 +1472,7 @@ func (s *server) kill(w http.ResponseWriter, r *http.Request) {
 	// Last thing before the signal: confirm the PID still holds the session the
 	// client named. Everything above ran against a snapshot that cost real I/O
 	// to build.
-	if refusal := s.reattest(pid, wantSession); refusal != nil {
+	if refusal := s.reattest(pid, wantSession, target.Tool); refusal != nil {
 		writeJSON(w, http.StatusOK, *refusal)
 		return
 	}

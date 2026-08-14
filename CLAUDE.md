@@ -166,6 +166,166 @@ last keystroke's filtered view has no relation to this keystroke's. Only
 `refresh()` (the data-changed path every action — kill, disable/group toggle,
 wall-clock tick, remote poll — funnels through) passes the real list.
 
+### Grok sessions
+
+`grok.go` lists the xAI Grok CLI's live sessions as first-class rows beside
+Claude Code's. `Session.Tool` names the owner: `""` is claude — every session
+file Claude Code writes, and every row an older server sends over the wire,
+decodes as claude with no migration step — and `toolGrok` marks a grok row.
+
+The two stores look nothing alike. Claude writes one file per pid; grok keeps a
+single `~/.grok/active_sessions.json` array (`session_id`, `pid`, `cwd`,
+`opened_at`) that it rewrites under its own `active_sessions.lock`. This
+collector never takes that lock, so a torn mid-write read is possible and is
+treated as **no grok sessions**, never an error — the caller is really trying to
+list claude sessions, and a file this tool does not own must not be able to
+blank that list. Missing, unreadable and unparseable all collapse to the same
+answer for the same reason.
+
+Per-session metadata lives at
+`~/.grok/sessions/<encoded-cwd>/<session-id>/summary.json`. The directory name
+is `url.PathEscape` of the absolute cwd, verified byte for byte against the
+live directories (`/` → `%2F`; `.` and `-` are left alone). That is the fast
+path; a miss falls back to scanning the per-cwd directories for one holding the
+session id, so the exact encoding is **not** load-bearing.
+
+**`grokSummaryPath`'s step order is a cost decision, not a style one.**
+`CollectLocal` runs on a 2s tick and a host can hold thousands of per-cwd
+directories, so a scan on every routine miss is thousands of syscalls per tick
+— the same failure shape the resume collector's laziness exists to avoid, and
+the common miss is entirely ordinary: grok creates the per-cwd directory before
+it writes `summary.json` on the first turn. So a miss on the summary checks the
+**directory** next: if that exists, the encoding is right and there is nothing
+a scan could find, so it answers not-found without listing anything. Only a
+per-cwd directory missing *entirely* can mean the encoding changed, and only
+then does the scan run. A resolved scan is memoized per cwd (`grokScanned`,
+mutex-guarded, keyed by sessions-root plus cwd so two homes never share an
+entry), so an encoding change costs one scan per cwd **per process** rather
+than one per pass. A scan that finds nothing is deliberately not memoized — the
+directory may appear the moment grok's first turn lands, and a negative memo
+would hide it for the life of the process; the residual cost is one scan per
+pass for a brand-new session under an unknown encoding, until its directory
+exists. `grokSessionsReadDir` is the seam that makes "did not scan" testable,
+which is the property that matters here rather than the answer being right. The
+scan uses `os.ReadDir` and never `filepath.Glob`, for the same reason
+`snapshotAccountNames` does: home is data, not a pattern.
+
+NAME prefers `generated_title`, then `session_summary`, and is marked
+`nameSource: "derived"` — grok generated it, the user did not type it — so it
+renders dimmed like claude's own derived names. A session whose summary has not
+been written yet still renders as a row. A row with no parseable `opened_at`
+**and** no summary has nothing on disk to date it by, so `grokSessionFrom`
+stamps collection time rather than leave `StartedAt` at zero — `Session.Updated`
+would otherwise answer the epoch and the AGE column would read ~20679d.
+
+`collectGrokLocal` deliberately fills **only** what the registry and summary
+know, and `CollectLocal` runs its CPU/tmux/Home/GitRoot enrichment over claude
+and grok rows in one shared pass. That is what makes attach, preview,
+send-keys, resize and kill need no per-tool path at all: they all key off
+`Session.Tmux`, and `walkTmuxPane` already handles grok's process shape (the
+pane pid is a shell whose child is `grok`) because it walks pid → ppid.
+Cost and context tokens stay zero (there is no claude transcript to scan), and
+STATUS renders as the same `-` placeholder MODEL/TMUX/SID already use —
+`statusCellText`, and `statusGlyphFor` for the minimal view's one-character
+version, which must agree with it: `?` there means "this session reports a
+status this tool does not recognise", which is the wrong claim about a tool
+that reports none at all. Grok publishes no status signal anywhere on disk and
+inventing one would be worse than admitting it. The row carries a dim `grok`
+badge inside the NAME cell (`toolBadge`/`nameCell`), which takes part in that
+column's **sizing** (`nameCellTextWidth`) — a badge left out of the width math
+pushes every column right of it out of alignment.
+
+**A pid claude still holds a session file for wins outright.** Claude Code does
+not delete that file when its process exits, so a pid it once used and grok now
+owns would otherwise produce two rows whose `Session.ID()` is the same
+`"<pid>"` — and selection, kill routing and the TUI's row bookkeeping all
+assume that id is unique. `CollectLocal` drops the grok row in that case:
+claude's carries a user-set name and a real status, where the grok row for a
+recycled pid is the one more likely to be describing something that has moved.
+
+**`CollectLocalLite` is deliberately not extended, but the flag store's prune
+resolver is** — and the split is the point, because the two answer different
+questions for different consumers. Lite feeds the account-switch warning about
+processes still holding the outgoing Anthropic token, and a grok session holds
+no Anthropic credential, so listing one there would warn about a process that
+cannot possibly clobber the credential being installed.
+`resolvableSessionIDs` (session_flags.go) decides what the flag store may
+**prune**, and a grok row can be grouped or disabled from the TUI exactly like
+a claude one. Built from Lite alone, a grok session id never resolves, so
+`mutateLocked`'s prune deleted the group or disable bit the user had just set
+on the very next flag write. It now unions in `grokLiveSessionIDs`, which is
+deliberately cheaper than `collectGrokLocal` — one registry read plus the
+liveness check, no `summary.json` join — because it runs on every flag write
+and needs identity only.
+
+**Two liveness seams, and tests must stub both.** `sessionPIDAlive`
+(session.go) is the claude collectors' check and `grokPIDAlive` (grok.go) is
+grok's; production leaves both as `pidAlive`. A test that stubs only one leaves
+the other's rows filtered by the real check, so its outcome silently depends on
+whether a made-up pid happens to exist on the machine running `go test` — green
+locally, and green for the wrong reason. `allPIDsAlive`/`livePIDs` in
+`grok_test.go` stub the pair together.
+
+**Reattestation routes off the row's own tool**, never off the pid: the pid
+alone cannot tell the two stores apart, and asking claude's store about a grok
+pid reports a healthy session as `not_live`. `localReattestSession`
+(migrate.go) picks `localReattest` or `localReattestGrok`; the server's
+`reattest(pid, wantSession, tool)` picks the `s.attest` seam or
+`grokSessionLookup`, with `tool` taken from the server's own freshly collected
+row so a client cannot steer which file is consulted. Both grok legs go through
+`grokSessionByPID`, which — unlike `readSessionByPID` — also checks liveness.
+That check **narrows** the stale-entry window; it does not close it. It proves
+some process holds the pid, never that the process is this grok session, so an
+entry left behind by a crash whose pid has since been recycled still attests —
+the same accepted residual window a claude kill against a session with no tmux
+name already has (see "Known residual windows, accepted"). It is worth having
+because claude's session file lingering after exit never claimed anything about
+the pid at all, while grok's entry is supposed to vanish with the session, so a
+surviving one is already evidence something went wrong. The refusal envelope
+and its `session_mismatch`/`not_live` codes are unchanged.
+`resolveLivePID`'s own not-live message is deliberately tool-neutral ("is not a
+live session"): nothing resolved for that pid, so nothing there knows which
+store would have owned it.
+
+**Migrate, resume and snapshot restore stay claude-only.** Migrate means "kill
+it and respawn as `claude --resume <id>`", which no grok session can be, so
+`MigrateLocalAttested` refuses a pid the registry claims — one place covering
+every entry point at once, and costing nothing on the normal path since the
+registry is consulted only after the claude session file has already missed.
+Four call sites also refuse up front, so the refusal arrives before a
+confirmation or a round trip rather than after one: `actAttach`'s migrate
+branch, `actAttachRemote`'s (the server can only refuse it too), `cmdMigrate`,
+and `cmdAttach`'s not-in-tmux branch — which used to point the user at `run:
+claude-sessions migrate <pid>`, a command that can only refuse. Two subtler
+paths matter for the same reason: `finishKillJob`'s resurrect offer is skipped
+for a grok row (it calls `ResumeSessionInWorktree`, i.e. `claude --resume`),
+and `saveSnapshotFrom` skips grok rows outright, since a snapshot is restored
+by resuming each entry's claude transcript and a grok session has none.
+
+`lookupLiveSessionByPID` is how the scriptable subcommands cope with a bare pid
+that names no tool: claude's file first, grok's registry second. It is what
+lets `kill PID` work on a grok session — with the same reattestation — and what
+lets `migrate PID` and `attach PID` name the right refusal.
+
+**Claude wins that race only while its own claim is still plausible.**
+`readSessionByPID` checks nothing about liveness — Claude Code leaves the file
+behind when the process exits — so a pid it once used and grok now owns would
+resolve to the dead claude session, and `kill PID` would act on the wrong row
+entirely. So when the claude file is present but the pid is **not** alive and
+grok's registry holds a live session there, grok's row is the truthful one and
+wins. `MigrateLocalAttested` carries the same guard in its own shape: it
+refuses rather than adopting the stale file, because migrating it would SIGTERM
+the live grok process and then resume a stranger's transcript in its place.
+Both guards are deliberately narrow — a dead claude pid with **no** grok
+session at that pid still resolves and still migrates, which is the legitimate
+"resume a session whose process died" path.
+
+Messages: `resolveLivePID`, `resolveLivePIDLocal` and the bare-pid subcommands
+all report "is not a live session" rather than "is not a live Claude session",
+since at that point nothing resolved and nothing knows which store would have
+owned the pid. `localReattest` keeps the word "Claude" — it re-read claude's
+own session file, so it knows exactly what it did not find.
+
 ### Resume picker
 
 `resume.go` owns the whole `r`-key feature: collect past transcripts

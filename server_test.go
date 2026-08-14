@@ -2348,8 +2348,10 @@ func TestKillHandlerSessionIDForDeadPIDRefuses(t *testing.T) {
 	if r.OK || r.Code != codeNotLive {
 		t.Fatalf("result = %#v, want refusal with code %q", r, codeNotLive)
 	}
-	if r.Error != "PID 55 is not a live Claude session" {
-		t.Fatalf("error = %q, want the pre-existing not-live wording", r.Error)
+	// Tool-neutral on purpose: nothing resolved for this PID, so nothing here
+	// knows which store would have owned it (see resolveLivePID).
+	if r.Error != "PID 55 is not a live session" {
+		t.Fatalf("error = %q, want the tool-neutral not-live wording", r.Error)
 	}
 }
 

@@ -432,6 +432,7 @@ MIT — see [LICENSE](LICENSE).
 ```
 main.go              CLI dispatch
 session.go           Session struct + CollectLocal
+grok.go              xAI Grok CLI live-session collector + reattestation
 tmux.go              pane mapping + ppid walk
 render.go            full/minimal views with multi-section layout
 config.go            view-mode load/save

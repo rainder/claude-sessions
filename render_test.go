@@ -317,6 +317,127 @@ func TestDerivedNameDimmed(t *testing.T) {
 	}
 }
 
+// A grok row carries a dim "grok" marker after its NAME label. It shares the
+// NAME cell rather than taking a column of its own, so the marker must take
+// part in that column's sizing — otherwise the badge eats into the next
+// column and every row below it goes out of alignment.
+func TestGrokRowsCarryADimBadgeAfterName(t *testing.T) {
+	now := time.Now().UnixMilli()
+	claude := Session{PID: 100, Name: "claude-task", NameSource: "user",
+		CWD: "/work/claudedir", Status: "busy", Entrypoint: "cli", UpdatedAt: now}
+	grok := Session{Tool: toolGrok, PID: 200, Name: "grok-task", NameSource: "user",
+		CWD: "/work/grokdir", Entrypoint: "cli", UpdatedAt: now}
+
+	for _, mode := range []string{"1", "2", "3"} {
+		var b strings.Builder
+		RenderAll(&b, mode, testLocalHost(claude, grok), nil, "", nil, 0, 0, "dir")
+		out := b.String()
+
+		grokRow := findRow(t, out, "grokdir")
+		if !strings.Contains(grokRow, "grok-task "+ansiDim+"grok") {
+			t.Errorf("mode %s: grok row has no dim badge after NAME: %q", mode, grokRow)
+		}
+		claudeRow := findRow(t, out, "claudedir")
+		if strings.Contains(stripANSI(claudeRow), " grok") {
+			t.Errorf("mode %s: claude row picked up a badge: %q", mode, claudeRow)
+		}
+		// Same columns, same widths: an uncounted badge would make the grok
+		// row wider than every other row in the table.
+		if a, b := visualLen(grokRow), visualLen(claudeRow); a != b {
+			t.Errorf("mode %s: rows disagree on width (%d vs %d): %q / %q", mode, a, b, grokRow, claudeRow)
+		}
+	}
+}
+
+func TestNameCellBadge(t *testing.T) {
+	cases := []struct {
+		name, label, badge string
+		width              int
+		nameDim, plain     bool
+		wantW              int
+		want               string
+	}{
+		{"no badge is the cell it always was", "abc", "", 6, false, false, 3, "abc   "},
+		{"badge adds a separator plus its own width", "abc", "grok", 10, false, false, 8, "abc " + ansiDim + "grok" + ansiReset + "  "},
+		{"badge dims even beside a dim label", "abc", "grok", 8, true, false, 8, ansiDim + "abc" + ansiReset + " " + ansiDim + "grok" + ansiReset},
+		// A row already dimmed or highlighted as a whole gets no escapes of
+		// its own — an embedded reset there cancels the row's attribute.
+		{"plain drops every escape", "abc", "grok", 10, true, true, 8, "abc grok  "},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := nameCellTextWidth(c.label, c.badge); got != c.wantW {
+				t.Errorf("nameCellTextWidth = %d, want %d", got, c.wantW)
+			}
+			if got := nameCell(c.label, c.badge, c.width, c.nameDim, c.plain); got != c.want {
+				t.Errorf("nameCell = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A disabled grok row is dimmed as a whole (sessionRowPlain), which is the
+// production path through nameCell's plain branch: the badge must survive it
+// without introducing a reset that would cancel the row's own dim.
+func TestDisabledGrokRowKeepsAPlainBadge(t *testing.T) {
+	s := Session{Tool: toolGrok, PID: 200, Name: "grok-task", NameSource: "user",
+		CWD: "/work/grokdir", Entrypoint: "cli", Disabled: true,
+		UpdatedAt: time.Now().UnixMilli()}
+	for _, mode := range []string{"1", "2", "3"} {
+		// Raw, not stripped: any escape between the label and the badge would
+		// carry a reset that cancels the row's own dim from there on.
+		row := renderSessionRowForTest(t, mode, s, false)
+		if !strings.Contains(row, "grok-task grok") {
+			t.Errorf("mode %s: disabled grok row lost its plain badge: %q", mode, row)
+		}
+	}
+}
+
+// Grok publishes no status anywhere on disk, so its rows take the same "-"
+// placeholder the MODEL, TMUX and SID columns already use — never a blank cell
+// that reads as a broken row.
+func TestGrokRowsShowAStatusPlaceholder(t *testing.T) {
+	s := Session{Tool: toolGrok, PID: 200, Name: "grok-task", NameSource: "user",
+		CWD: "/work/grokdir", Entrypoint: "cli", UpdatedAt: time.Now().UnixMilli()}
+	if got := statusCellText(s); got != "-" {
+		t.Errorf("statusCellText(grok) = %q, want %q", got, "-")
+	}
+	if got := statusCellText(Session{Status: "busy"}); got != "busy" {
+		t.Errorf("statusCellText(claude) = %q, want %q", got, "busy")
+	}
+	// A claude row with no status of its own keeps rendering exactly as it did.
+	if got := statusCellText(Session{}); got != "" {
+		t.Errorf("statusCellText(status-less claude) = %q, want %q", got, "")
+	}
+}
+
+// The minimal view's one-character STATUS must make the same call the wider
+// views do: "?" claims the status is unrecognised, which is wrong for a tool
+// that reports none at all.
+func TestGrokRowsShowAStatusPlaceholderGlyph(t *testing.T) {
+	if got := statusGlyphFor(Session{Tool: toolGrok}); got != "-" {
+		t.Errorf("statusGlyphFor(grok) = %q, want %q", got, "-")
+	}
+	if got := statusGlyphFor(Session{Status: "busy"}); got != statusGlyph["busy"] {
+		t.Errorf("statusGlyphFor(busy) = %q, want %q", got, statusGlyph["busy"])
+	}
+	// Unchanged for claude: an unknown or absent status is still "?".
+	if got := statusGlyphFor(Session{}); got != "?" {
+		t.Errorf("statusGlyphFor(status-less claude) = %q, want %q", got, "?")
+	}
+	if got := statusGlyphFor(Session{Status: "nonsense"}); got != "?" {
+		t.Errorf("statusGlyphFor(unknown status) = %q, want %q", got, "?")
+	}
+
+	// End to end through the minimal view.
+	s := Session{Tool: toolGrok, PID: 200, Name: "grok-task", NameSource: "user",
+		CWD: "/work/grokdir", Entrypoint: "cli", UpdatedAt: time.Now().UnixMilli()}
+	row := stripANSI(renderSessionRowForTest(t, "2", s, false))
+	if strings.Contains(row, "?") {
+		t.Errorf("minimal grok row still shows the unknown-status glyph: %q", row)
+	}
+}
+
 func TestClipLine(t *testing.T) {
 	cases := []struct {
 		name  string

@@ -27,6 +27,14 @@ type Session struct {
 	StartedAt  int64  `json:"startedAt"`  // millis since epoch
 	UpdatedAt  int64  `json:"updatedAt"`  // millis since epoch; absent for headless (sdk-cli) sessions
 
+	// Tool names the CLI that owns this session. "" is Claude Code — every
+	// session file Claude Code writes, and every row a server predating this
+	// field sends over the wire, decodes as claude with no migration step.
+	// toolGrok (grok.go) marks a row collected from the xAI Grok CLI's own
+	// registry. Action dispatch reads it to route reattestation and to refuse
+	// the claude-only actions (migrate, resume).
+	Tool string `json:"tool,omitempty"`
+
 	Model         string `json:"model,omitempty"`         // last main-loop assistant model from the transcript
 	ContextTokens int    `json:"contextTokens,omitempty"` // context size of that turn (input+cache tokens)
 
@@ -59,6 +67,10 @@ type Session struct {
 	// and the full squashed-home path for non-git working directories.
 	GitRoot string `json:"gitRoot,omitempty"`
 }
+
+// IsGrok reports whether this row is an xAI Grok CLI session rather than a
+// Claude Code one.
+func (s Session) IsGrok() bool { return s.Tool == toolGrok }
 
 // StatusDisplay returns the status label including the waitingFor suffix
 // when relevant (e.g. "waiting:permission prompt").
@@ -184,7 +196,7 @@ func CollectLocal() ([]Session, error) {
 		if !ok {
 			continue
 		}
-		if !pidAlive(s.PID) {
+		if !sessionPIDAlive(s.PID) {
 			continue
 		}
 		if isScratchCWD(s.CWD) {
@@ -193,6 +205,33 @@ func CollectLocal() ([]Session, error) {
 		if s.Headless() {
 			continue
 		}
+		out = append(out, s)
+	}
+	// Grok CLI sessions come from their own registry (grok.go) but go through
+	// the identical enrichment below, so a grok row carries the same CPU
+	// reading and tmux pane address every action already depends on — attach,
+	// preview, send-keys, resize and kill need no per-tool path at all.
+	//
+	// A pid claude still has a session file for wins outright. Claude does not
+	// delete that file when the process exits, so a pid it once used and grok
+	// now owns would otherwise produce two rows whose Session.ID() is the same
+	// "<pid>" — and selection, kill routing and the TUI's row bookkeeping all
+	// key on that id being unique. Claude's row is the one to keep: it carries
+	// a user-set name and a real status, where the grok row for a recycled pid
+	// is the one more likely to be wrong.
+	claudePIDs := make(map[int]bool, len(out))
+	for _, s := range out {
+		claudePIDs[s.PID] = true
+	}
+	for _, g := range collectGrokLocal(home) {
+		if claudePIDs[g.PID] {
+			continue
+		}
+		out = append(out, g)
+	}
+
+	for i := range out {
+		s := &out[i]
 		if c, ok := sumProcessTreeCPU(s.PID, cpu, children); ok {
 			s.CPU = c
 		} else {
@@ -204,13 +243,18 @@ func CollectLocal() ([]Session, error) {
 		}
 		s.Home = home
 		s.GitRoot = gitRootFor(s.CWD)
+		if s.IsGrok() {
+			// Model came from grok's own summary.json, and there is no claude
+			// transcript to scan for cost or context — those stay zero and
+			// render as the columns' own placeholders.
+			continue
+		}
 		if p := findTranscript(home, s.SessionID); p != "" {
 			m := cachedMeta(p)
 			s.Model = m.Model
 			s.ContextTokens = m.ContextTokens
 			s.CostUSD, s.CostSubagentsUSD = scanSessionCost(p)
 		}
-		out = append(out, s)
 	}
 	// Sort by cwd (case-insensitive), newest-started first as tiebreaker. This
 	// is the server-side default; the client re-sorts per its own mode.
@@ -221,6 +265,12 @@ func CollectLocal() ([]Session, error) {
 // CollectLocalLite reads every *.json under ~/.claude/sessions and applies the
 // same liveness and visibility filters as CollectLocal, but skips CPU, tmux,
 // and transcript enrichment entirely.
+//
+// Grok sessions are deliberately NOT included. This feeds the account-switch
+// warning about sessions still holding the outgoing Anthropic token
+// (switchSessionWarnings, account.go), and a grok session holds no Anthropic
+// credential at all — listing one there would warn about a process that
+// cannot possibly clobber the credential being installed.
 //
 // The notification ticker runs this every couple of seconds and needs only
 // identity and status. CollectLocal's per-session transcript scans (cost,
@@ -241,7 +291,7 @@ func CollectLocalLite() ([]Session, error) {
 		if !ok {
 			continue
 		}
-		if !pidAlive(s.PID) || isScratchCWD(s.CWD) || s.Headless() {
+		if !sessionPIDAlive(s.PID) || isScratchCWD(s.CWD) || s.Headless() {
 			continue
 		}
 		s.Home = home
@@ -366,3 +416,11 @@ func readSessionFile(path string) (Session, bool) {
 func pidAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
+
+// sessionPIDAlive is the liveness check the claude collectors apply, the
+// counterpart of grok.go's grokPIDAlive. A package var for the same reason:
+// a test that describes a session list with made-up pids must be able to say
+// which of them are running, for both tools, instead of depending on whichever
+// pids happen to exist on the machine running `go test`. Production always
+// leaves it as pidAlive.
+var sessionPIDAlive = pidAlive

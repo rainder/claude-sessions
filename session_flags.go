@@ -520,6 +520,18 @@ func resolvableSessionIDs() (map[string]bool, bool) {
 			set[s.SessionID] = true
 		}
 	}
+	// Grok's live session ids join the set even though CollectLocalLite above
+	// stays claude-only, because the two answer different questions for
+	// different consumers. Lite's other caller is the account-switch warning
+	// about processes holding the outgoing Anthropic token, which a grok
+	// session never holds. This one decides what the flag store may PRUNE, and
+	// a grok row can be grouped or disabled from the TUI exactly like a claude
+	// one — so leaving its id out means every flag write deletes the grok
+	// group or disable bit the user just set, since nothing here would ever
+	// resolve it.
+	for _, id := range grokLiveSessionIDs(home) {
+		set[id] = true
+	}
 	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", "*.jsonl"))
 	if err != nil {
 		return nil, false

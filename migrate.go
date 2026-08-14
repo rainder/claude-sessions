@@ -102,6 +102,11 @@ func pidPresentErr(err error) bool {
 // kind regardless of which of the two checks caught the substitution.
 var errMigrateSessionMismatch = errors.New("that PID is a different session now")
 
+// errMigrateUnsupportedTool is returned when the PID names a live session this
+// tool cannot migrate. Migrate means "kill it and respawn it as `claude
+// --resume <id>`", which only Claude Code sessions can be.
+var errMigrateUnsupportedTool = errors.New("migrate is not supported for grok sessions")
+
 // MigrateLocal stops the Claude process at pid and spawns a new tmux session
 // running `claude --resume <sessionId>` in the same cwd. Returns the tmux
 // session name on success.
@@ -123,7 +128,28 @@ func MigrateLocal(pid int) (string, error) {
 func MigrateLocalAttested(pid int, wantSession string) (string, error) {
 	sess, ok := readSessionByPID(pid)
 	if !ok {
+		// Migrate is claude-only: it kills the process and respawns it as
+		// `claude --resume <sessionId>`, which has no grok equivalent this
+		// tool could drive. Refusing here rather than at each entry point
+		// covers the server handler, cmdMigrate and actAttach's migrate
+		// branch at once, and costs nothing on the normal path — the registry
+		// is only consulted once the claude session file has already missed.
+		if _, live := grokSessionLookup(pid); live {
+			return "", fmt.Errorf("%w: PID %d", errMigrateUnsupportedTool, pid)
+		}
 		return "", fmt.Errorf("no session file for PID %d", pid)
+	}
+	// The claude file is present, but it proves nothing about the pid: Claude
+	// Code never deletes it, so a pid it once used and grok now owns still
+	// reads as a claude session here. Migrating that would SIGTERM the live
+	// grok process and then resume a stranger's transcript in its place. Only
+	// a pid that is dead AND live in grok's registry can be that case — a dead
+	// claude pid with no grok session at all still migrates, which is the
+	// legitimate "resume a session whose process died" path.
+	if !sessionPIDAlive(pid) {
+		if _, live := grokSessionLookup(pid); live {
+			return "", fmt.Errorf("%w: PID %d", errMigrateUnsupportedTool, pid)
+		}
 	}
 	if sess.SessionID == "" || sess.CWD == "" {
 		return "", fmt.Errorf("session file missing sessionId or cwd")
@@ -375,6 +401,35 @@ func localReattest(pid int, wantSessionID string) error {
 	sess, ok := readSessionByPID(pid)
 	if !ok {
 		return fmt.Errorf("PID %d is not a live Claude session", pid)
+	}
+	if sess.SessionID != wantSessionID {
+		return fmt.Errorf("PID %d is a different session now", pid)
+	}
+	return nil
+}
+
+// localReattestSession routes a pre-kill reattestation to the store that owns
+// the session: claude's per-pid session file, or grok's active_sessions.json.
+// Every local caller holds a full Session row, so the tool is already known —
+// the pid alone could not tell the two stores apart, and asking the wrong one
+// would report a healthy grok session as not_live.
+func localReattestSession(s Session) error {
+	if s.IsGrok() {
+		return localReattestGrok(s.PID, s.SessionID)
+	}
+	return localReattest(s.PID, s.SessionID)
+}
+
+// localReattestGrok is localReattest against grok's registry: same two refusal
+// cases, same "empty wantSessionID skips the check" contract, just a different
+// file establishing identity.
+func localReattestGrok(pid int, wantSessionID string) error {
+	if wantSessionID == "" {
+		return nil
+	}
+	sess, ok := grokSessionLookup(pid)
+	if !ok {
+		return fmt.Errorf("PID %d is not a live grok session", pid)
 	}
 	if sess.SessionID != wantSessionID {
 		return fmt.Errorf("PID %d is a different session now", pid)

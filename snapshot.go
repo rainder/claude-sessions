@@ -101,6 +101,12 @@ func saveSnapshotFrom(name string, sessions []Session) (string, int, error) {
 		if s.SessionID == "" {
 			continue
 		}
+		// A snapshot is restored by resuming each entry's claude transcript
+		// (RestoreSnapshot below), and a grok session has none — capturing one
+		// would only produce an entry whose restore is guaranteed to fail.
+		if s.IsGrok() {
+			continue
+		}
 		snap.Entries = append(snap.Entries, SnapshotEntry{SessionID: s.SessionID, Cwd: s.CWD})
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")

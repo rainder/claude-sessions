@@ -27,6 +27,53 @@ const (
 	ansiPreviewBar = "\033[30;47m"
 )
 
+// toolBadge is the marker that follows the NAME label for a session this tool
+// did not originally list — "grok" for an xAI Grok CLI row, "" for Claude
+// Code, whose rows keep exactly the layout they always had. It rides inside
+// the NAME cell rather than taking a column of its own: a column would cost
+// every row width for a distinction most rows do not make.
+func toolBadge(s Session) string {
+	if s.IsGrok() {
+		return "grok"
+	}
+	return ""
+}
+
+// nameCellTextWidth is the width the NAME column must reserve for one row —
+// the label plus, when there is a badge, a separating space and the badge.
+func nameCellTextWidth(name, badge string) int {
+	w := utf8.RuneCountInString(name)
+	if badge != "" {
+		w += 1 + utf8.RuneCountInString(badge)
+	}
+	return w
+}
+
+// nameCell renders the padded NAME cell. The badge is always dim; the label is
+// dim only when it was auto-derived rather than user-set. plain suppresses
+// both, for a row already dimmed or highlighted as a whole — an embedded reset
+// there would cancel the row's own attribute mid-line.
+func nameCell(name, badge string, width int, nameDim, plain bool) string {
+	pad := width - nameCellTextWidth(name, badge)
+	if pad < 0 {
+		pad = 0
+	}
+	if plain {
+		if badge != "" {
+			name += " " + badge
+		}
+		return name + strings.Repeat(" ", pad)
+	}
+	label := name
+	if nameDim {
+		label = dim(name)
+	}
+	if badge != "" {
+		label += " " + dim(badge)
+	}
+	return label + strings.Repeat(" ", pad)
+}
+
 // statusColor maps the raw `status` field to an ANSI SGR code.
 var statusColor = map[string]string{
 	"busy":    "1;31",
@@ -1800,6 +1847,7 @@ type drowFull struct {
 	s         Session
 	nameStr   string // resolved NAME label (name → tmux → worktree → "-")
 	nameDim   bool   // true when nameStr is auto-derived, not user-set
+	badgeStr  string // tool marker rendered after nameStr ("grok"), "" for claude
 	statusStr string
 	cwdStr    string
 	modelStr  string
@@ -1820,7 +1868,8 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		s:         s,
 		nameStr:   name,
 		nameDim:   nameDim,
-		statusStr: s.StatusDisplay(),
+		badgeStr:  toolBadge(s),
+		statusStr: statusCellText(s),
 		cwdStr:    dirDisplay(s.CWD, s.Home, s.GitRoot),
 		modelStr:  shortModel(s.Model),
 		ctxStr:    formatTokens(s.ContextTokens),
@@ -1828,6 +1877,33 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		ageStr:    formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
 		sidShort:  sid,
 	}
+}
+
+// statusCellText is the STATUS column's text for a row. Claude Code writes a
+// status into every session file, so this is StatusDisplay verbatim for a
+// claude row. Grok publishes no equivalent signal anywhere on disk, so rather
+// than invent one its rows take the same "-" placeholder the MODEL, TMUX and
+// SID columns already use for a value this tool does not have.
+func statusCellText(s Session) string {
+	d := s.StatusDisplay()
+	if d == "" && s.IsGrok() {
+		return "-"
+	}
+	return d
+}
+
+// statusGlyphFor is statusCellText's one-character form, for the minimal
+// view. "?" means "this session reports a status this tool does not know";
+// a grok row reports none at all, so it takes the same "-" placeholder the
+// wider views give it rather than claiming its status is unrecognised.
+func statusGlyphFor(s Session) string {
+	if g := statusGlyph[s.Status]; g != "" {
+		return g
+	}
+	if s.Status == "" && s.IsGrok() {
+		return "-"
+	}
+	return "?"
 }
 
 // modelCell pads the model for its column, dimming the "-" placeholder unless
@@ -1882,7 +1958,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 	pidW := len("PID")
 	for _, r := range all {
 		pidW = max(pidW, len(strconv.Itoa(r.s.PID)))
-		nameW = max(nameW, len(r.nameStr))
+		nameW = max(nameW, nameCellTextWidth(r.nameStr, r.badgeStr))
 		dirW = max(dirW, len(r.cwdStr))
 		modelW = max(modelW, len(r.modelStr))
 		costW = max(costW, len(r.costStr))
@@ -1929,10 +2005,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 			if !plainCells {
 				statusCell = colorize(statusColor[r.s.Status], statusCell)
 			}
-			nameCell := fmt.Sprintf("%-*s", nameW, r.nameStr)
-			if r.nameDim && !plainCells {
-				nameCell = dim(nameCell)
-			}
+			nameStr := nameCell(r.nameStr, r.badgeStr, nameW, r.nameDim, plainCells)
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
@@ -1945,7 +2018,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 			}
 			body := fmt.Sprintf("%*d  %s  %s  %s  %s  %s  %s  %s  %5s  %5s  %-8s  %s ",
 				pidW, r.s.PID,
-				nameCell,
+				nameStr,
 				marqueeCell(r.cwdStr, dirW, step),
 				modelCell(r.modelStr, modelW, plainCells),
 				statusCell,
@@ -2010,7 +2083,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 	dirLabel, statusLabel, ageLabel := sortLabels(sortMode)
 	nameW, dirW, modelW, costW, statusW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), utf8.RuneCountInString(statusLabel)
 	for _, r := range all {
-		nameW = max(nameW, len(r.nameStr))
+		nameW = max(nameW, nameCellTextWidth(r.nameStr, r.badgeStr))
 		dirW = max(dirW, len(r.cwdStr))
 		modelW = max(modelW, len(r.modelStr))
 		costW = max(costW, len(r.costStr))
@@ -2044,15 +2117,12 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 			if !plainCells {
 				statusCell = colorize(statusColor[r.s.Status], statusCell)
 			}
-			nameCell := fmt.Sprintf("%-*s", nameW, r.nameStr)
-			if r.nameDim && !plainCells {
-				nameCell = dim(nameCell)
-			}
+			nameStr := nameCell(r.nameStr, r.badgeStr, nameW, r.nameDim, plainCells)
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
 			body := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %5s  %5s ",
-				nameCell,
+				nameStr,
 				marqueeCell(r.cwdStr, dirW, step),
 				statusCell,
 				modelCell(r.modelStr, modelW, plainCells),
@@ -2097,11 +2167,12 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 // ============================================================================
 
 type drowMinimal struct {
-	s       Session
-	dir     string // repo name (+ ":worktree") for a git cwd, else cwd basename
-	display string // resolved NAME label (name → tmux → worktree → "-")
-	nameDim bool   // true when display is auto-derived, not user-set
-	ageStr  string
+	s        Session
+	dir      string // repo name (+ ":worktree") for a git cwd, else cwd basename
+	display  string // resolved NAME label (name → tmux → worktree → "-")
+	nameDim  bool   // true when display is auto-derived, not user-set
+	badgeStr string // tool marker rendered after display ("grok"), "" for claude
+	ageStr   string
 }
 
 func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
@@ -2116,11 +2187,12 @@ func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
 	disp, dimName := s.DisplayName()
 	disp = truncateRunes(disp, maxNameCellWidth)
 	return drowMinimal{
-		s:       s,
-		dir:     dir,
-		display: disp,
-		nameDim: dimName,
-		ageStr:  formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
+		s:        s,
+		dir:      dir,
+		display:  disp,
+		nameDim:  dimName,
+		badgeStr: toolBadge(s),
+		ageStr:   formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
 	}
 }
 
@@ -2145,7 +2217,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 	dirW, nameW := utf8.RuneCountInString(dirLabel), len("NAME")
 	for _, r := range all {
 		dirW = max(dirW, len(r.dir))
-		nameW = max(nameW, len(r.display))
+		nameW = max(nameW, nameCellTextWidth(r.display, r.badgeStr))
 	}
 
 	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols, gv.filter, gv.groupSort, gv.query)
@@ -2169,25 +2241,18 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 			selected := r.s.ID() == sel
 			plainCells := sessionRowPlain(r.s, selected)
 
-			glyph := statusGlyph[r.s.Status]
-			if glyph == "" {
-				glyph = "?"
-			}
-			statusCell := glyph + strings.Repeat(" ", statusW-1)
+			statusCell := statusGlyphFor(r.s) + strings.Repeat(" ", statusW-1)
 			if !plainCells {
 				statusCell = colorize(statusColor[r.s.Status], statusCell)
 			}
-			nameCell := fmt.Sprintf("%-*s", nameW, r.display)
-			if r.nameDim && !plainCells {
-				nameCell = dim(nameCell)
-			}
+			nameStr := nameCell(r.display, r.badgeStr, nameW, r.nameDim, plainCells)
 			if utf8.RuneCountInString(r.dir) > dirW {
 				overflowing = true
 			}
 			body := fmt.Sprintf(
 				"%s  %s  %s  %5s ",
 				marqueeCell(r.dir, dirW, step),
-				nameCell,
+				nameStr,
 				statusCell,
 				r.ageStr,
 			)
