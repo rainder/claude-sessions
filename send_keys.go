@@ -65,5 +65,7 @@ func resolveLivePIDLocal(pid int, wantSessionID string) (Session, error) {
 		}
 		return s, nil
 	}
-	return Session{}, fmt.Errorf("PID %d is not a live Claude session", pid)
+	// Tool-neutral, like resolveLivePID's own not-live message: nothing
+	// resolved for this pid, so nothing here knows which store owned it.
+	return Session{}, fmt.Errorf("PID %d is not a live session", pid)
 }

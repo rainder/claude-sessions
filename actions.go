@@ -282,7 +282,11 @@ func finishKillJob(c *actCtx, res killJobResult) string {
 	if res.worktree == "" || res.removeErr == nil {
 		return fmt.Sprintf("killed %s", label)
 	}
-	if res.session.Host != "" {
+	// A remote kill cannot be resurrected (that needs local git state over
+	// HTTP), and neither can a grok one: the resurrect step is
+	// ResumeSessionInWorktree, i.e. `claude --resume <id>`, which would spawn
+	// a Claude Code session on a grok transcript id. Both just report.
+	if res.session.Host != "" || res.session.IsGrok() {
 		return fmt.Sprintf("killed %s, worktree removal failed: %v", label, res.removeErr)
 	}
 	c.prepareLineOutput()
@@ -323,7 +327,14 @@ func actAttach(c *actCtx) {
 		runTmuxAttach(c, sessName)
 		return
 	}
-	// Not in tmux — offer migration.
+	// Not in tmux — offer migration, unless migration is not a thing this
+	// session can do. Migrating means respawning as `claude --resume <id>`,
+	// which has no grok equivalent, so say so rather than offering a
+	// confirmation that can only end in a refusal.
+	if s.IsGrok() {
+		showActionError(c, "attach", errMigrateUnsupportedTool)
+		return
+	}
 	question := fmt.Sprintf("PID %d is not in tmux. Migrate (kill + resume in tmux) first?", s.PID)
 	if s.NotIdle() {
 		question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question

@@ -40,7 +40,9 @@ func TestResolveLivePIDLocalGonePIDRefuses(t *testing.T) {
 	// No session file written for this PID at all.
 
 	_, err := resolveLivePIDLocal(999999, "sess-abc")
-	if err == nil || !strings.Contains(err.Error(), "not a live Claude session") {
+	// Tool-neutral: nothing resolved for this PID, so nothing knows which
+	// store would have owned it.
+	if err == nil || !strings.Contains(err.Error(), "not a live session") {
 		t.Fatalf("resolveLivePIDLocal = %v, want not-live error", err)
 	}
 }
