@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,37 @@ func TestParseNewArgs(t *testing.T) {
 			name: "group",
 			args: []string{"--dir", "/tmp/proj", "--group", "3"},
 			want: newArgs{dir: "/tmp/proj", group: 3},
+		},
+		{
+			name: "cmd with flags and prompt after dashdash",
+			args: []string{"--dir", "/tmp/proj", "--cmd", "grok", "-m", "grok-4.6", "--reasoning-effort", "high", "--", "DR-1234"},
+			want: newArgs{dir: "/tmp/proj", cmd: "grok", cmdArgs: []string{"-m", "grok-4.6", "--reasoning-effort", "high"}, prompt: "DR-1234"},
+		},
+		{
+			name: "cmd plus prompt tokens before cmd",
+			args: []string{"hello", "--dir", "/tmp/proj", "--cmd", "claude", "--model=fable", "--", "DR-1"},
+			want: newArgs{dir: "/tmp/proj", cmd: "claude", cmdArgs: []string{"--model=fable"}, prompt: "hello DR-1"},
+		},
+		{
+			name:    "cmd and command together",
+			args:    []string{"--dir", "/tmp", "--command", "Fable", "--cmd", "claude", "--"},
+			wantErr: true,
+		},
+		{
+			name:    "cmd without binary",
+			args:    []string{"--dir", "/tmp", "--cmd"},
+			wantErr: true,
+		},
+		{
+			name:    "cmd without dashdash",
+			args:    []string{"--dir", "/tmp", "--cmd", "grok", "-m", "grok-4.6"},
+			wantErr: true,
+		},
+		{
+			name:    "command after cmd",
+			args:    []string{"--dir", "/tmp", "--cmd", "grok", "--", "--command", "Fable"},
+			wantErr: false, // "--command" after "--" is prompt text
+			want:    newArgs{dir: "/tmp", cmd: "grok", prompt: "--command Fable"},
 		},
 		{
 			name:    "missing value for flag",
@@ -95,7 +127,7 @@ func TestParseNewArgs(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseNewArgs(%v) = %+v, want %+v", tt.args, got, tt.want)
 			}
 		})

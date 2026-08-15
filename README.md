@@ -84,7 +84,7 @@ claude-sessions kill PID [-y] [--remove-worktree]
                                             # kill a session (tmux-aware); offers to remove
                                             # a worktree left with no live sessions
 claude-sessions migrate PID [-y]           # kill + resume in a new tmux session
-claude-sessions new --dir PATH [--name N] [--command PRESET] [--group 1-9] [--server S] [PROMPT...]
+claude-sessions new --dir PATH [--name N] [--command PRESET | --cmd BINARY [ARG...] --] [--group 1-9] [--server S] [PROMPT...]
                                             # spawn a tmux+claude session, locally or on a server;
                                             # --group badges it once it comes up (best effort)
 claude-sessions service install [--port N] [--bind ADDR] | uninstall | restart | status

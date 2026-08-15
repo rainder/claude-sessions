@@ -174,12 +174,19 @@ func cmdMigrate(args []string) int {
 type newArgs struct {
 	dir, name, command, server, prompt string
 	group                              int // 1..9, 0 = none requested
+	cmd                                string
+	cmdArgs                            []string
 }
 
 // parseNewArgs parses `new`'s flags. --dir and --cwd are synonyms (--dir is
 // preferred, --cwd kept for backward compatibility). Any non-flag args are
 // joined with spaces to form the optional initial prompt, so callers can
 // write it unquoted: `new --dir X some initial prompt`.
+//
+// --cmd BINARY [ARG...] -- takes every token after BINARY until a lone `--`
+// as cmd args (even tokens that look like flags). Tokens before --cmd and
+// after that terminator join as the prompt. --cmd and --command cannot both
+// be set. --cmd requires the trailing `--` even when the prompt is empty.
 //
 // --group is validated here rather than at spawn time so a typo costs nothing:
 // the range is the store's own 1..9, and 0 is rejected along with everything
@@ -188,7 +195,24 @@ type newArgs struct {
 func parseNewArgs(args []string) (newArgs, error) {
 	var a newArgs
 	var promptParts []string
+	cmdMode := false
+	cmdSawDashDash := false
 	for i := 0; i < len(args); i++ {
+		if cmdMode {
+			if args[i] == "--" {
+				cmdMode = false
+				cmdSawDashDash = true
+				continue
+			}
+			a.cmdArgs = append(a.cmdArgs, args[i])
+			continue
+		}
+		if cmdSawDashDash {
+			// After --cmd's terminator, every token is prompt text (including
+			// strings that look like flags, e.g. --command).
+			promptParts = append(promptParts, args[i])
+			continue
+		}
 		switch args[i] {
 		case "--dir", "--cwd":
 			if i+1 >= len(args) {
@@ -203,11 +227,24 @@ func parseNewArgs(args []string) (newArgs, error) {
 			a.name = args[i+1]
 			i++
 		case "--command":
+			if a.cmd != "" {
+				return newArgs{}, fmt.Errorf("--cmd and --command cannot both be set")
+			}
 			if i+1 >= len(args) {
 				return newArgs{}, fmt.Errorf("--command needs a value")
 			}
 			a.command = args[i+1]
 			i++
+		case "--cmd":
+			if a.command != "" || a.cmd != "" {
+				return newArgs{}, fmt.Errorf("--cmd and --command cannot both be set")
+			}
+			if i+1 >= len(args) {
+				return newArgs{}, fmt.Errorf("--cmd needs a binary")
+			}
+			a.cmd = args[i+1]
+			i++
+			cmdMode = true
 		case "--server":
 			if i+1 >= len(args) {
 				return newArgs{}, fmt.Errorf("--server needs a value")
@@ -231,11 +268,14 @@ func parseNewArgs(args []string) (newArgs, error) {
 			promptParts = append(promptParts, args[i])
 		}
 	}
+	if a.cmd != "" && !cmdSawDashDash {
+		return newArgs{}, fmt.Errorf("--cmd requires -- before the prompt")
+	}
 	a.prompt = strings.Join(promptParts, " ")
 	return a, nil
 }
 
-const newUsage = "usage: claude-sessions new --dir PATH [--name NAME] [--command PRESET] [--group 1-9] [--server SERVER] [PROMPT...]"
+const newUsage = "usage: claude-sessions new --dir PATH [--name NAME] [--command PRESET | --cmd BINARY [ARG...] --] [--group 1-9] [--server SERVER] [PROMPT...]"
 
 func cmdNew(args []string) int {
 	a, err := parseNewArgs(args)

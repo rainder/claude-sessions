@@ -87,7 +87,7 @@ subcommands:
                                   kill a session (tmux-aware); offers to remove
                                   the git worktree it was the last session in
   migrate PID [-y]                kill + resume in a new tmux session
-  new --dir PATH [--name NAME] [--command PRESET] [--server SERVER] [PROMPT...]
+  new --dir PATH [--name NAME] [--command PRESET | --cmd BINARY [ARG...] --] [--group 1-9] [--server SERVER] [PROMPT...]
                                   spawn a new tmux+claude session, locally or
                                   on a configured server (--cwd is a synonym
                                   for --dir)
