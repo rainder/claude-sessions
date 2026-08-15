@@ -11,8 +11,9 @@ import (
 	"unicode/utf8"
 )
 
-// maxNameCellWidth caps the NAME column so one long session name can't blow
-// out the whole table's layout.
+// maxNameCellWidth caps the NAME column: a hard cap in full/minimal view, and
+// the floor intermediate view shrinks down to only once terminal width forces
+// it (see shrinkNameW) — otherwise intermediate shows names uncropped.
 const maxNameCellWidth = 20
 
 // ANSI escape sequences.
@@ -53,6 +54,18 @@ func nameCellTextWidth(name, badge string) int {
 // dim only when it was auto-derived rather than user-set. plain suppresses
 // both, for a row already dimmed or highlighted as a whole — an embedded reset
 // there would cancel the row's own attribute mid-line.
+// fitNameForBadge truncates name so name+badge (see nameCellTextWidth) fits
+// within width, leaving the badge itself intact.
+func fitNameForBadge(name, badge string, width int) string {
+	if badge != "" {
+		width -= 1 + utf8.RuneCountInString(badge)
+	}
+	if width < 0 {
+		width = 0
+	}
+	return truncateRunes(name, width)
+}
+
 func nameCell(name, badge string, width int, nameDim, plain bool) string {
 	pad := width - nameCellTextWidth(name, badge)
 	if pad < 0 {
@@ -1319,6 +1332,25 @@ func shrinkDirW(dirW, lineW, cols int) int {
 	return dirW
 }
 
+// shrinkNameW reduces nameW so a row of total visible width lineW fits within
+// cols, never dropping below maxNameCellWidth. It runs after shrinkDirW has
+// already taken its cut, so a wide NAME column only gives up room once DIR is
+// already at its own floor. cols <= 0 leaves nameW untouched.
+func shrinkNameW(nameW, lineW, cols int) int {
+	if cols <= 0 {
+		return nameW
+	}
+	if over := lineW - cols; over > 0 {
+		// The floor never exceeds the starting width: a column already
+		// narrower than maxNameCellWidth must not be widened by the clamp.
+		floor := min(maxNameCellWidth, nameW)
+		if nameW -= over; nameW < floor {
+			nameW = floor
+		}
+	}
+	return nameW
+}
+
 // displayCWD collapses a path's own collector $HOME prefix to "~". Each row
 // carries the home of the host that produced it (Session.Home), so local and
 // remote rows both collapse against the correct home; an empty home (rows from
@@ -1863,7 +1895,6 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		sid = sid[:8]
 	}
 	name, nameDim := s.DisplayName()
-	name = truncateRunes(name, maxNameCellWidth)
 	return drowFull{
 		s:         s,
 		nameStr:   name,
@@ -1969,6 +2000,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 		}
 		tmuxW = max(tmuxW, len(t))
 	}
+	nameW = min(nameW, maxNameCellWidth)
 
 	renderHeader(w, sections, "full", accounts, codexAccounts, cols, gv.filter, gv.groupSort, gv.query)
 
@@ -2005,7 +2037,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 			if !plainCells {
 				statusCell = colorize(statusColor[r.s.Status], statusCell)
 			}
-			nameStr := nameCell(r.nameStr, r.badgeStr, nameW, r.nameDim, plainCells)
+			nameStr := nameCell(fitNameForBadge(r.nameStr, r.badgeStr, nameW), r.badgeStr, nameW, r.nameDim, plainCells)
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
@@ -2105,6 +2137,10 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 		dirW = nd
 		hdr = buildHdr()
 	}
+	if nn := shrinkNameW(nameW, visualLen(hdr), cols); nn != nameW {
+		nameW = nn
+		hdr = buildHdr()
+	}
 	fmt.Fprintln(w, hdr)
 	fmt.Fprintln(w, strings.Repeat("-", visualLen(hdr)))
 
@@ -2117,7 +2153,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 			if !plainCells {
 				statusCell = colorize(statusColor[r.s.Status], statusCell)
 			}
-			nameStr := nameCell(r.nameStr, r.badgeStr, nameW, r.nameDim, plainCells)
+			nameStr := nameCell(fitNameForBadge(r.nameStr, r.badgeStr, nameW), r.badgeStr, nameW, r.nameDim, plainCells)
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
