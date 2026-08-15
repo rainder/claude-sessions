@@ -6,18 +6,18 @@ import (
 	"time"
 )
 
-// usagePoller is the shared background poller behind UsageHub (Anthropic) and
-// CodexUsageHub (OpenAI Codex): the two differ only in what they fetch, cache,
-// and hold, so the loop, pause/resume, kick, snapshot, and shutdown live here
-// once and each provider supplies fetch + save. It refetches on a fixed cadence
-// (usageRefreshInterval) into a single *T slot the render loop reads via
-// Snapshot, backing off from usageRetryMin on failure (capped at the refresh
-// interval) and persisting each success via save so a restart during a throttle
-// still shows a stale bar. Following RemoteHub's pattern minus the wake pipe —
-// the TUI repaints on its own tick, and a slightly stale percentage is fine.
-// Snapshot is nil until the first success (or a warm-start seed), so the bar
-// lazily appears on a later repaint; a failed refresh keeps the previous value
-// visible instead of blinking the bar away.
+// usagePoller is the shared background poller behind UsageHub (Anthropic),
+// CodexUsageHub (OpenAI Codex), and GrokUsageHub (xAI Grok): they differ only in
+// what they fetch, cache, and hold, so the loop, pause/resume, kick, snapshot,
+// and shutdown live here once and each provider supplies fetch + save. It
+// refetches on a fixed cadence (usageRefreshInterval) into a single *T slot the
+// render loop reads via Snapshot, backing off from usageRetryMin on failure
+// (capped at the refresh interval) and persisting each success via save so a
+// restart during a throttle still shows a stale bar. Following RemoteHub's
+// pattern minus the wake pipe — the TUI repaints on its own tick, and a slightly
+// stale percentage is fine. Snapshot is nil until the first success (or a
+// warm-start seed), so the bar lazily appears on a later repaint; a failed
+// refresh keeps the previous value visible instead of blinking the bar away.
 type usagePoller[T any] struct {
 	mu     sync.Mutex
 	info   *T

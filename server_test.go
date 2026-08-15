@@ -944,6 +944,67 @@ func TestSessionsOmitsCodexUsageWhenSnapshotNilOrHubAbsent(t *testing.T) {
 	}
 }
 
+func TestSessionsIncludesGrokUsageWhenSnapshotPresent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := &server{
+		token: "secret",
+		host:  "devbox",
+		grokUsageSnapshot: func() *GrokAccountUsage {
+			return &GrokAccountUsage{
+				Account: "bot@x.ai",
+				Info:    &GrokUsageInfo{Windows: []grokWindow{{Label: "wk", Pct: 6}}},
+			}
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.sessions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	var raw map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	grok, ok := raw["grok_usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("grok_usage not an object: %#v", raw["grok_usage"])
+	}
+	if grok["account"] != "bot@x.ai" {
+		t.Fatalf("grok_usage.account = %#v, want bot@x.ai", grok["account"])
+	}
+	if _, ok := grok["info"].(map[string]any); !ok {
+		t.Fatalf("grok_usage.info not an object: %#v", grok["info"])
+	}
+}
+
+func TestSessionsOmitsGrokUsageWhenSnapshotNilOrHubAbsent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cases := map[string]*server{
+		"no hub":       {token: "secret", host: "devbox"},
+		"nil snapshot": {token: "secret", host: "devbox", grokUsageSnapshot: func() *GrokAccountUsage { return nil }},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+			s.sessions(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+			}
+			var raw map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := raw["grok_usage"]; present {
+				t.Fatalf("grok_usage key present when it should be omitted: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 // newUsageServer builds a bare server for /usage tests. Unlike before, the
 // handler makes no Anthropic call at all, so there is no fetch to stub out.
 func newUsageServer() *server {

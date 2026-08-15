@@ -36,6 +36,10 @@ type RemoteResult struct {
 	// older servers, from a host with no Codex auth, or before its first poll.
 	// This one does still ride /sessions — the Codex side is still polled.
 	CodexUsage *CodexAccountUsage
+	// GrokUsage is the host's xAI Grok account rate-limit snapshot; nil from
+	// older servers, from a host with no Grok auth, or before its first poll.
+	// Rides /sessions like CodexUsage — not GET /usage (Anthropic-only identity).
+	GrokUsage *GrokAccountUsage
 	// KnownAccounts lists usage for every other account this host holds a
 	// claude-switch credential snapshot for (excludes whichever account is
 	// currently live — that's still reported via Usage). An entry with a nil Info,
@@ -51,9 +55,11 @@ type RemoteResult struct {
 	ActiveSnapshotName string
 	Error              string // "" on success, short reason otherwise
 	Loading            bool   // true for a placeholder slot whose first fetch hasn't returned yet
-	// Stale marks a result whose Sessions/HostUsage/Usage/CodexUsage are carried
-	// over from the last successful fetch because the current one failed (see
-	// Error). Only ever set alongside a non-empty Error.
+	// Stale marks a result whose Sessions/HostUsage/Usage/CodexUsage/GrokUsage
+	// are carried over from the last successful fetch because the current one
+	// failed (see Error). Only ever set alongside a non-empty Error.
+	// Note: mergeRemoteResult does not actually carry CodexUsage/GrokUsage —
+	// those clear on failure so a frozen rate-limit bar never reads as live.
 	Stale bool
 }
 
@@ -83,6 +89,7 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 		Sessions   []Session          `json:"sessions"`
 		HostUsage  HostUsage          `json:"hostUsage"`
 		CodexUsage *CodexAccountUsage `json:"codex_usage"` // nil from older servers
+		GrokUsage  *GrokAccountUsage  `json:"grok_usage"`  // nil from older servers
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return RemoteResult{Name: srv.Name, Error: "bad response: " + shortErr(err)}
@@ -97,6 +104,7 @@ func FetchRemote(srv ServerConfig) RemoteResult {
 		Sessions:   body.Sessions,
 		HostUsage:  body.HostUsage,
 		CodexUsage: body.CodexUsage,
+		GrokUsage:  body.GrokUsage,
 	}
 }
 
@@ -466,10 +474,11 @@ func (h *RemoteHub) fetchAll() {
 // mergeRemoteResult implements the non-destructive fetch: on failure (e.g. a
 // flaky connection), the session list stays on screen instead of blanking,
 // marked Stale, while the error message is still surfaced. Only the session
-// list carries forward — CodexUsage feeds a header rate-limit bar (see
-// dedupeCodexAccounts), which has no "stale" rendering of its own, so a frozen
-// reading there would silently pass as live; it's left to clear as before, and
-// RemoteUsageHub applies the same rule to the Anthropic side.
+// list carries forward — CodexUsage and GrokUsage feed header rate-limit bars
+// (see dedupeCodexAccounts / dedupeGrokAccounts), which have no "stale"
+// rendering of their own, so a frozen reading there would silently pass as
+// live; they are left to clear as before, and RemoteUsageHub applies the same
+// rule to the Anthropic side.
 // hasData excludes a slot that never had a successful fetch (still
 // Loading, or errored with nothing yet to carry forward).
 func mergeRemoteResult(r, prior RemoteResult, hadPrior bool) RemoteResult {

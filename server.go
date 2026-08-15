@@ -655,6 +655,10 @@ type server struct {
 	// hub) or a nil return (no fetch yet, or no Codex auth) omits the
 	// "codex_usage" key — the account email rides in the snapshot itself.
 	codexUsageSnapshot func() *CodexAccountUsage
+	// grokUsageSnapshot returns this host's xAI Grok account usage. nil (no hub)
+	// or a nil return (no fetch yet, or no Grok auth) omits the "grok_usage" key.
+	// Rides /sessions like Codex — not GET /usage (Anthropic identity only).
+	grokUsageSnapshot func() *GrokAccountUsage
 	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
 	// a stub to assert bounds and header wiring without touching tmux.
 	previewLoader func(int, PreviewLimits) (PreviewResult, error)
@@ -1120,14 +1124,21 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 		"hostUsage": hostUsage,
 		"sessions":  sessions,
 	}
-	// "codex_usage" is optional: present only once this host's Codex poller has a
-	// snapshot. Omitted when absent — older clients ignore it and it never nulls
-	// out the response. The Anthropic account's own limits used to ride here too
-	// ("usage", "knownAccounts", "activeSnapshotName"); they moved to GET /usage,
-	// which fetches on demand instead of polling forever.
+	// "codex_usage" / "grok_usage" are optional: present only once this host's
+	// poller has a snapshot. Omitted when absent — older clients ignore them and
+	// they never null out the response. The Anthropic account's own limits used
+	// to ride here too ("usage", "knownAccounts", "activeSnapshotName"); they
+	// moved to GET /usage, which reports identity only and never calls Anthropic.
+	// Grok stays on /sessions (like Codex) rather than /usage — /usage is the
+	// Anthropic identity surface, not a multi-provider usage bus.
 	if s.codexUsageSnapshot != nil {
 		if u := s.codexUsageSnapshot(); u != nil {
 			resp["codex_usage"] = u
+		}
+	}
+	if s.grokUsageSnapshot != nil {
+		if u := s.grokUsageSnapshot(); u != nil {
+			resp["grok_usage"] = u
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -2271,10 +2282,10 @@ func cmdServer(args []string) int {
 	hostUsageHub := NewHostUsageHub(hostUsageInterval)
 	defer hostUsageHub.Shutdown()
 
-	// Codex account usage: a background poller, so a remote host surfaces its own
-	// Codex account's limits (which may differ from the client's) in the client's
-	// header. The snapshot is account-paired at fetch time — the email rides in
-	// the payload — so a mid-run relogin re-attributes the limits.
+	// Codex / Grok account usage: background pollers, so a remote host surfaces
+	// its own accounts' limits (which may differ from the client's) in the
+	// client's header. Codex pairs the email from the usage payload; Grok pairs
+	// it from auth.json at fetch time — either way a mid-run relogin re-attributes.
 	//
 	// The Anthropic side has no counterpart here on purpose: it is served by
 	// GET /usage, which answers account identity from disk and never calls
@@ -2282,6 +2293,8 @@ func cmdServer(args []string) int {
 	// and neither does one being watched, for that matter.
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
+	grokUsageHub := NewGrokUsageHub()
+	defer grokUsageHub.Shutdown()
 
 	// Auto-maintain a "latest" snapshot so a reboot doesn't require having
 	// remembered to save beforehand. Best-effort: a failed save is logged, never
@@ -2340,6 +2353,7 @@ func cmdServer(args []string) int {
 		host:               host,
 		hostSnapshot:       hostUsageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
+		grokUsageSnapshot:  grokUsageHub.Snapshot,
 		devices:            devices,
 		flags:              flagsStore,
 	}
