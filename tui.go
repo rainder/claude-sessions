@@ -166,6 +166,9 @@ func RunTUI(interval time.Duration) error {
 	codexUsageHub := NewCodexUsageHub()
 	defer codexUsageHub.Shutdown()
 
+	grokUsageHub := NewGrokUsageHub()
+	defer grokUsageHub.Shutdown()
+
 	// Every account this machine holds a claude-switch credential snapshot for,
 	// polled the same way but read-only from the snapshot files — the live
 	// credential is never touched, so the account actually logged in here keeps
@@ -473,6 +476,7 @@ func RunTUI(interval time.Duration) error {
 		}, remotes, state.sel, &LocalUsage{
 			Claude:        usageHub.Snapshot(),
 			Codex:         codexUsageHub.Snapshot(),
+			Grok:          grokUsageHub.Snapshot(),
 			KnownAccounts: derefKnownAccounts(knownAccountsHub.Snapshot()),
 		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled, groupSort: groupSortOn})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
@@ -546,6 +550,7 @@ func RunTUI(interval time.Duration) error {
 				hub.Pause()
 				usageHub.Pause()
 				codexUsageHub.Pause()
+				grokUsageHub.Pause()
 				knownAccountsHub.Pause()
 				remoteUsageHub.Pause()
 				hostUsageHub.Pause()
@@ -554,6 +559,7 @@ func RunTUI(interval time.Duration) error {
 				hub.Resume()
 				usageHub.Resume()
 				codexUsageHub.Resume()
+				grokUsageHub.Resume()
 				knownAccountsHub.Resume()
 				remoteUsageHub.Resume()
 				hostUsageHub.Resume()

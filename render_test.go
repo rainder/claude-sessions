@@ -855,7 +855,7 @@ func TestWriteUsageHeaderRendersExpiredPlaceholder(t *testing.T) {
 		{label: "trecs", email: "andy@trecs.aero", placeholder: usageExpiredText},
 	}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, 0)
+	writeUsageHeader(&b, accounts, nil, nil, 0)
 	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("lines = %#v, want one per account", lines)
@@ -876,7 +876,7 @@ func TestWriteUsageHeaderExpiredOnlyLineKeepsItsLabel(t *testing.T) {
 	// snapshot-derived lines, so "auth expired" always says whose.
 	accounts := []accountUsageLine{{label: "trecs", email: "andy@trecs.aero", placeholder: usageExpiredText}}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, 80)
+	writeUsageHeader(&b, accounts, nil, nil, 80)
 	if got := strings.TrimRight(b.String(), "\n"); got != dim("trecs")+" "+dim(usageExpiredText) {
 		t.Fatalf("sole expired line = %q", got)
 	}
@@ -891,7 +891,7 @@ func TestWriteUsageHeaderNarrowTerminalKeepsExpiredLine(t *testing.T) {
 		{label: "trecs", email: "andy@trecs.aero", placeholder: usageExpiredText},
 	}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, 20)
+	writeUsageHeader(&b, accounts, nil, nil, 20)
 	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("lines = %#v, want one per account", lines)
@@ -915,7 +915,7 @@ func TestWriteUsageHeaderRendersReasonPlaceholder(t *testing.T) {
 		{label: "trecs", email: "andy@trecs.aero", placeholder: "rate limited"},
 	}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, 0)
+	writeUsageHeader(&b, accounts, nil, nil, 0)
 	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("lines = %#v, want one per account", lines)
@@ -934,7 +934,7 @@ func TestWriteUsageHeaderMarksStaleNumbers(t *testing.T) {
 		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
 	}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, 0)
+	writeUsageHeader(&b, accounts, nil, nil, 0)
 	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("lines = %#v, want one per account", lines)
@@ -963,7 +963,7 @@ func TestWriteUsageHeaderShowsStaleAge(t *testing.T) {
 		},
 	}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, 0)
+	writeUsageHeader(&b, accounts, nil, nil, 0)
 	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("lines = %#v, want one per account", lines)
@@ -991,7 +991,7 @@ func TestWriteUsageHeaderStaleAgeSurvivesNarrowWidth(t *testing.T) {
 		},
 	}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, 40)
+	writeUsageHeader(&b, accounts, nil, nil, 40)
 	line := strings.TrimRight(b.String(), "\n")
 	want := usageStaleText + " 3h"
 	if !strings.Contains(line, want) {
@@ -1004,7 +1004,7 @@ func TestWriteUsageHeaderStaleWithoutAgeStaysBare(t *testing.T) {
 		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
 	}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, 0)
+	writeUsageHeader(&b, accounts, nil, nil, 0)
 	line := strings.TrimRight(b.String(), "\n")
 	if !strings.HasSuffix(line, " "+dim(usageStaleText)) {
 		t.Fatalf("stale line with zero FetchedAt = %q, want the bare word with no age", line)
@@ -1026,8 +1026,8 @@ func TestWriteUsageHeaderMarksASoleBareLocalLine(t *testing.T) {
 		info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, mine: true,
 	}}
 	var a, b strings.Builder
-	writeUsageHeader(&a, fresh, nil, 100)
-	writeUsageHeader(&b, stale, nil, 100)
+	writeUsageHeader(&a, fresh, nil, nil, 100)
+	writeUsageHeader(&b, stale, nil, nil, 100)
 	freshLine := strings.TrimRight(a.String(), "\n")
 	staleLine := strings.TrimRight(b.String(), "\n")
 
@@ -1057,8 +1057,8 @@ func TestWriteUsageHeaderStaleMarkerShiftsNoOtherColumn(t *testing.T) {
 		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
 	}
 	var a, b strings.Builder
-	writeUsageHeader(&a, fresh, nil, 100)
-	writeUsageHeader(&b, stale, nil, 100)
+	writeUsageHeader(&a, fresh, nil, nil, 100)
+	writeUsageHeader(&b, stale, nil, nil, 100)
 	freshLines := strings.Split(strings.TrimRight(a.String(), "\n"), "\n")
 	staleLines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	if len(freshLines) != len(staleLines) {
@@ -1085,7 +1085,7 @@ func TestWriteUsageHeaderStaleMarkerSurvivesWidthClip(t *testing.T) {
 		{label: "andy@trecs.aero", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
 	}
 	var b strings.Builder
-	writeUsageHeader(&b, accounts, nil, cols)
+	writeUsageHeader(&b, accounts, nil, nil, cols)
 	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("lines = %#v, want one per account", lines)
@@ -1716,6 +1716,246 @@ func TestRenderHeaderCodexAbsentEverywhereNoLine(t *testing.T) {
 	writeUsage(&bare, "", claude, 0)
 	if want := strings.TrimRight(bare.String(), "\n"); usage[0] != want {
 		t.Errorf("codex-absent Claude line = %q, want bare (byte-identical) %q", usage[0], want)
+	}
+}
+
+func TestWriteGrokUsage(t *testing.T) {
+	var b strings.Builder
+	writeGrokUsage(&b, "grok", &GrokUsageInfo{
+		Windows: []grokWindow{
+			{Label: "wk", Pct: 6, ResetsAt: time.Now().Add(5 * 24 * time.Hour)},
+		},
+	}, 0)
+	out := b.String()
+	if lines := strings.Count(out, "\n"); lines != 1 {
+		t.Errorf("writeGrokUsage wrote %d lines, want 1: %q", lines, out)
+	}
+	if !strings.HasPrefix(out, dim("grok")+" ") {
+		t.Errorf("missing dim grok label: %q", out)
+	}
+	if !strings.Contains(out, "wk") {
+		t.Errorf("missing window label: %q", out)
+	}
+	if !strings.Contains(out, "6%") {
+		t.Errorf("missing percentage: %q", out)
+	}
+	if !strings.Contains(out, colorize(usageColor(6), usageBar(6, usageBarMax))) {
+		t.Errorf("grok 6%% window not colored like writeUsage: %q", out)
+	}
+	if got := strings.Count(out, "█") + strings.Count(out, "░"); got != usageBarMax {
+		t.Errorf("bar cells = %d, want %d (1 window × max width)", got, usageBarMax)
+	}
+}
+
+func TestWriteGrokUsageEmpty(t *testing.T) {
+	var b strings.Builder
+	writeGrokUsage(&b, "grok", nil, 0)
+	writeGrokUsage(&b, "grok", &GrokUsageInfo{}, 0) // non-nil but no windows
+	if b.Len() != 0 {
+		t.Errorf("writeGrokUsage(nil/empty) wrote %q, want nothing", b.String())
+	}
+}
+
+func TestWriteGrokUsageNoResetOmitsTrailer(t *testing.T) {
+	// A window with a zero reset time renders the bar and percentage but no
+	// countdown trailer (no misleading "<1m"), and leaves no trailing space.
+	var b strings.Builder
+	writeGrokUsage(&b, "grok", &GrokUsageInfo{
+		Windows: []grokWindow{{Label: "wk", Pct: 12}}, // ResetsAt zero
+	}, 0)
+	out := strings.TrimSuffix(b.String(), "\n")
+	if strings.Contains(out, "<1m") {
+		t.Errorf("zero-reset window rendered a misleading countdown: %q", out)
+	}
+	if !strings.Contains(out, "12%") {
+		t.Errorf("missing percentage: %q", out)
+	}
+	if strings.HasSuffix(out, " ") {
+		t.Errorf("zero-reset window left a trailing space: %q", out)
+	}
+}
+
+func TestDedupeGrokAccounts(t *testing.T) {
+	// Mirrors TestDedupeCodexAccounts: the resolution logic is identical, only the
+	// snapshot type and remote source field (r.GrokUsage) differ.
+	info := func() *GrokUsageInfo { return &GrokUsageInfo{} }
+
+	t.Run("same email local and remote collapse, local wins", func(t *testing.T) {
+		localInfo := info()
+		local := GrokAccountUsage{Account: "Dev@Example.com", Info: localInfo}
+		remotes := []RemoteResult{
+			{Name: "pi", GrokUsage: &GrokAccountUsage{Account: "dev@example.com", Info: info()}},
+		}
+		got := dedupeGrokAccounts(local, remotes)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1: %#v", len(got), got)
+		}
+		if got[0].label != "Dev" {
+			t.Errorf("label = %q, want local-part %q", got[0].label, "Dev")
+		}
+		if got[0].info != localInfo {
+			t.Error("first occurrence (local) should win the shared account")
+		}
+		if !got[0].mine {
+			t.Error("local account line should be mine")
+		}
+	})
+
+	t.Run("distinct emails render both, labeled by local-part", func(t *testing.T) {
+		local := GrokAccountUsage{Account: "andy@work.com", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "pi", GrokUsage: &GrokAccountUsage{Account: "bot@ci.com", Info: info()}},
+		}
+		got := dedupeGrokAccounts(local, remotes)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2: %#v", len(got), got)
+		}
+		if got[0].label != "andy" || got[1].label != "bot" {
+			t.Errorf("labels = %q,%q want andy,bot", got[0].label, got[1].label)
+		}
+		if !got[0].mine || got[1].mine {
+			t.Errorf("mine = %v,%v want true (local),false (foreign)", got[0].mine, got[1].mine)
+		}
+	})
+
+	t.Run("unknown accounts never merge, labeled by host name", func(t *testing.T) {
+		local := GrokAccountUsage{Account: "andy@work.com", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "beluga", GrokUsage: &GrokAccountUsage{Account: "", Info: info()}},
+			{Name: "walrus", GrokUsage: &GrokAccountUsage{Account: "", Info: info()}},
+		}
+		got := dedupeGrokAccounts(local, remotes)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (unknowns never merge): %#v", len(got), got)
+		}
+		if got[1].label != "beluga" || got[2].label != "walrus" {
+			t.Errorf("unknown labels = %q,%q want beluga,walrus", got[1].label, got[2].label)
+		}
+	})
+
+	t.Run("nil Info entries drop without polluting the dedupe set", func(t *testing.T) {
+		local := GrokAccountUsage{Account: "bot@ci.com", Info: nil}
+		remotes := []RemoteResult{
+			{Name: "old", GrokUsage: nil}, // pre-propagation / no-grok server
+			{Name: "live", GrokUsage: &GrokAccountUsage{Account: "bot@ci.com", Info: info()}},
+		}
+		got := dedupeGrokAccounts(local, remotes)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1 (only the live snapshot): %#v", len(got), got)
+		}
+		if got[0].label != "bot" {
+			t.Errorf("label = %q, want bot", got[0].label)
+		}
+		if !got[0].mine {
+			t.Error("remote sharing local's email should be mine")
+		}
+	})
+
+	t.Run("colliding local-parts fall back to full email", func(t *testing.T) {
+		local := GrokAccountUsage{Account: "andy@trecs.aero", Info: info()}
+		remotes := []RemoteResult{
+			{Name: "pi", GrokUsage: &GrokAccountUsage{Account: "andy@avisoma.com", Info: info()}},
+		}
+		got := dedupeGrokAccounts(local, remotes)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2: %#v", len(got), got)
+		}
+		if got[0].label != "andy@trecs.aero" || got[1].label != "andy@avisoma.com" {
+			t.Errorf("labels = %q,%q want full emails on collision", got[0].label, got[1].label)
+		}
+	})
+}
+
+func TestRenderHeaderGrokAfterCodex(t *testing.T) {
+	// Claude + Codex + Grok: three lines in that order; Grok sits after Codex.
+	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	codex := &CodexAccountUsage{Account: "dev@example.com", Info: &CodexUsageInfo{
+		Windows: []codexWindow{{Label: "wk", Pct: 96}},
+	}}
+	grok := &GrokAccountUsage{Account: "dev@x.ai", Info: &GrokUsageInfo{
+		Windows: []grokWindow{{Label: "wk", Pct: 6}},
+	}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+		nil, "", &LocalUsage{
+			Claude: &AccountUsage{Account: "andy@work.com", Info: claude},
+			Codex:  codex,
+			Grok:   grok,
+		}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 3 {
+		t.Fatalf("want 3 usage lines (claude + codex + grok), got %d: %#v", len(usage), usage)
+	}
+	if !strings.HasPrefix(usage[0], dim("claude")+" ") {
+		t.Errorf("line 0 should be claude: %q", usage[0])
+	}
+	if !strings.HasPrefix(usage[1], dim("codex")+" ") {
+		t.Errorf("line 1 should be codex: %q", usage[1])
+	}
+	if !strings.HasPrefix(usage[2], dim("grok")+" ") {
+		t.Errorf("line 2 should be grok: %q", usage[2])
+	}
+	if !strings.Contains(usage[2], "6%") {
+		t.Errorf("grok line missing window pct: %q", usage[2])
+	}
+}
+
+func TestRenderHeaderClaudeLabeledWhenOnlyGrokPresent(t *testing.T) {
+	// No Codex, local Grok: Claude still takes the dim "claude" tag (otherPresent),
+	// Grok is tagged "grok".
+	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	grok := &GrokAccountUsage{Account: "dev@x.ai", Info: &GrokUsageInfo{
+		Windows: []grokWindow{{Label: "wk", Pct: 6}},
+	}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+		nil, "", &LocalUsage{
+			Claude: &AccountUsage{Account: "andy@work.com", Info: claude},
+			Grok:   grok,
+		}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 2 {
+		t.Fatalf("want 2 usage lines (claude + grok), got %d: %#v", len(usage), usage)
+	}
+	if !strings.HasPrefix(usage[0], dim("claude")+" ") {
+		t.Errorf("Claude line should take the dim 'claude' tag when only Grok is present: %q", usage[0])
+	}
+	if !strings.HasPrefix(usage[1], dim("grok")+" ") {
+		t.Errorf("grok line missing dim grok label: %q", usage[1])
+	}
+}
+
+func TestRenderHeaderThreeProvidersAlign(t *testing.T) {
+	// Claude + Codex + Grok: first-segment columns match across all three lines.
+	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	codex := &CodexAccountUsage{Account: "me@work.com", Info: &CodexUsageInfo{
+		Windows: []codexWindow{{Label: "wk", Pct: 40}},
+	}}
+	grok := &GrokAccountUsage{Account: "me@x.ai", Info: &GrokUsageInfo{
+		Windows: []grokWindow{{Label: "wk", Pct: 6}},
+	}}
+	var out bytes.Buffer
+	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
+		nil, "", &LocalUsage{
+			Claude: &AccountUsage{Account: "me@work.com", Info: claude},
+			Codex:  codex,
+			Grok:   grok,
+		}, 0, 0, "dir")
+
+	usage := headerUsageLines(out.String())
+	if len(usage) != 3 {
+		t.Fatalf("want 3 lines (claude + codex + grok), got %d: %#v", len(usage), usage)
+	}
+	plain0, plain1, plain2 := stripANSI(usage[0]), stripANSI(usage[1]), stripANSI(usage[2])
+	c0, c1, c2 := strings.Index(plain0, "5h"), strings.Index(plain1, "wk"), strings.Index(plain2, "wk")
+	if c0 < 0 || c1 < 0 || c2 < 0 {
+		t.Fatalf("first segment missing: %q / %q / %q", plain0, plain1, plain2)
+	}
+	if c0 != c1 || c1 != c2 {
+		t.Errorf("bars misaligned: claude 5h col %d, codex wk col %d, grok wk col %d\n%q\n%q\n%q",
+			c0, c1, c2, plain0, plain1, plain2)
 	}
 }
 

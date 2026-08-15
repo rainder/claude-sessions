@@ -854,31 +854,33 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 	return lines
 }
 
-// writeUsageHeader prints the header's account rate-limit line(s) for both
-// providers — Anthropic lines first, then Codex — with their bars vertically
-// aligned in two respects: every line's dim label is padded to one width shared
-// across both blocks (rune-counted) so the first segment ("5h"/"wk"/…) starts in
-// the same column, and every line's bars are the same width. A shorter Codex
-// line (fewer/narrower segments) would otherwise afford wider bars than a Claude
-// line the terminal has shrunk, so the shared width is the minimum any line can
-// afford (clamped usageBarMin..usageBarMax); on a wide terminal that's
-// usageBarMax for all.
+// writeUsageHeader prints the header's account rate-limit line(s) for three
+// providers — Anthropic lines first, then Codex, then Grok — with their bars
+// vertically aligned in two respects: every line's dim label is padded to one
+// width shared across all blocks (rune-counted) so the first segment
+// ("5h"/"wk"/…) starts in the same column, and every line's bars are the same
+// width. A shorter Codex/Grok line (fewer/narrower segments) would otherwise
+// afford wider bars than a Claude line the terminal has shrunk, so the shared
+// width is the minimum any line can afford (clamped usageBarMin..usageBarMax);
+// on a wide terminal that's usageBarMax for all.
 //
 // Anthropic labeling: a sole line attributable to this machine (mine) renders
-// bare — byte-for-byte the pre-Codex layout — when there's no Codex block, but
-// takes the dim "claude" tag once a Codex block shares the header, symmetric
-// with "codex". A lone foreign remote keeps its account label so its limits
-// can't masquerade as local; several lines each carry their account (local-part
-// / host / full email on collision).
+// bare — byte-for-byte the pre-Codex layout — when no other provider block is
+// present, but takes the dim "claude" tag once Codex or Grok shares the header,
+// symmetric with "codex"/"grok". A lone foreign remote keeps its account label
+// so its limits can't masquerade as local; several lines each carry their
+// account (local-part / host / full email on collision).
 //
 // Codex labeling: a sole mine line is the bare "codex" tag; every other line is
 // "codex <account>". The same anti-masquerade carve-out applies — a lone foreign
 // remote keeps its account so "codex" alone can't imply the local account.
 //
+// Grok labeling mirrors Codex: sole mine → bare "grok"; else "grok <account>".
+//
 // The pad spaces sit outside the dim escape (see renderUsageSegs); a bare ""
 // label pads to nothing and stays byte-identical to the pre-Codex bare layout.
-// Empty (no usage for either provider) writes nothing.
-func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int) {
+// Empty (no usage for any provider) writes nothing.
+func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []codexAccountLine, grokAccounts []grokAccountLine, cols int) {
 	type entry struct {
 		label string
 		segs  []usageSeg
@@ -900,7 +902,7 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 	// now is captured once so every stale line in this render agrees on its
 	// age relative to a single instant, rather than drifting line to line.
 	now := time.Now()
-	codexPresent := len(codexAccounts) > 0
+	otherPresent := len(codexAccounts) > 0 || len(grokAccounts) > 0
 
 	addClaude := func(label string, a accountUsageLine) {
 		if a.placeholder != "" {
@@ -930,13 +932,21 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 			entries = append(entries, entry{label: label, segs: segs})
 		}
 	}
+	addGrok := func(label string, info *GrokUsageInfo) {
+		if info == nil {
+			return
+		}
+		if segs := grokSegs(info); len(segs) > 0 {
+			entries = append(entries, entry{label: label, segs: segs})
+		}
+	}
 
 	// Anthropic block. Only a live line may go bare — dedupeAccounts never marks
 	// a snapshot-derived line mine, so an unlabeled line always means "this
 	// machine's account, right now".
 	if len(accounts) == 1 && accounts[0].mine {
 		label := ""
-		if codexPresent {
+		if otherPresent {
 			label = "claude"
 		}
 		addClaude(label, accounts[0])
@@ -952,6 +962,15 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 	} else {
 		for _, a := range codexAccounts {
 			addCodex("codex "+a.label, a.info)
+		}
+	}
+
+	// Grok block (after Codex).
+	if len(grokAccounts) == 1 && grokAccounts[0].mine {
+		addGrok("grok", grokAccounts[0].info)
+	} else {
+		for _, a := range grokAccounts {
+			addGrok("grok "+a.label, a.info)
 		}
 	}
 
@@ -1088,6 +1107,32 @@ func codexSegs(info *CodexUsageInfo) []usageSeg {
 	return segs
 }
 
+// writeGrokUsage prints one Grok account usage line: a dim label prefix followed
+// by one bar segment for the current period (wk / mo / 1d / cr). Bars, colors,
+// percent formatting, and the dim reset trailer match writeUsage. Standalone
+// path uses lineBarW; the header shares one bar width across lines (see
+// writeUsageHeader). Nil info or no windows writes nothing.
+func writeGrokUsage(w io.Writer, label string, info *GrokUsageInfo, cols int) {
+	if info == nil {
+		return
+	}
+	segs := grokSegs(info)
+	if len(segs) == 0 {
+		return
+	}
+	renderUsageSegs(w, label, segs, lineBarW(label, segs, 0, cols))
+}
+
+// grokSegs builds one segment per Grok rate-limit window; a window with no
+// reset time gets an empty trailer — formatUntil returns "" for a zero ResetsAt.
+func grokSegs(info *GrokUsageInfo) []usageSeg {
+	segs := make([]usageSeg, 0, len(info.Windows))
+	for _, win := range info.Windows {
+		segs = append(segs, usageSeg{label: win.Label, trailer: formatUntil(win.ResetsAt), pct: win.Pct})
+	}
+	return segs
+}
+
 // codexAccountLine is one resolved Codex header line, mirroring accountUsageLine
 // for the Codex provider (see dedupeCodexAccounts).
 type codexAccountLine struct {
@@ -1146,13 +1191,67 @@ func dedupeCodexAccounts(local CodexAccountUsage, remotes []RemoteResult) []code
 	return lines
 }
 
+// grokAccountLine is one resolved Grok header line, mirroring codexAccountLine
+// for the Grok provider (see dedupeGrokAccounts).
+type grokAccountLine struct {
+	label string // email local-part, or host name for an unknown account
+	email string // full account email ("" unknown); disambiguates a label collision
+	info  *GrokUsageInfo
+	// mine marks a line attributable to this machine's Grok account: the local
+	// entry, or a remote sharing the local email. Only such a line may render as
+	// a bare "grok" tag when it's the sole survivor — a lone foreign remote keeps
+	// its account label so its limits don't masquerade as local.
+	mine bool
+}
+
+// dedupeGrokAccounts resolves which Grok usage lines the header shows and in
+// what order, mirroring dedupeCodexAccounts for the Grok provider. The only
+// differences are the snapshot type and the remote source field (r.GrokUsage).
+func dedupeGrokAccounts(local GrokAccountUsage, remotes []RemoteResult) []grokAccountLine {
+	var lines []grokAccountLine
+	seen := make(map[string]bool)
+	add := func(account, host string, info *GrokUsageInfo, isLocal bool) {
+		if info == nil {
+			return
+		}
+		mine := isLocal || (account != "" && strings.EqualFold(account, local.Account))
+		if account == "" {
+			lines = append(lines, grokAccountLine{label: host, info: info, mine: mine})
+			return
+		}
+		key := strings.ToLower(account)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		lines = append(lines, grokAccountLine{label: accountLocalPart(account), email: account, info: info, mine: mine})
+	}
+	add(local.Account, "local", local.Info, true)
+	for _, r := range remotes {
+		if r.GrokUsage != nil {
+			add(r.GrokUsage.Account, r.Name, r.GrokUsage.Info, false)
+		}
+	}
+	labelCount := make(map[string]int)
+	for _, l := range lines {
+		labelCount[l.label]++
+	}
+	for i, l := range lines {
+		if l.email != "" && labelCount[l.label] > 1 {
+			lines[i].label = l.email
+		}
+	}
+	return lines
+}
+
 // LocalUsage carries this machine's own account usage for each provider,
 // threaded into the renderer so each provider's snapshot is deduped against its
 // remotes' before the header draws. A nil LocalUsage, or a nil field, renders no
-// bars for that provider — the Codex field is independent of the Anthropic one.
+// bars for that provider — each provider field is independent of the others.
 type LocalUsage struct {
 	Claude *AccountUsage
 	Codex  *CodexAccountUsage
+	Grok   *GrokAccountUsage
 	// KnownAccounts is this machine's own claude-switch credential snapshots'
 	// usage — every account it knows about except the one currently logged in
 	// (that one is Claude). Nil before the first known-accounts poll lands, or
@@ -1631,9 +1730,9 @@ func plural(n int, word string) string {
 
 // renderHeader prints the title line with live counts, the active view-filter
 // indicators (the group badge then a dim "/query" when a text filter is active),
-// the optional account usage bars (Anthropic lines then Codex lines, one line
-// per distinct account — see dedupeAccounts / dedupeCodexAccounts), and the
-// trailing blank line — shared by all three views.
+// the optional account usage bars (Anthropic, Codex, then Grok — one line per
+// distinct account; see dedupeAccounts / dedupeCodexAccounts / dedupeGrokAccounts),
+// and the trailing blank line — shared by all three views.
 // groupFilterIndicator renders the badge shown in the title while a filter is
 // active. only mode shows "only ③" colored with the group's palette entry;
 // hide mode shows a red "hide" label followed by the hidden groups' badges in
@@ -1663,7 +1762,7 @@ func groupFilterIndicator(filter groupFilter) string {
 	return b.String()
 }
 
-func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols int, filter groupFilter, groupSort bool, query string) {
+func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, grokAccounts []grokAccountLine, cols int, filter groupFilter, groupSort bool, query string) {
 	live, busy := 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -1696,7 +1795,7 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 		ansiBold, time.Now().Format("15:04:05"),
 		plural(live, "session"), busyStr,
 		filterStr, ansiReset, dim("["+mode+"]"))
-	writeUsageHeader(w, accounts, codexAccounts, cols)
+	writeUsageHeader(w, accounts, codexAccounts, grokAccounts, cols)
 	fmt.Fprintln(w)
 }
 
@@ -1738,6 +1837,7 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	// header's account dedupe.
 	var localAU AccountUsage
 	var localCodex CodexAccountUsage
+	var localGrok GrokAccountUsage
 	var localKnown []KnownAccountUsage
 	if localUsage != nil {
 		if localUsage.Claude != nil {
@@ -1745,6 +1845,9 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 		}
 		if localUsage.Codex != nil {
 			localCodex = *localUsage.Codex
+		}
+		if localUsage.Grok != nil {
+			localGrok = *localUsage.Grok
 		}
 		localKnown = localUsage.KnownAccounts
 	}
@@ -1761,18 +1864,19 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	}
 	// Pair each provider's local snapshot with every remote's, dedupe by account,
 	// and carry the resolved lines through the header so each distinct account
-	// shows once. The two providers dedupe independently.
+	// shows once. The three providers dedupe independently.
 	accounts := dedupeAccounts(localAU, localKnown, remotes)
 	codexAccounts := dedupeCodexAccounts(localCodex, remotes)
+	grokAccounts := dedupeGrokAccounts(localGrok, remotes)
 	w := &frameWriter{}
 	var overflowing bool
 	switch viewMode {
 	case "2":
-		overflowing = renderAllMinimal(w, sections, sel, accounts, codexAccounts, cols, step, sortMode, gv)
+		overflowing = renderAllMinimal(w, sections, sel, accounts, codexAccounts, grokAccounts, cols, step, sortMode, gv)
 	case "3":
-		overflowing = renderAllIntermediate(w, sections, sel, accounts, codexAccounts, cols, step, sortMode, gv)
+		overflowing = renderAllIntermediate(w, sections, sel, accounts, codexAccounts, grokAccounts, cols, step, sortMode, gv)
 	default:
-		overflowing = renderAllFull(w, sections, sel, accounts, codexAccounts, cols, step, sortMode, gv)
+		overflowing = renderAllFull(w, sections, sel, accounts, codexAccounts, grokAccounts, cols, step, sortMode, gv)
 	}
 	return tableFrame{
 		lines:       strings.Split(w.buf.String(), "\n"),
@@ -1973,7 +2077,7 @@ func rowIndent(gv groupView) string {
 	return strings.Repeat("  ", n)
 }
 
-func renderAllFull(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
+func renderAllFull(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, grokAccounts []grokAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -2006,7 +2110,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 	}
 	nameW = min(nameW, maxNameCellWidth)
 
-	renderHeader(w, sections, "full", accounts, codexAccounts, cols, gv.filter, gv.groupSort, gv.query)
+	renderHeader(w, sections, "full", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -2101,7 +2205,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 // Intermediate view — full's columns minus TMUX, VER, SID.
 // ============================================================================
 
-func renderAllIntermediate(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
+func renderAllIntermediate(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, grokAccounts []grokAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -2126,7 +2230,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	renderHeader(w, sections, "intermediate", accounts, codexAccounts, cols, gv.filter, gv.groupSort, gv.query)
+	renderHeader(w, sections, "intermediate", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -2236,7 +2340,7 @@ func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
 	}
 }
 
-func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
+func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, grokAccounts []grokAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
 	now := time.Now()
 	nameWidth := sectionNameWidth(sections)
 
@@ -2260,7 +2364,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 		nameW = max(nameW, nameCellTextWidth(r.display, r.badgeStr))
 	}
 
-	renderHeader(w, sections, "minimal", accounts, codexAccounts, cols, gv.filter, gv.groupSort, gv.query)
+	renderHeader(w, sections, "minimal", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(

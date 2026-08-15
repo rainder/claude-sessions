@@ -106,6 +106,33 @@ func TestFetchRemoteDecodesOptionalCodexUsage(t *testing.T) {
 	}
 }
 
+func TestFetchRemoteDecodesOptionalGrokUsage(t *testing.T) {
+	// Marshal a GrokAccountUsage exactly as the server does so the test tracks
+	// the real "grok_usage" serialization.
+	grok := GrokAccountUsage{Account: "bot@x.ai", Info: &GrokUsageInfo{
+		Windows: []grokWindow{{Label: "wk", Pct: 6}},
+	}}
+	payload, err := json.Marshal(map[string]any{"sessions": []Session{}, "grok_usage": grok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fetchRemoteFixture(t, string(payload))
+	if got.GrokUsage == nil {
+		t.Fatal("grok_usage decoded as nil, want populated")
+	}
+	if got.GrokUsage.Account != "bot@x.ai" {
+		t.Fatalf("account = %q, want bot@x.ai", got.GrokUsage.Account)
+	}
+	if got.GrokUsage.Info == nil || len(got.GrokUsage.Info.Windows) != 1 || got.GrokUsage.Info.Windows[0].Pct != 6 {
+		t.Fatalf("grok_usage.info wrong: %#v", got.GrokUsage.Info)
+	}
+
+	// An older server (or one with no Grok auth) omits the key → nil, no error.
+	if old := fetchRemoteFixture(t, `{"sessions":[]}`); old.GrokUsage != nil {
+		t.Fatalf("missing grok_usage decoded as %#v, want nil", old.GrokUsage)
+	}
+}
+
 func fetchRemoteFixture(t *testing.T, body string) RemoteResult {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
