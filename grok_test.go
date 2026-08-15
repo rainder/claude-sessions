@@ -885,21 +885,36 @@ func TestGrokStatusFromEvents(t *testing.T) {
 			status: "busy",
 		},
 		{
-			name: "unmatched permission is waiting",
+			name: "a tool permission prompt is busy, not waiting",
 			lines: []string{
 				`{"type":"phase_changed","phase":"permission_prompt"}`,
-				`{"type":"permission_requested","tool_name":"read_file"}`,
+				`{"type":"permission_requested","tool_name":"run_terminal_command"}`,
 			},
-			status:     "waiting",
-			waitingFor: "read_file",
+			status: "busy",
 		},
 		{
-			name: "permission without a tool name still waits",
+			name: "a nameless tool permission is still busy",
 			lines: []string{
 				`{"type":"permission_requested"}`,
 			},
+			status: "busy",
+		},
+		{
+			name: "ask_user_question is waiting for the user",
+			lines: []string{
+				`{"type":"tool_started","tool_name":"ask_user_question"}`,
+			},
 			status:     "waiting",
-			waitingFor: "permission",
+			waitingFor: "input",
+		},
+		{
+			name: "a finished ask_user_question is not left waiting",
+			lines: []string{
+				`{"type":"tool_started","tool_name":"ask_user_question"}`,
+				`{"type":"tool_completed","tool_name":"ask_user_question"}`,
+				`{"type":"phase_changed","phase":"streaming_text"}`,
+			},
+			status: "busy",
 		},
 		{
 			name: "resolved permission falls through to the next phase",
@@ -966,7 +981,7 @@ func TestCollectGrokLocalDerivesStatusFromEvents(t *testing.T) {
 	}
 }
 
-func TestCollectGrokLocalDerivesWaitingFromAnOpenPermission(t *testing.T) {
+func TestCollectGrokLocalTreatsAToolPermissionAsBusy(t *testing.T) {
 	allPIDsAlive(t)
 	home := t.TempDir()
 	grokFixture(t, home, grokActiveOne)
@@ -980,8 +995,29 @@ func TestCollectGrokLocalDerivesWaitingFromAnOpenPermission(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
 	}
-	if rows[0].Status != "waiting" || rows[0].WaitingFor != "run_terminal_command" {
-		t.Errorf("Status/WaitingFor = %q/%q, want waiting/run_terminal_command",
+	if rows[0].Status != "busy" || rows[0].WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want busy/", rows[0].Status, rows[0].WaitingFor)
+	}
+	if rows[0].Waiting() {
+		t.Error("Waiting() is true for a tool permission; that is a user-input signal")
+	}
+}
+
+func TestCollectGrokLocalDerivesWaitingFromAskUserQuestion(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"tool_started","tool_name":"ask_user_question"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "waiting" || rows[0].WaitingFor != "input" {
+		t.Errorf("Status/WaitingFor = %q/%q, want waiting/input",
 			rows[0].Status, rows[0].WaitingFor)
 	}
 	if !rows[0].Waiting() {

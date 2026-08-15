@@ -138,12 +138,12 @@ const grokEventsFile = "events.jsonl"
 // grokEventsTailSize is how much of events.jsonl CollectLocal reads per
 // session. The file grows by one phase_changed line per token chunk, so a
 // whole-file read on a 2s tick would cost the same shape the resume
-// collector's laziness exists to avoid. 8KB is ~100 events. An unmatched
-// permission or a turn_ended that is still the live state sits at the end,
-// so the tail is the whole signal. An unmatched permission older than the
-// window with later non-permission events would read as busy — accepted,
-// because that shape has not been observed: a session still waiting writes
-// nothing after the permission_requested.
+// collector's laziness exists to avoid. 8KB is ~100 events. An open
+// ask_user_question or a turn_ended that is still the live state sits at
+// the end, so the tail is the whole signal. An open question older than
+// the window with later non-question events would read as busy — accepted,
+// because a session still blocked on the user writes nothing after the
+// tool_started.
 const grokEventsTailSize = 8 * 1024
 
 // grokEvent is the subset of one events.jsonl line this tool reads. Grok
@@ -212,23 +212,24 @@ func readGrokEventsTail(path string) []byte {
 // grokStatusFromEvents walks a tail of events.jsonl and maps it onto
 // Session.Status / WaitingFor. The map is ours, not a field grok publishes:
 //
-//	unmatched permission_requested → waiting (WaitingFor = tool name)
+//	open ask_user_question         → waiting (WaitingFor = "input")
 //	last event is turn_ended       → idle
 //	an open turn / busy phase      → busy
 //	nothing recognizable           → empty (TUI keeps "-")
 //
-// turn_ended wins over a leftover streaming phase: grok does not write an
-// idle phase, so the last phase_changed after a finished turn is still
-// streaming_text. A torn line is skipped, never a reason to drop the rest.
+// A tool permission prompt is busy, not waiting. waiting is only "the agent
+// is blocked on a user answer". turn_ended wins over a leftover streaming
+// phase: grok does not write an idle phase, so the last phase_changed after
+// a finished turn is still streaming_text. A torn line is skipped, never a
+// reason to drop the rest.
 func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 	var (
-		lastType    string
-		lastPhase   string
-		unresolved  int
-		waitingTool string
-		sawTurnEnd  bool
-		sawTurnOn   bool
-		sawBusy     bool
+		lastType   string
+		lastPhase  string
+		sawTurnEnd bool
+		sawTurnOn  bool
+		sawBusy    bool
+		waitingOn  bool
 	)
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		line = bytes.TrimSpace(line)
@@ -247,18 +248,14 @@ func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 				sawBusy = true
 			}
 		case "permission_requested":
-			unresolved++
-			if ev.ToolName != "" {
-				waitingTool = ev.ToolName
-			} else if waitingTool == "" {
-				waitingTool = "permission"
+			if grokUserWaitTool(ev.ToolName) {
+				waitingOn = true
+			} else {
+				sawBusy = true
 			}
 		case "permission_resolved":
-			if unresolved > 0 {
-				unresolved--
-			}
-			if unresolved == 0 {
-				waitingTool = ""
+			if grokUserWaitTool(ev.ToolName) {
+				waitingOn = false
 			}
 		case "turn_started":
 			sawTurnOn = true
@@ -268,17 +265,23 @@ func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 			sawTurnOn = false
 			sawBusy = false
 			lastPhase = ""
-			unresolved = 0
-			waitingTool = ""
-		case "tool_started", "first_token", "loop_started":
+			waitingOn = false
+		case "tool_started":
+			if grokUserWaitTool(ev.ToolName) {
+				waitingOn = true
+			} else {
+				sawBusy = true
+			}
+		case "tool_completed":
+			if grokUserWaitTool(ev.ToolName) {
+				waitingOn = false
+			}
+		case "first_token", "loop_started":
 			sawBusy = true
 		}
 	}
-	if unresolved > 0 {
-		if waitingTool == "" {
-			waitingTool = "permission"
-		}
-		return "waiting", waitingTool
+	if waitingOn {
+		return "waiting", "input"
 	}
 	// lastType == turn_ended must win over a leftover sawBusy from the
 	// turn that just finished. A busy phase AFTER that turn_ended is a
@@ -298,7 +301,17 @@ func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 
 func grokBusyPhase(phase string) bool {
 	switch phase {
-	case "waiting_for_model", "streaming_reasoning", "streaming_text", "tool_execution":
+	case "waiting_for_model", "streaming_reasoning", "streaming_text", "tool_execution", "permission_prompt":
+		return true
+	}
+	return false
+}
+
+// grokUserWaitTool reports whether a grok tool is blocked on a human answer
+// rather than on a permission click or a running command.
+func grokUserWaitTool(name string) bool {
+	switch name {
+	case "ask_user_question", "AskUserQuestion":
 		return true
 	}
 	return false

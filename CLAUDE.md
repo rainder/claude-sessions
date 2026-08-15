@@ -231,24 +231,27 @@ Grok writes no `status` field. The live signal is `events.jsonl` beside
 `summary.json` (`phase_changed`, `turn_started` / `turn_ended`,
 `permission_requested` / `permission_resolved`). `grokStatusFromEvents` maps
 that log onto Claude's vocabulary so render, sort and `StatusDisplay` need no
-grok branch: an unmatched `permission_requested` is `waiting` (WaitingFor is
-the tool name, or `"permission"` if the line has none — `Waiting()` keys off
-WaitingFor, and `sessionStatusRank` would bury a waiting row that only set
-Status); a last event of `turn_ended` is `idle` (grok never writes an idle
-phase, so the last `phase_changed` after a finished turn is still
-`streaming_text`); an open turn or a busy phase (`waiting_for_model`,
-`streaming_reasoning`, `streaming_text`, `tool_execution`) is `busy`. A
-missing, unreadable or unparseable log leaves both fields empty, and STATUS
-renders as the same `-` placeholder MODEL/TMUX/SID already use —
-`statusCellText`, and `statusGlyphFor` for the minimal view's one-character
-version, which must agree with it: `?` there means "this session reports a
-status this tool does not recognise", which is the wrong claim about a
-session that reported none. The file is tailed (`grokEventsTailSize`, 8KB),
-not scanned: `phase_changed` fires per token chunk, and CollectLocal runs on
-a 2s tick. An unmatched permission older than the window with later
-non-permission events would read as busy — accepted, because a session still
-waiting writes nothing after the `permission_requested`. There is no `shell`
-status: a long bash tool is still `busy`. The row carries a dim `grok`
+grok branch: `waiting` is only an open `ask_user_question` (WaitingFor is
+`"input"` — `Waiting()` keys off WaitingFor, and `sessionStatusRank` would
+bury a waiting row that only set Status). A tool permission prompt
+(`permission_requested` / `permission_prompt`, including
+`run_terminal_command`) is `busy`, not waiting — that is a running turn, not
+a question to the user. A last event of `turn_ended` is `idle` (grok never
+writes an idle phase, so the last `phase_changed` after a finished turn is
+still `streaming_text`); an open turn or a busy phase (`waiting_for_model`,
+`streaming_reasoning`, `streaming_text`, `tool_execution`,
+`permission_prompt`) is `busy`. A missing, unreadable or unparseable log
+leaves both fields empty, and STATUS renders as the same `-` placeholder
+MODEL/TMUX/SID already use — `statusCellText`, and `statusGlyphFor` for the
+minimal view's one-character version, which must agree with it: `?` there
+means "this session reports a status this tool does not recognise", which is
+the wrong claim about a session that reported none. The file is tailed
+(`grokEventsTailSize`, 8KB), not scanned: `phase_changed` fires per token
+chunk, and CollectLocal runs on a 2s tick. An open `ask_user_question` older
+than the window with later non-question events would read as busy —
+accepted, because a session still blocked on the user writes nothing after
+the `tool_started`. There is no `shell` status: a long bash tool is still
+`busy`. The row carries a dim `grok`
 badge inside the NAME cell (`toolBadge`/`nameCell`), which takes part in that
 column's **sizing** (`nameCellTextWidth`) — a badge left out of the width math
 pushes every column right of it out of alignment.
