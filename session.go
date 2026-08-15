@@ -246,8 +246,9 @@ func CollectLocal() ([]Session, error) {
 		s.GitRoot = gitRootFor(s.CWD)
 		if s.IsGrok() {
 			// Model came from grok's own summary.json. Context comes from
-			// signals.json (filled in grokSessionFrom). There is no claude
-			// transcript to scan; cost stays zero.
+			// signals.json (filled in grokSessionFrom). Cost comes from
+			// updates.jsonl in grokSessionFrom. Skip so a claude transcript
+			// cannot overwrite model/CTX/cost.
 			continue
 		}
 		if p := findTranscript(home, s.SessionID); p != "" {

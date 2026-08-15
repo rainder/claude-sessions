@@ -227,10 +227,14 @@ kill need no per-tool path at all: they all key off `Session.Tmux`, and
 whose child is `grok`) because it walks pid → ppid. Context comes from sibling
 `signals.json` (`contextTokensUsed`); missing, unreadable or unparseable is 0
 and CTX stays `-`. Color uses `contextWindowTokens` on the same file
-(`Session.ContextWindow`); 0 falls back to the Claude 300k constant. Cost still
-stays zero — there is no cheap cost field on `signals.json`, and this collector
-does not scan `updates.jsonl` (last `usage.inputTokens` is billed totals, not
-window fill).
+(`Session.ContextWindow`); 0 falls back to the Claude 300k constant. Cost is
+the incremental sum of `turn_completed` `costUsdTicks` on sibling
+`updates.jsonl`, divided by 1e10 (Grok's documented unit). A missing file or
+no ticks is 0 / "—". Do not scan the whole file every tick: only new bytes,
+same contract as `scanCostIncremental`. Turns without `costUsdTicks` are
+skipped (may understate, accepted). `CostSubagentsUSD` stays 0 — parent
+`turn_completed.usage` already includes finished subagents. Do not scan
+`updates.jsonl` for CTX; CTX stays on `signals.json`.
 
 Grok writes no `status` field. The live signal is `events.jsonl` beside
 `summary.json` (`phase_changed`, `turn_started` / `turn_ended`,
