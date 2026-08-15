@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -122,7 +124,184 @@ func grokSessionFrom(home string, e grokActiveSession) (Session, bool) {
 		s.Model = sum.CurrentModelID
 		s.UpdatedAt = grokMillis(firstNonEmpty(sum.LastActiveAt, sum.UpdatedAt))
 	}
+	// Status is derived from events.jsonl, not from the summary: grok never
+	// writes a status field. A missing or unreadable log leaves both empty
+	// so the TUI keeps the "-" placeholder.
+	s.Status, s.WaitingFor = grokSessionStatus(home, e.CWD, e.SessionID)
 	return s, true
+}
+
+// grokEventsFile is the append-only phase log grok writes beside summary.json.
+// It is the only on-disk signal this tool can map onto Session.Status.
+const grokEventsFile = "events.jsonl"
+
+// grokEventsTailSize is how much of events.jsonl CollectLocal reads per
+// session. The file grows by one phase_changed line per token chunk, so a
+// whole-file read on a 2s tick would cost the same shape the resume
+// collector's laziness exists to avoid. 8KB is ~100 events. An unmatched
+// permission or a turn_ended that is still the live state sits at the end,
+// so the tail is the whole signal. An unmatched permission older than the
+// window with later non-permission events would read as busy — accepted,
+// because that shape has not been observed: a session still waiting writes
+// nothing after the permission_requested.
+const grokEventsTailSize = 8 * 1024
+
+// grokEvent is the subset of one events.jsonl line this tool reads. Grok
+// writes a good deal more (timestamps, outcomes, durations); everything not
+// listed here is ignored so a schema addition is never a parse failure.
+type grokEvent struct {
+	Type     string `json:"type"`
+	Phase    string `json:"phase"`
+	ToolName string `json:"tool_name"`
+}
+
+// grokSessionStatus maps a session's events.jsonl tail onto Claude's
+// status / waitingFor vocabulary so the existing render, sort and
+// StatusDisplay paths need no grok branch.
+func grokSessionStatus(home, cwd, sessionID string) (string, string) {
+	return grokStatusFromEvents(readGrokEventsTail(grokEventsPath(home, cwd, sessionID)))
+}
+
+// grokEventsPath locates events.jsonl. The cheap path is the sibling of a
+// summary we already found (including a fallback-scan hit). When there is no
+// summary yet — grok writes events during the first turn, often first — the
+// derived encoding is used and grokSummaryPath's own "do not scan if the cwd
+// dir exists" rule is left untouched. A missing file is the caller's empty
+// status, not an error.
+func grokEventsPath(home, cwd, sessionID string) string {
+	if p, ok := grokSummaryPath(home, cwd, sessionID); ok {
+		return filepath.Join(filepath.Dir(p), grokEventsFile)
+	}
+	return filepath.Join(home, grokDir, "sessions", url.PathEscape(cwd), sessionID, grokEventsFile)
+}
+
+// readGrokEventsTail returns the last grokEventsTailSize bytes of path, with
+// a leading partial line dropped when the read started mid-file. A missing
+// or unreadable file is nil — the same answer as an empty log.
+func readGrokEventsTail(path string) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	size := fi.Size()
+	off := int64(0)
+	if size > grokEventsTailSize {
+		off = size - grokEventsTailSize
+	}
+	buf := make([]byte, size-off)
+	n, err := f.ReadAt(buf, off)
+	if n == 0 || (err != nil && err != io.EOF) {
+		return nil
+	}
+	buf = buf[:n]
+	if off > 0 {
+		i := bytes.IndexByte(buf, '\n')
+		if i < 0 {
+			return nil
+		}
+		buf = buf[i+1:]
+	}
+	return buf
+}
+
+// grokStatusFromEvents walks a tail of events.jsonl and maps it onto
+// Session.Status / WaitingFor. The map is ours, not a field grok publishes:
+//
+//	unmatched permission_requested → waiting (WaitingFor = tool name)
+//	last event is turn_ended       → idle
+//	an open turn / busy phase      → busy
+//	nothing recognizable           → empty (TUI keeps "-")
+//
+// turn_ended wins over a leftover streaming phase: grok does not write an
+// idle phase, so the last phase_changed after a finished turn is still
+// streaming_text. A torn line is skipped, never a reason to drop the rest.
+func grokStatusFromEvents(data []byte) (status, waitingFor string) {
+	var (
+		lastType    string
+		lastPhase   string
+		unresolved  int
+		waitingTool string
+		sawTurnEnd  bool
+		sawTurnOn   bool
+		sawBusy     bool
+	)
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var ev grokEvent
+		if json.Unmarshal(line, &ev) != nil || ev.Type == "" {
+			continue
+		}
+		lastType = ev.Type
+		switch ev.Type {
+		case "phase_changed":
+			lastPhase = ev.Phase
+			if grokBusyPhase(ev.Phase) {
+				sawBusy = true
+			}
+		case "permission_requested":
+			unresolved++
+			if ev.ToolName != "" {
+				waitingTool = ev.ToolName
+			} else if waitingTool == "" {
+				waitingTool = "permission"
+			}
+		case "permission_resolved":
+			if unresolved > 0 {
+				unresolved--
+			}
+			if unresolved == 0 {
+				waitingTool = ""
+			}
+		case "turn_started":
+			sawTurnOn = true
+			sawTurnEnd = false
+		case "turn_ended":
+			sawTurnEnd = true
+			sawTurnOn = false
+			sawBusy = false
+			lastPhase = ""
+			unresolved = 0
+			waitingTool = ""
+		case "tool_started", "first_token", "loop_started":
+			sawBusy = true
+		}
+	}
+	if unresolved > 0 {
+		if waitingTool == "" {
+			waitingTool = "permission"
+		}
+		return "waiting", waitingTool
+	}
+	// lastType == turn_ended must win over a leftover sawBusy from the
+	// turn that just finished. A busy phase AFTER that turn_ended is a
+	// new turn (even if turn_started aged out of the tail) and must not
+	// stay idle.
+	if lastType == "turn_ended" {
+		return "idle", ""
+	}
+	if sawTurnOn || sawBusy || grokBusyPhase(lastPhase) {
+		return "busy", ""
+	}
+	if sawTurnEnd {
+		return "idle", ""
+	}
+	return "", ""
+}
+
+func grokBusyPhase(phase string) bool {
+	switch phase {
+	case "waiting_for_model", "streaming_reasoning", "streaming_text", "tool_execution":
+		return true
+	}
+	return false
 }
 
 // grokSummaryName resolves the NAME label from a summary: grok's generated

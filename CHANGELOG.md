@@ -9,6 +9,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Grok rows now show a STATUS of `idle` / `busy` / `waiting`, derived from
+  the session's `events.jsonl` tail (not a field Grok publishes). Waiting
+  uses the same `WaitingFor` suffix Claude rows do, so status-sort still
+  ranks a permission prompt first. A missing or unreadable log still
+  renders as `-`.
 - The `s`/`S` sort dialog gains a `g`/`G` toggle for group-first sort: when on,
   sessions rank by their assigned group (Shift-1..9) first, ungrouped sessions
   last, then by the normal sort mode within each group. Off by default; the

@@ -39,6 +39,22 @@ func grokSummaryFixture(t *testing.T, home, cwd, sessionID, body string) {
 	}
 }
 
+// grokEventsFixture writes events.jsonl beside that session's summary.
+func grokEventsFixture(t *testing.T, home, cwd, sessionID string, lines ...string) {
+	t.Helper()
+	dir := filepath.Join(home, grokDir, "sessions", url.PathEscape(cwd), sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	body := ""
+	if len(lines) > 0 {
+		body = strings.Join(lines, "\n") + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, grokEventsFile), []byte(body), 0o644); err != nil {
+		t.Fatalf("write events.jsonl: %v", err)
+	}
+}
+
 // allPIDsAlive makes every pid in a fixture count as running, so a test can
 // use readable made-up pids instead of hunting for real ones.
 //
@@ -153,6 +169,11 @@ func TestCollectGrokLocalReadsRegistryAndSummary(t *testing.T) {
 	// must not pre-fill them with a different answer.
 	if s.CPU != "" || s.Tmux != "" || s.Home != "" || s.GitRoot != "" {
 		t.Errorf("collector filled an enrichment field: %+v", s)
+	}
+	// No events.jsonl in this fixture: status stays empty so the TUI keeps
+	// the "-" placeholder rather than inventing a phase.
+	if s.Status != "" || s.WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want empty without events.jsonl", s.Status, s.WaitingFor)
 	}
 }
 
@@ -809,5 +830,211 @@ func TestCollectLocalLiteExcludesGrokSessions(t *testing.T) {
 		if s.IsGrok() {
 			t.Fatalf("CollectLocalLite listed a grok session: %+v", s)
 		}
+	}
+}
+
+func TestGrokStatusFromEvents(t *testing.T) {
+	tests := []struct {
+		name       string
+		lines      []string
+		status     string
+		waitingFor string
+	}{
+		{name: "empty", status: "", waitingFor: ""},
+		{
+			name: "turn_ended is idle even after a streaming phase",
+			lines: []string{
+				`{"type":"phase_changed","phase":"streaming_text"}`,
+				`{"type":"turn_ended","outcome":"completed"}`,
+			},
+			status: "idle",
+		},
+		{
+			name: "a busy phase after turn_ended is a new turn",
+			lines: []string{
+				`{"type":"turn_ended","outcome":"completed"}`,
+				`{"type":"phase_changed","phase":"waiting_for_model"}`,
+			},
+			status: "busy",
+		},
+		{
+			name: "a non-busy trailer after turn_ended stays idle",
+			lines: []string{
+				`{"type":"phase_changed","phase":"streaming_text"}`,
+				`{"type":"turn_ended","outcome":"completed"}`,
+				`{"type":"tool_completed","tool_name":"read_file"}`,
+			},
+			status: "idle",
+		},
+		{
+			name: "streaming_reasoning is busy",
+			lines: []string{
+				`{"type":"turn_started"}`,
+				`{"type":"phase_changed","phase":"streaming_reasoning"}`,
+			},
+			status: "busy",
+		},
+		{
+			name:   "tool_execution is busy",
+			lines:  []string{`{"type":"phase_changed","phase":"tool_execution"}`},
+			status: "busy",
+		},
+		{
+			name:   "waiting_for_model is busy",
+			lines:  []string{`{"type":"phase_changed","phase":"waiting_for_model"}`},
+			status: "busy",
+		},
+		{
+			name: "unmatched permission is waiting",
+			lines: []string{
+				`{"type":"phase_changed","phase":"permission_prompt"}`,
+				`{"type":"permission_requested","tool_name":"read_file"}`,
+			},
+			status:     "waiting",
+			waitingFor: "read_file",
+		},
+		{
+			name: "permission without a tool name still waits",
+			lines: []string{
+				`{"type":"permission_requested"}`,
+			},
+			status:     "waiting",
+			waitingFor: "permission",
+		},
+		{
+			name: "resolved permission falls through to the next phase",
+			lines: []string{
+				`{"type":"permission_requested","tool_name":"read_file"}`,
+				`{"type":"permission_resolved","tool_name":"read_file","decision":"allow"}`,
+				`{"type":"phase_changed","phase":"tool_execution"}`,
+			},
+			status: "busy",
+		},
+		{
+			name: "turn_ended clears a leftover permission",
+			lines: []string{
+				`{"type":"permission_requested","tool_name":"read_file"}`,
+				`{"type":"turn_ended","outcome":"completed"}`,
+			},
+			status: "idle",
+		},
+		{
+			name: "a torn line does not blank a later valid event",
+			lines: []string{
+				`{not json`,
+				`{"type":"turn_ended","outcome":"completed"}`,
+			},
+			status: "idle",
+		},
+		{
+			name:   "an unknown event is not a status",
+			lines:  []string{`{"type":"mcp_init_completed"}`},
+			status: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := ""
+			if len(tt.lines) > 0 {
+				body = strings.Join(tt.lines, "\n") + "\n"
+			}
+			status, waitingFor := grokStatusFromEvents([]byte(body))
+			if status != tt.status || waitingFor != tt.waitingFor {
+				t.Errorf("grokStatusFromEvents = (%q, %q), want (%q, %q)",
+					status, waitingFor, tt.status, tt.waitingFor)
+			}
+		})
+	}
+}
+
+func TestCollectGrokLocalDerivesStatusFromEvents(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"phase_changed","phase":"streaming_text"}`,
+		`{"type":"turn_ended","outcome":"completed"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "idle" || rows[0].WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want idle/", rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
+func TestCollectGrokLocalDerivesWaitingFromAnOpenPermission(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"phase_changed","phase":"permission_prompt"}`,
+		`{"type":"permission_requested","tool_name":"run_terminal_command"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "waiting" || rows[0].WaitingFor != "run_terminal_command" {
+		t.Errorf("Status/WaitingFor = %q/%q, want waiting/run_terminal_command",
+			rows[0].Status, rows[0].WaitingFor)
+	}
+	if !rows[0].Waiting() {
+		t.Error("Waiting() is false; sessionStatusRank would bury this row")
+	}
+}
+
+// events.jsonl is written during the first turn, often before summary.json.
+// Status must not wait on the summary, and looking for it must not scan.
+func TestCollectGrokLocalReadsEventsWithoutASummary(t *testing.T) {
+	allPIDsAlive(t)
+	scans := countGrokScans(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"phase_changed","phase":"tool_execution"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "busy" {
+		t.Errorf("Status = %q, want busy", rows[0].Status)
+	}
+	if *scans != 0 {
+		t.Fatalf("fallback scan ran %d times for an events-only session, want 0", *scans)
+	}
+}
+
+func TestReadGrokEventsTailCapsTheRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, grokEventsFile)
+	// Far larger than the tail window, so a whole-file ReadFile would fail
+	// the length check below.
+	var b strings.Builder
+	line := `{"type":"phase_changed","phase":"streaming_text"}` + "\n"
+	for b.Len() < grokEventsTailSize*4 {
+		b.WriteString(line)
+	}
+	b.WriteString(`{"type":"turn_ended","outcome":"completed"}` + "\n")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	data := readGrokEventsTail(path)
+	if len(data) == 0 {
+		t.Fatal("readGrokEventsTail returned nothing")
+	}
+	if len(data) > grokEventsTailSize {
+		t.Fatalf("readGrokEventsTail returned %d bytes, cap is %d", len(data), grokEventsTailSize)
+	}
+	status, _ := grokStatusFromEvents(data)
+	if status != "idle" {
+		t.Errorf("status from tail = %q, want idle (last event is turn_ended)", status)
 	}
 }

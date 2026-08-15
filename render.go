@@ -1912,9 +1912,9 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 
 // statusCellText is the STATUS column's text for a row. Claude Code writes a
 // status into every session file, so this is StatusDisplay verbatim for a
-// claude row. Grok publishes no equivalent signal anywhere on disk, so rather
-// than invent one its rows take the same "-" placeholder the MODEL, TMUX and
-// SID columns already use for a value this tool does not have.
+// claude row. Grok has no status field; collectGrokLocal maps events.jsonl
+// onto Status/WaitingFor, and a grok row that still has neither (no log,
+// torn read) takes the same "-" placeholder MODEL, TMUX and SID already use.
 func statusCellText(s Session) string {
 	d := s.StatusDisplay()
 	if d == "" && s.IsGrok() {
@@ -1925,8 +1925,8 @@ func statusCellText(s Session) string {
 
 // statusGlyphFor is statusCellText's one-character form, for the minimal
 // view. "?" means "this session reports a status this tool does not know";
-// a grok row reports none at all, so it takes the same "-" placeholder the
-// wider views give it rather than claiming its status is unrecognised.
+// a grok row with no derived Status takes the same "-" placeholder the wider
+// views give it rather than claiming its status is unrecognised.
 func statusGlyphFor(s Session) string {
 	if g := statusGlyph[s.Status]; g != "" {
 		return g

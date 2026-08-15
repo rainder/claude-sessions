@@ -393,9 +393,9 @@ func TestDisabledGrokRowKeepsAPlainBadge(t *testing.T) {
 	}
 }
 
-// Grok publishes no status anywhere on disk, so its rows take the same "-"
-// placeholder the MODEL, TMUX and SID columns already use — never a blank cell
-// that reads as a broken row.
+// A grok row with no derived Status takes the same "-" placeholder the MODEL,
+// TMUX and SID columns already use — never a blank cell that reads as a
+// broken row, and never "?" (which claims the status is unrecognised).
 func TestGrokRowsShowAStatusPlaceholder(t *testing.T) {
 	s := Session{Tool: toolGrok, PID: 200, Name: "grok-task", NameSource: "user",
 		CWD: "/work/grokdir", Entrypoint: "cli", UpdatedAt: time.Now().UnixMilli()}
@@ -411,9 +411,25 @@ func TestGrokRowsShowAStatusPlaceholder(t *testing.T) {
 	}
 }
 
+// Once collectGrokLocal fills Status, render must show it — an IsGrok
+// short-circuit that always returns "-" would hide a real idle/busy/waiting.
+func TestGrokRowWithDerivedStatusRendersIt(t *testing.T) {
+	s := Session{Tool: toolGrok, Status: "busy"}
+	if got := statusCellText(s); got != "busy" {
+		t.Errorf("statusCellText(grok busy) = %q, want busy", got)
+	}
+	if got := statusGlyphFor(s); got != statusGlyph["busy"] {
+		t.Errorf("statusGlyphFor(grok busy) = %q, want %q", got, statusGlyph["busy"])
+	}
+	waiting := Session{Tool: toolGrok, Status: "waiting", WaitingFor: "read_file"}
+	if got := statusCellText(waiting); got != "waiting:read_file" {
+		t.Errorf("statusCellText(grok waiting) = %q, want waiting:read_file", got)
+	}
+}
+
 // The minimal view's one-character STATUS must make the same call the wider
-// views do: "?" claims the status is unrecognised, which is wrong for a tool
-// that reports none at all.
+// views do: "?" claims the status is unrecognised, which is wrong for a grok
+// row that has no derived Status.
 func TestGrokRowsShowAStatusPlaceholderGlyph(t *testing.T) {
 	if got := statusGlyphFor(Session{Tool: toolGrok}); got != "-" {
 		t.Errorf("statusGlyphFor(grok) = %q, want %q", got, "-")
