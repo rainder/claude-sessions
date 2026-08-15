@@ -2142,18 +2142,20 @@ func TestCtxCell(t *testing.T) {
 		name   string
 		ctxStr string
 		tokens int
+		window int
 		plain  bool
 		want   string
 	}{
-		{"low usage uncolored", "50k", 50_000, false, "  50k"},
-		{"warn at 70%", "210k", 210_000, false, colorize("33", " 210k")},
-		{"hot at 90%", "280k", 280_000, false, colorize("1;31", " 280k")},
-		{"ghost stays plain", "280k", 280_000, true, " 280k"},
-		{"empty tokens plain", "-", 0, false, "    -"},
+		{"low usage uncolored", "50k", 50_000, 0, false, "  50k"},
+		{"warn at 70%", "210k", 210_000, 0, false, colorize("33", " 210k")},
+		{"hot at 90%", "280k", 280_000, 0, false, colorize("1;31", " 280k")},
+		{"ghost stays plain", "280k", 280_000, 0, true, " 280k"},
+		{"empty tokens plain", "-", 0, 0, false, "    -"},
+		{"grok window keeps 70pct-of-claude uncolored", "210k", 210_000, 500_000, false, " 210k"},
 	}
 	for _, c := range cases {
-		if got := ctxCell(c.ctxStr, c.tokens, c.plain); got != c.want {
-			t.Errorf("%s: ctxCell(%q, %d, %v) = %q, want %q", c.name, c.ctxStr, c.tokens, c.plain, got, c.want)
+		if got := ctxCell(c.ctxStr, c.tokens, c.window, c.plain); got != c.want {
+			t.Errorf("%s: ctxCell(%q, %d, %d, %v) = %q, want %q", c.name, c.ctxStr, c.tokens, c.window, c.plain, got, c.want)
 		}
 	}
 }

@@ -224,8 +224,13 @@ still runs its CPU/tmux/Home/GitRoot enrichment over claude and grok rows in
 one shared pass. That is what makes attach, preview, send-keys, resize and
 kill need no per-tool path at all: they all key off `Session.Tmux`, and
 `walkTmuxPane` already handles grok's process shape (the pane pid is a shell
-whose child is `grok`) because it walks pid → ppid. Cost and context tokens
-stay zero (there is no claude transcript to scan).
+whose child is `grok`) because it walks pid → ppid. Context comes from sibling
+`signals.json` (`contextTokensUsed`); missing, unreadable or unparseable is 0
+and CTX stays `-`. Color uses `contextWindowTokens` on the same file
+(`Session.ContextWindow`); 0 falls back to the Claude 300k constant. Cost still
+stays zero — there is no cheap cost field on `signals.json`, and this collector
+does not scan `updates.jsonl` (last `usage.inputTokens` is billed totals, not
+window fill).
 
 Grok writes no `status` field. The live signal is `events.jsonl` beside
 `summary.json` (`phase_changed`, `turn_started` / `turn_ended`,

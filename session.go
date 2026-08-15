@@ -37,6 +37,7 @@ type Session struct {
 
 	Model         string `json:"model,omitempty"`         // last main-loop assistant model from the transcript
 	ContextTokens int    `json:"contextTokens,omitempty"` // context size of that turn (input+cache tokens)
+	ContextWindow int    `json:"contextWindow,omitempty"` // model context limit used to color CTX; 0 = use render.go's Claude default
 
 	// Cumulative dollar cost from the transcript's usage, split by source:
 	// CostUSD is the parent transcript (main loop), CostSubagentsUSD is the
@@ -244,9 +245,9 @@ func CollectLocal() ([]Session, error) {
 		s.Home = home
 		s.GitRoot = gitRootFor(s.CWD)
 		if s.IsGrok() {
-			// Model came from grok's own summary.json, and there is no claude
-			// transcript to scan for cost or context — those stay zero and
-			// render as the columns' own placeholders.
+			// Model came from grok's own summary.json. Context comes from
+			// signals.json (filled in grokSessionFrom). There is no claude
+			// transcript to scan; cost stays zero.
 			continue
 		}
 		if p := findTranscript(home, s.SessionID); p != "" {

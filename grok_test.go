@@ -55,6 +55,18 @@ func grokEventsFixture(t *testing.T, home, cwd, sessionID string, lines ...strin
 	}
 }
 
+// grokSignalsFixture writes signals.json beside that session's summary.
+func grokSignalsFixture(t *testing.T, home, cwd, sessionID, body string) {
+	t.Helper()
+	dir := filepath.Join(home, grokDir, "sessions", url.PathEscape(cwd), sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, grokSignalsFile), []byte(body), 0o644); err != nil {
+		t.Fatalf("write signals.json: %v", err)
+	}
+}
+
 // allPIDsAlive makes every pid in a fixture count as running, so a test can
 // use readable made-up pids instead of hunting for real ones.
 //
@@ -174,6 +186,68 @@ func TestCollectGrokLocalReadsRegistryAndSummary(t *testing.T) {
 	// the "-" placeholder rather than inventing a phase.
 	if s.Status != "" || s.WaitingFor != "" {
 		t.Errorf("Status/WaitingFor = %q/%q, want empty without events.jsonl", s.Status, s.WaitingFor)
+	}
+}
+
+func TestGrokSessionFromReadsContextFromSignals(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokSignalsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"contextTokensUsed":191463,"contextWindowTokens":500000}`)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	s := rows[0]
+	if s.ContextTokens != 191463 {
+		t.Errorf("ContextTokens = %d, want 191463", s.ContextTokens)
+	}
+	if s.ContextWindow != 500000 {
+		t.Errorf("ContextWindow = %d, want 500000", s.ContextWindow)
+	}
+}
+
+func TestGrokSessionFromLeavesContextZeroWithoutSignals(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	s := rows[0]
+	if s.Name != "Ticket review" {
+		t.Errorf("Name = %q, want Ticket review from the summary", s.Name)
+	}
+	if s.ContextTokens != 0 || s.ContextWindow != 0 {
+		t.Errorf("ContextTokens/ContextWindow = %d/%d, want 0/0 without signals.json",
+			s.ContextTokens, s.ContextWindow)
+	}
+}
+
+func TestGrokSessionFromIgnoresBadSignals(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokSignalsFixture(t, home, "/work/trecs-brain", grokActiveOneID, `{not json`)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	s := rows[0]
+	if s.Name != "Ticket review" {
+		t.Errorf("Name = %q, want Ticket review; bad signals must not drop the row", s.Name)
+	}
+	if s.ContextTokens != 0 || s.ContextWindow != 0 {
+		t.Errorf("ContextTokens/ContextWindow = %d/%d, want 0/0 for unparseable signals.json",
+			s.ContextTokens, s.ContextWindow)
 	}
 }
 
@@ -781,6 +855,19 @@ func TestCollectLocalIncludesEnrichedGrokRows(t *testing.T) {
 	t.Setenv("HOME", home)
 	grokFixture(t, home, grokActiveOne)
 	grokSummaryFixture(t, home, "/work/trecs-brain", "01a00180-1735-75a1-b08a-11c777abcdd4", grokSummaryFull)
+	grokSignalsFixture(t, home, "/work/trecs-brain", "01a00180-1735-75a1-b08a-11c777abcdd4",
+		`{"contextTokensUsed":191463,"contextWindowTokens":500000}`)
+	// A claude transcript under the same session id must not overwrite the
+	// grok summary model or the signals.json CTX. The CollectLocal skip is
+	// what keeps that from happening.
+	decoy := filepath.Join(home, ".claude", "projects", "-decoy")
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	decoyLine := `{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":100,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(decoy, grokActiveOneID+".jsonl"), []byte(decoyLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	rows, err := CollectLocal()
 	if err != nil {
@@ -809,8 +896,14 @@ func TestCollectLocalIncludesEnrichedGrokRows(t *testing.T) {
 	if got.Model != "grok-4.6" {
 		t.Errorf("Model = %q, want grok-4.6", got.Model)
 	}
-	if got.CostUSD != 0 || got.ContextTokens != 0 {
-		t.Errorf("grok row picked up claude transcript metrics: %+v", got)
+	if got.CostUSD != 0 {
+		t.Errorf("grok row picked up claude cost: %+v", got)
+	}
+	if got.ContextTokens != 191463 {
+		t.Errorf("ContextTokens = %d, want 191463 from signals.json", got.ContextTokens)
+	}
+	if got.ContextWindow != 500000 {
+		t.Errorf("ContextWindow = %d, want 500000 from signals.json", got.ContextWindow)
 	}
 }
 

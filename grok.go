@@ -128,7 +128,49 @@ func grokSessionFrom(home string, e grokActiveSession) (Session, bool) {
 	// writes a status field. A missing or unreadable log leaves both empty
 	// so the TUI keeps the "-" placeholder.
 	s.Status, s.WaitingFor = grokSessionStatus(home, e.CWD, e.SessionID)
+	// CTX comes from signals.json, not from a transcript scan. A missing,
+	// unreadable or unparseable file leaves both fields at 0 so CTX stays "-".
+	if sig, ok := readGrokSignals(home, e.CWD, e.SessionID); ok {
+		s.ContextTokens = sig.ContextTokensUsed
+		s.ContextWindow = sig.ContextWindowTokens
+	}
 	return s, true
+}
+
+// grokSignalsFile is the token/turn counter grok writes beside summary.json.
+const grokSignalsFile = "signals.json"
+
+// grokSignals is the subset of signals.json this tool reads. The file carries
+// more (turn counts, tool counters); everything not listed here is ignored
+// so a schema addition is never a parse failure.
+type grokSignals struct {
+	ContextTokensUsed   int `json:"contextTokensUsed"`
+	ContextWindowTokens int `json:"contextWindowTokens"`
+}
+
+// grokSignalsPath locates signals.json. The cheap path is the sibling of a
+// summary we already found (including a fallback-scan hit). When there is no
+// summary yet the derived encoding is used, same as grokEventsPath.
+func grokSignalsPath(home, cwd, sessionID string) string {
+	if p, ok := grokSummaryPath(home, cwd, sessionID); ok {
+		return filepath.Join(filepath.Dir(p), grokSignalsFile)
+	}
+	return filepath.Join(home, grokDir, "sessions", url.PathEscape(cwd), sessionID, grokSignalsFile)
+}
+
+// readGrokSignals loads contextTokensUsed / contextWindowTokens from
+// signals.json. Missing, unreadable and unparseable all return ok=false —
+// never an error, matching readGrokSummary.
+func readGrokSignals(home, cwd, sessionID string) (grokSignals, bool) {
+	data, err := os.ReadFile(grokSignalsPath(home, cwd, sessionID))
+	if err != nil {
+		return grokSignals{}, false
+	}
+	var sig grokSignals
+	if err := json.Unmarshal(data, &sig); err != nil {
+		return grokSignals{}, false
+	}
+	return sig, true
 }
 
 // grokEventsFile is the append-only phase log grok writes beside summary.json.

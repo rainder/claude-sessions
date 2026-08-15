@@ -1175,19 +1175,23 @@ func formatTokens(n int) string {
 	}
 }
 
-// contextWindow is the assumed model context limit used to color the CTX
-// column. Flat 300k; per-model limits aren't tracked in the session file.
+// contextWindow is the Claude fallback used to color CTX when
+// Session.ContextWindow is 0. Grok rows carry contextWindowTokens from
+// signals.json; using this constant for those would warn a 210k row.
 const contextWindow = 300_000
 
 // ctxCell right-aligns the formatted token count in 5 columns and colors it
 // by context utilization (usageColor thresholds: yellow ≥70%, red ≥90%).
 // plain skips the color for rows dimmed as a whole (no embedded resets).
-func ctxCell(ctxStr string, tokens int, plain bool) string {
+func ctxCell(ctxStr string, tokens, window int, plain bool) string {
+	if window <= 0 {
+		window = contextWindow
+	}
 	cell := fmt.Sprintf("%5s", ctxStr)
 	if plain || tokens <= 0 {
 		return cell
 	}
-	return colorize(usageColor(float64(tokens)/contextWindow*100), cell)
+	return colorize(usageColor(float64(tokens)/float64(window)*100), cell)
 }
 
 // dollars formats a single dollar amount: "$1.23" below $100, "$123" (cents
@@ -2055,7 +2059,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 				modelCell(r.modelStr, modelW, plainCells),
 				statusCell,
 				costCell(r.costStr, costW),
-				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
+				ctxCell(r.ctxStr, r.s.ContextTokens, r.s.ContextWindow, plainCells),
 				tmuxCell,
 				r.s.CPU, r.ageStr, r.s.Version, sidCell,
 			)
@@ -2163,7 +2167,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 				statusCell,
 				modelCell(r.modelStr, modelW, plainCells),
 				costCell(r.costStr, costW),
-				ctxCell(r.ctxStr, r.s.ContextTokens, plainCells),
+				ctxCell(r.ctxStr, r.s.ContextTokens, r.s.ContextWindow, plainCells),
 				r.s.CPU, r.ageStr,
 			)
 			row := decorateSessionRow(r.s, selected, body, gv)
