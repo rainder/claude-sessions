@@ -1259,8 +1259,10 @@ type LocalUsage struct {
 	KnownAccounts []KnownAccountUsage
 }
 
-// formatTokens renders a context-token count compactly: 0 → "-", under 1k as
+// formatTokens renders a token count compactly: 0 → "-", under 1k as
 // plain digits, thousands as "124k" (rounded), millions as "1.2M".
+// At 100M+ the decimal is dropped ("156M") so the value stays inside
+// the 5-column TOK/CTX cells; billions use "1.0B".
 func formatTokens(n int) string {
 	switch {
 	case n <= 0:
@@ -1269,8 +1271,12 @@ func formatTokens(n int) string {
 		return fmt.Sprintf("%d", n)
 	case n < 1_000_000:
 		return fmt.Sprintf("%dk", (n+500)/1000)
-	default:
+	case n < 99_950_000: // 99.95M would round to 100.0M (6 columns)
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n < 1_000_000_000:
+		return fmt.Sprintf("%.0fM", float64(n)/1_000_000)
+	default:
+		return fmt.Sprintf("%.1fB", float64(n)/1_000_000_000)
 	}
 }
 
@@ -1993,6 +1999,7 @@ type drowFull struct {
 	modelStr  string
 	ctxStr    string
 	costStr   string
+	tokStr    string
 	ageStr    string
 	sidShort  string
 }
@@ -2013,6 +2020,7 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		modelStr:  shortModel(s.Model),
 		ctxStr:    formatTokens(s.ContextTokens),
 		costStr:   formatCost(s.CostUSD, s.CostSubagentsUSD),
+		tokStr:    formatTokens(s.TokensSpent),
 		ageStr:    formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
 		sidShort:  sid,
 	}
@@ -2202,7 +2210,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 }
 
 // ============================================================================
-// Intermediate view — full's columns minus TMUX, VER, SID.
+// Intermediate view — full's columns minus TMUX, VER, SID, plus TOK.
 // ============================================================================
 
 func renderAllIntermediate(w *frameWriter, sections []section, sel string, accounts []accountUsageLine, codexAccounts []codexAccountLine, grokAccounts []grokAccountLine, cols, step int, sortMode string, gv groupView) (overflowing bool) {
@@ -2234,10 +2242,10 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			rowIndent(gv)+"%-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s  %5s ",
+			rowIndent(gv)+"%-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s  %5s  %5s ",
 			nameW, "NAME", dirW, dirLabel, statusW, statusLabel,
 			modelW, "MODEL", costW, "COST",
-			"CTX", "CPU%", ageLabel,
+			"TOK", "CTX", "CPU%", ageLabel,
 		)
 	}
 	hdr := buildHdr()
@@ -2265,12 +2273,13 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %5s  %5s ",
+			body := fmt.Sprintf("%s  %s  %s  %s  %s  %5s  %s  %5s  %5s ",
 				nameStr,
 				marqueeCell(r.cwdStr, dirW, step),
 				statusCell,
 				modelCell(r.modelStr, modelW, plainCells),
 				costCell(r.costStr, costW),
+				r.tokStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, r.s.ContextWindow, plainCells),
 				r.s.CPU, r.ageStr,
 			)

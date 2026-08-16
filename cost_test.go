@@ -83,13 +83,29 @@ func TestUsageCost(t *testing.T) {
 // asstLine builds an assistant transcript line with the given ids, model, and
 // input tokens (priced at that family's input rate).
 func asstLine(msgID, reqID, model string, inputTokens int) string {
+	return asstUsageLine(msgID, reqID, model, costUsage{InputTokens: inputTokens})
+}
+
+func asstUsageLine(msgID, reqID, model string, u costUsage) string {
+	usage := map[string]any{
+		"input_tokens":                u.InputTokens,
+		"output_tokens":               u.OutputTokens,
+		"cache_read_input_tokens":     u.CacheReadTokens,
+		"cache_creation_input_tokens": u.CacheCreationTokens,
+	}
+	if u.CacheCreation != nil {
+		usage["cache_creation"] = map[string]any{
+			"ephemeral_5m_input_tokens": u.CacheCreation.Ephemeral5m,
+			"ephemeral_1h_input_tokens": u.CacheCreation.Ephemeral1h,
+		}
+	}
 	e := map[string]any{
 		"type":      "assistant",
 		"requestId": reqID,
 		"message": map[string]any{
 			"id":    msgID,
 			"model": model,
-			"usage": map[string]any{"input_tokens": inputTokens},
+			"usage": usage,
 		},
 	}
 	b, _ := json.Marshal(e)
@@ -100,16 +116,16 @@ func TestLineCostDedup(t *testing.T) {
 	e := newCostCacheEntry()
 	line := []byte(asstLine("msg-1", "req-1", "claude-fable-5", 1_000_000))
 
-	c, ok := lineCost(line, e)
+	c, _, ok := lineCost(line, e)
 	if !ok || !approxEq(c, 10) {
 		t.Fatalf("first: cost=%v ok=%v, want 10 true", c, ok)
 	}
 	// Same message.id+requestId → deduped.
-	if c, ok := lineCost(line, e); ok || c != 0 {
+	if c, _, ok := lineCost(line, e); ok || c != 0 {
 		t.Errorf("dup: cost=%v ok=%v, want 0 false", c, ok)
 	}
 	// Different requestId with same message.id → counted.
-	if c, ok := lineCost([]byte(asstLine("msg-1", "req-2", "claude-fable-5", 1_000_000)), e); !ok || !approxEq(c, 10) {
+	if c, _, ok := lineCost([]byte(asstLine("msg-1", "req-2", "claude-fable-5", 1_000_000)), e); !ok || !approxEq(c, 10) {
 		t.Errorf("distinct req: cost=%v ok=%v, want 10 true", c, ok)
 	}
 }
@@ -119,11 +135,10 @@ func TestLineCostSkips(t *testing.T) {
 	skips := []string{
 		`not json`,
 		`{"type":"user","message":{"role":"user"}}`,
-		asstLine("m", "r", "gpt-4o", 1_000_000),                               // unknown model
 		`{"type":"assistant","message":{"id":"m2","model":"claude-fable-5"}}`, // no usage block
 	}
 	for _, s := range skips {
-		if c, ok := lineCost([]byte(s), e); ok || c != 0 {
+		if c, _, ok := lineCost([]byte(s), e); ok || c != 0 {
 			t.Errorf("line %q: cost=%v ok=%v, want skipped", s, c, ok)
 		}
 	}
@@ -146,7 +161,7 @@ func TestScanCostIncremental(t *testing.T) {
 	)
 	st, _ := os.Stat(p)
 
-	if got := scanCostIncremental(p); !approxEq(got, 20) {
+	if got, _ := scanCostIncremental(p); !approxEq(got, 20) {
 		t.Fatalf("initial scan = %v, want 20", got)
 	}
 	if off := costOffset(p); off != st.Size() {
@@ -162,7 +177,7 @@ func TestScanCostIncremental(t *testing.T) {
 	f.Close()
 	st2, _ := os.Stat(p)
 
-	if got := scanCostIncremental(p); !approxEq(got, 30) {
+	if got, _ := scanCostIncremental(p); !approxEq(got, 30) {
 		t.Errorf("after append = %v, want 30", got)
 	}
 	if off := costOffset(p); off != st2.Size() {
@@ -176,7 +191,7 @@ func TestScanCostIncremental(t *testing.T) {
 	}
 	fmt.Fprintln(f, asstLine("m1", "r1", "claude-fable-5", 1_000_000))
 	f.Close()
-	if got := scanCostIncremental(p); !approxEq(got, 30) {
+	if got, _ := scanCostIncremental(p); !approxEq(got, 30) {
 		t.Errorf("after dup append = %v, want 30 (deduped)", got)
 	}
 }
@@ -186,14 +201,14 @@ func TestScanCostTruncationReset(t *testing.T) {
 		asstLine("m1", "r1", "claude-fable-5", 1_000_000),
 		asstLine("m2", "r2", "claude-fable-5", 1_000_000),
 	)
-	if got := scanCostIncremental(p); !approxEq(got, 20) {
+	if got, _ := scanCostIncremental(p); !approxEq(got, 20) {
 		t.Fatalf("initial = %v, want 20", got)
 	}
 	// Shrink the file (rotation/truncation) → full rescan of new content.
 	if err := os.WriteFile(p, []byte(asstLine("m9", "r9", "claude-opus-4-8", 1_000_000)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := scanCostIncremental(p); !approxEq(got, 5) {
+	if got, _ := scanCostIncremental(p); !approxEq(got, 5) {
 		t.Errorf("after truncation = %v, want 5 (opus input only)", got)
 	}
 	st, _ := os.Stat(p)
@@ -203,7 +218,7 @@ func TestScanCostTruncationReset(t *testing.T) {
 }
 
 func TestScanCostMissing(t *testing.T) {
-	if got := scanCostIncremental("/nonexistent/path/s.jsonl"); got != 0 {
+	if got, _ := scanCostIncremental("/nonexistent/path/s.jsonl"); got != 0 {
 		t.Errorf("missing file = %v, want 0", got)
 	}
 }
@@ -234,7 +249,7 @@ func TestScanSessionCostSubagents(t *testing.T) {
 	writeLines(t, filepath.Join(subs, "agent-1.jsonl"), asstLine("s1", "q1", "claude-sonnet-4-6", 1_000_000)) // $3
 	writeLines(t, filepath.Join(subs, "agent-2.jsonl"), asstLine("s2", "q2", "claude-opus-4-8", 1_000_000))   // $5
 
-	main, sub := scanSessionCost(parent)
+	main, sub, _ := scanSessionCost(parent)
 	if !approxEq(main, 10) {
 		t.Errorf("main (parent) cost = %v, want 10", main)
 	}
@@ -245,11 +260,127 @@ func TestScanSessionCostSubagents(t *testing.T) {
 
 func TestScanSessionCostNoSubagents(t *testing.T) {
 	parent := writeTranscript(t, asstLine("m1", "r1", "claude-fable-5", 1_000_000))
-	main, sub := scanSessionCost(parent)
+	main, sub, _ := scanSessionCost(parent)
 	if !approxEq(main, 10) {
 		t.Errorf("main cost = %v, want 10", main)
 	}
 	if sub != 0 {
 		t.Errorf("subagents cost = %v, want 0 (no subagents dir)", sub)
+	}
+}
+
+func TestUsageTokens(t *testing.T) {
+	split := func(five, one int) *struct {
+		Ephemeral5m int `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+	} {
+		return &struct {
+			Ephemeral5m int `json:"ephemeral_5m_input_tokens"`
+			Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+		}{five, one}
+	}
+	cases := []struct {
+		name  string
+		usage costUsage
+		want  int
+	}{
+		{
+			"input+output+cache read+fallback write",
+			costUsage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 20, CacheCreationTokens: 10},
+			180,
+		},
+		{
+			"split cache_creation uses 5m+1h, not CacheCreationTokens",
+			costUsage{InputTokens: 1, OutputTokens: 2, CacheReadTokens: 3, CacheCreationTokens: 999, CacheCreation: split(10, 20)},
+			36,
+		},
+		{"zero", costUsage{}, 0},
+	}
+	for _, c := range cases {
+		if got := usageTokens(c.usage); got != c.want {
+			t.Errorf("%s: usageTokens = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestLineCostUnknownModelCountsTokens(t *testing.T) {
+	e := newCostCacheEntry()
+	line := []byte(asstUsageLine("m", "r", "gpt-4o", costUsage{
+		InputTokens: 100, OutputTokens: 50, CacheReadTokens: 20, CacheCreationTokens: 10,
+	}))
+	c, tok, ok := lineCost(line, e)
+	if !ok || c != 0 || tok != 180 {
+		t.Errorf("unknown model: cost=%v tokens=%d ok=%v, want 0 180 true", c, tok, ok)
+	}
+}
+
+func TestLineCostDedupTokens(t *testing.T) {
+	e := newCostCacheEntry()
+	line := []byte(asstUsageLine("m", "r", "claude-fable-5", costUsage{InputTokens: 100}))
+	_, tok, ok := lineCost(line, e)
+	if !ok || tok != 100 {
+		t.Fatalf("first: tokens=%d ok=%v, want 100 true", tok, ok)
+	}
+	if _, tok, ok := lineCost(line, e); ok || tok != 0 {
+		t.Errorf("dup: tokens=%d ok=%v, want 0 false", tok, ok)
+	}
+}
+
+func TestScanCostIncrementalTokens(t *testing.T) {
+	p := writeTranscript(t,
+		asstUsageLine("m1", "r1", "claude-fable-5", costUsage{
+			InputTokens: 100, OutputTokens: 50, CacheReadTokens: 20, CacheCreationTokens: 10,
+		}),
+		asstUsageLine("m2", "r2", "claude-fable-5", costUsage{InputTokens: 100}),
+	)
+	_, tok := scanCostIncremental(p)
+	if tok != 280 {
+		t.Fatalf("initial tokens = %d, want 280", tok)
+	}
+
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(f, asstUsageLine("m3", "r3", "claude-fable-5", costUsage{InputTokens: 40}))
+	f.Close()
+	_, tok = scanCostIncremental(p)
+	if tok != 320 {
+		t.Errorf("after append tokens = %d, want 320", tok)
+	}
+
+	f, err = os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(f, asstUsageLine("m1", "r1", "claude-fable-5", costUsage{
+		InputTokens: 100, OutputTokens: 50, CacheReadTokens: 20, CacheCreationTokens: 10,
+	}))
+	f.Close()
+	_, tok = scanCostIncremental(p)
+	if tok != 320 {
+		t.Errorf("after dup append tokens = %d, want 320 (deduped)", tok)
+	}
+}
+
+func TestScanSessionCostSubagentTokens(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	writeLines(t, parent, asstUsageLine("m1", "r1", "claude-fable-5", costUsage{InputTokens: 100}))
+
+	subs := filepath.Join(dir, "sess", "subagents")
+	writeLines(t, filepath.Join(subs, "agent-1.jsonl"), asstUsageLine("s1", "q1", "claude-sonnet-4-6", costUsage{InputTokens: 50}))
+	writeLines(t, filepath.Join(subs, "agent-2.jsonl"), asstUsageLine("s2", "q2", "claude-opus-4-8", costUsage{InputTokens: 25}))
+
+	_, _, tok := scanSessionCost(parent)
+	if tok != 175 {
+		t.Errorf("session tokens = %d, want 175 (100+50+25)", tok)
+	}
+}
+
+func TestScanCostMissingTokens(t *testing.T) {
+	_, tok := scanCostIncremental("/nonexistent/path/s.jsonl")
+	if tok != 0 {
+		t.Errorf("missing file tokens = %d, want 0", tok)
 	}
 }

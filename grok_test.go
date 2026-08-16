@@ -273,7 +273,7 @@ func TestGrokSessionFromReadsCostFromUpdates(t *testing.T) {
 	grokFixture(t, home, grokActiveOne)
 	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
 	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
-		grokTurnLine("turn-1", ticksPtr(10_000_000_000)))
+		grokTurnLineUsage("turn-1", ticksPtr(10_000_000_000), 5000))
 
 	rows := collectGrokLocal(home)
 	if len(rows) != 1 {
@@ -282,6 +282,9 @@ func TestGrokSessionFromReadsCostFromUpdates(t *testing.T) {
 	s := rows[0]
 	if s.CostUSD != 1.0 {
 		t.Errorf("CostUSD = %v, want 1.0 from updates.jsonl", s.CostUSD)
+	}
+	if s.TokensSpent != 5000 {
+		t.Errorf("TokensSpent = %d, want 5000 from updates.jsonl totalTokens", s.TokensSpent)
 	}
 	if s.ContextTokens != 0 {
 		t.Errorf("ContextTokens = %d, want 0 without signals.json", s.ContextTokens)
@@ -304,6 +307,9 @@ func TestGrokSessionFromLeavesCostZeroWithoutUpdates(t *testing.T) {
 	}
 	if s.CostUSD != 0 {
 		t.Errorf("CostUSD = %v, want 0 without updates.jsonl", s.CostUSD)
+	}
+	if s.TokensSpent != 0 {
+		t.Errorf("TokensSpent = %d, want 0 without updates.jsonl", s.TokensSpent)
 	}
 }
 
