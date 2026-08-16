@@ -17,11 +17,12 @@ const grokUpdatesFile = "updates.jsonl"
 const grokCostTicksPerUSD = 10_000_000_000
 
 // grokCostCacheEntry holds the incremental scan state for one updates.jsonl:
-// the byte offset consumed so far, the running dollar cost, and the prompt_ids
-// already counted.
+// the byte offset consumed so far, the running dollar cost and token count,
+// and the prompt_ids already counted.
 type grokCostCacheEntry struct {
 	offset  int64
 	costUSD float64
+	tokens  int
 	seen    map[string]bool // prompt_id already counted
 }
 
@@ -44,17 +45,18 @@ func grokUpdatesPath(home, cwd, sessionID string) string {
 	return filepath.Join(home, grokDir, "sessions", url.PathEscape(cwd), sessionID, grokUpdatesFile)
 }
 
-// scanGrokCost returns the cumulative dollar cost of one updates.jsonl,
-// parsing only the bytes appended since the previous call. State is cached
-// per path; a file smaller than the cached offset (truncation or rotation)
-// resets the entry and forces a full rescan. Only complete newline-terminated
-// lines advance the offset, so a partially written trailing line is re-read
-// on the next tick. Missing file is 0. Any open/seek error returns the
-// cached cost so far — never an error to the caller.
-func scanGrokCost(path string) float64 {
+// scanGrokCost returns the cumulative dollar cost and token count of one
+// updates.jsonl, parsing only the bytes appended since the previous call.
+// State is cached per path; a file smaller than the cached offset
+// (truncation or rotation) resets the entry and forces a full rescan. Only
+// complete newline-terminated lines advance the offset, so a partially
+// written trailing line is re-read on the next tick. Missing file is 0, 0.
+// Any open/seek error returns the cached values so far — never an error to
+// the caller.
+func scanGrokCost(path string) (cost float64, tokens int) {
 	st, err := os.Stat(path)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	grokCostCacheMu.Lock()
 	defer grokCostCacheMu.Unlock()
@@ -65,16 +67,16 @@ func scanGrokCost(path string) float64 {
 		grokCostCache[path] = e
 	}
 	if st.Size() == e.offset {
-		return e.costUSD
+		return e.costUSD, e.tokens
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return e.costUSD
+		return e.costUSD, e.tokens
 	}
 	defer f.Close()
 	if _, err := f.Seek(e.offset, io.SeekStart); err != nil {
-		return e.costUSD
+		return e.costUSD, e.tokens
 	}
 
 	r := bufio.NewReaderSize(f, 64*1024)
@@ -83,8 +85,9 @@ func scanGrokCost(path string) float64 {
 		line, err := r.ReadBytes('\n')
 		if n := len(line); n > 0 && line[n-1] == '\n' {
 			off += int64(n)
-			if c, ok := grokTurnCost(line, e); ok {
+			if c, tok, ok := grokTurnCost(line, e); ok {
 				e.costUSD += c
+				e.tokens += tok
 			}
 		}
 		if err != nil {
@@ -92,16 +95,17 @@ func scanGrokCost(path string) float64 {
 		}
 	}
 	e.offset = off
-	return e.costUSD
+	return e.costUSD, e.tokens
 }
 
 // grokTurnCost prices one updates.jsonl line. Only turn_completed lines that
-// carry a non-nil costUsdTicks count. Dedup is by prompt_id when non-empty
-// (first counted emission wins). Empty prompt_id still counts — there is no
-// key. Negative ticks are ignored.
-func grokTurnCost(line []byte, e *grokCostCacheEntry) (float64, bool) {
+// carry a non-nil costUsdTicks and/or totalTokens count. Dedup is by
+// prompt_id when non-empty (first counted emission wins). Empty prompt_id
+// still counts — there is no key. Negative ticks are ignored. Tokens come
+// from usage.totalTokens only; cache fields are already inside that total.
+func grokTurnCost(line []byte, e *grokCostCacheEntry) (float64, int, bool) {
 	if !bytes.Contains(line, []byte("turn_completed")) {
-		return 0, false
+		return 0, 0, false
 	}
 	var ev struct {
 		Params struct {
@@ -110,28 +114,35 @@ func grokTurnCost(line []byte, e *grokCostCacheEntry) (float64, bool) {
 				PromptID      string `json:"prompt_id"`
 				Usage         *struct {
 					CostUsdTicks *int64 `json:"costUsdTicks"`
+					TotalTokens  int    `json:"totalTokens"`
 				} `json:"usage"`
 			} `json:"update"`
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(line, &ev); err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	if ev.Params.Update.SessionUpdate != "turn_completed" {
-		return 0, false
+		return 0, 0, false
 	}
-	if ev.Params.Update.Usage == nil || ev.Params.Update.Usage.CostUsdTicks == nil {
-		return 0, false
+	if ev.Params.Update.Usage == nil {
+		return 0, 0, false
 	}
-	ticks := *ev.Params.Update.Usage.CostUsdTicks
-	if ticks < 0 {
-		return 0, false
+	u := ev.Params.Update.Usage
+	hasTicks := u.CostUsdTicks != nil && *u.CostUsdTicks >= 0
+	tokens := u.TotalTokens
+	if !hasTicks && tokens == 0 {
+		return 0, 0, false
 	}
 	if id := ev.Params.Update.PromptID; id != "" {
 		if e.seen[id] {
-			return 0, false
+			return 0, 0, false
 		}
 		e.seen[id] = true
 	}
-	return float64(ticks) / grokCostTicksPerUSD, true
+	var cost float64
+	if hasTicks {
+		cost = float64(*u.CostUsdTicks) / grokCostTicksPerUSD
+	}
+	return cost, tokens, true
 }

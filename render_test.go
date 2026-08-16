@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestUsageBar(t *testing.T) {
@@ -178,6 +179,27 @@ func findHeaderRow(t *testing.T, out string) string {
 	}
 	t.Fatalf("no table header in output:\n%s", out)
 	return ""
+}
+
+// tokColumnCell returns the 5-wide TOK field under the header. TOK is %5s,
+// so the field starts two columns before the "TOK" label. Indexes are in
+// runes: the DIR sort arrow is a 3-byte glyph.
+func tokColumnCell(t *testing.T, hdr, row string) string {
+	t.Helper()
+	plainHdr, plainRow := stripANSI(hdr), stripANSI(row)
+	byteI := strings.Index(plainHdr, "TOK")
+	if byteI < 0 {
+		t.Fatalf("TOK not in header: %q", hdr)
+	}
+	start := utf8.RuneCountInString(plainHdr[:byteI]) - 2
+	if start < 0 {
+		t.Fatalf("TOK column start %d: %q", start, hdr)
+	}
+	runes := []rune(plainRow)
+	if start+5 > len(runes) {
+		t.Fatalf("row shorter than TOK column: %q", plainRow)
+	}
+	return string(runes[start : start+5])
 }
 
 func TestTableHeadersHaveOneRightPaddingSpace(t *testing.T) {
@@ -1997,6 +2019,10 @@ func TestFormatTokens(t *testing.T) {
 		{999999, "1000k"},
 		{1000000, "1.0M"},
 		{1234567, "1.2M"},
+		{99_949_999, "99.9M"},
+		{99_950_000, "100M"},
+		{156_000_000, "156M"},
+		{1_000_000_000, "1.0B"},
 	}
 	for _, c := range cases {
 		if got := formatTokens(c.n); got != c.want {
@@ -2057,6 +2083,42 @@ func TestRenderCostColumn(t *testing.T) {
 	RenderAll(&b, "2", testLocalHost(priced), nil, "", nil, 0, 0, "dir")
 	if strings.Contains(b.String(), "COST") {
 		t.Errorf("minimal view unexpectedly has COST column:\n%s", b.String())
+	}
+}
+
+func TestRenderTokColumn(t *testing.T) {
+	spent := Session{PID: 1, Name: "spent", CWD: "/tmp/spent", Status: "idle",
+		Model: "claude-fable-5", TokensSpent: 124000, ContextTokens: 5000,
+		UpdatedAt: time.Now().UnixMilli()}
+	none := Session{PID: 2, Name: "none", CWD: "/tmp/none", Status: "idle",
+		Model: "claude-fable-5", TokensSpent: 0, ContextTokens: 5000,
+		UpdatedAt: time.Now().UnixMilli()}
+
+	var b strings.Builder
+	RenderAll(&b, "3", testLocalHost(spent, none), nil, "", nil, 0, 0, "dir")
+	out := b.String()
+	hdr := findHeaderRow(t, out)
+	if !strings.Contains(hdr, "TOK") {
+		t.Errorf("view 3: missing TOK header:\n%s", hdr)
+	}
+	costI, tokI, ctxI := strings.Index(hdr, "COST"), strings.Index(hdr, "TOK"), strings.Index(hdr, "CTX")
+	if costI < 0 || tokI < 0 || ctxI < 0 || !(costI < tokI && tokI < ctxI) {
+		t.Errorf("view 3 header order want COST then TOK then CTX: %q", hdr)
+	}
+	if got := tokColumnCell(t, hdr, findRow(t, out, "spent")); got != " 124k" {
+		t.Errorf("view 3 TOK cell for 124000 = %q, want %q", got, " 124k")
+	}
+	if got := tokColumnCell(t, hdr, findRow(t, out, "none")); got != "    -" {
+		t.Errorf("view 3 TOK cell for 0 = %q, want %q", got, "    -")
+	}
+
+	for _, view := range []string{"1", "2"} {
+		var vb strings.Builder
+		RenderAll(&vb, view, testLocalHost(spent), nil, "", nil, 0, 0, "dir")
+		hdr := findHeaderRow(t, vb.String())
+		if strings.Contains(hdr, "TOK") {
+			t.Errorf("view %s unexpectedly has TOK column:\n%s", view, hdr)
+		}
 	}
 }
 

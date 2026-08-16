@@ -46,6 +46,11 @@ type Session struct {
 	CostUSD          float64 `json:"costUsd,omitempty"`
 	CostSubagentsUSD float64 `json:"costSubagentsUsd,omitempty"`
 
+	// TokensSpent is the cumulative API tokens (Claude: input+output+cache
+	// write+cache read; Grok: sum of turn_completed totalTokens). 0 / omitted
+	// = unknown or none.
+	TokensSpent int `json:"tokensSpent,omitempty"`
+
 	// Disabled and Group are this host's shared per-session flags, overlaid at
 	// serve/render time from its FlagsStore (session_flags.go) — never read
 	// from the session file Claude Code writes. Both ride the wire so a remote
@@ -255,7 +260,7 @@ func CollectLocal() ([]Session, error) {
 			m := cachedMeta(p)
 			s.Model = m.Model
 			s.ContextTokens = m.ContextTokens
-			s.CostUSD, s.CostSubagentsUSD = scanSessionCost(p)
+			s.CostUSD, s.CostSubagentsUSD, s.TokensSpent = scanSessionCost(p)
 		}
 	}
 	// Sort by cwd (case-insensitive), newest-started first as tiebreaker. This

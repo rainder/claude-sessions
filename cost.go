@@ -76,12 +76,25 @@ func usageCost(p modelPricing, u costUsage) float64 {
 	return cost / 1_000_000
 }
 
-// lineCost prices a single transcript line, returning its dollar cost and
-// whether it counted (a known-model assistant usage line not already seen).
-// e.seen dedupes streaming re-emissions by message.id+requestId. User lines
-// whose content is a plain string fail the unmarshal and are skipped, same as
-// before.
-func lineCost(line []byte, e *costCacheEntry) (cost float64, ok bool) {
+// usageTokens sums one usage block. Cache writes use the 5m+1h split when
+// present, else cache_creation_input_tokens — the same split/fallback as
+// usageCost, never both.
+func usageTokens(u costUsage) int {
+	n := u.InputTokens + u.OutputTokens + u.CacheReadTokens
+	if u.CacheCreation != nil {
+		n += u.CacheCreation.Ephemeral5m + u.CacheCreation.Ephemeral1h
+	} else {
+		n += u.CacheCreationTokens
+	}
+	return n
+}
+
+// lineCost prices a single transcript line, returning its dollar cost, token
+// count, and whether it counted (an assistant usage line not already seen).
+// Unknown models still count tokens at $0. e.seen dedupes streaming
+// re-emissions by message.id+requestId. User lines whose content is a plain
+// string fail the unmarshal and are skipped, same as before.
+func lineCost(line []byte, e *costCacheEntry) (cost float64, tokens int, ok bool) {
 	var ev struct {
 		Type      string `json:"type"`
 		RequestID string `json:"requestId"`
@@ -92,29 +105,31 @@ func lineCost(line []byte, e *costCacheEntry) (cost float64, ok bool) {
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(line, &ev); err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	if ev.Type != "assistant" || ev.Message.Usage == nil {
-		return 0, false
-	}
-	price, known := priceFor(ev.Message.Model)
-	if !known {
-		return 0, false
+		return 0, 0, false
 	}
 	key := ev.Message.ID + "\x00" + ev.RequestID
 	if e.seen[key] {
-		return 0, false
+		return 0, 0, false
 	}
 	e.seen[key] = true
-	return usageCost(price, *ev.Message.Usage), true
+	tokens = usageTokens(*ev.Message.Usage)
+	price, known := priceFor(ev.Message.Model)
+	if !known {
+		return 0, tokens, true
+	}
+	return usageCost(price, *ev.Message.Usage), tokens, true
 }
 
 // costCacheEntry holds the incremental scan state for one transcript file: the
-// byte offset consumed so far, the running dollar cost, and the dedup set of
-// message.id+requestId keys already counted.
+// byte offset consumed so far, the running dollar cost and token count, and
+// the dedup set of message.id+requestId keys already counted.
 type costCacheEntry struct {
 	offset  int64
 	costUSD float64
+	tokens  int
 	seen    map[string]bool
 }
 
@@ -129,16 +144,17 @@ var (
 	costCache   = map[string]*costCacheEntry{}
 )
 
-// scanCostIncremental returns the cumulative dollar cost of one transcript
-// file (parent or subagent), parsing only the bytes appended since the
-// previous call. State is cached per path; a file smaller than the cached
-// offset (truncation or rotation) resets the entry and forces a full rescan.
-// Only complete newline-terminated lines advance the offset, so a partially
-// written trailing line is re-read on the next tick. Returns 0 on any error.
-func scanCostIncremental(path string) float64 {
+// scanCostIncremental returns the cumulative dollar cost and token count of
+// one transcript file (parent or subagent), parsing only the bytes appended
+// since the previous call. State is cached per path; a file smaller than the
+// cached offset (truncation or rotation) resets the entry and forces a full
+// rescan. Only complete newline-terminated lines advance the offset, so a
+// partially written trailing line is re-read on the next tick. Returns 0, 0
+// on any error.
+func scanCostIncremental(path string) (cost float64, tokens int) {
 	st, err := os.Stat(path)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	costCacheMu.Lock()
 	defer costCacheMu.Unlock()
@@ -149,16 +165,16 @@ func scanCostIncremental(path string) float64 {
 		costCache[path] = e
 	}
 	if st.Size() == e.offset {
-		return e.costUSD // nothing appended since last scan
+		return e.costUSD, e.tokens // nothing appended since last scan
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return e.costUSD
+		return e.costUSD, e.tokens
 	}
 	defer f.Close()
 	if _, err := f.Seek(e.offset, io.SeekStart); err != nil {
-		return e.costUSD
+		return e.costUSD, e.tokens
 	}
 
 	r := bufio.NewReaderSize(f, 64*1024)
@@ -167,8 +183,9 @@ func scanCostIncremental(path string) float64 {
 		line, err := r.ReadBytes('\n')
 		if n := len(line); n > 0 && line[n-1] == '\n' {
 			off += int64(n)
-			if c, ok := lineCost(line, e); ok {
+			if c, tok, ok := lineCost(line, e); ok {
 				e.costUSD += c
+				e.tokens += tok
 			}
 		}
 		if err != nil {
@@ -178,21 +195,24 @@ func scanCostIncremental(path string) float64 {
 		}
 	}
 	e.offset = off
-	return e.costUSD
+	return e.costUSD, e.tokens
 }
 
-// scanSessionCost totals a session's cost, split by transcript source: main is
-// the parent transcript (the session's main loop), subagents is the summed
-// cost of every Task-tool subagent transcript (siblings under
-// <uuid>/subagents/*.jsonl, which Claude Code creates mid-session). Each file
-// flows through the same per-path incremental cache; the files are disjoint,
-// so no cross-file dedup is needed.
-func scanSessionCost(path string) (main, subagents float64) {
-	main = scanCostIncremental(path)
+// scanSessionCost totals a session's cost and tokens. main/subagents split
+// dollars by transcript source (parent vs Task-tool siblings under
+// <uuid>/subagents/*.jsonl). tokens is the sum across both. Each file flows
+// through the same per-path incremental cache; the files are disjoint, so no
+// cross-file dedup is needed.
+func scanSessionCost(path string) (main, subagents float64, tokens int) {
+	var mainTok int
+	main, mainTok = scanCostIncremental(path)
 	subDir := strings.TrimSuffix(path, ".jsonl")
 	subs, _ := filepath.Glob(filepath.Join(subDir, "subagents", "*.jsonl"))
+	subTok := 0
 	for _, f := range subs {
-		subagents += scanCostIncremental(f)
+		c, t := scanCostIncremental(f)
+		subagents += c
+		subTok += t
 	}
-	return main, subagents
+	return main, subagents, mainTok + subTok
 }
