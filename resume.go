@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,10 +22,10 @@ import (
 	"golang.org/x/term"
 )
 
-// Resume-session picker: collect past (ended) Claude Code transcripts on this
-// host and every configured server, let the user filter and pick one, then
-// resume it via `claude --resume <id>` in a fresh tmux session on the host that
-// owns the transcript.
+// Resume-session picker: collect past (ended) Claude Code transcripts and
+// finished Grok sessions on this host and every configured server, let the
+// user filter and pick one, then resume it in a fresh tmux session on the
+// host that owns it (`claude --resume <id>` or `grok --resume <id>`).
 
 const (
 	// resumableMaxAge caps how far back a transcript can be modified and still
@@ -67,6 +68,7 @@ type ResumableSession struct {
 	MessageCount int       `json:"message_count"`
 	ModifiedAt   time.Time `json:"modified_at"`
 	Host         string    `json:"-"` // "" local, set client-side for remote rows
+	Tool         string    `json:"tool,omitempty"` // "" Claude, toolGrok for a Grok row
 }
 
 // errResumeSessionLive is returned by ResumeSession when the requested session
@@ -84,18 +86,140 @@ func CollectResumable() []ResumableSession {
 }
 
 // collectResumableFrom is the testable core of CollectResumable: home is the
-// directory holding .claude/projects, live is the set of session ids to skip,
-// and now anchors the 30-day cutoff.
+// directory holding .claude/projects and .grok/sessions, live is the set of
+// session ids to skip, and now anchors the 30-day cutoff.
 //
-// Rules (per the resume design): glob ~/.claude/projects/*/*.jsonl; skip
-// zero-byte files, transcripts modified more than resumableMaxAge ago, sessions
-// in live, and unreadable/corrupt files or ones with no cwd in their head
-// (cwd is required to spawn the resumed tmux session). A session id appearing
-// under several project dirs (a worktree move) is deduped to its newest
-// transcript, mirroring findTranscript. Sorted mtime-desc, capped at
-// resumableMaxCount.
+// Claude rows come from collectResumableLimited (lazy, cached). Grok rows
+// come from collectGrokResumable. The two are merged, sorted ModifiedAt-desc
+// (tie-break SessionID, then Tool), and capped at resumableMaxCount. A home
+// with no .grok tree produces the same Claude list as collectResumableLimited
+// alone.
 func collectResumableFrom(home string, live map[string]bool, now time.Time) []ResumableSession {
-	return collectResumableLimited(home, live, now, resumableMaxCount)
+	return collectResumableFromLimited(home, live, now, resumableMaxCount)
+}
+
+// collectResumableFromLimited is collectResumableFrom with the result cap
+// injected, so a test can prove the shared recency cap without weakening
+// resumableMaxCount. collectResumableLimited stays Claude-only.
+func collectResumableFromLimited(home string, live map[string]bool, now time.Time, limit int) []ResumableSession {
+	claude := collectResumableLimited(home, live, now, limit)
+	grok := collectGrokResumable(home, live, now, limit)
+	out := append(append([]ResumableSession{}, claude...), grok...)
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].ModifiedAt.Equal(out[j].ModifiedAt) {
+			return out[i].ModifiedAt.After(out[j].ModifiedAt)
+		}
+		if out[i].SessionID != out[j].SessionID {
+			return out[i].SessionID < out[j].SessionID
+		}
+		return out[i].Tool < out[j].Tool
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// collectGrokResumable walks home/.grok/sessions/<cwd>/<id>/summary.json for
+// finished grok sessions inside the same window and cap as the Claude
+// collector. Missing root, unreadable dirs, and unparseable summaries are
+// skipped — never an error — so a file this tool does not own cannot blank
+// the Claude list. Does not use filepath.Glob or grokSummaryPath's fallback
+// scan: the walk already knows each summary's path.
+func collectGrokResumable(home string, live map[string]bool, now time.Time, limit int) []ResumableSession {
+	if limit <= 0 {
+		return nil
+	}
+	// A torn registry is "no live grok rows" for CollectLocal. Here that
+	// would list still-running sessions as resumable. Skip grok this pass.
+	if !grokRegistryKnown(home) {
+		return nil
+	}
+	root := filepath.Join(home, grokDir, "sessions")
+	cwdGroups, err := grokSessionsReadDir(root)
+	if err != nil {
+		return nil
+	}
+	cutoff := now.Add(-resumableMaxAge)
+	var out []ResumableSession
+	for _, g := range cwdGroups {
+		if !g.IsDir() {
+			continue
+		}
+		groupName := g.Name()
+		groupPath := filepath.Join(root, groupName)
+		sessDirs, err := grokSessionsReadDir(groupPath)
+		if err != nil {
+			continue
+		}
+		for _, d := range sessDirs {
+			if !d.IsDir() {
+				continue
+			}
+			sid := d.Name()
+			if sid == "" || live[sid] {
+				continue
+			}
+			sumPath := filepath.Join(groupPath, sid, "summary.json")
+			fi, err := os.Stat(sumPath)
+			if err != nil || fi.IsDir() || fi.Size() == 0 {
+				continue
+			}
+			mtime := fi.ModTime()
+			if mtime.Before(cutoff) {
+				continue
+			}
+			data, err := os.ReadFile(sumPath)
+			if err != nil {
+				continue
+			}
+			var sum grokSummary
+			if err := json.Unmarshal(data, &sum); err != nil {
+				continue
+			}
+			if sum.SessionKind == "subagent" {
+				continue
+			}
+			cwd := sum.Info.CWD
+			if cwd == "" {
+				if dec, err := url.PathUnescape(groupName); err == nil {
+					cwd = dec
+				}
+			}
+			if cwd == "" || isScratchCWD(cwd) {
+				continue
+			}
+			if live[sid] {
+				continue
+			}
+			modified := mtime
+			if ms := grokMillis(firstNonEmpty(sum.LastActiveAt, sum.UpdatedAt)); ms != 0 {
+				modified = time.UnixMilli(ms)
+			}
+			if modified.Before(cutoff) {
+				continue
+			}
+			out = append(out, ResumableSession{
+				SessionID:    sid,
+				CWD:          cwd,
+				GitBranch:    sum.HeadBranch,
+				Name:         grokSummaryName(sum),
+				MessageCount: sum.NumMessages,
+				ModifiedAt:   modified,
+				Tool:         toolGrok,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].ModifiedAt.Equal(out[j].ModifiedAt) {
+			return out[i].ModifiedAt.After(out[j].ModifiedAt)
+		}
+		return out[i].SessionID < out[j].SessionID
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // resumableCandidate is one transcript file that survived collectResumableLimited's
@@ -124,9 +248,9 @@ type resumableCandidate struct {
 // still-green laziness test.
 var readResumableHeadFn = readResumableHead
 
-// collectResumableLimited is collectResumableFrom with the result cap injected,
-// so a test can prove the laziness below without weakening resumableMaxCount.
-// limit is assumed positive.
+// collectResumableLimited is the Claude-only lazy collector. The mixed-list
+// merge and shared cap live in collectResumableFromLimited. limit is assumed
+// positive.
 //
 // The work is split into two passes because the expensive half used to run on
 // every match and then be thrown away: on a busy host the glob returns
@@ -438,12 +562,20 @@ func countFileLines(path string) int {
 func liveSessionIDs() map[string]bool {
 	set := map[string]bool{}
 	sessions, err := CollectLocal()
-	if err != nil {
-		return set
+	if err == nil {
+		for _, s := range sessions {
+			if s.SessionID != "" {
+				set[s.SessionID] = true
+			}
+		}
 	}
-	for _, s := range sessions {
-		if s.SessionID != "" {
-			set[s.SessionID] = true
+	// CollectLocal drops a grok row when a Claude file still claims that pid.
+	// The grok session is live; its id must still be excluded from the picker
+	// or `grok --resume` starts a second process. grokLiveSessionIDs is the
+	// same cheap union resolvableSessionIDs already uses for this gap.
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, id := range grokLiveSessionIDs(home) {
+			set[id] = true
 		}
 	}
 	return set
@@ -468,6 +600,16 @@ func ResumeSession(sessionID, cwd string) (string, error) {
 	if cwd == "" {
 		return "", fmt.Errorf("resume: session id and cwd required")
 	}
+	if err := validateResumeSessionID(sessionID); err != nil {
+		return "", err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if findTranscript(home, sessionID) == "" {
+		return "", fmt.Errorf("no transcript for session %s", sessionID)
+	}
 	return resumeCommon(sessionID, cwd, "claude --resume "+sessionID)
 }
 
@@ -487,18 +629,8 @@ func ResumeSessionInWorktree(sessionID, repoRoot, worktreeName string) (string, 
 	if !worktreeNameRe.MatchString(worktreeName) {
 		return "", fmt.Errorf("resume: invalid worktree name")
 	}
-	return resumeCommon(sessionID, repoRoot, "claude --worktree "+worktreeName+" --resume "+sessionID)
-}
-
-// resumeCommon is the shared validate → refuse-if-live → spawn → send-keys
-// sequence behind ResumeSession and ResumeSessionInWorktree. tmuxCwd is where
-// the detached tmux session is created; command is what gets typed into it.
-func resumeCommon(sessionID, tmuxCwd, command string) (string, error) {
-	if sessionID == "" {
-		return "", fmt.Errorf("resume: session id and cwd required")
-	}
-	if !resumeSessionIDRe.MatchString(sessionID) {
-		return "", fmt.Errorf("resume: invalid session id")
+	if err := validateResumeSessionID(sessionID); err != nil {
+		return "", err
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -506,6 +638,58 @@ func resumeCommon(sessionID, tmuxCwd, command string) (string, error) {
 	}
 	if findTranscript(home, sessionID) == "" {
 		return "", fmt.Errorf("no transcript for session %s", sessionID)
+	}
+	return resumeCommon(sessionID, repoRoot, "claude --worktree "+worktreeName+" --resume "+sessionID)
+}
+
+// ResumeGrokSession validates that grok still has a summary for sessionID
+// under cwd, refuses if the session is already live, then spawns a fresh tmux
+// session running `grok --resume <id>` with tmux cwd = the session cwd.
+// No --cwd / --worktree / --restore-code: grok resumes in the process cwd.
+func ResumeGrokSession(sessionID, cwd string) (string, error) {
+	if cwd == "" {
+		return "", fmt.Errorf("resume: session id and cwd required")
+	}
+	if !filepath.IsAbs(cwd) {
+		return "", fmt.Errorf("resume: cwd must be absolute")
+	}
+	if err := validateResumeSessionID(sessionID); err != nil {
+		return "", err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if !grokRegistryKnown(home) {
+		return "", fmt.Errorf("resume: grok registry unreadable")
+	}
+	if _, ok := readGrokSummary(home, cwd, sessionID); !ok {
+		return "", fmt.Errorf("no grok session %s", sessionID)
+	}
+	return resumeCommon(sessionID, cwd, "grok --resume "+sessionID)
+}
+
+func validateResumeSessionID(sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("resume: session id and cwd required")
+	}
+	if !resumeSessionIDRe.MatchString(sessionID) {
+		return fmt.Errorf("resume: invalid session id")
+	}
+	return nil
+}
+
+// resumeCommon is the shared validate → refuse-if-live → spawn → send-keys
+// sequence behind ResumeSession, ResumeSessionInWorktree and ResumeGrokSession.
+// Existence checks stay in the callers: Claude needs a transcript, Grok needs
+// a summary. tmuxCwd is where the detached tmux session is created; command
+// is what gets typed into it.
+func resumeCommon(sessionID, tmuxCwd, command string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("resume: session id and cwd required")
+	}
+	if !resumeSessionIDRe.MatchString(sessionID) {
+		return "", fmt.Errorf("resume: invalid session id")
 	}
 	if liveSessionIDs()[sessionID] {
 		return "", errResumeSessionLive
@@ -605,7 +789,7 @@ func resumeRows(sessions []ResumableSession, localHome, localName string, cols i
 		}
 	}
 
-	type cells struct{ age, host, name, dir, branch, msg, prompt string }
+	type cells struct{ age, host, name, dir, branch, msg, prompt, badge string }
 	rows := make([]cells, len(sessions))
 	hostW, nameW, dirW, branchW := len("HOST"), len("NAME"), len("DIR"), len("BRANCH")
 	promptW := len("PROMPT")
@@ -618,6 +802,7 @@ func resumeRows(sessions []ResumableSession, localHome, localName string, cols i
 		if name == "" {
 			name = "-"
 		}
+		badge := toolBadge(Session{Tool: s.Tool})
 		branch := s.GitBranch
 		if branch == "" {
 			branch = "-"
@@ -627,7 +812,7 @@ func resumeRows(sessions []ResumableSession, localHome, localName string, cols i
 			prompt = "-"
 		}
 		host = truncateRunes(host, hostCap)
-		name = truncateRunes(name, nameCap)
+		name = fitNameForBadge(name, badge, nameCap)
 		dir = truncateDirTail(dir, dirCap)
 		branch = truncateRunes(branch, branchCap)
 		prompt = truncateRunes(prompt, resumePromptMax)
@@ -639,11 +824,12 @@ func resumeRows(sessions []ResumableSession, localHome, localName string, cols i
 			branch: branch,
 			msg:    strconv.Itoa(s.MessageCount),
 			prompt: prompt,
+			badge:  badge,
 		}
 		if n := utf8.RuneCountInString(host); n > hostW {
 			hostW = n
 		}
-		if n := utf8.RuneCountInString(name); n > nameW {
+		if n := nameCellTextWidth(name, badge); n > nameW {
 			nameW = n
 		}
 		if n := utf8.RuneCountInString(dir); n > dirW {
@@ -708,7 +894,7 @@ func resumeRows(sessions []ResumableSession, localHome, localName string, cols i
 		if showHost {
 			parts = append(parts, dim(padRight(c.host, hostW)))
 		}
-		parts = append(parts, padRight(truncateRunes(c.name, nameW), nameW))
+		parts = append(parts, nameCell(fitNameForBadge(c.name, c.badge, nameW), c.badge, nameW, false, false))
 		parts = append(parts, padRight(truncateDirTail(c.dir, dirW), dirW))
 		if showBranch {
 			parts = append(parts, dim(padRight(c.branch, branchW)))
@@ -1318,7 +1504,15 @@ func actResume(c *actCtx) {
 
 	if sel.Host == "" {
 		fmt.Printf("\nresuming %s in %s... ", shortID(sel.SessionID), collapseHome(sel.CWD, home))
-		tname, err := ResumeSession(sel.SessionID, sel.CWD)
+		var (
+			tname string
+			err   error
+		)
+		if sel.Tool == toolGrok {
+			tname, err = ResumeGrokSession(sel.SessionID, sel.CWD)
+		} else {
+			tname, err = ResumeSession(sel.SessionID, sel.CWD)
+		}
 		if err != nil {
 			fmt.Printf("failed: %v\n", err)
 			pauseForKey(c.fd, c.oldState)
@@ -1337,6 +1531,7 @@ func actResume(c *actCtx) {
 	body, _ := json.Marshal(map[string]string{
 		"session_id": sel.SessionID,
 		"cwd":        sel.CWD,
+		"tool":       sel.Tool,
 	})
 	resp, err := remoteRequest(sel.Host, "/sessions/resume", "POST", body)
 	if err != nil {

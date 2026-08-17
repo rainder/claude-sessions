@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,6 +46,12 @@ type grokSummary struct {
 	CurrentModelID string `json:"current_model_id"`
 	LastActiveAt   string `json:"last_active_at"`
 	UpdatedAt      string `json:"updated_at"`
+	SessionKind    string `json:"session_kind"`
+	HeadBranch     string `json:"head_branch"`
+	NumMessages    int    `json:"num_messages"`
+	Info           struct {
+		CWD string `json:"cwd"`
+	} `json:"info"`
 }
 
 // grokPIDAlive is collectGrokLocal's liveness check, injectable so the
@@ -481,6 +488,9 @@ func grokSummaryPath(home, cwd, sessionID string) (string, bool) {
 	}
 	for _, name := range candidates {
 		p := filepath.Join(root, name, sessionID, "summary.json")
+		if !grokPathUnderSessions(root, p) {
+			continue
+		}
 		if _, err := os.Stat(p); err == nil {
 			return p, true
 		}
@@ -488,7 +498,11 @@ func grokSummaryPath(home, cwd, sessionID string) (string, bool) {
 	// Step 2: a per-cwd directory we already know about means the name is
 	// right and only the summary is missing. Nothing to scan for.
 	for _, name := range candidates {
-		if fi, err := os.Stat(filepath.Join(root, name)); err == nil && fi.IsDir() {
+		dir := filepath.Join(root, name)
+		if !grokPathUnderSessions(root, dir) {
+			continue
+		}
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
 			return "", false
 		}
 	}
@@ -502,12 +516,42 @@ func grokSummaryPath(home, cwd, sessionID string) (string, bool) {
 			continue
 		}
 		p := filepath.Join(root, d.Name(), sessionID, "summary.json")
+		if !grokPathUnderSessions(root, p) {
+			continue
+		}
 		if _, err := os.Stat(p); err == nil {
 			grokScanRemember(root, cwd, d.Name())
 			return p, true
 		}
 	}
 	return "", false
+}
+
+// grokPathUnderSessions reports whether p is still inside root after Clean.
+// url.PathEscape leaves "." and ".." unchanged, so Join(root, "..", id, ...)
+// would walk out of ~/.grok/sessions when cwd is attacker-controlled.
+func grokPathUnderSessions(root, p string) bool {
+	root = filepath.Clean(root)
+	p = filepath.Clean(p)
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// grokRegistryKnown is true when live grok ids can be trusted this pass.
+// A missing registry means none are live. An unreadable or unparseable file
+// is unknown — collectGrokLocal treats that as no live rows, but a resume
+// collector must not list historical summaries as ended. Do not use this
+// inside collectGrokLocal; that path's torn-read rule is load-bearing.
+func grokRegistryKnown(home string) bool {
+	data, err := os.ReadFile(filepath.Join(home, grokDir, grokActiveSessionsFile))
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	var entries []grokActiveSession
+	return json.Unmarshal(data, &entries) == nil
 }
 
 // grokLiveSessionIDs returns the session id of every live grok session under

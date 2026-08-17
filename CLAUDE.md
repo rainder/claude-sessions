@@ -317,7 +317,7 @@ and its `session_mismatch`/`not_live` codes are unchanged.
 live session"): nothing resolved for that pid, so nothing there knows which
 store would have owned it.
 
-**Migrate, resume and snapshot restore stay claude-only.** Migrate means "kill
+**Migrate and snapshot restore stay claude-only.** Migrate means "kill
 it and respawn as `claude --resume <id>`", which no grok session can be, so
 `MigrateLocalAttested` refuses a pid the registry claims — one place covering
 every entry point at once, and costing nothing on the normal path since the
@@ -358,13 +358,19 @@ own session file, so it knows exactly what it did not find.
 
 ### Resume picker
 
-`resume.go` owns the whole `r`-key feature: collect past transcripts
-(`~/.claude/projects/*/*.jsonl`; session id = filename stem), a searchable
-picker (reuses `filterNewPickerLines`), and `ResumeSession(sessionID, cwd)` —
-the shared primitive both the local TUI path and the server's
-`POST /sessions/resume` handler call (409 when the session is already live).
-Remote lists come from `GET /resumable`, fetched concurrently per host and
-merged newest-first.
+`resume.go` owns the whole `r`-key feature: collect past Claude transcripts
+(`~/.claude/projects/*/*.jsonl`; session id = filename stem) plus finished
+Grok sessions (`~/.grok/sessions/**/summary.json`), a searchable picker
+(reuses `filterNewPickerLines`), and the spawn primitives both the local TUI
+path and `POST /sessions/resume` call (409 when the session is already live).
+Claude rows go through `ResumeSession` (`claude --resume <id>`). Grok rows
+go through `ResumeGrokSession` (`grok --resume <id>` in the session's cwd —
+no `--cwd`, no `--worktree`, no `--restore-code`). Empty `tool` on the wire
+is Claude, so old clients and servers stay compatible. A non-empty unknown
+`tool` is `400`. Remote lists come from `GET /resumable`, fetched concurrently
+per host and merged newest-first. An old client talking to a new server can
+still see Grok rows as Claude — the reverse mismatch this repo's deploy
+order (client first) does not handle.
 
 Collector filters (all server-side, in `collectResumableFrom`): >30 days old,
 currently-live session ids, zero-byte/corrupt files, scratch cwds (`/tmp`,
@@ -378,11 +384,33 @@ once tool_use/tool_result entries are interleaved in. NAME is best-effort:
 user-set name from a lingering `~/.claude/sessions`
 file (`nameSource != "derived"`), else the transcript's summary line, else
 `-`. Session ids arriving over HTTP are format-validated
-(`resumeSessionIDRe`) before touching the filesystem or tmux.
+(`resumeSessionIDRe`) before touching the filesystem or tmux
+(`validateResumeSessionID` in `ResumeSession` / `ResumeGrokSession`, not
+only later in `resumeCommon`).
+
+Grok rows come from walking `~/.grok/sessions/<encoded-cwd>/<session-id>/summary.json`
+— never `grok sessions list`, never `session_search.sqlite`. The same 30-day
+window, 100-row cap, scratch-cwd filter and live-id exclusion apply after a
+merge sorted by recency across both tools. Live exclusion unions
+`grokLiveSessionIDs` into `liveSessionIDs`: `CollectLocal` drops a grok row
+when a Claude file still claims that pid, and without the union the picker
+would offer a still-running grok session. A torn or unreadable registry is
+unknown live-set, so that pass lists no grok rows and `ResumeGrokSession`
+refuses — unlike `collectGrokLocal`, which treats a torn read as no live grok
+rows and must not blank the Claude list. `session_kind=subagent` is skipped;
+a missing or empty kind is kept, including forks that carry a
+`parent_session_id`. NAME is `grokSummaryName` (generated_title, then
+session_summary). A dim `grok` badge rides inside NAME and takes part in that
+column's width math (`toolBadge` / `nameCellTextWidth` / `fitNameForBadge` /
+`nameCell`). Prompts stay empty — the → overlay is claude-only. A missing
+`.grok` tree is not an error: the Claude list is exactly what it was before.
+`collectResumableLimited` stays Claude-only (the lazy two-pass + cache
+below). `collectResumableFrom` asks it and `collectGrokResumable` separately,
+then merges.
 
 **The collector is lazy, and its two passes are split by cost.**
-`collectResumableLimited` (which `collectResumableFrom` calls with
-`resumableMaxCount`) first stats every match and applies only what a name and a
+`collectResumableLimited` (which `collectResumableFromLimited` still calls with
+the same cap) first stats every match and applies only what a name and a
 mtime can decide — dirs, zero-byte files, the `resumableMaxAge` cutoff, live
 session ids — producing candidates sorted mtime-desc, ties broken by path
 string comparison (not `Glob`'s own order — a worktree's project dir is a

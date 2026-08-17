@@ -1250,9 +1250,10 @@ func (s *server) resumable(w http.ResponseWriter, r *http.Request) {
 	}{Sessions: CollectResumable()})
 }
 
-// resume spawns `claude --resume <id>` in a fresh tmux session for the given
-// session id + cwd. A session that's already live is refused with 409;
-// validation and the spawn go through the shared ResumeSession primitive.
+// resume spawns `claude --resume <id>` or `grok --resume <id>` in a fresh tmux
+// session for the given session id + cwd. Empty tool is Claude (old clients).
+// A session that's already live is refused with 409; validation and the spawn
+// go through ResumeSession / ResumeGrokSession.
 func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -1261,6 +1262,7 @@ func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
 		CWD       string `json:"cwd"`
+		Tool      string `json:"tool"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -1270,7 +1272,19 @@ func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
 	}
-	tname, err := ResumeSession(body.SessionID, body.CWD)
+	var (
+		tname string
+		err   error
+	)
+	switch body.Tool {
+	case toolGrok:
+		tname, err = ResumeGrokSession(body.SessionID, body.CWD)
+	case "":
+		tname, err = ResumeSession(body.SessionID, body.CWD)
+	default:
+		http.Error(w, "bad tool", http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		if errors.Is(err, errResumeSessionLive) {
 			http.Error(w, err.Error(), http.StatusConflict)
