@@ -230,8 +230,10 @@ and CTX stays `-`. Color uses `contextWindowTokens` on the same file
 (`Session.ContextWindow`); 0 falls back to the Claude 300k constant. Cost is
 the incremental sum of `turn_completed` `costUsdTicks` on sibling
 `updates.jsonl`, divided by 1e10 (Grok's documented unit). A missing file or
-no ticks is 0 / "—". Do not scan the whole file every tick: only new bytes,
-same contract as `scanCostIncremental`. Turns without `costUsdTicks` are
+no ticks is 0 / "—". The same incremental pass tracks open background
+tasks (`task_backgrounded` / `task_completed`) for the shell overlay.
+Do not scan the whole file every tick: only new bytes, same contract as
+`scanCostIncremental`. Turns without `costUsdTicks` are
 skipped (may understate, accepted). `CostSubagentsUSD` stays 0 — parent
 `turn_completed.usage` already includes finished subagents. Do not scan
 `updates.jsonl` for CTX; CTX stays on `signals.json`.
@@ -259,8 +261,13 @@ the wrong claim about a session that reported none. The file is tailed
 chunk, and CollectLocal runs on a 2s tick. An open `ask_user_question` older
 than the window with later non-question events would read as busy —
 accepted, because a session still blocked on the user writes nothing after
-the `tool_started`. There is no `shell` status: a long bash tool is still
-`busy`. The row carries a dim `grok`
+the `tool_started`. A long foreground bash tool is still `busy`. After
+`turn_ended`, an open background command or monitor is `shell` — grok
+writes `task_backgrounded` to `updates.jsonl` when it backgrounds the
+task, and `task_completed` when that task exits, and
+`grokSessionStatus` overlays `shell` on an idle (or empty) events
+answer while any id is still open. waiting and a live turn still win.
+The row carries a dim `grok`
 badge inside the NAME cell (`toolBadge`/`nameCell`), which takes part in that
 column's **sizing** (`nameCellTextWidth`) — a badge left out of the width math
 pushes every column right of it out of alignment.

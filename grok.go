@@ -124,9 +124,10 @@ func grokSessionFrom(home string, e grokActiveSession) (Session, bool) {
 		s.Model = sum.CurrentModelID
 		s.UpdatedAt = grokMillis(firstNonEmpty(sum.LastActiveAt, sum.UpdatedAt))
 	}
-	// Status is derived from events.jsonl, not from the summary: grok never
-	// writes a status field. A missing or unreadable log leaves both empty
-	// so the TUI keeps the "-" placeholder.
+	// Status is derived from events.jsonl, then overlaid from updates.jsonl
+	// when a background command or monitor is still open. Grok never writes
+	// a status field. Missing events and no open background leave both
+	// empty so the TUI keeps the "-" placeholder.
 	s.Status, s.WaitingFor = grokSessionStatus(home, e.CWD, e.SessionID)
 	// CTX comes from signals.json, not from a transcript scan. A missing,
 	// unreadable or unparseable file leaves both fields at 0 so CTX stays "-".
@@ -200,9 +201,23 @@ type grokEvent struct {
 
 // grokSessionStatus maps a session's events.jsonl tail onto Claude's
 // status / waitingFor vocabulary so the existing render, sort and
-// StatusDisplay paths need no grok branch.
+// StatusDisplay paths need no grok branch. An idle (or empty) events
+// answer is then overlaid with shell when updates.jsonl still has an
+// open background command or monitor — grok writes no status field,
+// and events call that state idle because the tool_completed fires
+// the moment the task is backgrounded.
 func grokSessionStatus(home, cwd, sessionID string) (string, string) {
-	return grokStatusFromEvents(readGrokEventsTail(grokEventsPath(home, cwd, sessionID)))
+	status, waitingFor := grokStatusFromEvents(readGrokEventsTail(grokEventsPath(home, cwd, sessionID)))
+	if waitingFor != "" {
+		return status, waitingFor
+	}
+	if status != "" && status != "idle" {
+		return status, waitingFor
+	}
+	if grokHasOpenBackground(grokUpdatesPath(home, cwd, sessionID)) {
+		return "shell", ""
+	}
+	return status, waitingFor
 }
 
 // grokEventsPath locates events.jsonl. The cheap path is the sibling of a
@@ -265,6 +280,10 @@ func readGrokEventsTail(path string) []byte {
 // phase: grok does not write an idle phase, so the last phase_changed after
 // a finished turn is still streaming_text. A torn line is skipped, never a
 // reason to drop the rest.
+//
+// shell is not derived here. A background command or monitor completes
+// its tool call the moment it is backgrounded, so events then look idle.
+// grokSessionStatus overlays shell from updates.jsonl after this returns.
 func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 	var (
 		lastType   string

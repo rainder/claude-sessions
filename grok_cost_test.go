@@ -156,6 +156,75 @@ func TestScanGrokCostMissing(t *testing.T) {
 	}
 }
 
+func TestScanGrokCostMissingClearsWarmCache(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p, grokTurnLine("a", ticksPtr(550018000)))
+	if got, _ := scanGrokCost(p); !approxEq(got, float64(550018000)/grokCostTicksPerUSD) {
+		t.Fatalf("seed scan = %v", got)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := scanGrokCost(p); got != 0 {
+		t.Errorf("removed file = %v, want 0", got)
+	}
+}
+
+func TestGrokHasOpenBackground(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p,
+		`{"params":{"update":{"sessionUpdate":"task_backgrounded","task_id":"t1"}}}`,
+		`{"params":{"update":{"sessionUpdate":"task_backgrounded","task_id":"t2"}}}`,
+		`{"params":{"update":{"sessionUpdate":"task_completed","task_snapshot":{"task_id":"t1"}}}}`,
+	)
+	if !grokHasOpenBackground(p) {
+		t.Fatal("open t2 should report background")
+	}
+
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(f, `{"params":{"update":{"sessionUpdate":"task_completed","task_snapshot":{"task_id":"t2"}}}}`)
+	f.Close()
+	if grokHasOpenBackground(p) {
+		t.Error("after t2 completed, want no open background")
+	}
+}
+
+func TestGrokHasOpenBackgroundMissing(t *testing.T) {
+	if grokHasOpenBackground("/nonexistent/path/updates.jsonl") {
+		t.Error("missing file should not report an open background")
+	}
+}
+
+func TestGrokHasOpenBackgroundMissingClearsWarmCache(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p,
+		`{"params":{"update":{"sessionUpdate":"task_backgrounded","task_id":"t1"}}}`,
+	)
+	if !grokHasOpenBackground(p) {
+		t.Fatal("seed write should report background")
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if grokHasOpenBackground(p) {
+		t.Error("removed file should not keep a stale open background")
+	}
+}
+
+func TestGrokHasOpenBackgroundIgnoresEmptyID(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p,
+		`{"params":{"update":{"sessionUpdate":"task_backgrounded","task_id":""}}}`,
+		`{"params":{"update":{"sessionUpdate":"task_completed","task_snapshot":{"task_id":"ghost"}}}}`,
+	)
+	if grokHasOpenBackground(p) {
+		t.Error("empty id and unmatched complete should not report background")
+	}
+}
+
 func TestScanGrokCostSumsTotalTokens(t *testing.T) {
 	p := filepath.Join(t.TempDir(), grokUpdatesFile)
 	writeLines(t, p,

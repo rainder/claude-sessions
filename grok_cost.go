@@ -18,16 +18,18 @@ const grokCostTicksPerUSD = 10_000_000_000
 
 // grokCostCacheEntry holds the incremental scan state for one updates.jsonl:
 // the byte offset consumed so far, the running dollar cost and token count,
-// and the prompt_ids already counted.
+// the prompt_ids already counted, and the background task ids still open
+// (task_backgrounded with no matching task_completed).
 type grokCostCacheEntry struct {
 	offset  int64
 	costUSD float64
 	tokens  int
 	seen    map[string]bool // prompt_id already counted
+	open    map[string]bool // background task_id still running
 }
 
 func newGrokCostCacheEntry() *grokCostCacheEntry {
-	return &grokCostCacheEntry{seen: map[string]bool{}}
+	return &grokCostCacheEntry{seen: map[string]bool{}, open: map[string]bool{}}
 }
 
 var (
@@ -47,7 +49,8 @@ func grokUpdatesPath(home, cwd, sessionID string) string {
 
 // scanGrokCost returns the cumulative dollar cost and token count of one
 // updates.jsonl, parsing only the bytes appended since the previous call.
-// State is cached per path; a file smaller than the cached offset
+// The same pass updates the open-background set that grokHasOpenBackground
+// reads. State is cached per path; a file smaller than the cached offset
 // (truncation or rotation) resets the entry and forces a full rescan. Only
 // complete newline-terminated lines advance the offset, so a partially
 // written trailing line is re-read on the next tick. Missing file is 0, 0.
@@ -56,6 +59,9 @@ func grokUpdatesPath(home, cwd, sessionID string) string {
 func scanGrokCost(path string) (cost float64, tokens int) {
 	st, err := os.Stat(path)
 	if err != nil {
+		grokCostCacheMu.Lock()
+		delete(grokCostCache, path)
+		grokCostCacheMu.Unlock()
 		return 0, 0
 	}
 	grokCostCacheMu.Lock()
@@ -85,6 +91,7 @@ func scanGrokCost(path string) (cost float64, tokens int) {
 		line, err := r.ReadBytes('\n')
 		if n := len(line); n > 0 && line[n-1] == '\n' {
 			off += int64(n)
+			grokApplyBackground(line, e)
 			if c, tok, ok := grokTurnCost(line, e); ok {
 				e.costUSD += c
 				e.tokens += tok
@@ -96,6 +103,52 @@ func scanGrokCost(path string) (cost float64, tokens int) {
 	}
 	e.offset = off
 	return e.costUSD, e.tokens
+}
+
+// grokHasOpenBackground reports whether updates.jsonl still has a
+// task_backgrounded id with no matching task_completed. It shares
+// scanGrokCost's incremental cache so a CollectLocal tick reads the
+// new bytes once. A missing file is false.
+func grokHasOpenBackground(path string) bool {
+	scanGrokCost(path)
+	grokCostCacheMu.Lock()
+	defer grokCostCacheMu.Unlock()
+	e := grokCostCache[path]
+	return e != nil && len(e.open) > 0
+}
+
+// grokApplyBackground updates e.open from one updates.jsonl line.
+// task_backgrounded adds task_id; task_completed removes
+// task_snapshot.task_id. Empty ids and torn lines are ignored.
+func grokApplyBackground(line []byte, e *grokCostCacheEntry) {
+	if !bytes.Contains(line, []byte("task_backgrounded")) &&
+		!bytes.Contains(line, []byte("task_completed")) {
+		return
+	}
+	var ev struct {
+		Params struct {
+			Update struct {
+				SessionUpdate string `json:"sessionUpdate"`
+				TaskID        string `json:"task_id"`
+				TaskSnapshot  struct {
+					TaskID string `json:"task_id"`
+				} `json:"task_snapshot"`
+			} `json:"update"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(line, &ev) != nil {
+		return
+	}
+	switch ev.Params.Update.SessionUpdate {
+	case "task_backgrounded":
+		if id := ev.Params.Update.TaskID; id != "" {
+			e.open[id] = true
+		}
+	case "task_completed":
+		if id := ev.Params.Update.TaskSnapshot.TaskID; id != "" {
+			delete(e.open, id)
+		}
+	}
 }
 
 // grokTurnCost prices one updates.jsonl line. Only turn_completed lines that
