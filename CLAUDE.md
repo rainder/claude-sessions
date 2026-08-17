@@ -46,7 +46,7 @@ else. Once the work is done and verified (`go build ./...`, `go vet ./...`,
 3. `git push origin main`.
 4. Deploy to `agent-workstation` (see the deploy memory / project notes for the
    exact remote command — it's `git pull --ff-only && make install &&
-   systemctl restart claude-sessions` run over ssh).
+   claude-sessions service restart` run over ssh).
 
 Then remove the worktree and its branch (`git worktree remove` /
 `git branch -d`) once merged — don't leave stale worktrees lying around.
