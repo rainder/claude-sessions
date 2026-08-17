@@ -1138,6 +1138,149 @@ func TestCollectGrokLocalDerivesStatusFromEvents(t *testing.T) {
 	}
 }
 
+// grokTaskBackgrounded / grokTaskCompleted are the updates.jsonl shapes grok
+// writes when a run_terminal_command (background:true) or monitor is sent to
+// the background and when that task later exits. Status overlays shell from
+// these, not from events.jsonl — the tool_completed fires as soon as the
+// task is backgrounded, and turn_ended then makes events say idle.
+func grokTaskBackgrounded(id string) string {
+	return `{"params":{"update":{"sessionUpdate":"task_backgrounded","task_id":"` + id + `"}}}`
+}
+
+func grokTaskCompleted(id string) string {
+	return `{"params":{"update":{"sessionUpdate":"task_completed","task_snapshot":{"task_id":"` + id + `"}}}}`
+}
+
+func TestCollectGrokLocalOpenBackgroundAfterTurnEndedIsShell(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"phase_changed","phase":"tool_execution"}`,
+		`{"type":"tool_started","tool_name":"run_terminal_command"}`,
+		`{"type":"tool_completed","tool_name":"run_terminal_command"}`,
+		`{"type":"turn_ended","outcome":"completed"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokTaskBackgrounded("task-1"),
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "shell" || rows[0].WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want shell/", rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
+func TestCollectGrokLocalCompletedBackgroundStaysIdle(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"turn_ended","outcome":"completed"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokTaskBackgrounded("task-1"),
+		grokTaskCompleted("task-1"),
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "idle" || rows[0].WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want idle/", rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
+func TestCollectGrokLocalBusyWinsOverOpenBackground(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"turn_started"}`,
+		`{"type":"phase_changed","phase":"streaming_text"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokTaskBackgrounded("task-1"),
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "busy" || rows[0].WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want busy/", rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
+func TestCollectGrokLocalWaitingWinsOverOpenBackground(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"tool_started","tool_name":"ask_user_question"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokTaskBackgrounded("task-1"),
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "waiting" || rows[0].WaitingFor != "input" {
+		t.Errorf("Status/WaitingFor = %q/%q, want waiting/input",
+			rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
+func TestCollectGrokLocalOpenBackgroundClearsWhenCompleted(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"turn_ended","outcome":"completed"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokTaskBackgrounded("task-1"),
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("first collect returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "shell" {
+		t.Fatalf("first collect Status = %q, want shell", rows[0].Status)
+	}
+
+	path := grokUpdatesPath(home, "/work/trecs-brain", grokActiveOneID)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(grokTaskCompleted("task-1") + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	rows = collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("second collect returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "idle" || rows[0].WaitingFor != "" {
+		t.Errorf("after complete Status/WaitingFor = %q/%q, want idle/",
+			rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
 func TestCollectGrokLocalTreatsAToolPermissionAsBusy(t *testing.T) {
 	allPIDsAlive(t)
 	home := t.TempDir()
