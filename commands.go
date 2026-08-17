@@ -174,12 +174,19 @@ func cmdMigrate(args []string) int {
 type newArgs struct {
 	dir, name, command, server, prompt string
 	group                              int // 1..9, 0 = none requested
+	cmd                                string
+	cmdArgs                            []string
 }
 
 // parseNewArgs parses `new`'s flags. --dir and --cwd are synonyms (--dir is
 // preferred, --cwd kept for backward compatibility). Any non-flag args are
 // joined with spaces to form the optional initial prompt, so callers can
 // write it unquoted: `new --dir X some initial prompt`.
+//
+// --cmd BINARY [ARG...] -- takes every token after BINARY until a lone `--`
+// as cmd args (even tokens that look like flags). Tokens before --cmd and
+// after that terminator join as the prompt. --cmd and --command cannot both
+// be set. --cmd requires the trailing `--` even when the prompt is empty.
 //
 // --group is validated here rather than at spawn time so a typo costs nothing:
 // the range is the store's own 1..9, and 0 is rejected along with everything
@@ -188,7 +195,24 @@ type newArgs struct {
 func parseNewArgs(args []string) (newArgs, error) {
 	var a newArgs
 	var promptParts []string
+	cmdMode := false
+	cmdSawDashDash := false
 	for i := 0; i < len(args); i++ {
+		if cmdMode {
+			if args[i] == "--" {
+				cmdMode = false
+				cmdSawDashDash = true
+				continue
+			}
+			a.cmdArgs = append(a.cmdArgs, args[i])
+			continue
+		}
+		if cmdSawDashDash {
+			// After --cmd's terminator, every token is prompt text (including
+			// strings that look like flags, e.g. --command).
+			promptParts = append(promptParts, args[i])
+			continue
+		}
 		switch args[i] {
 		case "--dir", "--cwd":
 			if i+1 >= len(args) {
@@ -203,11 +227,24 @@ func parseNewArgs(args []string) (newArgs, error) {
 			a.name = args[i+1]
 			i++
 		case "--command":
+			if a.cmd != "" {
+				return newArgs{}, fmt.Errorf("--cmd and --command cannot both be set")
+			}
 			if i+1 >= len(args) {
 				return newArgs{}, fmt.Errorf("--command needs a value")
 			}
 			a.command = args[i+1]
 			i++
+		case "--cmd":
+			if a.command != "" || a.cmd != "" {
+				return newArgs{}, fmt.Errorf("--cmd and --command cannot both be set")
+			}
+			if i+1 >= len(args) {
+				return newArgs{}, fmt.Errorf("--cmd needs a binary")
+			}
+			a.cmd = args[i+1]
+			i++
+			cmdMode = true
 		case "--server":
 			if i+1 >= len(args) {
 				return newArgs{}, fmt.Errorf("--server needs a value")
@@ -231,11 +268,14 @@ func parseNewArgs(args []string) (newArgs, error) {
 			promptParts = append(promptParts, args[i])
 		}
 	}
+	if a.cmd != "" && !cmdSawDashDash {
+		return newArgs{}, fmt.Errorf("--cmd requires -- before the prompt")
+	}
 	a.prompt = strings.Join(promptParts, " ")
 	return a, nil
 }
 
-const newUsage = "usage: claude-sessions new --dir PATH [--name NAME] [--command PRESET] [--group 1-9] [--server SERVER] [PROMPT...]"
+const newUsage = "usage: claude-sessions new --dir PATH [--name NAME] [--command PRESET | --cmd BINARY [ARG...] --] [--group 1-9] [--server SERVER] [PROMPT...]"
 
 func cmdNew(args []string) int {
 	a, err := parseNewArgs(args)
@@ -260,39 +300,53 @@ func cmdNewLocal(a newArgs) int {
 		fmt.Fprintf(os.Stderr, "not a directory: %s\n", dir)
 		return 1
 	}
-	presets, err := LoadCommandPresets()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	preset := presets[0]
-	if a.command != "" {
-		var ok bool
-		preset, ok = findCommandPreset(presets, a.command)
-		if !ok {
-			names := make([]string, len(presets))
-			for i, p := range presets {
-				names[i] = p.Name
-			}
-			fmt.Fprintf(os.Stderr, "new: command preset not found: %s (available: %s)\n", a.command, strings.Join(names, ", "))
+	var launch string
+	var binary string
+	if a.cmd != "" {
+		var err error
+		launch, err = launchFromCmd(a.cmd, a.cmdArgs, a.prompt)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "new:", err)
 			return 2
 		}
+		binary = a.cmd
+	} else {
+		presets, err := LoadCommandPresets()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		preset := presets[0]
+		if a.command != "" {
+			var ok bool
+			preset, ok = findCommandPreset(presets, a.command)
+			if !ok {
+				names := make([]string, len(presets))
+				for i, p := range presets {
+					names[i] = p.Name
+				}
+				fmt.Fprintf(os.Stderr, "new: command preset not found: %s (available: %s)\n", a.command, strings.Join(names, ", "))
+				return 2
+			}
+		}
+		launch = preset.Command
+		if a.prompt != "" {
+			launch = launch + " " + shellQuote(a.prompt)
+		}
+		binary, _, _ = strings.Cut(preset.Command, " ")
 	}
-	command := preset.Command
-	if a.prompt != "" {
-		command = command + " " + shellQuote(a.prompt)
-	}
-	tname, err := SpawnNew(dir, a.name, command)
+	tname, err := SpawnNew(dir, a.name, launch)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if a.prompt != "" {
+	if a.prompt != "" && binary == "claude" {
 		// Run synchronously, not backgrounded: unlike the TUI (a long-running
 		// process where a goroutine can outlive the triggering keypress), this
 		// CLI process exits the moment cmdNew returns, which would kill a
 		// goroutine before it ever polled. dismissTrustPrompt bounds itself to
-		// trustPromptTimeout, so this adds at most a few seconds.
+		// trustPromptTimeout, so this adds at most a few seconds. Claude Code
+		// is the only binary that shows that dialog.
 		dismissTrustPrompt(tname)
 	}
 	// Printed before the group is resolved: the tmux name is what a caller
@@ -319,7 +373,7 @@ func cmdNewRemote(a newArgs) int {
 		fmt.Fprintf(os.Stderr, "new: unknown server %q (configured: %s)\n", a.server, strings.Join(names, ", "))
 		return 2
 	}
-	if a.command != "" {
+	if a.cmd == "" && a.command != "" {
 		// Validate against the remote's own preset names before spawning, so a
 		// typo fails fast locally with the list of what that host actually
 		// offers. An old server without the /presets route can't be asked
@@ -345,9 +399,14 @@ func cmdNewRemote(a newArgs) int {
 	req := map[string]any{
 		"cwd":        a.dir,
 		"name":       a.name,
-		"command":    a.command,
 		"prompt":     a.prompt,
 		"request_id": newSpawnRequestID(),
+	}
+	if a.cmd != "" {
+		req["cmd"] = a.cmd
+		req["cmd_args"] = a.cmdArgs
+	} else {
+		req["command"] = a.command
 	}
 	// Sent only when asked for: the flags file is per host, so the remote sets
 	// the group on its own store, and an omitted key is what an unrequested

@@ -433,6 +433,71 @@ func TestNewSessionKnownPresetUsesItsCommand(t *testing.T) {
 	}
 }
 
+func TestNewSessionCmdUsesQuotedArgv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+
+	body := fmt.Sprintf(`{"cwd":%q,"cmd":"grok","cmd_args":["-m","grok-4.6"],"prompt":"DR-1"}`, home)
+	req := httptest.NewRequest(http.MethodPost, "/sessions/new", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	(&server{token: "test-token"}).newSession(rec, req)
+
+	var got actionResult
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.OK {
+		t.Fatalf("result = %#v", got)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// send-keys receives one string: binary + shellQuote(each arg) + quoted prompt.
+	want := "<grok " + shellQuote("-m") + " " + shellQuote("grok-4.6") + " " + shellQuote("DR-1") + "><Enter>"
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("tmux argv missing %q:\n%s", want, data)
+	}
+}
+
+func TestNewSessionCmdRejectsUnknownBinary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	body := fmt.Sprintf(`{"cwd":%q,"cmd":"bash","cmd_args":["-c","id"]}`, home)
+	req := httptest.NewRequest(http.MethodPost, "/sessions/new", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	(&server{token: "test-token"}).newSession(rec, req)
+
+	var got actionResult
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OK || !strings.Contains(got.Error, "not allowed") {
+		t.Fatalf("result = %#v", got)
+	}
+}
+
+func TestNewSessionCmdAndCommandRejected(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	body := fmt.Sprintf(`{"cwd":%q,"command":"Fable","cmd":"claude"}`, home)
+	req := httptest.NewRequest(http.MethodPost, "/sessions/new", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	(&server{token: "test-token"}).newSession(rec, req)
+
+	var got actionResult
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OK {
+		t.Fatalf("wanted rejection, got %#v", got)
+	}
+}
+
 // TestNewSessionPromptIsShellQuoted: a prompt is appended to the preset
 // command as a single shell-quoted argument, so shell metacharacters in the
 // prompt (backticks, $(), quotes) land as literal text typed into the fresh

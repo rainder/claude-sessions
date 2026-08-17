@@ -1727,6 +1727,12 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		Name    string `json:"name"`
 		Command string `json:"command"` // preset name, never raw command text
 		Prompt  string `json:"prompt"`  // free text; shell-quoted before use, never interpreted
+		// Cmd / CmdArgs are the --cmd BINARY [ARG...] path. Mutually exclusive
+		// with Command: a client that sets both is confused, not asking for a
+		// preset named after a binary. Absent Cmd keeps today's first-preset
+		// default.
+		Cmd     string   `json:"cmd"`
+		CmdArgs []string `json:"cmd_args"`
 		// RequestID is an optional idempotency key. Absent, this endpoint keeps
 		// its old behaviour and every call spawns. Present, a repeat of the same
 		// id joins the first call if it is still running and replays its result
@@ -1761,8 +1767,12 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 		}
 		group = *body.Group
 	}
+	if body.Cmd != "" && body.Command != "" {
+		writeJSON(w, http.StatusOK, actionResult{Error: "--cmd and --command cannot both be set"})
+		return
+	}
 	if body.RequestID == "" {
-		writeJSON(w, http.StatusOK, s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, "", group))
+		writeJSON(w, http.StatusOK, s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, "", group, body.Cmd, body.CmdArgs))
 		return
 	}
 	flight, claim := s.spawns.begin(body.RequestID)
@@ -1805,7 +1815,7 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 	// read hold a finished spawn's slot, and a later request would then be
 	// refused for capacity nothing is actually using.
 	defer publish()
-	result = s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, body.RequestID, group)
+	result = s.spawnSession(body.CWD, body.Name, body.Command, body.Prompt, body.RequestID, group, body.Cmd, body.CmdArgs)
 	publish()
 	writeJSON(w, http.StatusOK, result)
 }
@@ -1818,39 +1828,52 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request) {
 // request id. A replayed request replays the stored envelope, warnings and
 // all, which is the same answer re-running would produce: the group is already
 // on that session.
-func (s *server) spawnSession(cwd, name, command, prompt, requestID string, group int) actionResult {
+func (s *server) spawnSession(cwd, name, command, prompt, requestID string, group int, cmd string, cmdArgs []string) actionResult {
 	cwd = expandTilde(cwd)
 	if !isDir(cwd) {
 		return actionResult{Error: "not a directory: " + cwd}
 	}
-	presets, err := LoadCommandPresets()
-	if err != nil {
-		return actionResult{Error: err.Error()}
-	}
-	// LoadCommandPresets always yields a non-empty slice (falls back to the
-	// default Claude preset), so presets[0] is a safe backward-compatible
-	// default for clients that omit command. A named command must match this
-	// server's own allowlist — raw command text is never accepted.
-	preset := presets[0]
-	if command != "" {
-		var ok bool
-		preset, ok = findCommandPreset(presets, command)
-		if !ok {
-			return actionResult{Error: "command preset not configured: " + command}
+	var launch string
+	var binary string
+	if cmd != "" {
+		var err error
+		launch, err = launchFromCmd(cmd, cmdArgs, prompt)
+		if err != nil {
+			return actionResult{Error: err.Error()}
 		}
-	}
-	launch := preset.Command
-	if prompt != "" {
-		launch = launch + " " + shellQuote(prompt)
+		binary = cmd
+	} else {
+		presets, err := LoadCommandPresets()
+		if err != nil {
+			return actionResult{Error: err.Error()}
+		}
+		// LoadCommandPresets always yields a non-empty slice (falls back to the
+		// default Claude preset), so presets[0] is a safe backward-compatible
+		// default for clients that omit command. A named command must match this
+		// server's own allowlist — raw command text is never accepted.
+		preset := presets[0]
+		if command != "" {
+			var ok bool
+			preset, ok = findCommandPreset(presets, command)
+			if !ok {
+				return actionResult{Error: "command preset not configured: " + command}
+			}
+		}
+		launch = preset.Command
+		if prompt != "" {
+			launch = launch + " " + shellQuote(prompt)
+		}
+		binary, _, _ = strings.Cut(preset.Command, " ")
 	}
 	tname, err := s.spawnNew(cwd, name, launch, spawnSuffix(requestID))
 	if err != nil {
 		return actionResult{Error: err.Error()}
 	}
-	if prompt != "" {
+	if prompt != "" && binary == "claude" {
 		// The client won't attach to this session, so nobody's there to accept
 		// a first-run workspace trust dialog for cwd — dismiss it here if it
-		// shows, without blocking the response on the poll.
+		// shows, without blocking the response on the poll. Claude Code is the
+		// only binary that shows that dialog.
 		go dismissTrustPrompt(tname)
 	}
 	result := actionResult{OK: true, Tmux: tname}
