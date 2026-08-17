@@ -44,9 +44,12 @@ else. Once the work is done and verified (`go build ./...`, `go vet ./...`,
    there's no PR step for solo work here).
 2. `make install` — refresh the local binary at `~/.local/bin`.
 3. `git push origin main`.
-4. Deploy to `agent-workstation` (see the deploy memory / project notes for the
-   exact remote command — it's `git pull --ff-only && make install &&
-   claude-sessions service restart` run over ssh).
+4. Deploy to `agent-workstation` over ssh:
+   `git pull --ff-only && make install &&
+   PATH="$HOME/.local/bin:$PATH" claude-sessions service restart`.
+   A login SSH session does not put `~/.local/bin` on `PATH`.
+
+Do all four steps every time after verified work. Do not ask.
 
 Then remove the worktree and its branch (`git worktree remove` /
 `git branch -d`) once merged — don't leave stale worktrees lying around.
