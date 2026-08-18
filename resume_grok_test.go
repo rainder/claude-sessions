@@ -290,59 +290,6 @@ func TestResumeSessionStillRequiresClaudeTranscript(t *testing.T) {
 	}
 }
 
-func TestResumeRowsGrokBadgeTakesPartInNameWidth(t *testing.T) {
-	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
-	const (
-		grokName = "Review"
-		nameCap  = 20 // resumeRows' NAME cap
-	)
-	badge := toolBadge(Session{Tool: toolGrok})
-	if badge != "grok" {
-		t.Fatalf("toolBadge = %q, want grok", badge)
-	}
-	fitted := fitNameForBadge(grokName, badge, nameCap)
-	wantW := nameCellTextWidth(fitted, badge)
-	if wantW <= len(grokName) {
-		t.Fatalf("badge-aware width %d should exceed name %q", wantW, grokName)
-	}
-
-	// One grok row and one short Claude row. A Claude NAME of the badge-aware
-	// width would hide a missing-badge nameW, so it is not in this list.
-	sessions := []ResumableSession{
-		{SessionID: "grok1", CWD: "/work/g", Name: grokName, Tool: toolGrok, MessageCount: 1, ModifiedAt: now},
-		{SessionID: "short1", CWD: "/work/s", Name: "Hi", MessageCount: 1, ModifiedAt: now},
-	}
-	lines, _ := resumeRows(sessions, "/home/u", "mac", 0, now)
-	if len(lines) != 2 {
-		t.Fatalf("got %d lines, want 2", len(lines))
-	}
-	plain := make([]string, len(lines))
-	for i, l := range lines {
-		plain[i] = stripSGR(l)
-	}
-
-	if !strings.Contains(plain[0], "grok") {
-		t.Errorf("grok row missing badge: %q", plain[0])
-	}
-
-	dirG := colStart(plain[0], "/work/g")
-	dirS := colStart(plain[1], "/work/s")
-	if dirG < 0 || dirS < 0 {
-		t.Fatalf("DIR missing: grok=%q short=%q", plain[0], plain[1])
-	}
-	if dirG != dirS {
-		t.Errorf("DIR start grok=%d short-claude=%d; grok=%q short=%q",
-			dirG, dirS, plain[0], plain[1])
-	}
-
-	// AGE(3) + gap(2) + NAME(wantW) + gap(2) — all-local list omits HOST.
-	wantDir := 3 + 2 + wantW + 2
-	if dirG != wantDir {
-		t.Errorf("DIR start = %d, want %d (nameCellTextWidth of fitted grok NAME); row=%q",
-			dirG, wantDir, plain[0])
-	}
-}
-
 func TestLiveSessionIDsIncludesGrokWhenClaudeFileWinsThePID(t *testing.T) {
 	allPIDsAlive(t)
 	home := t.TempDir()

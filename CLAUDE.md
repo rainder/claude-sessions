@@ -270,10 +270,9 @@ writes `task_backgrounded` to `updates.jsonl` when it backgrounds the
 task, and `task_completed` when that task exits, and
 `grokSessionStatus` overlays `shell` on an idle (or empty) events
 answer while any id is still open. waiting and a live turn still win.
-The row carries a dim `grok`
-badge inside the NAME cell (`toolBadge`/`nameCell`), which takes part in that
-column's **sizing** (`nameCellTextWidth`) — a badge left out of the width math
-pushes every column right of it out of alignment.
+A grok row's NAME cell renders identically to a claude one — `toolBadge`
+returns "" for every row, so there is no tool marker distinguishing them
+visually.
 
 **A pid claude still holds a session file for wins outright.** Claude Code does
 not delete that file when its process exits, so a pid it once used and grok now
@@ -410,9 +409,9 @@ refuses — unlike `collectGrokLocal`, which treats a torn read as no live grok
 rows and must not blank the Claude list. `session_kind=subagent` is skipped;
 a missing or empty kind is kept, including forks that carry a
 `parent_session_id`. NAME is `grokSummaryName` (generated_title, then
-session_summary). A dim `grok` badge rides inside NAME and takes part in that
-column's width math (`toolBadge` / `nameCellTextWidth` / `fitNameForBadge` /
-`nameCell`). Prompts stay empty — the → overlay is claude-only. A missing
+session_summary), rendered with no tool marker — `toolBadge` returns "" for
+every row, so a grok row's NAME cell is indistinguishable from a claude
+one's. Prompts stay empty — the → overlay is claude-only. A missing
 `.grok` tree is not an error: the Claude list is exactly what it was before.
 `collectResumableLimited` stays Claude-only (the lazy two-pass + cache
 below). `collectResumableFrom` asks it and `collectGrokResumable` separately,

@@ -29,14 +29,11 @@ const (
 )
 
 // toolBadge is the marker that follows the NAME label for a session this tool
-// did not originally list — "grok" for an xAI Grok CLI row, "" for Claude
-// Code, whose rows keep exactly the layout they always had. It rides inside
-// the NAME cell rather than taking a column of its own: a column would cost
-// every row width for a distinction most rows do not make.
+// did not originally list. Every row currently returns "" — Claude Code and
+// grok rows keep exactly the same NAME layout — but the seam stays in place
+// since nameCell/nameCellTextWidth/fitNameForBadge already carry a badge
+// through sizing and truncation for a future tool that wants one.
 func toolBadge(s Session) string {
-	if s.IsGrok() {
-		return "grok"
-	}
 	return ""
 }
 
