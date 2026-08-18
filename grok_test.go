@@ -1042,19 +1042,21 @@ func TestGrokStatusFromEvents(t *testing.T) {
 			status: "busy",
 		},
 		{
-			name: "a tool permission prompt is busy, not waiting",
+			name: "a tool permission prompt is busy with waitingFor set",
 			lines: []string{
 				`{"type":"phase_changed","phase":"permission_prompt"}`,
 				`{"type":"permission_requested","tool_name":"run_terminal_command"}`,
 			},
-			status: "busy",
+			status:     "busy",
+			waitingFor: "permission prompt",
 		},
 		{
-			name: "a nameless tool permission is still busy",
+			name: "a nameless tool permission is still busy with waitingFor set",
 			lines: []string{
 				`{"type":"permission_requested"}`,
 			},
-			status: "busy",
+			status:     "busy",
+			waitingFor: "permission prompt",
 		},
 		{
 			name: "ask_user_question is waiting for the user",
@@ -1281,7 +1283,7 @@ func TestCollectGrokLocalOpenBackgroundClearsWhenCompleted(t *testing.T) {
 	}
 }
 
-func TestCollectGrokLocalTreatsAToolPermissionAsBusy(t *testing.T) {
+func TestCollectGrokLocalTreatsAToolPermissionAsWaiting(t *testing.T) {
 	allPIDsAlive(t)
 	home := t.TempDir()
 	grokFixture(t, home, grokActiveOne)
@@ -1295,11 +1297,11 @@ func TestCollectGrokLocalTreatsAToolPermissionAsBusy(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
 	}
-	if rows[0].Status != "busy" || rows[0].WaitingFor != "" {
-		t.Errorf("Status/WaitingFor = %q/%q, want busy/", rows[0].Status, rows[0].WaitingFor)
+	if rows[0].Status != "busy" || rows[0].WaitingFor != "permission prompt" {
+		t.Errorf("Status/WaitingFor = %q/%q, want busy/permission prompt", rows[0].Status, rows[0].WaitingFor)
 	}
-	if rows[0].Waiting() {
-		t.Error("Waiting() is true for a tool permission; that is a user-input signal")
+	if !rows[0].Waiting() {
+		t.Error("Waiting() is false for an open tool permission; the user must click allow/deny")
 	}
 }
 

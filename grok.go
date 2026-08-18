@@ -278,27 +278,37 @@ func readGrokEventsTail(path string) []byte {
 // Session.Status / WaitingFor. The map is ours, not a field grok publishes:
 //
 //	open ask_user_question         → waiting (WaitingFor = "input")
+//	open permission prompt         → busy (WaitingFor = "permission prompt")
 //	last event is turn_ended       → idle
 //	an open turn / busy phase      → busy
 //	nothing recognizable           → empty (TUI keeps "-")
 //
-// A tool permission prompt is busy, not waiting. waiting is only "the agent
-// is blocked on a user answer". turn_ended wins over a leftover streaming
-// phase: grok does not write an idle phase, so the last phase_changed after
-// a finished turn is still streaming_text. A torn line is skipped, never a
-// reason to drop the rest.
+// A tool permission prompt — including run_terminal_command — blocks the
+// turn on a human clicking allow/deny, exactly like Claude Code's own
+// {Status: "busy", WaitingFor: "permission prompt"} shape (session.go's
+// Waiting() docs). It is Status "busy" rather than "waiting" for the same
+// reason Claude's own sessions use that shape, but WaitingFor must still be
+// set so Waiting()/sessionStatusRank surface it as needing the user, not as
+// ordinary background work — an unattended permission prompt otherwise sits
+// indistinguishable from a session mid-turn for as long as it takes someone
+// to notice. ask_user_question is the one case that fully blocks the agent
+// on an answer rather than a click, so it alone gets Status "waiting".
+// turn_ended wins over a leftover streaming phase: grok does not write an
+// idle phase, so the last phase_changed after a finished turn is still
+// streaming_text. A torn line is skipped, never a reason to drop the rest.
 //
 // shell is not derived here. A background command or monitor completes
 // its tool call the moment it is backgrounded, so events then look idle.
 // grokSessionStatus overlays shell from updates.jsonl after this returns.
 func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 	var (
-		lastType   string
-		lastPhase  string
-		sawTurnEnd bool
-		sawTurnOn  bool
-		sawBusy    bool
-		waitingOn  bool
+		lastType    string
+		lastPhase   string
+		sawTurnEnd  bool
+		sawTurnOn   bool
+		sawBusy     bool
+		waitingOn   bool
+		permWaiting bool
 	)
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		line = bytes.TrimSpace(line)
@@ -320,11 +330,13 @@ func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 			if grokUserWaitTool(ev.ToolName) {
 				waitingOn = true
 			} else {
-				sawBusy = true
+				permWaiting = true
 			}
 		case "permission_resolved":
 			if grokUserWaitTool(ev.ToolName) {
 				waitingOn = false
+			} else {
+				permWaiting = false
 			}
 		case "turn_started":
 			sawTurnOn = true
@@ -335,6 +347,7 @@ func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 			sawBusy = false
 			lastPhase = ""
 			waitingOn = false
+			permWaiting = false
 		case "tool_started":
 			if grokUserWaitTool(ev.ToolName) {
 				waitingOn = true
@@ -351,6 +364,9 @@ func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 	}
 	if waitingOn {
 		return "waiting", "input"
+	}
+	if permWaiting {
+		return "busy", "permission prompt"
 	}
 	// lastType == turn_ended must win over a leftover sawBusy from the
 	// turn that just finished. A busy phase AFTER that turn_ended is a
