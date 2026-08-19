@@ -16,20 +16,29 @@ const grokUpdatesFile = "updates.jsonl"
 // grokCostTicksPerUSD is Grok's documented unit: 1 USD = 10^10 ticks.
 const grokCostTicksPerUSD = 10_000_000_000
 
+// grokPromptCost is the last counted turn_completed for one prompt_id.
+// Last-wins: grok may emit an incomplete snapshot (no costUsdTicks) and
+// later a complete one for the same prompt; first-wins would keep the
+// short count forever.
+type grokPromptCost struct {
+	cost   float64
+	tokens int
+}
+
 // grokCostCacheEntry holds the incremental scan state for one updates.jsonl:
 // the byte offset consumed so far, the running dollar cost and token count,
-// the prompt_ids already counted, and the background task ids still open
-// (task_backgrounded with no matching task_completed).
+// the last counted totals per prompt_id, and the background task ids still
+// open (task_backgrounded with no matching task_completed).
 type grokCostCacheEntry struct {
 	offset  int64
 	costUSD float64
 	tokens  int
-	seen    map[string]bool // prompt_id already counted
-	open    map[string]bool // background task_id still running
+	seen    map[string]grokPromptCost // last counted totals per prompt_id
+	open    map[string]bool           // background task_id still running
 }
 
 func newGrokCostCacheEntry() *grokCostCacheEntry {
-	return &grokCostCacheEntry{seen: map[string]bool{}, open: map[string]bool{}}
+	return &grokCostCacheEntry{seen: map[string]grokPromptCost{}, open: map[string]bool{}}
 }
 
 var (
@@ -45,6 +54,71 @@ func grokUpdatesPath(home, cwd, sessionID string) string {
 		return filepath.Join(filepath.Dir(p), grokUpdatesFile)
 	}
 	return filepath.Join(home, grokDir, "sessions", url.PathEscape(cwd), sessionID, grokUpdatesFile)
+}
+
+const grokSubagentsDir = "subagents"
+const grokSubagentMetaFile = "meta.json"
+
+// grokChildUpdatesPaths lists each spawned subagent's updates.jsonl. Grok
+// writes child sessions as their own trees under ~/.grok/sessions, not as
+// sibling jsonl files the way Claude Code does. Identity comes from
+// subagents/<id>/meta.json (child_session_id + child_cwd). A missing dir,
+// unreadable meta, or empty child id is skipped — never an error. One
+// level only, matching scanSessionCost's glob; nested grandchildren stay
+// on their own parent. os.ReadDir, not Glob: home is data, not a pattern.
+func grokChildUpdatesPaths(home, cwd, sessionID string) []string {
+	parent := grokUpdatesPath(home, cwd, sessionID)
+	ents, err := os.ReadDir(filepath.Join(filepath.Dir(parent), grokSubagentsDir))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ent := range ents {
+		if !ent.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(parent), grokSubagentsDir, ent.Name(), grokSubagentMetaFile))
+		if err != nil {
+			continue
+		}
+		var meta struct {
+			ChildSessionID string `json:"child_session_id"`
+			ChildCWD       string `json:"child_cwd"`
+		}
+		if json.Unmarshal(data, &meta) != nil {
+			continue
+		}
+		id := meta.ChildSessionID
+		if id == "" {
+			id = ent.Name()
+		}
+		if id == "" || id == sessionID {
+			continue
+		}
+		childCWD := meta.ChildCWD
+		if childCWD == "" {
+			childCWD = cwd
+		}
+		out = append(out, grokUpdatesPath(home, childCWD, id))
+	}
+	return out
+}
+
+// scanGrokSessionCost totals a grok session's cost and tokens. main is the
+// parent updates.jsonl; subagents is the sum of each child session's own
+// updates.jsonl. tokens is the sum across both. Each file uses the same
+// per-path incremental cache as scanGrokCost. Parent turn_completed.usage
+// does not include child sessions.
+func scanGrokSessionCost(home, cwd, sessionID string) (main, subagents float64, tokens int) {
+	var mainTok int
+	main, mainTok = scanGrokCost(grokUpdatesPath(home, cwd, sessionID))
+	subTok := 0
+	for _, p := range grokChildUpdatesPaths(home, cwd, sessionID) {
+		c, t := scanGrokCost(p)
+		subagents += c
+		subTok += t
+	}
+	return main, subagents, mainTok + subTok
 }
 
 // scanGrokCost returns the cumulative dollar cost and token count of one
@@ -152,10 +226,13 @@ func grokApplyBackground(line []byte, e *grokCostCacheEntry) {
 }
 
 // grokTurnCost prices one updates.jsonl line. Only turn_completed lines that
-// carry a non-nil costUsdTicks and/or totalTokens count. Dedup is by
-// prompt_id when non-empty (first counted emission wins). Empty prompt_id
-// still counts — there is no key. Negative ticks are ignored. Tokens come
-// from usage.totalTokens only; cache fields are already inside that total.
+// carry a non-nil costUsdTicks and/or totalTokens count. Dedup is last-wins
+// by prompt_id when non-empty (a later emission replaces the earlier one,
+// returning the delta so the incremental sum stays correct), except a later
+// incomplete snapshot (tokens, no ticks) must not wipe a priced complete
+// turn. Empty prompt_id still counts — there is no key. Negative ticks are
+// ignored. Tokens come from usage.totalTokens only; cache fields are
+// already inside that total.
 func grokTurnCost(line []byte, e *grokCostCacheEntry) (float64, int, bool) {
 	if !bytes.Contains(line, []byte("turn_completed")) {
 		return 0, 0, false
@@ -187,15 +264,23 @@ func grokTurnCost(line []byte, e *grokCostCacheEntry) (float64, int, bool) {
 	if !hasTicks && tokens == 0 {
 		return 0, 0, false
 	}
-	if id := ev.Params.Update.PromptID; id != "" {
-		if e.seen[id] {
-			return 0, 0, false
-		}
-		e.seen[id] = true
-	}
 	var cost float64
 	if hasTicks {
 		cost = float64(*u.CostUsdTicks) / grokCostTicksPerUSD
+	}
+	if id := ev.Params.Update.PromptID; id != "" {
+		prev := e.seen[id]
+		// A later incomplete snapshot (tokens, no ticks) must not wipe a
+		// priced complete turn. Tokens may still grow; cost stays.
+		if prev.cost > 0 && !hasTicks {
+			if tokens > prev.tokens {
+				e.seen[id] = grokPromptCost{cost: prev.cost, tokens: tokens}
+				return 0, tokens - prev.tokens, true
+			}
+			return 0, 0, false
+		}
+		e.seen[id] = grokPromptCost{cost: cost, tokens: tokens}
+		return cost - prev.cost, tokens - prev.tokens, true
 	}
 	return cost, tokens, true
 }

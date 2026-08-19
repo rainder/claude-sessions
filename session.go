@@ -41,14 +41,15 @@ type Session struct {
 
 	// Cumulative dollar cost from the transcript's usage, split by source:
 	// CostUSD is the parent transcript (main loop), CostSubagentsUSD is the
-	// summed cost of the session's Task-tool subagent transcripts. Computed at
-	// collection time so remote rows render from the JSON as-is.
+	// summed cost of child sessions (Claude: Task-tool jsonl under
+	// subagents/; Grok: each spawned child session's updates.jsonl).
+	// Computed at collection time so remote rows render from the JSON as-is.
 	CostUSD          float64 `json:"costUsd,omitempty"`
 	CostSubagentsUSD float64 `json:"costSubagentsUsd,omitempty"`
 
 	// TokensSpent is the cumulative API tokens (Claude: input+output+cache
-	// write+cache read; Grok: sum of turn_completed totalTokens). 0 / omitted
-	// = unknown or none.
+	// write+cache read; Grok: sum of parent plus child-session
+	// turn_completed totalTokens). 0 / omitted = unknown or none.
 	TokensSpent int `json:"tokensSpent,omitempty"`
 
 	// Disabled and Group are this host's shared per-session flags, overlaid at

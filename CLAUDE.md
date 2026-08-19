@@ -237,8 +237,21 @@ no ticks is 0 / "—". The same incremental pass tracks open background
 tasks (`task_backgrounded` / `task_completed`) for the shell overlay.
 Do not scan the whole file every tick: only new bytes, same contract as
 `scanCostIncremental`. Turns without `costUsdTicks` are
-skipped (may understate, accepted). `CostSubagentsUSD` stays 0 — parent
-`turn_completed.usage` already includes finished subagents. Do not scan
+skipped for dollars (may understate, accepted) but still count
+`totalTokens`. Dedup is last-wins per `prompt_id`: grok can emit an
+incomplete snapshot (`usageIsIncomplete`, no ticks) and later a complete
+one for the same prompt — first-wins would keep the short count.
+`CostSubagentsUSD` is the sum of each spawned child session's own
+`updates.jsonl`. Parent `turn_completed.usage` does **not** include
+those children (checked live: PID 4015214 parent $0.67 / 3.6M, twelve
+children $0.54 / 2.8M). Children are discovered from
+`subagents/<id>/meta.json` (`child_session_id`, `child_cwd`) and scanned
+through the same incremental cache, one level only. Grok's in-session
+`/usage` is a live in-memory parent total and can sit ahead of disk
+while a turn is still open. An incomplete `turn_completed`
+(`usageIsIncomplete`, tokens, no ticks) can move TOK mid-turn; COST
+waits for `costUsdTicks` at turn end. A later incomplete line must not
+replace a priced complete one for the same `prompt_id`. Do not scan
 `updates.jsonl` for CTX; CTX stays on `signals.json`.
 
 Grok writes no `status` field. The live signal is `events.jsonl` beside

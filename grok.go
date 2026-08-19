@@ -142,7 +142,7 @@ func grokSessionFrom(home string, e grokActiveSession) (Session, bool) {
 		s.ContextTokens = sig.ContextTokensUsed
 		s.ContextWindow = sig.ContextWindowTokens
 	}
-	s.CostUSD, s.TokensSpent = scanGrokCost(grokUpdatesPath(home, e.CWD, e.SessionID))
+	s.CostUSD, s.CostSubagentsUSD, s.TokensSpent = scanGrokSessionCost(home, e.CWD, e.SessionID)
 	return s, true
 }
 

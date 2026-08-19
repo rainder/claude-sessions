@@ -83,6 +83,26 @@ func grokUpdatesFixture(t *testing.T, home, cwd, sessionID string, lines ...stri
 	}
 }
 
+// grokSubagentMetaFixture writes subagents/<childID>/meta.json under the
+// parent session so scanGrokSessionCost can find the child.
+func grokSubagentMetaFixture(t *testing.T, home, parentCWD, parentID, childID, childCWD string) {
+	t.Helper()
+	dir := filepath.Join(home, grokDir, "sessions", url.PathEscape(parentCWD), parentID, grokSubagentsDir, childID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	meta, err := json.Marshal(map[string]string{
+		"child_session_id": childID,
+		"child_cwd":        childCWD,
+	})
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, grokSubagentMetaFile), meta, 0o644); err != nil {
+		t.Fatalf("write meta.json: %v", err)
+	}
+}
+
 // allPIDsAlive makes every pid in a fixture count as running, so a test can
 // use readable made-up pids instead of hunting for real ones.
 //
@@ -286,8 +306,39 @@ func TestGrokSessionFromReadsCostFromUpdates(t *testing.T) {
 	if s.TokensSpent != 5000 {
 		t.Errorf("TokensSpent = %d, want 5000 from updates.jsonl totalTokens", s.TokensSpent)
 	}
+	if s.CostSubagentsUSD != 0 {
+		t.Errorf("CostSubagentsUSD = %v, want 0 without child sessions", s.CostSubagentsUSD)
+	}
 	if s.ContextTokens != 0 {
 		t.Errorf("ContextTokens = %d, want 0 without signals.json", s.ContextTokens)
+	}
+}
+
+func TestGrokSessionFromAddsSubagentCostAndTokens(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	childID := "child-sess"
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokTurnLineUsage("parent", ticksPtr(10_000_000_000), 1000))
+	grokUpdatesFixture(t, home, "/work/trecs-brain", childID,
+		grokTurnLineUsage("child", ticksPtr(20_000_000_000), 3000))
+	grokSubagentMetaFixture(t, home, "/work/trecs-brain", grokActiveOneID, childID, "/work/trecs-brain")
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	s := rows[0]
+	if s.CostUSD != 1.0 {
+		t.Errorf("CostUSD = %v, want 1.0 from parent updates.jsonl", s.CostUSD)
+	}
+	if s.CostSubagentsUSD != 2.0 {
+		t.Errorf("CostSubagentsUSD = %v, want 2.0 from child updates.jsonl", s.CostSubagentsUSD)
+	}
+	if s.TokensSpent != 4000 {
+		t.Errorf("TokensSpent = %d, want 4000 (parent 1000 + child 3000)", s.TokensSpent)
 	}
 }
 

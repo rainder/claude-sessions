@@ -316,3 +316,99 @@ func TestScanGrokCostMissingTokens(t *testing.T) {
 		t.Errorf("missing file tokens = %d, want 0", tok)
 	}
 }
+
+func TestScanGrokCostLastWinsSamePrompt(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p,
+		grokTurnLineUsage("a", ticksPtr(550018000), 1000),
+		grokTurnLineUsage("a", ticksPtr(10_000_000_000), 4000),
+	)
+	got, tok := scanGrokCost(p)
+	if !approxEq(got, 1) {
+		t.Errorf("scanGrokCost = %v, want 1 (later emission)", got)
+	}
+	if tok != 4000 {
+		t.Errorf("tokens = %d, want 4000 (later emission)", tok)
+	}
+}
+
+func TestScanGrokCostLastWinsOnAppend(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p, grokTurnLineUsage("a", nil, 1000))
+	if got, tok := scanGrokCost(p); got != 0 || tok != 1000 {
+		t.Fatalf("initial = %v/%d, want 0/1000 (incomplete, no ticks)", got, tok)
+	}
+
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(f, grokTurnLineUsage("a", ticksPtr(10_000_000_000), 4000))
+	f.Close()
+
+	got, tok := scanGrokCost(p)
+	if !approxEq(got, 1) {
+		t.Errorf("after complete append = %v, want 1", got)
+	}
+	if tok != 4000 {
+		t.Errorf("after complete append tokens = %d, want 4000", tok)
+	}
+}
+
+func TestScanGrokCostKeepsPricedTurnOverLaterIncomplete(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p, grokTurnLineUsage("a", ticksPtr(10_000_000_000), 4000))
+	if got, tok := scanGrokCost(p); !approxEq(got, 1) || tok != 4000 {
+		t.Fatalf("initial = %v/%d, want 1/4000", got, tok)
+	}
+
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(f, grokTurnLineUsage("a", nil, 5000))
+	f.Close()
+
+	got, tok := scanGrokCost(p)
+	if !approxEq(got, 1) {
+		t.Errorf("after incomplete append = %v, want 1 (priced turn kept)", got)
+	}
+	if tok != 5000 {
+		t.Errorf("after incomplete append tokens = %d, want 5000 (tokens may grow)", tok)
+	}
+}
+
+func TestScanGrokSessionCostAddsChildSessions(t *testing.T) {
+	home := t.TempDir()
+	parentID := "parent-sess"
+	childID := "child-sess"
+	cwd := "/work/repo"
+	grokUpdatesFixture(t, home, cwd, parentID,
+		grokTurnLineUsage("p", ticksPtr(10_000_000_000), 1000))
+	grokUpdatesFixture(t, home, cwd, childID,
+		grokTurnLineUsage("c", ticksPtr(20_000_000_000), 3000))
+	grokSubagentMetaFixture(t, home, cwd, parentID, childID, cwd)
+
+	main, sub, tok := scanGrokSessionCost(home, cwd, parentID)
+	if !approxEq(main, 1) {
+		t.Errorf("main = %v, want 1", main)
+	}
+	if !approxEq(sub, 2) {
+		t.Errorf("subagents = %v, want 2", sub)
+	}
+	if tok != 4000 {
+		t.Errorf("tokens = %d, want 4000 (parent 1000 + child 3000)", tok)
+	}
+}
+
+func TestScanGrokSessionCostWithoutChildren(t *testing.T) {
+	home := t.TempDir()
+	cwd := "/work/repo"
+	id := "solo"
+	grokUpdatesFixture(t, home, cwd, id,
+		grokTurnLineUsage("p", ticksPtr(10_000_000_000), 1000))
+	main, sub, tok := scanGrokSessionCost(home, cwd, id)
+	if !approxEq(main, 1) || sub != 0 || tok != 1000 {
+		t.Errorf("scanGrokSessionCost = %v/%v/%d, want 1/0/1000", main, sub, tok)
+	}
+}
