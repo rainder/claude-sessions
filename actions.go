@@ -244,7 +244,7 @@ func actKill(c *actCtx) {
 		question = fmt.Sprintf("kill PID %d?", s.PID)
 	}
 	if s.NotIdle() {
-		question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — killing will interrupt it", s.StatusDisplay())) + "\n" + question
+		question = colorize(statusDisplayColor(*s), fmt.Sprintf("⚠ session is %s, not idle — killing will interrupt it", s.StatusDisplay())) + "\n" + question
 	}
 	pane := startLocalPreview(*s)
 	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())
@@ -337,7 +337,7 @@ func actAttach(c *actCtx) {
 	}
 	question := fmt.Sprintf("PID %d is not in tmux. Migrate (kill + resume in tmux) first?", s.PID)
 	if s.NotIdle() {
-		question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question
+		question = colorize(statusDisplayColor(*s), fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question
 	}
 	pane := startLocalPreview(*s)
 	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())

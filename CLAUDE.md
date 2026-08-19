@@ -245,12 +245,21 @@ Grok writes no `status` field. The live signal is `events.jsonl` beside
 `summary.json` (`phase_changed`, `turn_started` / `turn_ended`,
 `permission_requested` / `permission_resolved`). `grokStatusFromEvents` maps
 that log onto Claude's vocabulary so render, sort and `StatusDisplay` need no
-grok branch: `waiting` is only an open `ask_user_question` (WaitingFor is
-`"input"` — `Waiting()` keys off WaitingFor, and `sessionStatusRank` would
-bury a waiting row that only set Status). A tool permission prompt
-(`permission_requested` / `permission_prompt`, including
-`run_terminal_command`) is `busy`, not waiting — that is a running turn, not
-a question to the user. A last event of `turn_ended` is `idle` (grok never
+grok branch: an open `ask_user_question` is Status `waiting` (WaitingFor
+`"input"`). An open tool permission prompt (`permission_requested` /
+`permission_prompt`, including `run_terminal_command`) keeps Status `busy` —
+it is a running turn, not a fully-stopped question — but still sets
+WaitingFor to `"permission prompt"`, mirroring the exact
+`{Status: "busy", WaitingFor: "permission prompt"}` shape Claude Code itself
+writes for its own sessions at a permission prompt. `Waiting()` keys off
+WaitingFor alone, not Status, so both shapes register as blocked on the
+user — and `sessionStatusRank` would bury a waiting row that only set
+Status. `StatusDisplay()` (session.go) leads with the literal word
+`"waiting"` whenever WaitingFor is non-empty, for both claude and grok rows
+alike, rather than echoing the underlying `busy`/`waiting` Status —
+`statusDisplayColor` (render.go) makes the STATUS cell's color agree,
+overriding to the `waiting` color whenever `Waiting()` is true. A last event
+of `turn_ended` is `idle` (grok never
 writes an idle phase, so the last `phase_changed` after a finished turn is
 still `streaming_text`); an open turn or a busy phase (`waiting_for_model`,
 `streaming_reasoning`, `streaming_text`, `tool_execution`,

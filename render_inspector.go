@@ -270,7 +270,7 @@ func inspectorMetadata(snap InspectorSnapshot, cols int) string {
 	if model == "" {
 		model = "-"
 	}
-	status := colorize(statusColor[s.Status], s.StatusDisplay())
+	status := colorize(statusDisplayColor(s), s.StatusDisplay())
 	ctx := "ctx " + formatTokens(s.ContextTokens)
 	cost := formatCost(s.CostUSD, s.CostSubagentsUSD)
 	cpu := "cpu " + s.CPU

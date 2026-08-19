@@ -412,6 +412,21 @@ func TestDisabledGrokRowRendersPlainName(t *testing.T) {
 }
 
 // A grok row with no derived Status takes the same "-" placeholder the MODEL,
+// A permission prompt (WaitingFor set, but Status still "busy" — the shape
+// Claude Code itself writes) must display as "waiting:...", not "busy:...":
+// the raw Status field describes the turn as still in flight, but WaitingFor
+// non-empty means the session is genuinely blocked on the user, and the
+// label should say so.
+func TestStatusDisplayLeadsWithWaitingForAPermissionPrompt(t *testing.T) {
+	s := Session{Status: "busy", WaitingFor: "permission prompt"}
+	if got := s.StatusDisplay(); got != "waiting:permission prompt" {
+		t.Errorf("StatusDisplay() = %q, want %q", got, "waiting:permission prompt")
+	}
+	if got := statusDisplayColor(s); got != statusColor["waiting"] {
+		t.Errorf("statusDisplayColor() = %q, want the waiting color %q", got, statusColor["waiting"])
+	}
+}
+
 // TMUX and SID columns already use — never a blank cell that reads as a
 // broken row, and never "?" (which claims the status is unrecognised).
 func TestGrokRowsShowAStatusPlaceholder(t *testing.T) {

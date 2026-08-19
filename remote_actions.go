@@ -345,7 +345,7 @@ func actKillRemote(c *actCtx) {
 	}
 	question := fmt.Sprintf("kill PID %d on %s?", s.PID, s.Host)
 	if s.NotIdle() {
-		question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — killing will interrupt it", s.StatusDisplay())) + "\n" + question
+		question = colorize(statusDisplayColor(*s), fmt.Sprintf("⚠ session is %s, not idle — killing will interrupt it", s.StatusDisplay())) + "\n" + question
 	}
 	pane := startRemotePreview(*s)
 	confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())
@@ -631,7 +631,7 @@ func actAttachRemote(c *actCtx) {
 		}
 		question := fmt.Sprintf("PID %d on %s is not in tmux. Migrate first?", pid, host)
 		if s.NotIdle() {
-			question = colorize(statusColor[s.Status], fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question
+			question = colorize(statusDisplayColor(*s), fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question
 		}
 		pane := startRemotePreview(*s)
 		confirmed := confirmOverlayPreview(question, pane, c.modalWakes, s.NotIdle())

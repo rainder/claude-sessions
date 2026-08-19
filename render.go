@@ -92,6 +92,18 @@ var statusColor = map[string]string{
 	"idle":    "2",
 }
 
+// statusDisplayColor picks the color for a session's STATUS text. Any
+// non-empty WaitingFor is a blocked-on-user state (Waiting()) regardless of
+// the raw Status underneath it — a mid-turn permission prompt is Status
+// "busy" — so it always gets the "waiting" color, matching StatusDisplay's
+// own "waiting:<reason>" text rather than coloring it as ordinary busy work.
+func statusDisplayColor(s Session) string {
+	if s.Waiting() {
+		return statusColor["waiting"]
+	}
+	return statusColor[s.Status]
+}
+
 // statusGlyph is the single-char indicator used in the minimal view.
 var statusGlyph = map[string]string{
 	"busy":    "●",
@@ -2150,7 +2162,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 			}
 			statusCell := fmt.Sprintf("%-*s", statusW, r.statusStr)
 			if !plainCells {
-				statusCell = colorize(statusColor[r.s.Status], statusCell)
+				statusCell = colorize(statusDisplayColor(r.s), statusCell)
 			}
 			nameStr := nameCell(fitNameForBadge(r.nameStr, r.badgeStr, nameW), r.badgeStr, nameW, r.nameDim, plainCells)
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
@@ -2266,7 +2278,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 
 			statusCell := fmt.Sprintf("%-*s", statusW, r.statusStr)
 			if !plainCells {
-				statusCell = colorize(statusColor[r.s.Status], statusCell)
+				statusCell = colorize(statusDisplayColor(r.s), statusCell)
 			}
 			nameStr := nameCell(fitNameForBadge(r.nameStr, r.badgeStr, nameW), r.badgeStr, nameW, r.nameDim, plainCells)
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
@@ -2395,7 +2407,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 
 			statusCell := statusGlyphFor(r.s) + strings.Repeat(" ", statusW-1)
 			if !plainCells {
-				statusCell = colorize(statusColor[r.s.Status], statusCell)
+				statusCell = colorize(statusDisplayColor(r.s), statusCell)
 			}
 			nameStr := nameCell(r.display, r.badgeStr, nameW, r.nameDim, plainCells)
 			if utf8.RuneCountInString(r.dir) > dirW {
