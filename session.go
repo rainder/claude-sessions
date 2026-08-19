@@ -94,11 +94,9 @@ func (s Session) StatusDisplay() string {
 // Waiting reports whether the session is blocked on the user.
 //
 // WaitingFor is the reliable signal, not Status: Claude Code writes shapes like
-// {Status: "busy", WaitingFor: "permission prompt"}, which StatusDisplay and
-// sessionStatusRank both already treat as waiting. selection.go's
-// firstStatusTarget compares Status directly and therefore disagrees; that
-// divergence predates this accessor and is deliberately left alone. All new
-// code uses this method.
+// {Status: "busy", WaitingFor: "permission prompt"}, which StatusDisplay,
+// sessionStatusRank and selection.go's firstIdleTarget (Tab's jump target)
+// all treat as waiting via this method — never by comparing Status directly.
 func (s Session) Waiting() bool { return s.WaitingFor != "" }
 
 // NotIdle reports whether the session has active status (busy, shell,

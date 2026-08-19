@@ -55,11 +55,22 @@ func TestFirstIdleTarget(t *testing.T) {
 
 	waitingBeatsIdle := buildSelectionTargets([]Session{
 		{PID: 1, CWD: "/a", Status: "idle"},
-		{PID: 2, CWD: "/b", Status: "waiting"},
-		{PID: 3, CWD: "/c", Status: "waiting"},
+		{PID: 2, CWD: "/b", Status: "waiting", WaitingFor: "input"},
+		{PID: 3, CWD: "/c", Status: "waiting", WaitingFor: "input"},
 	}, nil)
 	if got, want := firstIdleTarget(waitingBeatsIdle), "2"; got != want {
 		t.Fatalf("firstIdleTarget waiting priority = %q, want %q", got, want)
+	}
+
+	// A permission prompt is Status "busy" with WaitingFor "permission
+	// prompt" — Waiting() is true, but Status is neither "waiting", "idle"
+	// nor "shell". It must still outrank a plain idle row, not be skipped.
+	permissionPromptBeatsIdle := buildSelectionTargets([]Session{
+		{PID: 1, CWD: "/a", Status: "idle"},
+		{PID: 2, CWD: "/b", Status: "busy", WaitingFor: "permission prompt"},
+	}, nil)
+	if got, want := firstIdleTarget(permissionPromptBeatsIdle), "2"; got != want {
+		t.Fatalf("firstIdleTarget permission-prompt priority = %q, want %q", got, want)
 	}
 }
 

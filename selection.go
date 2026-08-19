@@ -94,10 +94,19 @@ func selectionForTmux(targets []selectionTarget, host, tmuxSession string) strin
 }
 
 // firstIdleTarget returns the id of the topmost non-disabled target needing
-// attention, in priority order: "waiting" (blocked on user input) beats
-// "idle", which beats "shell". Returns "" if none qualifies.
+// attention, in priority order: any Waiting() target (blocked on the
+// user — Status "waiting", or a permission prompt with Status "busy" and
+// WaitingFor "permission prompt") beats "idle", which beats "shell". Waiting
+// is checked via Session.Waiting(), not a literal Status comparison, so a
+// permission prompt ranks alongside an ask_user_question rather than being
+// invisible to Tab. Returns "" if none qualifies.
 func firstIdleTarget(targets []selectionTarget) string {
-	for _, status := range []string{"waiting", "idle", "shell"} {
+	for _, target := range targets {
+		if target.session != nil && target.session.Waiting() && !target.session.Disabled {
+			return target.id
+		}
+	}
+	for _, status := range []string{"idle", "shell"} {
 		if id := firstStatusTarget(targets, status); id != "" {
 			return id
 		}
