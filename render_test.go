@@ -2205,15 +2205,17 @@ func TestDisplayCWD(t *testing.T) {
 
 func TestDirDisplay(t *testing.T) {
 	cases := []struct {
-		name, cwd, home, gitRoot, want string
+		name, cwd, home, gitRoot, worktree, want string
 	}{
-		{"worktree", "/repo/.claude/worktrees/DR-860/sub/dir", "", "", "repo:DR-860"},
-		{"git repo, no worktree", "/home/andy/Developer/project-name/src", "/home/andy", "/home/andy/Developer/project-name", "project-name"},
-		{"non-git dir squashes home path", "/home/andy/Developer/scratch/dir", "/home/andy", "", "~/D/s/dir"},
+		{"worktree", "/repo/.claude/worktrees/DR-860/sub/dir", "", "", "", "repo:DR-860"},
+		{"git repo, no worktree", "/home/andy/Developer/project-name/src", "/home/andy", "/home/andy/Developer/project-name", "", "project-name"},
+		{"inferred worktree keeps launch cwd", "/home/andy/Developer/project-name", "/home/andy", "/home/andy/Developer/project-name", "DR-3141", "project-name:DR-3141"},
+		{"cwd worktree wins over inferred name", "/repo/.claude/worktrees/DR-860/sub", "", "/repo/.claude/worktrees/DR-860", "DR-9999", "repo:DR-860"},
+		{"non-git dir squashes home path", "/home/andy/Developer/scratch/dir", "/home/andy", "", "", "~/D/s/dir"},
 	}
 	for _, tc := range cases {
-		if got := dirDisplay(tc.cwd, tc.home, tc.gitRoot); got != tc.want {
-			t.Errorf("%s: dirDisplay(%q, %q, %q) = %q, want %q", tc.name, tc.cwd, tc.home, tc.gitRoot, got, tc.want)
+		if got := dirDisplay(tc.cwd, tc.home, tc.gitRoot, tc.worktree); got != tc.want {
+			t.Errorf("%s: dirDisplay(%q, %q, %q, %q) = %q, want %q", tc.name, tc.cwd, tc.home, tc.gitRoot, tc.worktree, got, tc.want)
 		}
 	}
 }
@@ -2227,6 +2229,21 @@ func TestDeriveFullWorktreePath(t *testing.T) {
 	}
 	row := deriveFull(s, now, "dir")
 	want := "project-name:some-feature"
+	if row.cwdStr != want {
+		t.Errorf("cwdStr = %q, want %q", row.cwdStr, want)
+	}
+}
+
+func TestDeriveFullInferredWorktree(t *testing.T) {
+	now := time.Unix(100, 0)
+	s := Session{
+		CWD:          "/home/andy/Developer/project-name",
+		Home:         "/home/andy",
+		GitRoot:      "/home/andy/Developer/project-name",
+		WorktreeName: "DR-3141",
+	}
+	row := deriveFull(s, now, "dir")
+	want := "project-name:DR-3141"
 	if row.cwdStr != want {
 		t.Errorf("cwdStr = %q, want %q", row.cwdStr, want)
 	}
@@ -2252,6 +2269,16 @@ func TestDeriveMinimalUsesRepoDirName(t *testing.T) {
 				GitRoot: "/home/andy/project/.claude/worktrees/some-feature",
 			},
 			"project:some-feature",
+		},
+		{
+			"inferred grok worktree shows repo:name",
+			Session{
+				CWD:          "/home/andy/project",
+				Home:         "/home/andy",
+				GitRoot:      "/home/andy/project",
+				WorktreeName: "DR-3141",
+			},
+			"project:DR-3141",
 		},
 		{
 			"non-git cwd falls back to basename",
@@ -3422,6 +3449,7 @@ func TestMatchesTextFilter(t *testing.T) {
 		{"tokens may match different fields", s, "prod-box", "api prod", true},
 		{"no field matches", s, "prod-box", "zzz", false},
 		{"empty host is not matched", s, "", "prod", false},
+		{"match inferred worktree name", Session{Name: "Ticket review", CWD: "/home/andy/Developer/trecs-brain", WorktreeName: "DR-3141"}, "", "DR-3141", true},
 	}
 	for _, c := range cases {
 		if got := matchesTextFilter(c.sess, c.host, c.query); got != c.want {

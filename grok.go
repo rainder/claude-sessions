@@ -143,7 +143,80 @@ func grokSessionFrom(home string, e grokActiveSession) (Session, bool) {
 		s.ContextWindow = sig.ContextWindowTokens
 	}
 	s.CostUSD, s.CostSubagentsUSD, s.TokensSpent = scanGrokSessionCost(home, e.CWD, e.SessionID)
+	s.WorktreeName = grokInferredWorktree(home, e.CWD, e.SessionID, s.Name)
 	return s, true
+}
+
+// grokHunkRecordsFile is grok's per-session list of edited file hunks, a
+// sibling of summary.json. Pickup worktrees show up here as paths under
+// .claude/worktrees/<name> even when the registry cwd stays the main repo.
+const grokHunkRecordsFile = "hunk_records.jsonl"
+
+// grokInferredWorktree is the DIR-column worktree label for a grok row whose
+// process cwd is still the launch directory. Empty when cwd already sits
+// under .claude/worktrees (dirDisplay reads that path) or when nothing on
+// disk names a checkout. CWD is never rewritten.
+func grokInferredWorktree(home, cwd, sessionID, name string) string {
+	if worktreeName(cwd) != "" {
+		return ""
+	}
+	if n := grokWorktreeFromHunks(home, cwd, sessionID); n != "" {
+		return n
+	}
+	return grokWorktreeFromTitle(cwd, name)
+}
+
+func grokHunkRecordsPath(home, cwd, sessionID string) string {
+	if p, ok := grokSummaryPath(home, cwd, sessionID); ok {
+		return filepath.Join(filepath.Dir(p), grokHunkRecordsFile)
+	}
+	return filepath.Join(home, grokDir, "sessions", url.PathEscape(cwd), sessionID, grokHunkRecordsFile)
+}
+
+func grokWorktreeFromHunks(home, cwd, sessionID string) string {
+	data := readGrokEventsTail(grokHunkRecordsPath(home, cwd, sessionID))
+	if len(data) == 0 {
+		return ""
+	}
+	name := ""
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if n := grokWorktreeNameInLine(string(line)); n != "" {
+			name = n
+		}
+	}
+	return name
+}
+
+// grokWorktreeNameInLine is worktreeName over a hunk_records JSON line.
+// worktreeName stops at '/', so a filePath that is the worktree root itself
+// (".../.claude/worktrees/DR-3141") would otherwise keep the closing quote.
+func grokWorktreeNameInLine(line string) string {
+	n := worktreeName(line)
+	if i := strings.IndexByte(n, '"'); i >= 0 {
+		n = n[:i]
+	}
+	return n
+}
+
+func grokWorktreeFromTitle(cwd, name string) string {
+	ticket := ticketIDRe.FindString(name)
+	if ticket == "" {
+		return ""
+	}
+	if grokWorktreeDirExists(cwd, ticket) {
+		return ticket
+	}
+	if root := gitRootFor(cwd); root != "" && root != cwd {
+		if grokWorktreeDirExists(root, ticket) {
+			return ticket
+		}
+	}
+	return ""
+}
+
+func grokWorktreeDirExists(root, ticket string) bool {
+	fi, err := os.Stat(filepath.Join(root, ".claude", "worktrees", ticket))
+	return err == nil && fi.IsDir()
 }
 
 // grokSignalsFile is the token/turn counter grok writes beside summary.json.

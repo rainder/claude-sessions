@@ -20,13 +20,17 @@ var ticketIDRe = regexp.MustCompile(`\bDR-\d{1,6}\b`)
 
 // detectTicketID looks for a ClickUp ticket id in the worktree directory
 // basename first (the authoritative source — pickup-next-ticket names
-// worktrees by ticket id), falling back to the session name. "" if neither
-// matches.
-func detectTicketID(cwd, name string) string {
+// worktrees by ticket id), then Session.WorktreeName (a grok row whose
+// process cwd is still the main repo), then the session name. "" if none
+// match.
+func detectTicketID(cwd, name, worktreeNameHint string) string {
 	if wt := worktreeName(cwd); wt != "" {
 		if id := ticketIDRe.FindString(wt); id != "" {
 			return id
 		}
+	}
+	if id := ticketIDRe.FindString(worktreeNameHint); id != "" {
+		return id
 	}
 	return ticketIDRe.FindString(name)
 }

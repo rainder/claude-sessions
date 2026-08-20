@@ -12,7 +12,7 @@ import (
 func infoDialogHeader(s Session) []string {
 	lines := []string{
 		bold(s.Name),
-		dirDisplay(s.CWD, s.Home, s.GitRoot),
+		dirDisplay(s.CWD, s.Home, s.GitRoot, s.WorktreeName),
 	}
 	if s.Host != "" {
 		lines = append(lines, "host: "+s.Host)
@@ -152,7 +152,7 @@ func renderInfoDialog(header []string, ticketSec, convoSec *asyncSection, cols, 
 // same close-key set.
 func showInfoDialog(s Session, wakes []wakeFD) {
 	header := infoDialogHeader(s)
-	ticketID := detectTicketID(s.CWD, s.Name)
+	ticketID := detectTicketID(s.CWD, s.Name, s.WorktreeName)
 
 	var ticketSec *asyncSection
 	if ticketID != "" {

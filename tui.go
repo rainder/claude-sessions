@@ -334,18 +334,18 @@ func RunTUI(interval time.Duration) error {
 	// (info_ticket.go) — this just enumerates what's currently visible.
 	prefetchTicketSummaries := func() {
 		seen := make(map[string]bool)
-		prefetch := func(cwd, name string) {
-			if id := detectTicketID(cwd, name); id != "" && !seen[id] {
+		prefetch := func(s Session) {
+			if id := detectTicketID(s.CWD, s.Name, s.WorktreeName); id != "" && !seen[id] {
 				seen[id] = true
 				prefetchTicketSummary(id)
 			}
 		}
 		for _, s := range local {
-			prefetch(s.CWD, s.Name)
+			prefetch(s)
 		}
 		for _, r := range remotes {
 			for _, s := range r.Sessions {
-				prefetch(s.CWD, s.Name)
+				prefetch(s)
 			}
 		}
 	}
@@ -651,7 +651,7 @@ func RunTUI(interval time.Duration) error {
 		// trip.
 		ticketSummarySec.close() // nil-safe
 		ticketSummarySec = nil
-		if ticketID := detectTicketID(sess.CWD, sess.Name); ticketID != "" {
+		if ticketID := detectTicketID(sess.CWD, sess.Name, sess.WorktreeName); ticketID != "" {
 			ticketSummarySec = startAsyncSection("ticket", func(ctx context.Context) (PreviewResult, error) {
 				return fetchTicketSummaryCached(ctx, ticketID)
 			})

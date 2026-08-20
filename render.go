@@ -229,8 +229,9 @@ func passesGroupFilter(s Session, groups map[string]int, filter groupFilter) boo
 // satisfies the free-form text query. The query is split on spaces into tokens
 // and every token must match (AND); a token matches when it is a
 // case-insensitive substring of at least one searchable field — the display
-// name, cwd, section host name, or tmux session name (the part before ":"). An
-// empty (or all-whitespace) query matches everything. Pure so it is
+// name, cwd, section host name, tmux session name (the part before ":"), or
+// WorktreeName (a grok pickup checkout whose process cwd is still the repo).
+// An empty (or all-whitespace) query matches everything. Pure so it is
 // table-testable.
 func matchesTextFilter(s Session, host, query string) bool {
 	tokens := strings.Fields(query)
@@ -242,7 +243,7 @@ func matchesTextFilter(s Session, host, query string) bool {
 	if i := strings.IndexByte(tmuxName, ':'); i >= 0 {
 		tmuxName = tmuxName[:i]
 	}
-	fields := []string{name, s.CWD, host, tmuxName}
+	fields := []string{name, s.CWD, host, tmuxName, s.WorktreeName}
 	for i, f := range fields {
 		fields[i] = strings.ToLower(f)
 	}
@@ -1494,9 +1495,12 @@ func displayCWD(cwd, home string) string {
 // display. A worktree checkout takes precedence over GitRoot: a worktree's
 // own ".git" is a file (see isGitWorktree), so GitRoot would otherwise
 // resolve to the worktree checkout itself rather than the main repo.
-func repoDirName(cwd, gitRoot string) (string, bool) {
+func repoDirName(cwd, gitRoot, worktreeNameHint string) (string, bool) {
 	if name := worktreeName(cwd); name != "" {
 		return filepath.Base(worktreeRepoRoot(cwd)) + ":" + name, true
+	}
+	if worktreeNameHint != "" && gitRoot != "" {
+		return filepath.Base(gitRoot) + ":" + worktreeNameHint, true
 	}
 	if gitRoot != "" {
 		return filepath.Base(gitRoot), true
@@ -1508,9 +1512,11 @@ func repoDirName(cwd, gitRoot string) (string, bool) {
 // session's cwd: the short repoDirName form for any git-tracked cwd, or a
 // full squashed-home path when cwd isn't inside a git repo (GitRoot empty,
 // e.g. scratch dirs or plain folders) — there, ancestry is the only way to
-// tell dirs apart.
-func dirDisplay(cwd, home, gitRoot string) string {
-	if name, ok := repoDirName(cwd, gitRoot); ok {
+// tell dirs apart. worktreeNameHint is Session.WorktreeName: a grok row
+// whose process still sits in the main checkout but that has a sibling
+// .claude/worktrees/<name> checkout.
+func dirDisplay(cwd, home, gitRoot, worktreeNameHint string) string {
+	if name, ok := repoDirName(cwd, gitRoot, worktreeNameHint); ok {
 		return name
 	}
 	return squashPath(displayCWD(cwd, home))
@@ -2025,7 +2031,7 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		nameDim:   nameDim,
 		badgeStr:  toolBadge(s),
 		statusStr: statusCellText(s),
-		cwdStr:    dirDisplay(s.CWD, s.Home, s.GitRoot),
+		cwdStr:    dirDisplay(s.CWD, s.Home, s.GitRoot, s.WorktreeName),
 		modelStr:  shortModel(s.Model),
 		ctxStr:    formatTokens(s.ContextTokens),
 		costStr:   formatCost(s.CostUSD, s.CostSubagentsUSD),
@@ -2340,7 +2346,7 @@ type drowMinimal struct {
 }
 
 func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
-	dir, ok := repoDirName(s.CWD, s.GitRoot)
+	dir, ok := repoDirName(s.CWD, s.GitRoot, s.WorktreeName)
 	if !ok {
 		cwd := displayCWD(s.CWD, s.Home)
 		dir = filepath.Base(strings.TrimRight(cwd, "/"))

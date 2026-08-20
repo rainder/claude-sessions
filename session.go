@@ -73,6 +73,14 @@ type Session struct {
 	// render.go uses it to decide between the short "<repo-name>" DIR display
 	// and the full squashed-home path for non-git working directories.
 	GitRoot string `json:"gitRoot,omitempty"`
+
+	// WorktreeName is a display-only checkout label (e.g. "DR-3141") for a
+	// grok row whose process cwd is still the main repo. Pickup creates
+	// .claude/worktrees/<name> and edits there without rewriting the
+	// registry cwd. Empty when cwd already names the worktree (dirDisplay
+	// reads the path) or when no worktree can be inferred. Never rewrite CWD
+	// from this field: attach, tmux and kill still use the real process dir.
+	WorktreeName string `json:"worktreeName,omitempty"`
 }
 
 // IsGrok reports whether this row is an xAI Grok CLI session rather than a

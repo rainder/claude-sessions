@@ -39,6 +39,22 @@ func grokSummaryFixture(t *testing.T, home, cwd, sessionID, body string) {
 	}
 }
 
+// grokHunkRecordsFixture writes hunk_records.jsonl beside that session's summary.
+func grokHunkRecordsFixture(t *testing.T, home, cwd, sessionID string, lines ...string) {
+	t.Helper()
+	dir := filepath.Join(home, grokDir, "sessions", url.PathEscape(cwd), sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	body := ""
+	if len(lines) > 0 {
+		body = strings.Join(lines, "\n") + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, grokHunkRecordsFile), []byte(body), 0o644); err != nil {
+		t.Fatalf("write hunk_records.jsonl: %v", err)
+	}
+}
+
 // grokEventsFixture writes events.jsonl beside that session's summary.
 func grokEventsFixture(t *testing.T, home, cwd, sessionID string, lines ...string) {
 	t.Helper()
@@ -222,6 +238,191 @@ func TestCollectGrokLocalReadsRegistryAndSummary(t *testing.T) {
 	// the "-" placeholder rather than inventing a phase.
 	if s.Status != "" || s.WaitingFor != "" {
 		t.Errorf("Status/WaitingFor = %q/%q, want empty without events.jsonl", s.Status, s.WaitingFor)
+	}
+	if s.WorktreeName != "" {
+		t.Errorf("WorktreeName = %q, want empty without hunks or a matching worktree dir", s.WorktreeName)
+	}
+}
+
+func TestGrokSessionFromInfersWorktreeFromHunkRecords(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	cwd := "/work/trecs-brain"
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, cwd, grokActiveOneID, grokSummaryFull)
+	grokHunkRecordsFixture(t, home, cwd, grokActiveOneID,
+		`{"filePath":"`+cwd+`/server/src/a.ts"}`,
+		`{"filePath":"`+cwd+`/.claude/worktrees/DR-3141/server/src/a.ts"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].CWD != cwd {
+		t.Errorf("CWD = %q, want the launch dir (must not rewrite)", rows[0].CWD)
+	}
+	if rows[0].WorktreeName != "DR-3141" {
+		t.Errorf("WorktreeName = %q, want DR-3141", rows[0].WorktreeName)
+	}
+}
+
+func TestGrokSessionFromHunkPathEndingAtWorktreeRoot(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	cwd := "/work/trecs-brain"
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, cwd, grokActiveOneID, grokSummaryFull)
+	grokHunkRecordsFixture(t, home, cwd, grokActiveOneID,
+		`{"filePath":"`+cwd+`/.claude/worktrees/DR-3141"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].WorktreeName != "DR-3141" {
+		t.Errorf("WorktreeName = %q, want DR-3141 without JSON quotes", rows[0].WorktreeName)
+	}
+}
+
+func TestGrokSessionFromLastHunkWorktreeWins(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	cwd := "/work/trecs-brain"
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, cwd, grokActiveOneID, grokSummaryFull)
+	grokHunkRecordsFixture(t, home, cwd, grokActiveOneID,
+		`{"filePath":"`+cwd+`/.claude/worktrees/DR-3141/a.ts"}`,
+		`{"filePath":"`+cwd+`/.claude/worktrees/DR-3375/b.ts"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].WorktreeName != "DR-3375" {
+		t.Errorf("WorktreeName = %q, want DR-3375 (last hunk)", rows[0].WorktreeName)
+	}
+}
+
+func TestGrokSessionFromInfersWorktreeFromTitleWhenDirExists(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	cwd := filepath.Join(home, "trecs-brain")
+	if err := os.MkdirAll(filepath.Join(cwd, ".claude", "worktrees", "DR-3371"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	body := `[{
+  "session_id": "` + grokActiveOneID + `",
+  "pid": 137851,
+  "cwd": "` + cwd + `",
+  "opened_at": "2026-08-14T18:24:21.263567932Z"
+}]`
+	grokFixture(t, home, body)
+	sum := `{
+  "generated_title": "DR-3371 Ticket Implementation and Fixes",
+  "session_summary": "working the ticket"
+}`
+	grokSummaryFixture(t, home, cwd, grokActiveOneID, sum)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].CWD != cwd {
+		t.Errorf("CWD = %q, want the launch dir", rows[0].CWD)
+	}
+	if rows[0].WorktreeName != "DR-3371" {
+		t.Errorf("WorktreeName = %q, want DR-3371", rows[0].WorktreeName)
+	}
+}
+
+func TestGrokSessionFromDoesNotInferWorktreeFromTitleWhenDirMissing(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	cwd := filepath.Join(home, "trecs-brain")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	body := `[{
+  "session_id": "` + grokActiveOneID + `",
+  "pid": 137851,
+  "cwd": "` + cwd + `",
+  "opened_at": "2026-08-14T18:24:21.263567932Z"
+}]`
+	grokFixture(t, home, body)
+	sum := `{
+  "generated_title": "DR-3366",
+  "session_summary": "talking about a ticket"
+}`
+	grokSummaryFixture(t, home, cwd, grokActiveOneID, sum)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].WorktreeName != "" {
+		t.Errorf("WorktreeName = %q, want empty when the worktree dir is missing", rows[0].WorktreeName)
+	}
+}
+
+func TestGrokSessionFromHunkRecordsWinOverTitle(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	cwd := filepath.Join(home, "trecs-brain")
+	if err := os.MkdirAll(filepath.Join(cwd, ".claude", "worktrees", "DR-3371"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	body := `[{
+  "session_id": "` + grokActiveOneID + `",
+  "pid": 137851,
+  "cwd": "` + cwd + `",
+  "opened_at": "2026-08-14T18:24:21.263567932Z"
+}]`
+	grokFixture(t, home, body)
+	sum := `{
+  "generated_title": "DR-3371 Ticket Implementation and Fixes"
+}`
+	grokSummaryFixture(t, home, cwd, grokActiveOneID, sum)
+	grokHunkRecordsFixture(t, home, cwd, grokActiveOneID,
+		`{"filePath":"`+cwd+`/.claude/worktrees/DR-3375/src/a.ts"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].WorktreeName != "DR-3375" {
+		t.Errorf("WorktreeName = %q, want DR-3375 from hunks, not the title ticket", rows[0].WorktreeName)
+	}
+}
+
+func TestGrokSessionFromSkipsInferenceWhenCwdIsAlreadyAWorktree(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	cwd := "/work/trecs-brain/.claude/worktrees/DR-3372"
+	body := `[{
+  "session_id": "` + grokActiveOneID + `",
+  "pid": 137851,
+  "cwd": "` + cwd + `",
+  "opened_at": "2026-08-14T18:24:21.263567932Z"
+}]`
+	grokFixture(t, home, body)
+	sum := `{
+  "generated_title": "DR-3372 already in the checkout"
+}`
+	grokSummaryFixture(t, home, cwd, grokActiveOneID, sum)
+	grokHunkRecordsFixture(t, home, cwd, grokActiveOneID,
+		`{"filePath":"`+cwd+`/server/src/a.ts"}`,
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].WorktreeName != "" {
+		t.Errorf("WorktreeName = %q, want empty when cwd already names the worktree", rows[0].WorktreeName)
 	}
 }
 
