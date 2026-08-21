@@ -161,9 +161,11 @@ func snapshotAccountNames() ([]string, error) {
 }
 
 // snapshotToken reads one snapshot's OAuth access token, parsed exactly the way
-// the live credential is (parseOAuthCredentials). Strictly read-only: nothing
-// here writes a credential file or touches the Keychain, so the account that is
-// actually logged in on this host is never disturbed.
+// the live credential is (parseOAuthCredentials). This function itself is a
+// read; a parked snapshot whose access token has aged out is rotated in place
+// by rotateParkedSnapshotAccess (the poller) or rotateSnapshotForSwitch, never
+// here. The live Keychain / .credentials.json item is still only written by
+// writeActiveCredential on switch.
 func snapshotToken(name string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -288,25 +290,23 @@ var usageInfoFetch = fetchVerifiedUsageInfo
 const usageBadSnapshotReason = "bad snapshot"
 
 // usageNeedsRefreshReason is the classification for a parked snapshot whose
-// OAuth *access* token has aged out while its refresh token is still good.
-// Nothing in this codebase can fix that: claude-switch snapshots are strictly
-// read-only here (see snapshotToken), so the token can never rotate in place
-// the way the live credential's does, and the account stays in this state
-// until a human runs `account save <name>` while logged into it.
+// OAuth *access* token has aged out AND whose rotate failed for a reason
+// other than invalid_grant (network, 5xx, persist). A successful rotate
+// falls through to a normal usage fetch with the new token. invalid_grant
+// is usageExpiredReason — the grant is dead, and `account save` cannot
+// mint a new refresh token from a parked copy that the server has already
+// rejected.
 //
 // It shares usageBadSnapshotReason's shape — set on the entry directly, no
-// classifyUsageErr branch, because no request was made — and is deliberately
-// neither of the two tags it would otherwise fall in with:
+// classifyUsageErr branch, because no usage request was made — and is
+// deliberately neither of the two tags it would otherwise fall in with:
 //
-//   - not usageExpiredReason: "auth expired" means re-login, and the refresh
-//     token here is still perfectly valid. Only the snapshot is stale.
-//   - not usageRateLimitedReason: which is what this state used to render as,
-//     and the whole reason this tag exists. Verified live against the real
-//     endpoint — an expired access token is answered 429 (with a Retry-After
-//     of ~30 minutes), not 401 — so classifyUsageErr saw an ordinary throttle,
-//     the consecutive-429 backoff armed a real wait, and an account that
-//     could never heal on its own sat there cycling "rate limited" forever
-//     against a fix that is one command away.
+//   - not usageExpiredReason: "auth expired" means re-login. That tag is
+//     used when the rotate itself is refused as invalid_grant; a transient
+//     rotate failure is still a snapshot that might work next pass.
+//   - not usageRateLimitedReason: which is what an expired access token
+//     used to render as (the usage endpoint answers 429, not 401), before
+//     this tag existed and before parked snapshots could rotate in place.
 const usageNeedsRefreshReason = "needs refresh"
 
 // knownAccountUsage is fetchKnownAccountUsage with the HTTP leg injected, so
@@ -367,11 +367,11 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 		return failed(false, usageBadSnapshotReason, false)
 	}
 	// The token parses, but has it aged out? A parked snapshot's access token
-	// expires like any other, and unlike the live credential nothing ever
-	// refreshes this copy, so spending a request on it is a request that cannot
-	// succeed today and cannot succeed on any later pass either. Answering it
-	// from the file is both cheaper and more truthful — see
-	// usageNeedsRefreshReason for what the endpoint actually says instead.
+	// expires like any other. The live account is never refreshed here (it was
+	// skipped above via emailMatchesLive; Claude Code rotates that copy). For
+	// every other snapshot, an expired access token is rotated in place
+	// against the OAuth token endpoint so the usage fetch below spends a
+	// fresh bearer rather than sitting on `needs refresh`.
 	//
 	// usageClockNow, not time.Now: this is a *decision* the fetcher tests drive
 	// through the same clock seam they drive backoff with (fakeClock), unlike
@@ -380,10 +380,18 @@ func knownAccountUsage(name, liveEmail string, prev *KnownAccountUsage, fetch fu
 	// A zero expiry means the credential never said (msExpiry's contract), and
 	// an unreadable one means the file changed under us between snapshotToken
 	// and here — neither is evidence of expiry, so both fall through to the
-	// fetch that would have happened anyway.
+	// fetch that would have happened anyway. Do not rotate those.
 	if exp, expErr := snapshotAccessTokenExpiresAt(name); expErr == nil && !exp.IsZero() &&
 		usageClockNow().After(exp.Add(usageExpiryClockSkew)) {
-		return failed(false, usageNeedsRefreshReason, false)
+		rotated, rerr := rotateParkedSnapshotAccess(name)
+		switch {
+		case rerr == nil:
+			tok = rotated
+		case isInvalidGrant(rerr):
+			return failed(true, usageExpiredReason, false)
+		default:
+			return failed(false, usageNeedsRefreshReason, false)
+		}
 	}
 	info, err := fetch(tok)
 	if err != nil {

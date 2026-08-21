@@ -829,8 +829,13 @@ a cache.
 `usage.go` polls Anthropic's OAuth usage endpoint (token from the macOS Keychain
 / `~/.claude/.credentials.json`) every 2 minutes in a background goroutine
 (`UsageHub`, following `RemoteHub`'s pattern minus the wake pipe); the TUI header
-shows it as two progress bars (5-hour and weekly limits). The token is read-only
-— refresh/rotation is Claude Code's job.
+shows it as two progress bars (5-hour and weekly limits). The live Keychain /
+`.credentials.json` credential is still not written except by
+`writeActiveCredential` on switch. Parked snapshots may be rotated in place
+against Claude Code's OAuth token endpoint (`oauth_refresh.go`); a switch
+installs those rotated bytes so Claude Code starts with a fresh access token.
+Rotating a parked snapshot of a grant that is live on another host can
+invalidate that host's refresh token.
 
 `known_accounts.go` covers the *other* accounts each host knows about:
 `claude-switch` parks a credential snapshot per account
@@ -842,12 +847,16 @@ limits with that snapshot's own token, **one account at a time** (inline in
 typically several different Anthropic accounts, each spending its own
 budget, but they are all requests from the same process to the same endpoint
 in the same moment, and going one at a time spreads that out instead of
-bursting it. Strictly read-only — nothing is ever swapped into the Keychain
-or the live credential file. Three rules hold. The **live** account is never
+bursting it. The live Keychain / `.credentials.json` item is still never
+written here — only `writeActiveCredential` on switch does that. Parked
+snapshots whose access token has aged out are rotated in place
+(`rotateParkedSnapshotAccess`); the poller then spends the new token.
+Three rules hold. The **live** account is never
 read from its own snapshot (Claude Code rotates the live token in place
 while the snapshot keeps whatever was stashed at switch time, so the
 snapshot can look expired while the session is healthy) — it is skipped by
-email equality against `loadAccountEmail`. A per-account failure is never an
+email equality against `loadAccountEmail`, and that skip is also what keeps
+the poller from rotating a parked copy of the live grant. A per-account failure is never an
 error: it becomes that entry's own classification, so the walk always
 produces a full slice and the poller's whole-batch backoff only ever fires
 on a host-level problem, never because one account is flaky. And only
@@ -922,29 +931,32 @@ stringifies with the whole request URL, which would land in a one-line header
 placeholder and in the `/usage` JSON.
 
 The sixth is `needs refresh` (`usageNeedsRefreshReason`, known_accounts.go): a
-parked snapshot's *access* token has aged out while its *refresh* token is
-still good. `knownAccountUsage` catches this before spending a request —
-`snapshotAccessTokenExpiresAt` reads the same credential's `expiresAt` field
-`validateSnapshotCredential` (account.go) also reads — there for a different
-reason (an expired access token there just skips the profile-identity probe;
-it is never itself a reason to refuse a switch, only an expired *refresh*
-token is) — applied here as an actual gate on the polling path instead. It
-shares `bad snapshot`'s shape (set
-directly, no `classifyUsageErr` branch, since no request was made) and is
-deliberately neither of the two tags it would otherwise resemble: not `Expired`
-(the refresh token is fine, no re-login needed) and not `rate limited` (which
-is what this state rendered as before this tag existed — confirmed live
-against the real endpoint, an expired access token gets **429**, not 401, from
-`/api/oauth/usage` specifically, even though the same token gets a correct 401
-from `/api/oauth/profile`; the usage endpoint's own quirk, not a real
-throttle). The fix is the same `account save <name>` while logged into that
-account. Like every other non-`Expired` reason, a carryable `prev` still gets
-served with a `Stale` marker ahead of this tag taking effect, so a
-recently-healthy account that goes into this state keeps showing its last
-numbers with a growing staleness age rather than the `needs refresh` text
-itself — consistent with how `bad snapshot` already behaves, and with this
-section's own "old numbers beside a visible Stale marker still beat no numbers
-at all" reasoning above; the age is the discoverability signal, not the tag.
+parked snapshot's *access* token has aged out AND the rotate against the
+OAuth token endpoint failed for a reason other than `invalid_grant`
+(network, 5xx, persist). `knownAccountUsage` catches expiry via
+`snapshotAccessTokenExpiresAt` (the same `expiresAt` field
+`validateSnapshotCredential` reads) and then calls
+`rotateParkedSnapshotAccess` under `withAccountLock`: re-read (a switch may
+have just written), skip if `loadAccountEmail` now matches this snapshot
+(a switch that installed original bytes after a failed rotate would
+otherwise have this poller POST the live grant's refresh token), rotate if
+still expired, persist, then fall through to `fetch` with the new access
+token. `invalid_grant` is `Expired` — the grant
+is dead; `account save` cannot mint a new refresh token from a parked copy
+the server has already rejected. A zero expiry (unknown) or one still inside
+the skew window does not rotate. It shares `bad snapshot`'s shape (set
+directly, no `classifyUsageErr` branch, since no usage request was made) and
+is deliberately neither of the two tags it would otherwise resemble: not
+`Expired` (that tag is the invalid_grant path) and not `rate limited` (which
+is what an expired access token used to render as — confirmed live against
+the real endpoint, `/api/oauth/usage` answers **429**, not 401). Like every
+other non-`Expired` reason, a carryable `prev` still gets served with a
+`Stale` marker ahead of this tag taking effect, so a recently-healthy
+account that fails to rotate keeps showing its last numbers with a growing
+staleness age rather than the `needs refresh` text itself — consistent with
+how `bad snapshot` already behaves, and with this section's own "old numbers
+beside a visible Stale marker still beat no numbers at all" reasoning above;
+the age is the discoverability signal, not the tag.
 
 A transient failure then **carries the last good numbers forward** rather than
 blanking the account — in `KnownAccountsHub`, the client-side poller, which is
@@ -1555,9 +1567,15 @@ doesn't (nothing is read or written past this failure either) → refuse if a
 previous switch left the pending-switch marker armed (see below) → if it is
 already current, return immediately, a *true* no-op touching zero files
 (re-applying the snapshot would overwrite a live token that may have
-refreshed with a stale one) → **step 2.4**, validate the credential about to
+refreshed with a stale one) — and a no-op must not rotate a parked copy of
+the live account → **step 2.4**, validate the credential about to
 be installed (`validateSnapshotCredential`) → **step 2.5**, collect the
-advisory session warning (`switchSessionWarnings`) → unconditional rescue copy
+advisory session warning (`switchSessionWarnings`) → **step 2.6**, rotate the
+parked snapshot via Claude Code's OAuth token endpoint (`rotateSnapshotForSwitch`;
+always attempted, even when access is still valid, so Claude Code starts with
+a fresh token; `invalid_grant` refuses and names `account save`; any other
+error keeps the original bytes) and persist the new blob into the snapshot
+file before the live write → unconditional rescue copy
 of the live credential to the single rolling `.last-switch-rescue.<ext>` slot → when the
 outgoing account resolves to a name, its own credential + identity snapshot →
 arm the pending-switch marker → only then overwrite the live credential →
@@ -1566,7 +1584,11 @@ disk. The rescue and named-sync-back steps exist so a failure can never
 strand you: the outgoing credential always has at least one copy on disk
 before anything overwrites it, including when its account can't be named
 (first switch, renamed account), which is exactly the case the *rescue* copy
-covers and the named sync-back cannot.
+covers and the named sync-back cannot. Rotate is inside the caller's
+`withAccountLock` and must not re-enter it (macOS flock is per-fd). A crash
+between POST and the snapshot write can burn a rotated refresh token — the
+same residual Claude Code itself accepts. Rotating a parked snapshot of a
+grant that is live on another host can invalidate that host's refresh token.
 
 **Steps 2.4 and 2.5 both sit after the no-op return, and that placement is the
 point.** 2.4 refuses a snapshot that is no longer a login: no `refreshToken`,
@@ -1579,8 +1601,9 @@ valid the profile endpoint is asked whose it is, and a disagreement with the
 identity file is refused too (the same misattribution `wrong identity` reports
 after the fact, caught before it becomes the live credential). That probe is
 advisory — validation works offline, and any failure to reach it leaves the
-two file-only checks as the whole decision. The validated bytes are carried to
-the write rather than re-read, so what was checked is what gets installed.
+two file-only checks as the whole decision. The validated bytes are carried
+through the rotate (step 2.6) to the write rather than re-read, so what was
+checked — and then rotated — is what gets installed.
 Running this *before* the no-op return would let a stale parked snapshot turn a
 guaranteed no-op into a refusal, and spend a network probe on it.
 
@@ -1601,6 +1624,12 @@ warning rather than an error. `switchAccount` returns
 the Ctrl+W picker folds a short clause into `accountSwitchToast` — the picker's
 cooked window is repainted the instant the TUI loop resumes, so the toast is
 the only surface that survives.
+
+2.6 always tries to rotate the parked snapshot (`rotateSnapshotForSwitch`)
+before the rescue copy or the pending marker. A no-op (`current == name`)
+still returns before validate and before this step — do not refresh a parked
+copy of the live account. `invalid_grant` refuses; other errors keep the
+original bytes.
 
 `account save NAME` refuses to file the live credential under a name whose
 `.<name>.account.json` already names a *different* account — that is the

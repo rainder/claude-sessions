@@ -27,8 +27,10 @@ import (
 //	~/.claude/.<name>.account.json     {oauthAccount, userID} identity snapshot
 //	~/.claude.json                     Claude Code's live identity cache
 //
-// Everything here is deliberately small and file-shaped: no OAuth refresh, no
-// new dependency (the advisory lock is golang.org/x/sys/unix, already imported
+// Parked-snapshot OAuth rotation lives in oauth_refresh.go (the token
+// endpoint, not a `claude` binary). The live Keychain / .credentials.json
+// item is still only written by writeActiveCredential on switch. No new
+// dependency (the advisory lock is golang.org/x/sys/unix, already imported
 // by remote.go), and no jq — the identity-cache patch is plain encoding/json.
 
 // keychainService is the macOS Keychain generic-password service Claude Code
@@ -333,10 +335,12 @@ func withAccountLock(fn func() error) error {
 // or written until the name is known; an already-active name returns without
 // touching a single file (re-applying a snapshot would overwrite a live token
 // that may have refreshed since the snapshot was captured with an older one);
-// and the live credential is backed up unconditionally, then again under its own
-// name when that name is known, both strictly before it is overwritten. A
-// failure anywhere after that leaves at least one copy of the outgoing
-// credential on disk, so no switch can ever strand an account with no way back.
+// the parked snapshot is rotated (always attempted; invalid_grant refuses)
+// before anything is backed up or marked pending; and the live credential is
+// backed up unconditionally, then again under its own name when that name is
+// known, both strictly before it is overwritten. A failure anywhere after that
+// leaves at least one copy of the outgoing credential on disk, so no switch
+// can ever strand an account with no way back.
 //
 // Warnings are never a refusal. They describe a hazard this tool cannot remove
 // (see runningSessionsWarning), and the one command most likely to run into it
@@ -462,8 +466,9 @@ func switchAccountLocked(name string) (string, []string, error) {
 	// to validate — and validating anyway would let a stale parked snapshot turn
 	// a guaranteed no-op into a refusal, and (worse) spend a network probe on it.
 	//
-	// The bytes are carried to step 5 rather than re-read there, so what was
-	// validated is exactly what gets installed.
+	// The bytes are carried through step 2.6 (rotate) to step 5 rather than
+	// re-read there, so what was validated — and then rotated — is exactly
+	// what gets installed.
 	data, err := validateSnapshotCredential(home, name, snapEmail)
 	if err != nil {
 		return "", nil, err
@@ -473,6 +478,21 @@ func switchAccountLocked(name string) (string, []string, error) {
 	// the outgoing account. Deliberately after the no-op return above too: a
 	// switch that touches nothing has no hazard to warn about.
 	warnings := switchSessionWarnings(name)
+
+	// 2.6. Rotate the parked snapshot before anything about the switch is
+	// armed. Always attempted, even when access is still valid: the whole
+	// point is that Claude Code starts with a fresh token rather than one
+	// that will expire mid-session. invalid_grant refuses (the refresh
+	// token is dead; installing it would log the host out). Any other
+	// error keeps the original bytes — today's expired-access-still-installs
+	// behaviour. Must run before backupOutgoing and the pending marker: a
+	// rotate that talks to the network must not be able to leave the host
+	// mid-switch, and must not re-enter withAccountLock (macOS flock is
+	// per-fd; a nested OpenFile+LOCK_EX deadlocks).
+	data, err = rotateSnapshotForSwitch(home, name, data)
+	if err != nil {
+		return "", nil, err
+	}
 
 	// 3 + 4. Unconditional rescue copy, then the named sync-back when the
 	// outgoing account is identifiable. Both complete before step 5.
@@ -488,9 +508,10 @@ func switchAccountLocked(name string) (string, []string, error) {
 	// for whichever switch comes next.
 	writePendingSwitchMarker(home, name)
 
-	// 5. The switch itself. The bytes are the ones step 2.4 validated, not a
-	// second read of the same path — re-reading would leave a window in which
-	// what was checked and what gets installed are different files.
+	// 5. The switch itself. The bytes are the ones step 2.4 validated and
+	// step 2.6 rotated, not a second read of the same path — re-reading
+	// would leave a window in which what was checked and what gets installed
+	// are different files.
 	if err := writeActiveCredential(data); err != nil {
 		return "", warnings, err
 	}

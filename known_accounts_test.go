@@ -432,12 +432,11 @@ func writeSnapshotExpiry(t *testing.T, home, name, token string, expiresAt time.
 	}
 }
 
-// A parked snapshot's access token ages out on its own and nothing here ever
-// refreshes it (snapshots are strictly read-only), so a request spent on one
-// cannot succeed today or on any later pass. Worse, the endpoint answers an
-// expired access token 429 rather than 401 — verified live — so before this
-// check the account rendered as "rate limited" and armed the consecutive-429
-// backoff forever, over a stale credential one `account save` would fix.
+// A parked snapshot's access token ages out on its own. The poller now
+// rotates it in place against the OAuth token endpoint; a usage request is
+// spent only after a successful rotate (or when expiry is unknown / still
+// inside the skew window). A rotate failure other than invalid_grant is
+// `needs refresh`; invalid_grant is Expired — the grant is dead.
 func TestKnownAccountUsageExpiredAccessToken(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -445,53 +444,68 @@ func TestKnownAccountUsageExpiredAccessToken(t *testing.T) {
 	fakeClock(t, now)
 	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
 
-	// A spy, not stubUsageFetch: the whole point is that no request is made, so
-	// the assertion has to be on the call count, not on the answer.
 	calls := 0
-	spy := func(string) (*UsageInfo, error) {
+	seen := ""
+	spy := func(tok string) (*UsageInfo, error) {
 		calls++
+		seen = tok
 		return &UsageInfo{FiveHour: usageBucket{Pct: 41}}, nil
 	}
 
-	t.Run("an expired access token is answered from the file, unfetched", func(t *testing.T) {
+	t.Run("expired + refresh success fetches with the new token", func(t *testing.T) {
+		calls, seen = 0, ""
+		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
+		stubOAuthRefresh(t, func(rt string, _ []string) (*oauthTokenResponse, error) {
+			if rt != "refresh-tok-t" {
+				t.Fatalf("refresh token = %q, want refresh-tok-t", rt)
+			}
+			return &oauthTokenResponse{AccessToken: "new-tok", RefreshToken: "new-refresh", ExpiresIn: 3600}, nil
+		})
+		got, skipped := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if skipped {
+			t.Fatal("skipped = true, want false for a non-live account")
+		}
+		if calls != 1 || seen != "new-tok" {
+			t.Fatalf("fetches = %d token = %q, want 1 with the rotated access token", calls, seen)
+		}
+		if got.Reason != "" || got.Expired || got.Info == nil || got.Info.FiveHour.Pct != 41 {
+			t.Fatalf("entry = %#v, want an ordinary clean fetch", got)
+		}
+		if tok, err := snapshotToken("trecs"); err != nil || tok != "new-tok" {
+			t.Fatalf("snapshot access = %q err = %v, want new-tok persisted", tok, err)
+		}
+	})
+
+	t.Run("expired + refresh network error is needs-refresh, unfetched", func(t *testing.T) {
 		calls = 0
 		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
-		// prev is nil deliberately: needs-refresh goes through failed() like
-		// every other non-expired outcome, so a carryable prev WOULD have its
-		// numbers re-served here (the bad-snapshot rule) — asserting Info == nil
-		// with a prev would pass for the wrong reason.
+		stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+			return nil, errors.New("dial tcp: no route to host")
+		})
 		got, skipped := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
 		if skipped {
 			t.Fatal("skipped = true, want false for a non-live account")
 		}
 		if calls != 0 {
-			t.Fatalf("fetches = %d, want none — a token known to be expired must cost no request", calls)
+			t.Fatalf("fetches = %d, want none — a failed rotate must not spend the usage endpoint", calls)
 		}
 		if got.Reason != usageNeedsRefreshReason {
 			t.Fatalf("reason = %q, want %q", got.Reason, usageNeedsRefreshReason)
 		}
 		if got.Expired {
-			// "auth expired" means re-login; the refresh token here is fine and
-			// `account save <name>` is the whole fix.
-			t.Fatalf("entry = %#v, want Expired false — the credential needs re-saving, not a new login", got)
+			t.Fatalf("entry = %#v, want Expired false — the grant was not refused", got)
 		}
 		if got.Info != nil || got.Name != "trecs" || got.Account != "andy@trecs.aero" {
 			t.Fatalf("entry = %#v, want identity kept with no numbers", got)
 		}
 	})
 
-	t.Run("a carryable prev still carries through needs-refresh, unfetched", func(t *testing.T) {
-		// Pinning a deliberate design choice, not just documenting it: needs-refresh
-		// goes through the same failed() carry-forward every other non-Expired
-		// reason gets, so an account with a recent healthy reading keeps showing
-		// those numbers (Stale, aging) instead of ever rendering the "needs
-		// refresh" text — matching bad snapshot's existing behavior, and this
-		// codebase's stated "old numbers beside a visible Stale marker still beat
-		// no numbers at all" philosophy. A later change that routes needs-refresh
-		// around failed() to surface the tag instead should have to touch this
-		// test, not break it silently.
+	t.Run("a carryable prev still carries through a failed rotate", func(t *testing.T) {
 		calls = 0
 		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
+		stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+			return nil, errors.New("dial tcp: no route to host")
+		})
 		prev := &KnownAccountUsage{
 			Name: "trecs", Account: "andy@trecs.aero",
 			Info: &UsageInfo{FiveHour: usageBucket{Pct: 7}}, FetchedAt: now.Add(-10 * time.Minute),
@@ -509,10 +523,36 @@ func TestKnownAccountUsageExpiredAccessToken(t *testing.T) {
 		}
 	})
 
-	t.Run("a live access token is still fetched", func(t *testing.T) {
+	t.Run("expired + invalid_grant is Expired, unfetched", func(t *testing.T) {
 		calls = 0
-		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(time.Hour))
+		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
+		stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+			return nil, &oauthRefreshError{Status: 400, Code: "invalid_grant"}
+		})
 		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if calls != 0 {
+			t.Fatalf("fetches = %d, want none", calls)
+		}
+		if !got.Expired || got.Reason != usageExpiredReason {
+			t.Fatalf("entry = %#v, want Expired tagged %q", got, usageExpiredReason)
+		}
+		if got.Info != nil {
+			t.Fatalf("entry = %#v, want no numbers beside a dead grant", got)
+		}
+	})
+
+	t.Run("a live access token is still fetched, without a rotate", func(t *testing.T) {
+		calls = 0
+		refreshCalls := 0
+		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(time.Hour))
+		stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+			refreshCalls++
+			return cannedTokenResponse(), nil
+		})
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if refreshCalls != 0 {
+			t.Fatalf("oauthTokenRefresh calls = %d, want 0 for unexpired access", refreshCalls)
+		}
 		if calls != 1 {
 			t.Fatalf("fetches = %d, want 1 — the expiry check must not over-trigger", calls)
 		}
@@ -522,12 +562,17 @@ func TestKnownAccountUsageExpiredAccessToken(t *testing.T) {
 	})
 
 	t.Run("an absent expiry is unknown, not expired", func(t *testing.T) {
-		// An older snapshot format that never wrote expiresAt: msExpiry reads 0
-		// as "unknown", and guessing "expired" from a missing field would blank
-		// a perfectly good account.
 		calls = 0
+		refreshCalls := 0
 		writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
+		stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+			refreshCalls++
+			return cannedTokenResponse(), nil
+		})
 		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if refreshCalls != 0 {
+			t.Fatalf("oauthTokenRefresh calls = %d, want 0 for an unknown expiry", refreshCalls)
+		}
 		if calls != 1 {
 			t.Fatalf("fetches = %d, want 1 — an unknown expiry must not read as expired", calls)
 		}
@@ -537,19 +582,57 @@ func TestKnownAccountUsageExpiredAccessToken(t *testing.T) {
 	})
 
 	t.Run("the clock-skew tolerance is one-directional", func(t *testing.T) {
-		// Just past the stated expiry but still inside the skew window: a
-		// disagreeing clock must not withhold a reading from a token that very
-		// likely still works. Once the window itself elapses, it does.
 		clock := fakeClock(t, now)
 		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-usageExpiryClockSkew/2))
+		refreshCalls := 0
+		stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+			refreshCalls++
+			return &oauthTokenResponse{AccessToken: "skew-tok", RefreshToken: "skew-refresh", ExpiresIn: 3600}, nil
+		})
 		calls = 0
-		if got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy); got.Reason != "" || calls != 1 {
-			t.Fatalf("inside the skew window: reason = %q, fetches = %d, want a normal fetch", got.Reason, calls)
+		if got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy); got.Reason != "" || calls != 1 || refreshCalls != 0 {
+			t.Fatalf("inside the skew window: reason = %q, fetches = %d, rotates = %d, want a normal fetch", got.Reason, calls, refreshCalls)
 		}
 		*clock = now.Add(usageExpiryClockSkew)
-		calls = 0
-		if got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy); got.Reason != usageNeedsRefreshReason || calls != 0 {
-			t.Fatalf("past the skew window: reason = %q, fetches = %d, want %q unfetched", got.Reason, calls, usageNeedsRefreshReason)
+		calls, refreshCalls = 0, 0
+		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if refreshCalls != 1 {
+			t.Fatalf("past the skew window: rotates = %d, want 1", refreshCalls)
+		}
+		if calls != 1 || seen != "skew-tok" || got.Reason != "" {
+			t.Fatalf("past the skew window: reason = %q, fetches = %d token = %q, want a fetch with the rotated token", got.Reason, calls, seen)
+		}
+	})
+
+	t.Run("does not rotate a snapshot that is now the live account", func(t *testing.T) {
+		// The outer skip uses the liveEmail argument, which a fetcher pass
+		// captured at the start. A switch to this account can finish after
+		// that read. The under-lock re-check must see the fresh identity
+		// and refuse to POST this grant's refresh token.
+		writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
+		if err := os.WriteFile(filepath.Join(home, ".claude.json"),
+			[]byte(`{"oauthAccount":{"emailAddress":"andy@trecs.aero"}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(filepath.Join(home, ".claude.json")) })
+		refreshCalls := 0
+		stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+			refreshCalls++
+			return &oauthTokenResponse{AccessToken: "must-not-rotate", ExpiresIn: 3600}, nil
+		})
+		calls, seen = 0, ""
+		got, skipped := knownAccountUsage("trecs", "andy@avisoma.com", nil, spy)
+		if skipped {
+			t.Fatal("skipped = true, want the outer skip to miss (stale liveEmail)")
+		}
+		if refreshCalls != 0 {
+			t.Fatalf("oauthTokenRefresh calls = %d, want 0 — this grant is live", refreshCalls)
+		}
+		if calls != 1 || seen != "tok-t" {
+			t.Fatalf("fetches = %d token = %q, want 1 with the existing access token", calls, seen)
+		}
+		if got.Reason != "" || got.Info == nil {
+			t.Fatalf("entry = %#v, want an ordinary fetch of the live grant", got)
 		}
 	})
 }
@@ -943,6 +1026,9 @@ func TestKnownAccountsFetcherPersistsIdentityOnAFailedPass(t *testing.T) {
 	fakeClock(t, now)
 	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
 	writeSnapshotExpiry(t, home, "trecs", "tok-t", now.Add(-time.Hour))
+	stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+		return nil, errors.New("dial tcp: no route to host")
+	})
 
 	calls := 0
 	swapFetch(t, func(string) (*UsageInfo, error) {
@@ -957,7 +1043,7 @@ func TestKnownAccountsFetcherPersistsIdentityOnAFailedPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	if calls != 0 {
-		t.Fatalf("fetches = %d, want none — the expiry check must short-circuit the whole pass", calls)
+		t.Fatalf("fetches = %d, want none — a failed rotate must not spend the usage endpoint", calls)
 	}
 	if len(res.Accounts) != 1 || res.Accounts[0].Reason != usageNeedsRefreshReason {
 		t.Fatalf("accounts = %#v, want one entry tagged %q", res.Accounts, usageNeedsRefreshReason)

@@ -36,6 +36,9 @@ func TestMain(m *testing.M) {
 	// poller's HTTP leg without swapFetch would spend the developer's own token
 	// on a real request, so the default has to be loud rather than plausible.
 	usageInfoFetch = func(string) (*UsageInfo, error) { panic("test reached the real usage endpoint") }
+	oauthTokenRefresh = func(string, []string) (*oauthTokenResponse, error) {
+		panic("test reached the real oauth token endpoint")
+	}
 	// Same rule for the identity probe beside it: a test that reaches the
 	// profile endpoint would spend the developer's own token on a real request,
 	// so the default is loud. Every path that probes gates on an unexpired
@@ -81,7 +84,39 @@ func newAccountFixture(t *testing.T) *accountFixture {
 	prevCollect := collectSessionsForSwitch
 	collectSessionsForSwitch = func() ([]Session, error) { return nil, nil }
 	t.Cleanup(func() { collectSessionsForSwitch = prevCollect })
+	// Successful switches rotate the parked snapshot (and install the rotated
+	// blob as live). A canned response keeps every existing switch test off
+	// the real token endpoint; tests that need a failure or a no-call
+	// override the seam afterwards.
+	stubOAuthRefresh(t, fixtureOAuthRefresh)
 	return f
+}
+
+// fixtureAccessForOrig is the access token fixtureOAuthRefresh writes for a
+// snapshot whose original access token was orig (credBlob stores the refresh
+// token as "refresh-"+orig). Tokens are per-refresh so two concurrent
+// switches cannot both land on the same canned value and hide a torn
+// credential/identity pair.
+func fixtureAccessForOrig(orig string) string {
+	return "rotated-access-refresh-" + orig
+}
+
+func fixtureOAuthRefresh(refresh string, _ []string) (*oauthTokenResponse, error) {
+	return &oauthTokenResponse{
+		AccessToken:           "rotated-access-" + refresh,
+		RefreshToken:          "rotated-refresh-" + refresh,
+		ExpiresIn:             3600,
+		RefreshTokenExpiresIn: 86400,
+	}, nil
+}
+
+func accessTokenOf(t *testing.T, blob string) string {
+	t.Helper()
+	tok, err := parseOAuthCredentials([]byte(blob))
+	if err != nil {
+		t.Fatalf("parse credential: %v (blob=%s)", err, blob)
+	}
+	return tok
 }
 
 // livePath is where the live credential physically lives for this platform: the
@@ -323,8 +358,11 @@ func TestSwitchAccountRescuesUnidentifiedOutgoing(t *testing.T) {
 	if string(rescue) != credBlob("tok-stranger") {
 		t.Fatalf("rescue = %q, want the outgoing live credential", rescue)
 	}
-	if got := f.live(); got != credBlob("tok-avisoma") {
-		t.Fatalf("live credential = %q, want avisoma's snapshot", got)
+	if got := accessTokenOf(t, f.live()); got != fixtureAccessForOrig("tok-avisoma") {
+		t.Fatalf("live access token = %q, want the rotated blob", got)
+	}
+	if got := accessTokenOf(t, f.snapshotCred("avisoma")); got != fixtureAccessForOrig("tok-avisoma") {
+		t.Fatalf("avisoma snapshot access = %q, want the rotated blob persisted", got)
 	}
 }
 
@@ -370,9 +408,14 @@ func TestSwitchAccountSyncsOutgoingAccount(t *testing.T) {
 		t.Fatalf("identity snapshot = %s, want exactly oauthAccount+userID", identity)
 	}
 
-	// Step 5: the live credential is now the target's.
-	if got := f.live(); got != credBlob("tok-trecs") {
-		t.Fatalf("live credential = %q, want trecs' snapshot", got)
+	// Step 5: the live credential is the rotated target blob, and the
+	// parked snapshot was rewritten to match so a later switch installs
+	// the same grant.
+	if got := accessTokenOf(t, f.live()); got != fixtureAccessForOrig("tok-trecs") {
+		t.Fatalf("live access token = %q, want the rotated blob", got)
+	}
+	if got := accessTokenOf(t, f.snapshotCred("trecs")); got != fixtureAccessForOrig("tok-trecs") {
+		t.Fatalf("trecs snapshot access = %q, want the rotated blob persisted", got)
 	}
 
 	// Step 6: the identity cache names the new account and keeps every key this
@@ -569,8 +612,8 @@ func TestSwitchAccountFirstEverSwitchNoCredentialAtAll(t *testing.T) {
 	if _, _, err := switchAccount("trecs"); err != nil {
 		t.Fatalf("err = %v, want the switch to proceed (nothing to lose)", err)
 	}
-	if got := f.live(); got != credBlob("tok-trecs") {
-		t.Fatalf("live credential = %q, want trecs' snapshot", got)
+	if got := accessTokenOf(t, f.live()); got != fixtureAccessForOrig("tok-trecs") {
+		t.Fatalf("live access token = %q, want the rotated blob", got)
 	}
 	if _, err := os.Stat(snapshotCredentialPath(f.home, rescueSnapshotName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("rescue file exists when there was nothing to back up (stat err = %v)", err)
@@ -594,8 +637,8 @@ func TestSwitchAccountFirstEverSwitch(t *testing.T) {
 	if email != "andy@avisoma.com" {
 		t.Fatalf("email = %q, want andy@avisoma.com", email)
 	}
-	if got := f.live(); got != credBlob("tok-avisoma") {
-		t.Fatalf("live credential = %q, want avisoma's snapshot", got)
+	if got := accessTokenOf(t, f.live()); got != fixtureAccessForOrig("tok-avisoma") {
+		t.Fatalf("live access token = %q, want the rotated blob", got)
 	}
 	if _, err := os.Stat(snapshotCredentialPath(f.home, rescueSnapshotName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("rescue file written with nothing to rescue (stat err = %v)", err)
@@ -1030,19 +1073,13 @@ func TestSwitchAccountConcurrent(t *testing.T) {
 		}
 	}
 
-	live := f.live()
+	liveTok := accessTokenOf(t, f.live())
 	email := loadAccountEmail()
-	switch live {
-	case credBlob("tok-trecs"):
-		if email != "andy@trecs.aero" {
-			t.Fatalf("torn state: live credential is trecs' but the identity says %q", email)
-		}
-	case credBlob("tok-third"):
-		if email != "andy@third.example" {
-			t.Fatalf("torn state: live credential is third's but the identity says %q", email)
-		}
+	switch {
+	case liveTok == fixtureAccessForOrig("tok-trecs") && email == "andy@trecs.aero":
+	case liveTok == fixtureAccessForOrig("tok-third") && email == "andy@third.example":
 	default:
-		t.Fatalf("live credential = %q, want one of the two targets", live)
+		t.Fatalf("torn state: live access = %q identity = %q", liveTok, email)
 	}
 	// The account both switches started from kept a copy of its own credential.
 	outgoing, err := os.ReadFile(snapshotCredentialPath(f.home, "avisoma"))
@@ -1261,8 +1298,8 @@ func TestSwitchAccountWarnsAboutRunningSessions(t *testing.T) {
 			t.Fatalf("warning = %q, want it to contain %q", warnings[0], want)
 		}
 	}
-	if got := f.live(); got != credBlob("tok-trecs") {
-		t.Fatalf("live credential = %q, want the switch to have happened", got)
+	if got := accessTokenOf(t, f.live()); got != fixtureAccessForOrig("tok-trecs") {
+		t.Fatalf("live access token = %q, want the rotated blob", got)
 	}
 }
 
@@ -1493,4 +1530,94 @@ func TestSwitchAccountNoOpSkipsValidation(t *testing.T) {
 		t.Fatalf("warnings = %v, want none for a no-op", warnings)
 	}
 	assertTreeUnchanged(t, f.home, before)
+}
+
+// TestSwitchAccountRotatesSnapshotAndLive is the happy path for parked-snapshot
+// rotation: a canned token response is written to BOTH the snapshot file and
+// the live credential, so Claude Code starts with a fresh access token.
+func TestSwitchAccountRotatesSnapshotAndLive(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.snapshotIdentity("trecs", "andy@trecs.aero", "uid-trecs")
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+
+	if _, _, err := switchAccount("trecs"); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got := accessTokenOf(t, f.live()); got != fixtureAccessForOrig("tok-trecs") {
+		t.Fatalf("live access = %q, want %q", got, fixtureAccessForOrig("tok-trecs"))
+	}
+	if got := accessTokenOf(t, f.snapshotCred("trecs")); got != fixtureAccessForOrig("tok-trecs") {
+		t.Fatalf("snapshot access = %q, want %q", got, fixtureAccessForOrig("tok-trecs"))
+	}
+}
+
+// TestSwitchAccountRefreshNetworkErrorInstallsOriginal: a transient rotate
+// failure must not block a switch. The original snapshot bytes are installed
+// live, matching today's expired-access-still-installs behaviour.
+func TestSwitchAccountRefreshNetworkErrorInstallsOriginal(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.snapshotIdentity("trecs", "andy@trecs.aero", "uid-trecs")
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+	stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+		return nil, errors.New("dial tcp: no route to host")
+	})
+
+	if _, _, err := switchAccount("trecs"); err != nil {
+		t.Fatalf("err = %v, want the switch to succeed with the original snapshot", err)
+	}
+	if got := f.live(); got != credBlob("tok-trecs") {
+		t.Fatalf("live credential = %q, want the original snapshot bytes", got)
+	}
+	if got := f.snapshotCred("trecs"); got != credBlob("tok-trecs") {
+		t.Fatalf("snapshot = %q, want it left as the original bytes", got)
+	}
+}
+
+// TestSwitchAccountRefreshInvalidGrantRefuses: a dead refresh token is a
+// refusal, not an install. Nothing is written — not live, not the snapshot.
+func TestSwitchAccountRefreshInvalidGrantRefuses(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("trecs", "tok-trecs", "andy@trecs.aero")
+	f.snapshotIdentity("trecs", "andy@trecs.aero", "uid-trecs")
+	f.setLive("tok-avisoma")
+	f.setIdentity("andy@avisoma.com")
+	stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+		return nil, &oauthRefreshError{Status: 400, Code: "invalid_grant"}
+	})
+	before := treeState(t, f.home)
+
+	_, _, err := switchAccount("trecs")
+	if err == nil {
+		t.Fatal("err = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "account save trecs") {
+		t.Fatalf("err = %v, want it to name the fix", err)
+	}
+	assertTreeUnchanged(t, f.home, before)
+}
+
+// TestSwitchAccountNoOpDoesNotRefresh: a switch to the already-live account
+// returns before validate AND before rotate. Refreshing a parked copy of the
+// live account would race Claude Code's own rotation of the live grant.
+func TestSwitchAccountNoOpDoesNotRefresh(t *testing.T) {
+	f := newAccountFixture(t)
+	f.snapshot("avisoma", "tok-avisoma", "andy@avisoma.com")
+	f.setLive("tok-avisoma-live")
+	f.setIdentity("andy@avisoma.com")
+	calls := 0
+	stubOAuthRefresh(t, func(string, []string) (*oauthTokenResponse, error) {
+		calls++
+		return fixtureOAuthRefresh("", nil)
+	})
+
+	if _, _, err := switchAccount("avisoma"); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("oauthTokenRefresh calls = %d, want 0 for a no-op switch", calls)
+	}
 }

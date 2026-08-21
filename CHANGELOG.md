@@ -9,6 +9,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Parked account snapshots now rotate their OAuth tokens in place (Claude
+  Code's token endpoint, no `claude` binary). `account switch` installs the
+  rotated blob so Claude Code starts with a fresh access token. The usage
+  poller rotates an expired parked snapshot instead of sitting on
+  `needs refresh`. A dead refresh token (`invalid_grant`) is `auth expired`.
+  Do not rotate a snapshot whose identity now matches the live account: that
+  grant is already in the Keychain.
+
 - Grok rows now show a STATUS of `idle` / `busy` / `waiting`, derived from
   the session's `events.jsonl` tail (not a field Grok publishes). `waiting`
   is only an open `ask_user_question` (`waiting:input`); a tool permission
