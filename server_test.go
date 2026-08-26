@@ -2369,6 +2369,167 @@ func TestTailscaleIPv4OnlyAcceptsAnIPv4(t *testing.T) {
 	}
 }
 
+// launchd agents have no TERM. The macOS app-bundle CLI then prints
+// "The Tailscale GUI failed to start" on stdout (exit 0) instead of an
+// address — which is the crash loop `--bind tailscale` has been in.
+func TestTailscaleIPv4SucceedsWhenParentHasNoTERM(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "tailscale")
+	// A shell fake is the wrong instrument: /bin/sh invents TERM=dumb when
+	// the parent has none, which is exactly the launchd case. Python sees
+	// the real environment, as Tailscale.app does.
+	script := "#!/usr/bin/python3\n" +
+		"import os\n" +
+		"print('100.64.1.2' if os.environ.get('TERM') else 'The Tailscale GUI failed to start: CLIError 3')\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	defer swapBundledPaths(t, nil)()
+
+	term, hadTerm := os.LookupEnv("TERM")
+	if err := os.Unsetenv("TERM"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadTerm {
+			os.Setenv("TERM", term)
+		}
+	})
+
+	if got := tailscaleIPv4Context(context.Background()); got != "100.64.1.2" {
+		t.Errorf("tailscaleIPv4Context() = %q, want 100.64.1.2 (launchd has no TERM)", got)
+	}
+}
+
+func TestTailscaleCLIEnvReplacesEmptyTERM(t *testing.T) {
+	got := tailscaleCLIEnv([]string{"HOME=/tmp", "TERM=", "PATH=/bin"})
+	nDumb, nEmpty := 0, 0
+	for _, kv := range got {
+		if kv == "TERM=dumb" {
+			nDumb++
+		}
+		if kv == "TERM=" {
+			nEmpty++
+		}
+	}
+	if nDumb != 1 || nEmpty != 0 {
+		t.Errorf("env = %q, want one TERM=dumb and no empty TERM=", got)
+	}
+}
+
+func TestWaitForTailscaleIPv4FailsFastWhenNoBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	defer swapBundledPaths(t, nil)()
+	orig := tailscaleRetryInterval
+	tailscaleRetryInterval = time.Hour
+	t.Cleanup(func() { tailscaleRetryInterval = orig })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	ip, err := waitForTailscaleIPv4(ctx)
+	if err == nil {
+		t.Fatal("waitForTailscaleIPv4 succeeded with no tailscale binary")
+	}
+	if ip != "" {
+		t.Errorf("ip = %q, want empty", ip)
+	}
+	if time.Since(start) > 100*time.Millisecond {
+		t.Errorf("waited %v, want fail-fast when the CLI is missing", time.Since(start))
+	}
+}
+
+func TestWaitForTailscaleIPv4ReturnsWhenReady(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "tailscale")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho 100.64.3.4\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	defer swapBundledPaths(t, nil)()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ip, err := waitForTailscaleIPv4(ctx)
+	if err != nil {
+		t.Fatalf("waitForTailscaleIPv4: %v", err)
+	}
+	if ip != "100.64.3.4" {
+		t.Errorf("ip = %q, want 100.64.3.4", ip)
+	}
+}
+
+func TestWaitForTailscaleIPv4RetriesUntilReady(t *testing.T) {
+	orig := tailscaleRetryInterval
+	tailscaleRetryInterval = time.Millisecond
+	t.Cleanup(func() { tailscaleRetryInterval = orig })
+
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "n")
+	fake := filepath.Join(dir, "tailscale")
+	script := "#!/usr/bin/python3\n" +
+		"from pathlib import Path\n" +
+		"p = Path(" + strconv.Quote(counter) + ")\n" +
+		"n = int(p.read_text()) if p.exists() else 0\n" +
+		"n += 1\n" +
+		"p.write_text(str(n))\n" +
+		"print('100.64.9.9' if n >= 3 else '')\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	defer swapBundledPaths(t, nil)()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ip, err := waitForTailscaleIPv4(ctx)
+	if err != nil {
+		t.Fatalf("waitForTailscaleIPv4: %v", err)
+	}
+	if ip != "100.64.9.9" {
+		t.Errorf("ip = %q, want 100.64.9.9", ip)
+	}
+	raw, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 3 {
+		t.Errorf("attempts = %d, want at least 3", n)
+	}
+}
+
+func TestWaitForTailscaleIPv4StopsOnCancel(t *testing.T) {
+	orig := tailscaleRetryInterval
+	tailscaleRetryInterval = 30 * time.Millisecond
+	t.Cleanup(func() { tailscaleRetryInterval = orig })
+
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "tailscale")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	defer swapBundledPaths(t, nil)()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	ip, err := waitForTailscaleIPv4(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if ip != "" {
+		t.Errorf("ip = %q, want empty", ip)
+	}
+}
+
 // --- TASK6: session_id preconditions on kill/migrate -----------------------
 
 // killRequest builds an authed kill request for pid with the given raw body.

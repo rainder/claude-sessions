@@ -318,6 +318,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--bind tailscale` no longer exits 1 on the first empty lookup.
+  The macOS app CLI needs a TERM, and launchd agents have none.
+  Without it the CLI prints CLIError 3 and the LaunchAgent crash-loops,
+  so auto-`latest` snapshots freeze. The lookup now sets `TERM=dumb`
+  and retries until an IPv4 exists.
 - A carried-forward account usage bar (numbers stay on screen with no age
   bound once a fetch fails, marked `stale`) no longer shows every reset-time
   trailer as "<1m" once its actual reset window has passed — that read as

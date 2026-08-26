@@ -2146,12 +2146,38 @@ func tailscaleBindFailure() string {
 	// explanation on stdout — "The Tailscale GUI failed to start", which is
 	// what a launchd agent gets — and guessing at the cause from here has
 	// already sent one debugging session after the wrong thing.
-	if out, err := exec.Command(bin, "ip", "-4").CombinedOutput(); err == nil || len(out) > 0 {
+	cmd := exec.Command(bin, "ip", "-4")
+	cmd.Env = tailscaleCLIEnv(os.Environ())
+	if out, err := cmd.CombinedOutput(); err == nil || len(out) > 0 {
 		if s := strings.TrimSpace(string(out)); s != "" {
 			msg += "\n        it said: " + s
 		}
 	}
 	return msg
+}
+
+// tailscaleCLIEnv is the environment the tailscale CLI must see. launchd
+// agents have no TERM; the macOS app-bundle CLI then prints CLIError 3
+// ("The Tailscale GUI failed to start") on stdout, exit 0, instead of an
+// address. TERM=dumb is enough to put it in CLI mode. A parent that already
+// has a non-empty TERM is left alone.
+func tailscaleCLIEnv(environ []string) []string {
+	out := make([]string, 0, len(environ)+1)
+	hasTerm := false
+	for _, kv := range environ {
+		if strings.HasPrefix(kv, "TERM=") {
+			if len(kv) > len("TERM=") {
+				hasTerm = true
+				out = append(out, kv)
+			}
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !hasTerm {
+		out = append(out, "TERM=dumb")
+	}
+	return out
 }
 
 // tailscaleIPv4Context is the context-bounded variant used by local client
@@ -2161,16 +2187,20 @@ func tailscaleIPv4Context(ctx context.Context) string {
 	if bin == "" {
 		return ""
 	}
-	out, err := exec.CommandContext(ctx, bin, "ip", "-4").Output()
+	cmd := exec.CommandContext(ctx, bin, "ip", "-4")
+	cmd.Env = tailscaleCLIEnv(os.Environ())
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
 	// Every line is validated as an IPv4 rather than trusting the first
 	// non-empty one. The macOS app bundle's CLI exits 0 and prints "The
 	// Tailscale GUI failed to start: ..." on stdout when it cannot reach the
-	// GUI — which is exactly what happens under launchd. Returning that text
-	// as an address produced a bind failure whose error was a DNS lookup of
-	// the sentence.
+	// GUI — which is what happens under launchd if TERM is missing.
+	// tailscaleCLIEnv sets TERM=dumb to put it in CLI mode; this filter is
+	// the remaining guard if it still prints a sentence. Returning that
+	// text as an address produced a bind failure whose error was a DNS
+	// lookup of the sentence.
 	for _, line := range strings.Split(string(out), "\n") {
 		ip := net.ParseIP(strings.TrimSpace(line))
 		if ip != nil && ip.To4() != nil {
@@ -2178,6 +2208,46 @@ func tailscaleIPv4Context(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+// tailscaleRetryInterval is how long --bind tailscale waits between lookups
+// when the CLI has no IPv4 yet (Tailscale not up at login). Tests shrink it.
+var tailscaleRetryInterval = 2 * time.Second
+
+var errNoTailscale = errors.New("no tailscale command")
+
+// waitForTailscaleIPv4 retries tailscaleIPv4 until it returns an address or
+// ctx is done. A launchd KeepAlive crash-loop is not a retry: the process
+// exits 1, launchd restarts it, and the next lookup is still empty. Staying
+// alive and polling is what lets the IPv4 appear once Tailscale is ready.
+func waitForTailscaleIPv4(ctx context.Context) (string, error) {
+	if tailscaleBinary() == "" {
+		return "", errNoTailscale
+	}
+	logged := false
+	n := 0
+	for {
+		if ip := tailscaleIPv4Context(ctx); ip != "" {
+			return ip, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n++
+		if !logged {
+			fmt.Fprintln(os.Stderr, "server: waiting for Tailscale IPv4")
+			logged = true
+		} else if n%15 == 0 {
+			fmt.Fprintf(os.Stderr, "server: still waiting for Tailscale IPv4 (attempt %d)\n", n)
+		}
+		timer := time.NewTimer(tailscaleRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // shortHostname returns hostname without the domain suffix.
@@ -2293,9 +2363,12 @@ func cmdServer(args []string) int {
 	port, bind := flags.port, flags.bind
 
 	// Magic value: resolve "tailscale" to this host's Tailscale IPv4.
+	// Retry until one exists rather than exiting 1: under launchd that
+	// exit is a KeepAlive crash loop, and Tailscale is often still
+	// coming up when the agent first starts at login.
 	if bind == "tailscale" {
-		ts := tailscaleIPv4()
-		if ts == "" {
+		ts, err := waitForTailscaleIPv4(context.Background())
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "server: "+tailscaleBindFailure())
 			return 1
 		}
