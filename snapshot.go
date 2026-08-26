@@ -23,6 +23,9 @@ var snapshotNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
 type SnapshotEntry struct {
 	SessionID string `json:"sessionId"`
 	Cwd       string `json:"cwd"`
+	// Tool is "" for Claude (including every snapshot written before this
+	// field existed) and toolGrok for a Grok session.
+	Tool string `json:"tool,omitempty"`
 }
 
 // Snapshot is a named, timestamped capture of the local sessions that were
@@ -101,13 +104,11 @@ func saveSnapshotFrom(name string, sessions []Session) (string, int, error) {
 		if s.SessionID == "" {
 			continue
 		}
-		// A snapshot is restored by resuming each entry's claude transcript
-		// (RestoreSnapshot below), and a grok session has none — capturing one
-		// would only produce an entry whose restore is guaranteed to fail.
-		if s.IsGrok() {
-			continue
-		}
-		snap.Entries = append(snap.Entries, SnapshotEntry{SessionID: s.SessionID, Cwd: s.CWD})
+		snap.Entries = append(snap.Entries, SnapshotEntry{
+			SessionID: s.SessionID,
+			Cwd:       s.CWD,
+			Tool:      s.Tool,
+		})
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -198,11 +199,14 @@ type RestoreReport struct {
 // entry failing (already live, transcript gone, cwd/repo root gone) does not
 // stop the rest; every entry gets a Restored/Reason outcome in the report.
 //
-// A worktree entry (cwd under .claude/worktrees/<name>) resumes via
+// Empty Tool is Claude, including every snapshot written before Tool existed.
+// A Claude worktree entry (cwd under .claude/worktrees/<name>) resumes via
 // ResumeSessionInWorktree, which spawns at the main checkout and passes
 // --worktree <name> — the same command claude itself suggests on exit from a
 // worktree session, and it works whether or not the worktree checkout is
-// still on disk. Every other entry resumes via the plain ResumeSession path.
+// still on disk. Every other Claude entry resumes via ResumeSession. A grok
+// entry resumes via ResumeGrokSession in that session's cwd — grok has no
+// --worktree flag, even when the cwd is a worktree path.
 func RestoreSnapshot(name string) (RestoreReport, error) {
 	snap, err := loadSnapshot(name)
 	if err != nil {
@@ -211,12 +215,7 @@ func RestoreSnapshot(name string) (RestoreReport, error) {
 	var report RestoreReport
 	for _, e := range snap.Entries {
 		result := RestoreEntryResult{SessionID: e.SessionID, Cwd: e.Cwd}
-		var rerr error
-		if wt := worktreeName(e.Cwd); wt != "" {
-			_, rerr = ResumeSessionInWorktree(e.SessionID, worktreeRepoRoot(e.Cwd), wt)
-		} else {
-			_, rerr = ResumeSession(e.SessionID, e.Cwd)
-		}
+		rerr := restoreSnapshotEntry(e)
 		if rerr != nil {
 			result.Reason = rerr.Error()
 		} else {
@@ -225,4 +224,21 @@ func RestoreSnapshot(name string) (RestoreReport, error) {
 		report.Results = append(report.Results, result)
 	}
 	return report, nil
+}
+
+func restoreSnapshotEntry(e SnapshotEntry) error {
+	switch e.Tool {
+	case toolGrok:
+		_, err := ResumeGrokSession(e.SessionID, e.Cwd)
+		return err
+	case "":
+		if wt := worktreeName(e.Cwd); wt != "" {
+			_, err := ResumeSessionInWorktree(e.SessionID, worktreeRepoRoot(e.Cwd), wt)
+			return err
+		}
+		_, err := ResumeSession(e.SessionID, e.Cwd)
+		return err
+	default:
+		return fmt.Errorf("unknown tool %q", e.Tool)
+	}
 }

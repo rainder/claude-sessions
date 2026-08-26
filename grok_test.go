@@ -1280,10 +1280,10 @@ func TestWorktreeSurvivorsCountGrokSessions(t *testing.T) {
 	}
 }
 
-// A snapshot is restored by resuming each entry's claude transcript, and a
-// grok session has none — capturing one would only produce an entry whose
-// restore is guaranteed to fail.
-func TestSaveSnapshotSkipsGrokSessions(t *testing.T) {
+// Auto-save of "latest" is how a reboot restores this host's sessions. Grok
+// rows have to be in the file or a grok-only host writes nothing and the
+// pre-reboot snapshot stays frozen.
+func TestSaveSnapshotIncludesGrokSessions(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sessions := []Session{
 		{PID: 1, SessionID: "claude-sess", CWD: "/work/a"},
@@ -1291,15 +1291,25 @@ func TestSaveSnapshotSkipsGrokSessions(t *testing.T) {
 	}
 	if _, n, err := saveSnapshotFrom("grok-test", sessions); err != nil {
 		t.Fatalf("saveSnapshotFrom: %v", err)
-	} else if n != 1 {
-		t.Fatalf("saved %d entries, want 1", n)
+	} else if n != 2 {
+		t.Fatalf("saved %d entries, want 2", n)
 	}
 	snap, err := loadSnapshot("grok-test")
 	if err != nil {
 		t.Fatalf("loadSnapshot: %v", err)
 	}
-	if len(snap.Entries) != 1 || snap.Entries[0].SessionID != "claude-sess" {
-		t.Fatalf("snapshot entries = %+v, want only the claude session", snap.Entries)
+	if len(snap.Entries) != 2 {
+		t.Fatalf("snapshot entries = %+v, want claude and grok", snap.Entries)
+	}
+	byID := map[string]SnapshotEntry{}
+	for _, e := range snap.Entries {
+		byID[e.SessionID] = e
+	}
+	if e := byID["claude-sess"]; e.Cwd != "/work/a" || e.Tool != "" {
+		t.Errorf("claude entry = %+v, want cwd /work/a and empty tool", e)
+	}
+	if e := byID["grok-sess"]; e.Cwd != "/work/b" || e.Tool != toolGrok {
+		t.Errorf("grok entry = %+v, want cwd /work/b and tool %q", e, toolGrok)
 	}
 }
 

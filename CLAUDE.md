@@ -348,11 +348,14 @@ and its `session_mismatch`/`not_live` codes are unchanged.
 live session"): nothing resolved for that pid, so nothing there knows which
 store would have owned it.
 
-**Snapshot restore stays claude-only.** A snapshot is restored by resuming
-each entry's claude transcript, and a grok session has none, so
-`saveSnapshotFrom` skips grok rows. `finishKillJob`'s resurrect offer is
-skipped for the same reason: it calls `ResumeSessionInWorktree`, i.e.
-`claude --resume` with `--worktree`, which grok has no equivalent of.
+**Snapshot save and restore include grok.** `saveSnapshotFrom` writes both
+Claude (`Tool` empty) and grok (`Tool: toolGrok`) rows. Restore dispatches
+on that field: Claude worktree cwd → `ResumeSessionInWorktree`, other Claude
+→ `ResumeSession`, grok → `ResumeGrokSession` in the entry's cwd (grok has
+no `--worktree`). Empty `tool` on disk is Claude, so snapshots taken before
+this field existed still restore. An unknown `tool` is a per-entry skip.
+`finishKillJob`'s resurrect offer stays claude-only: it calls
+`ResumeSessionInWorktree`, and grok has no equivalent.
 
 **Migrate is not claude-only.** `MigrateLocalAttested` kills the process and
 respawns it in a new tmux session: `claude --resume <id>` or

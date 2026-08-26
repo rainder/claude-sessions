@@ -280,3 +280,123 @@ func TestRestoreSnapshotContinuesAfterOneFailure(t *testing.T) {
 		t.Errorf("Results[1].Restored = false, Reason = %q, want true", report.Results[1].Reason)
 	}
 }
+
+func TestRestoreSnapshotResumesGrokEntry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	const (
+		sid = "aaaa-g111"
+		cwd = "/work/proj"
+	)
+	grokSummaryFixture(t, home, cwd, sid, grokResumeSummary("n", cwd, "main", 1, "", ""))
+
+	snap := Snapshot{Name: "grokme", TakenAt: time.Now(), Entries: []SnapshotEntry{
+		{SessionID: sid, Cwd: cwd, Tool: toolGrok},
+	}}
+	data, _ := json.MarshalIndent(snap, "", "  ")
+	path, err := snapshotPath("grokme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := RestoreSnapshot("grokme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 1 || !report.Results[0].Restored {
+		t.Fatalf("Results = %+v, want one restored grok entry", report.Results)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(log)
+	if !strings.Contains(got, "grok --resume "+sid) {
+		t.Errorf("tmux log = %q, want grok --resume %s", got, sid)
+	}
+	if strings.Contains(got, "claude --resume") {
+		t.Errorf("tmux log = %q, must not contain claude --resume", got)
+	}
+	if !strings.Contains(got, "<-c><"+cwd+">") {
+		t.Errorf("tmux log = %q, want new-session -c %s", got, cwd)
+	}
+}
+
+func TestRestoreSnapshotGrokWorktreeCwdDoesNotUseClaudeWorktree(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	const (
+		sid = "aaaa-g222"
+		cwd = "/repo/.claude/worktrees/DR-1"
+	)
+	grokSummaryFixture(t, home, cwd, sid, grokResumeSummary("n", cwd, "main", 1, "", ""))
+
+	snap := Snapshot{Name: "grokwt", TakenAt: time.Now(), Entries: []SnapshotEntry{
+		{SessionID: sid, Cwd: cwd, Tool: toolGrok},
+	}}
+	data, _ := json.MarshalIndent(snap, "", "  ")
+	path, _ := snapshotPath("grokwt")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := RestoreSnapshot("grokwt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 1 || !report.Results[0].Restored {
+		t.Fatalf("Results = %+v, want one restored grok entry", report.Results)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(log)
+	if !strings.Contains(got, "grok --resume "+sid) {
+		t.Errorf("tmux log = %q, want grok --resume %s", got, sid)
+	}
+	if strings.Contains(got, "claude --worktree") || strings.Contains(got, "claude --resume") {
+		t.Errorf("tmux log = %q, grok worktree cwd must not resume via claude", got)
+	}
+	if !strings.Contains(got, "<-c><"+cwd+">") {
+		t.Errorf("tmux log = %q, want new-session -c %s (the worktree cwd, not the repo root)", got, cwd)
+	}
+}
+
+func TestRestoreSnapshotUnknownToolDoesNotResume(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+
+	snap := Snapshot{Name: "unk", TakenAt: time.Now(), Entries: []SnapshotEntry{
+		{SessionID: "plain-1111", Cwd: "/srv/app", Tool: "codex"},
+	}}
+	data, _ := json.MarshalIndent(snap, "", "  ")
+	path, _ := snapshotPath("unk")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := RestoreSnapshot("unk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 1 || report.Results[0].Restored {
+		t.Fatalf("Results = %+v, want one skipped unknown-tool entry", report.Results)
+	}
+	if !strings.Contains(report.Results[0].Reason, "codex") {
+		t.Errorf("Reason = %q, want it to name the unknown tool", report.Results[0].Reason)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(log)) != "" {
+		t.Errorf("tmux log = %q, want empty (unknown tool must not spawn)", log)
+	}
+}

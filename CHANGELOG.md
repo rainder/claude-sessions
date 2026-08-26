@@ -318,6 +318,9 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Auto-save of `latest` now includes Grok sessions. Restore resumes them
+  with `grok --resume` in that session's cwd. A host with only Grok rows
+  no longer leaves `latest` frozen.
 - `--bind tailscale` no longer exits 1 on the first empty lookup.
   The macOS app CLI needs a TERM, and launchd agents have none.
   Without it the CLI prints CLIError 3 and the LaunchAgent crash-loops,
