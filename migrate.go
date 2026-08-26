@@ -102,14 +102,9 @@ func pidPresentErr(err error) bool {
 // kind regardless of which of the two checks caught the substitution.
 var errMigrateSessionMismatch = errors.New("that PID is a different session now")
 
-// errMigrateUnsupportedTool is returned when the PID names a live session this
-// tool cannot migrate. Migrate means "kill it and respawn it as `claude
-// --resume <id>`", which only Claude Code sessions can be.
-var errMigrateUnsupportedTool = errors.New("migrate is not supported for grok sessions")
-
-// MigrateLocal stops the Claude process at pid and spawns a new tmux session
-// running `claude --resume <sessionId>` in the same cwd. Returns the tmux
-// session name on success.
+// MigrateLocal stops the process at pid and spawns a new tmux session running
+// `claude --resume <sessionId>` or `grok --resume <sessionId>` in the same cwd.
+// Returns the tmux session name on success.
 func MigrateLocal(pid int) (string, error) {
 	return MigrateLocalAttested(pid, "")
 }
@@ -117,39 +112,24 @@ func MigrateLocal(pid int) (string, error) {
 // MigrateLocalAttested is MigrateLocal with the session id the caller already
 // verified for this PID.
 //
-// The re-read below is not redundant with a caller's check. Whoever resolved
+// The lookup below is not redundant with a caller's check. Whoever resolved
 // this PID did so against a list that took real I/O to build, and this function
-// then re-reads the session file and would otherwise adopt whatever it now says
-// — so a pane recycled in between would be killed *and* have its transcript
-// resumed under the caller's intent. Passing the attested id makes the re-read
+// then re-resolves the pid and would otherwise adopt whatever it now says —
+// so a pane recycled in between would be killed *and* have its transcript
+// resumed under the caller's intent. Passing the attested id makes the lookup
 // verify rather than adopt. "" keeps the pre-existing unconditional behaviour
 // for the local TUI and CLI paths, which resolve the PID and act on it within
 // the same keystroke.
 func MigrateLocalAttested(pid int, wantSession string) (string, error) {
-	sess, ok := readSessionByPID(pid)
+	// lookupLiveSessionByPID, not readSessionByPID: a leftover claude file for a
+	// pid grok now owns would otherwise be adopted, SIGTERM the live grok
+	// process, and resume a stranger's transcript. The lookup already prefers
+	// live grok in that case, and still returns a dead claude row when grok
+	// has nothing there — the legitimate "resume a session whose process died"
+	// path.
+	sess, ok := lookupLiveSessionByPID(pid)
 	if !ok {
-		// Migrate is claude-only: it kills the process and respawns it as
-		// `claude --resume <sessionId>`, which has no grok equivalent this
-		// tool could drive. Refusing here rather than at each entry point
-		// covers the server handler, cmdMigrate and actAttach's migrate
-		// branch at once, and costs nothing on the normal path — the registry
-		// is only consulted once the claude session file has already missed.
-		if _, live := grokSessionLookup(pid); live {
-			return "", fmt.Errorf("%w: PID %d", errMigrateUnsupportedTool, pid)
-		}
 		return "", fmt.Errorf("no session file for PID %d", pid)
-	}
-	// The claude file is present, but it proves nothing about the pid: Claude
-	// Code never deletes it, so a pid it once used and grok now owns still
-	// reads as a claude session here. Migrating that would SIGTERM the live
-	// grok process and then resume a stranger's transcript in its place. Only
-	// a pid that is dead AND live in grok's registry can be that case — a dead
-	// claude pid with no grok session at all still migrates, which is the
-	// legitimate "resume a session whose process died" path.
-	if !sessionPIDAlive(pid) {
-		if _, live := grokSessionLookup(pid); live {
-			return "", fmt.Errorf("%w: PID %d", errMigrateUnsupportedTool, pid)
-		}
 	}
 	if sess.SessionID == "" || sess.CWD == "" {
 		return "", fmt.Errorf("session file missing sessionId or cwd")
@@ -186,8 +166,11 @@ func MigrateLocalAttested(pid int, wantSession string) (string, error) {
 	if err := tmuxNewDetachedSession(tname, sess.CWD, cols, rows); err != nil {
 		return "", fmt.Errorf("tmux new-session: %w", err)
 	}
-	if err := exec.Command("tmux", "send-keys", "-t", tname,
-		"claude --resume "+sess.SessionID, "Enter").Run(); err != nil {
+	command := "claude --resume " + sess.SessionID
+	if sess.IsGrok() {
+		command = "grok --resume " + sess.SessionID
+	}
+	if err := exec.Command("tmux", "send-keys", "-t", tname, command, "Enter").Run(); err != nil {
 		// Same partial commit SpawnNew guards against: the session exists but
 		// was never told what to run.
 		killTmuxSession(tname)

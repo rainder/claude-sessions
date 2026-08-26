@@ -32,7 +32,7 @@ type Session struct {
 	// field sends over the wire, decodes as claude with no migration step.
 	// toolGrok (grok.go) marks a row collected from the xAI Grok CLI's own
 	// registry. Action dispatch reads it to route reattestation, resume, and
-	// to refuse the claude-only actions (migrate, snapshot restore).
+	// to refuse the claude-only snapshot restore.
 	Tool string `json:"tool,omitempty"`
 
 	Model         string `json:"model,omitempty"`         // last main-loop assistant model from the transcript

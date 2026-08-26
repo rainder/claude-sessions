@@ -754,24 +754,32 @@ func sessionToolLabel(tool string) string {
 // scriptable subcommands take a bare pid with no tool named alongside it, so
 // this is where they learn which store to trust.
 //
-// Claude wins only while its own claim is still plausible. readSessionByPID
-// checks nothing about liveness — Claude Code leaves the file behind when the
-// process exits — so a pid it once used and grok now owns would otherwise
-// resolve to the dead claude session, and `kill PID` would act on the wrong
-// row. When the claude file is present but the pid is NOT alive and grok's
-// registry holds a live session there, grok's row is the truthful one. A dead
-// claude pid with no grok session at all still resolves to the claude row,
-// exactly as before: that is the shape `migrate` legitimately uses to resume a
-// session whose process died.
+// Claude wins only while its own claim is still a row CollectLocal would
+// keep. readSessionByPID checks nothing about liveness, scratch cwd, or
+// headless entrypoints — Claude Code leaves the file behind when the process
+// exits — so a pid it once used and grok now owns would otherwise resolve to
+// the leftover claude session, and `kill PID` / `migrate PID` would act on
+// the wrong row. When the leftover would not be listed (dead pid, scratch
+// cwd, sdk-* entrypoint) and grok's registry holds a live session there,
+// grok's row is the truthful one. A leftover claude pid with no grok session
+// at all still resolves to the claude row: that is the shape `migrate`
+// legitimately uses to resume a session whose process died.
 func lookupLiveSessionByPID(pid int) (Session, bool) {
 	s, ok := readSessionByPID(pid)
-	if !ok {
-		return grokSessionLookup(pid)
-	}
-	if !sessionPIDAlive(pid) {
-		if g, live := grokSessionLookup(pid); live {
+	if g, live := grokSessionLookup(pid); live {
+		if !ok || !listedClaudeClaim(s) {
 			return g, true
 		}
 	}
-	return s, true
+	if ok {
+		return s, true
+	}
+	return Session{}, false
+}
+
+// listedClaudeClaim reports whether s is a claude session file CollectLocal
+// would keep: live pid, not scratch, not headless. A leftover that fails any
+// of those must not beat a live grok session at the same pid.
+func listedClaudeClaim(s Session) bool {
+	return sessionPIDAlive(s.PID) && !isScratchCWD(s.CWD) && !s.Headless()
 }

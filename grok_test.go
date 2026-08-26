@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -914,25 +916,74 @@ func TestServerReattestRoutesGrokToItsOwnRegistry(t *testing.T) {
 	}
 }
 
-// Migrate means "kill it and respawn as `claude --resume <id>`", which no grok
-// session can be. The refusal lives in MigrateLocalAttested so every entry
-// point — the server handler, cmdMigrate and actAttach's migrate branch — gets
-// it from one place.
-func TestMigrateRefusesGrokSessions(t *testing.T) {
-	stubGrokLookup(t, Session{Tool: toolGrok, PID: 999999, SessionID: "grok-sess"})
-	_, err := MigrateLocalAttested(999999, "grok-sess")
-	if err == nil || !strings.Contains(err.Error(), "not supported for grok") {
-		t.Fatalf("MigrateLocalAttested on a grok pid = %v, want a grok refusal", err)
+// A grok session that is not in tmux migrates the same way a claude one does:
+// kill the process, then type `grok --resume <id>` into a new pane. It must
+// not send `claude --resume` — that would resume a stranger's transcript.
+func TestMigrateSendsGrokResume(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	stubGrokLookup(t, Session{Tool: toolGrok, PID: 999999, SessionID: "grok-sess", CWD: "/work/a"})
+	defer stubMigrateKill(t, func(int, syscall.Signal) error { return nil }, func(int) bool { return false })()
+
+	if _, err := MigrateLocalAttested(999999, "grok-sess"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "grok --resume grok-sess") {
+		t.Errorf("tmux log = %q, want grok --resume grok-sess", got)
+	}
+	if strings.Contains(got, "claude --resume") {
+		t.Errorf("tmux log = %q, must not contain claude --resume", got)
+	}
+	if !strings.Contains(got, "<-c></work/a>") {
+		t.Errorf("tmux log = %q, want new-session -c /work/a", got)
 	}
 }
 
-// `attach PID` on a grok session with no tmux pane must not point the user at
-// `migrate`, which can only refuse. The refusal branch returns before anything
-// touches tmux, so this is exercisable without a terminal.
-func TestCmdAttachRefusesToSuggestMigrateForAGrokSession(t *testing.T) {
-	stubGrokLookup(t, Session{Tool: toolGrok, PID: 999999, SessionID: "grok-sess"})
-	if code := cmdAttach([]string{"999999"}); code != 1 {
-		t.Fatalf("cmdAttach = %d, want 1", code)
+// `attach PID` on a grok session with no pane now points at migrate, the same
+// recovery step a claude session already gets.
+func TestCmdAttachSuggestsMigrateForAGrokSession(t *testing.T) {
+	stubGrokLookup(t, Session{Tool: toolGrok, PID: 999999, SessionID: "grok-sess", CWD: "/work/a"})
+	stderr := captureStderr(t, func() {
+		if code := cmdAttach([]string{"999999"}); code != 1 {
+			t.Fatalf("cmdAttach = %d, want 1", code)
+		}
+	})
+	if !strings.Contains(stderr, "run: claude-sessions migrate 999999") {
+		t.Fatalf("stderr = %q, want a migrate suggestion", stderr)
+	}
+	if strings.Contains(stderr, "not supported for grok") {
+		t.Fatalf("stderr = %q, must not refuse grok migrate", stderr)
+	}
+}
+
+// cmdMigrate's up-front grok refuse would otherwise hide a working primitive
+// behind a confirmation the user never reaches. -y skips the prompt.
+func TestCmdMigrateYSendsGrokResume(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	stubGrokLookup(t, Session{Tool: toolGrok, PID: 999999, SessionID: "grok-sess", CWD: "/work/a"})
+	defer stubMigrateKill(t, func(int, syscall.Signal) error { return nil }, func(int) bool { return false })()
+
+	if code := cmdMigrate([]string{"999999", "-y"}); code != 0 {
+		t.Fatalf("cmdMigrate -y = %d, want 0", code)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "grok --resume grok-sess") {
+		t.Errorf("tmux log = %q, want grok --resume grok-sess", got)
+	}
+	if strings.Contains(got, "claude --resume") {
+		t.Errorf("tmux log = %q, must not contain claude --resume", got)
 	}
 }
 
@@ -1095,6 +1146,39 @@ func TestLookupLiveSessionPrefersLiveGrokOverADeadClaudeFile(t *testing.T) {
 // The narrowness of that rule matters: a dead claude pid with nothing in
 // grok's registry still resolves to the claude row, which is the shape
 // `migrate` legitimately uses to resume a session whose process died.
+// CollectLocal drops headless leftover files, then shows grok at that pid.
+// lookup must agree: a live grok process behind an sdk-* claude file is grok,
+// even though the pid itself is alive.
+func TestLookupLiveSessionPrefersGrokOverAHeadlessClaudeFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeClaudeSessionFile(t, home, Session{
+		PID: 4242, SessionID: "claude-sess", CWD: "/work/a", Entrypoint: "sdk-py",
+	})
+	stubSessionPIDAlive(t, func(int) bool { return true })
+	stubGrokLookup(t, Session{Tool: toolGrok, PID: 4242, SessionID: "grok-sess", CWD: "/work/b"})
+
+	got, ok := lookupLiveSessionByPID(4242)
+	if !ok || !got.IsGrok() || got.SessionID != "grok-sess" {
+		t.Fatalf("lookupLiveSessionByPID = (%+v, %v), want the grok session", got, ok)
+	}
+}
+
+func TestLookupLiveSessionPrefersGrokOverAScratchClaudeFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeClaudeSessionFile(t, home, Session{
+		PID: 4242, SessionID: "claude-sess", CWD: "/tmp/scratch",
+	})
+	stubSessionPIDAlive(t, func(int) bool { return true })
+	stubGrokLookup(t, Session{Tool: toolGrok, PID: 4242, SessionID: "grok-sess", CWD: "/work/b"})
+
+	got, ok := lookupLiveSessionByPID(4242)
+	if !ok || !got.IsGrok() || got.SessionID != "grok-sess" {
+		t.Fatalf("lookupLiveSessionByPID = (%+v, %v), want the grok session", got, ok)
+	}
+}
+
 func TestLookupLiveSessionKeepsADeadClaudeSessionWithNoGrokAtThatPID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1108,19 +1192,78 @@ func TestLookupLiveSessionKeepsADeadClaudeSessionWithNoGrokAtThatPID(t *testing.
 	}
 }
 
-// Same substitution, seen from migrate: SIGTERMing the live grok process and
-// resuming a stranger's transcript in its place is the worst outcome available
-// on this path, so it refuses rather than adopting the stale claude file.
-func TestMigrateRefusesADeadClaudePIDOwnedByALiveGrokSession(t *testing.T) {
+// Same substitution, seen from migrate: a caller that attested the stale
+// claude id must not SIGTERM the live grok process. The grok row wins the
+// lookup, so the attested id disagrees and this is a session mismatch.
+func TestMigrateRefusesAStaleClaudeIDWhenGrokOwnsThePID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeClaudeSessionFile(t, home, Session{PID: 4242, SessionID: "claude-sess", CWD: "/work/a"})
 	stubSessionPIDAlive(t, func(int) bool { return false })
-	stubGrokLookup(t, Session{Tool: toolGrok, PID: 4242, SessionID: "grok-sess"})
+	stubGrokLookup(t, Session{Tool: toolGrok, PID: 4242, SessionID: "grok-sess", CWD: "/work/b"})
 
 	_, err := MigrateLocalAttested(4242, "claude-sess")
-	if err == nil || !strings.Contains(err.Error(), "not supported for grok") {
-		t.Fatalf("MigrateLocalAttested = %v, want a grok refusal", err)
+	if err == nil || !errors.Is(err, errMigrateSessionMismatch) {
+		t.Fatalf("MigrateLocalAttested = %v, want session mismatch", err)
+	}
+}
+
+// Attesting the grok id against that same pid migrates grok, not the leftover
+// claude file. Resuming the claude transcript would be the worst outcome.
+func TestMigratePrefersLiveGrokOverADeadClaudeFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	writeClaudeSessionFile(t, home, Session{PID: 4242, SessionID: "claude-sess", CWD: "/work/a"})
+	stubSessionPIDAlive(t, func(int) bool { return false })
+	stubGrokLookup(t, Session{Tool: toolGrok, PID: 4242, SessionID: "grok-sess", CWD: "/work/b"})
+	defer stubMigrateKill(t, func(int, syscall.Signal) error { return nil }, func(int) bool { return false })()
+
+	if _, err := MigrateLocalAttested(4242, "grok-sess"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "grok --resume grok-sess") {
+		t.Errorf("tmux log = %q, want grok --resume grok-sess", got)
+	}
+	if strings.Contains(got, "claude --resume") {
+		t.Errorf("tmux log = %q, must not resume the stale claude transcript", got)
+	}
+	if !strings.Contains(got, "<-c></work/b>") {
+		t.Errorf("tmux log = %q, want grok's cwd, not the claude file's", got)
+	}
+}
+
+// The TUI row for this pid is grok (CollectLocal dropped the sdk leftover).
+// Migrating it must send grok --resume, not the leftover claude transcript.
+func TestMigratePrefersGrokOverAHeadlessClaudeFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logPath := installFakeTmux(t)
+	writeClaudeSessionFile(t, home, Session{
+		PID: 4242, SessionID: "claude-sess", CWD: "/work/a", Entrypoint: "sdk-py",
+	})
+	stubSessionPIDAlive(t, func(int) bool { return true })
+	stubGrokLookup(t, Session{Tool: toolGrok, PID: 4242, SessionID: "grok-sess", CWD: "/work/b"})
+	defer stubMigrateKill(t, func(int, syscall.Signal) error { return nil }, func(int) bool { return false })()
+
+	if _, err := MigrateLocalAttested(4242, "grok-sess"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "grok --resume grok-sess") {
+		t.Errorf("tmux log = %q, want grok --resume grok-sess", got)
+	}
+	if strings.Contains(got, "claude --resume") {
+		t.Errorf("tmux log = %q, must not resume the leftover claude transcript", got)
 	}
 }
 

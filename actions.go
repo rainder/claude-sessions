@@ -327,14 +327,8 @@ func actAttach(c *actCtx) {
 		runTmuxAttach(c, sessName)
 		return
 	}
-	// Not in tmux — offer migration, unless migration is not a thing this
-	// session can do. Migrating means respawning as `claude --resume <id>`,
-	// which has no grok equivalent, so say so rather than offering a
-	// confirmation that can only end in a refusal.
-	if s.IsGrok() {
-		showActionError(c, "attach", errMigrateUnsupportedTool)
-		return
-	}
+	// Not in tmux — offer migration. Grok rows go through the same confirm:
+	// MigrateLocalAttested respawns them as `grok --resume <id>`.
 	question := fmt.Sprintf("PID %d is not in tmux. Migrate (kill + resume in tmux) first?", s.PID)
 	if s.NotIdle() {
 		question = colorize(statusDisplayColor(*s), fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question

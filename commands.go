@@ -148,12 +148,6 @@ func cmdMigrate(args []string) int {
 		fmt.Fprintf(os.Stderr, "PID %d is not a live session\n", pid)
 		return 1
 	}
-	// Refuse before the confirmation rather than after it: MigrateLocalAttested
-	// would refuse this too, but only once the user had already answered yes.
-	if sess.IsGrok() {
-		fmt.Fprintf(os.Stderr, "%v: PID %d\n", errMigrateUnsupportedTool, pid)
-		return 1
-	}
 	tname := MakeTmuxName(sess.CWD, sess.SessionID, sess.Name)
 	if !assumeYes {
 		if !confirm(fmt.Sprintf("migrate PID %d to tmux %q? [y/N] ", pid, tname)) {
@@ -481,7 +475,7 @@ func cmdAttach(args []string) int {
 	if err != nil {
 		return 2
 	}
-	sess, ok := lookupLiveSessionByPID(pid)
+	_, ok := lookupLiveSessionByPID(pid)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "PID %d is not a live session\n", pid)
 		return 1
@@ -489,14 +483,7 @@ func cmdAttach(args []string) int {
 	sessName := tmuxSessionForPID(pid)
 	if sessName == "" {
 		fmt.Fprintf(os.Stderr, "PID %d is not in tmux\n", pid)
-		// Migrate is the recovery step for a claude session with no pane;
-		// pointing a grok session at it would only send the user to a command
-		// that refuses. Name the refusal here instead.
-		if sess.IsGrok() {
-			fmt.Fprintf(os.Stderr, "%v\n", errMigrateUnsupportedTool)
-		} else {
-			fmt.Fprintln(os.Stderr, "run: claude-sessions migrate", pid)
-		}
+		fmt.Fprintln(os.Stderr, "run: claude-sessions migrate", pid)
 		return 1
 	}
 	subcommand := "attach"

@@ -356,6 +356,30 @@ func captureStdout(t *testing.T, fn func()) string {
 	return out
 }
 
+// captureStderr is captureStdout for os.Stderr. cmdAttach and cmdMigrate write
+// their "not in tmux" recovery hint there.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	fn()
+	os.Stderr = orig
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
+}
+
 // TestActFlagKeysReportAStoreThatCannotSave: a session-flags.json that failed
 // to parse latches the store read-only for the rest of the process, so a local
 // row's -/+ and ⇧1..9 must say so instead of looking dead forever — the same

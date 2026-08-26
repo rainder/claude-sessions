@@ -621,14 +621,9 @@ func actAttachRemote(c *actCtx) {
 
 	tname := info.Tmux
 	if tname == "" {
-		// Not in tmux — offer migration, unless migration is not a thing this
-		// session can do. Mirrors actAttach (actions.go): the remote server
-		// would refuse this too, so asking first only spends a confirmation
-		// and a round trip on a guaranteed refusal.
-		if s.IsGrok() {
-			showActionError(c, "attach", errMigrateUnsupportedTool)
-			return
-		}
+		// Not in tmux — offer migration. Mirrors actAttach (actions.go): grok
+		// rows go through the same confirm; the server migrates them as
+		// `grok --resume <id>`.
 		question := fmt.Sprintf("PID %d on %s is not in tmux. Migrate first?", pid, host)
 		if s.NotIdle() {
 			question = colorize(statusDisplayColor(*s), fmt.Sprintf("⚠ session is %s, not idle — migrating will interrupt it", s.StatusDisplay())) + "\n" + question

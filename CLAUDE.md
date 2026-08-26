@@ -348,38 +348,42 @@ and its `session_mismatch`/`not_live` codes are unchanged.
 live session"): nothing resolved for that pid, so nothing there knows which
 store would have owned it.
 
-**Migrate and snapshot restore stay claude-only.** Migrate means "kill
-it and respawn as `claude --resume <id>`", which no grok session can be, so
-`MigrateLocalAttested` refuses a pid the registry claims — one place covering
-every entry point at once, and costing nothing on the normal path since the
-registry is consulted only after the claude session file has already missed.
-Four call sites also refuse up front, so the refusal arrives before a
-confirmation or a round trip rather than after one: `actAttach`'s migrate
-branch, `actAttachRemote`'s (the server can only refuse it too), `cmdMigrate`,
-and `cmdAttach`'s not-in-tmux branch — which used to point the user at `run:
-claude-sessions migrate <pid>`, a command that can only refuse. Two subtler
-paths matter for the same reason: `finishKillJob`'s resurrect offer is skipped
-for a grok row (it calls `ResumeSessionInWorktree`, i.e. `claude --resume`),
-and `saveSnapshotFrom` skips grok rows outright, since a snapshot is restored
-by resuming each entry's claude transcript and a grok session has none.
+**Snapshot restore stays claude-only.** A snapshot is restored by resuming
+each entry's claude transcript, and a grok session has none, so
+`saveSnapshotFrom` skips grok rows. `finishKillJob`'s resurrect offer is
+skipped for the same reason: it calls `ResumeSessionInWorktree`, i.e.
+`claude --resume` with `--worktree`, which grok has no equivalent of.
+
+**Migrate is not claude-only.** `MigrateLocalAttested` kills the process and
+respawns it in a new tmux session: `claude --resume <id>` or
+`grok --resume <id>` in that session's cwd. It resolves the pid through
+`lookupLiveSessionByPID`, which yields to grok when the leftover claude
+file would not be listed (dead pid, scratch cwd, `sdk-*` entrypoint) —
+the same filters `CollectLocal` already applies before showing grok. An
+attested stale claude id is then `session_mismatch` rather than SIGTERMing
+grok to resume a stranger's transcript. A leftover claude file `CollectLocal`
+would still keep (live pid, interactive, real cwd) still wins, matching the
+unique-id rule. A dead claude pid with **no** grok session at that pid still
+migrates as claude — the legitimate "resume a session whose process died"
+path. The same primitive covers the server handler, `cmdMigrate`, and
+`actAttach` / `actAttachRemote`. `cmdAttach`'s not-in-tmux branch points at
+`run: claude-sessions migrate <pid>` for both tools.
 
 `lookupLiveSessionByPID` is how the scriptable subcommands cope with a bare pid
 that names no tool: claude's file first, grok's registry second. It is what
-lets `kill PID` work on a grok session — with the same reattestation — and what
-lets `migrate PID` and `attach PID` name the right refusal.
+lets `kill PID` and `migrate PID` work on a grok session — with the same
+reattestation — and what lets `attach PID` name the right not-live refusal.
 
-**Claude wins that race only while its own claim is still plausible.**
-`readSessionByPID` checks nothing about liveness — Claude Code leaves the file
-behind when the process exits — so a pid it once used and grok now owns would
-resolve to the dead claude session, and `kill PID` would act on the wrong row
-entirely. So when the claude file is present but the pid is **not** alive and
-grok's registry holds a live session there, grok's row is the truthful one and
-wins. `MigrateLocalAttested` carries the same guard in its own shape: it
-refuses rather than adopting the stale file, because migrating it would SIGTERM
-the live grok process and then resume a stranger's transcript in its place.
-Both guards are deliberately narrow — a dead claude pid with **no** grok
-session at that pid still resolves and still migrates, which is the legitimate
-"resume a session whose process died" path.
+**Claude wins that race only while its own claim is still a listed row.**
+`readSessionByPID` checks nothing about liveness, scratch cwd, or headless
+entrypoints — Claude Code leaves the file behind when the process exits — so
+a pid it once used and grok now owns would resolve to the leftover claude
+session, and `kill PID` would act on the wrong row entirely. So when the
+leftover would not be listed (dead pid, scratch cwd, `sdk-*`) and grok's
+registry holds a live session there, grok's row is the truthful one and
+wins. That rule is deliberately narrow — a leftover claude pid with **no**
+grok session at that pid still resolves and still migrates, which is the
+legitimate "resume a session whose process died" path.
 
 Messages: `resolveLivePID`, `resolveLivePIDLocal` and the bare-pid subcommands
 all report "is not a live session" rather than "is not a live Claude session",
