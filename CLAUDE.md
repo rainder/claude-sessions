@@ -440,7 +440,12 @@ a missing or empty kind is kept, including forks that carry a
 `parent_session_id`. NAME is `grokSummaryName` (generated_title, then
 session_summary), rendered with no tool marker — `toolBadge` returns "" for
 every row, so a grok row's NAME cell is indistinguishable from a claude
-one's. Prompts stay empty — the → overlay is claude-only. A missing
+one's. Prompts come from sibling `chat_history.jsonl` after the cap
+(same `resumePromptsMax` / scan-line budget as Claude): `type=user` with
+a `prompt_index` and no `synthetic_reason`; `<user_query>` inner text
+wins, otherwise the cleaned content (spawned-agent turns have no tag).
+A missing history still lists the row, with empty Prompts. Search and
+the → overlay use that field for both tools. A missing
 `.grok` tree is not an error: the Claude list is exactly what it was before.
 `collectResumableLimited` stays Claude-only (the lazy two-pass + cache
 below). `collectResumableFrom` asks it and `collectGrokResumable` separately,

@@ -255,6 +255,10 @@ func readGrokSignals(home, cwd, sessionID string) (grokSignals, bool) {
 	return sig, true
 }
 
+// grokChatHistoryFile is the per-session transcript grok writes beside
+// summary.json. Resume-picker prompts come from here, not from summary.json.
+const grokChatHistoryFile = "chat_history.jsonl"
+
 // grokEventsFile is the append-only phase log grok writes beside summary.json.
 // It is the only on-disk signal this tool can map onto Session.Status.
 const grokEventsFile = "events.jsonl"

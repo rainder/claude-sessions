@@ -67,7 +67,7 @@ type ResumableSession struct {
 	Prompts      []string  `json:"prompts,omitempty"` // first few user prompts, for the → overlay
 	MessageCount int       `json:"message_count"`
 	ModifiedAt   time.Time `json:"modified_at"`
-	Host         string    `json:"-"` // "" local, set client-side for remote rows
+	Host         string    `json:"-"`              // "" local, set client-side for remote rows
 	Tool         string    `json:"tool,omitempty"` // "" Claude, toolGrok for a Grok row
 }
 
@@ -126,6 +126,11 @@ func collectResumableFromLimited(home string, live map[string]bool, now time.Tim
 // skipped — never an error — so a file this tool does not own cannot blank
 // the Claude list. Does not use filepath.Glob or grokSummaryPath's fallback
 // scan: the walk already knows each summary's path.
+//
+// Prompts are filled from sibling chat_history.jsonl only after the cap, so a
+// 30-day corpus does not open every transcript — the same cost split as
+// collectResumableLimited's lazy pass. A missing or unreadable history leaves
+// Prompts empty and still lists the row.
 func collectGrokResumable(home string, live map[string]bool, now time.Time, limit int) []ResumableSession {
 	if limit <= 0 {
 		return nil
@@ -141,7 +146,11 @@ func collectGrokResumable(home string, live map[string]bool, now time.Time, limi
 		return nil
 	}
 	cutoff := now.Add(-resumableMaxAge)
-	var out []ResumableSession
+	type row struct {
+		sess ResumableSession
+		dir  string
+	}
+	var rows []row
 	for _, g := range cwdGroups {
 		if !g.IsDir() {
 			continue
@@ -199,27 +208,127 @@ func collectGrokResumable(home string, live map[string]bool, now time.Time, limi
 			if modified.Before(cutoff) {
 				continue
 			}
-			out = append(out, ResumableSession{
-				SessionID:    sid,
-				CWD:          cwd,
-				GitBranch:    sum.HeadBranch,
-				Name:         grokSummaryName(sum),
-				MessageCount: sum.NumMessages,
-				ModifiedAt:   modified,
-				Tool:         toolGrok,
+			rows = append(rows, row{
+				sess: ResumableSession{
+					SessionID:    sid,
+					CWD:          cwd,
+					GitBranch:    sum.HeadBranch,
+					Name:         grokSummaryName(sum),
+					MessageCount: sum.NumMessages,
+					ModifiedAt:   modified,
+					Tool:         toolGrok,
+				},
+				dir: filepath.Join(groupPath, sid),
 			})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].ModifiedAt.Equal(out[j].ModifiedAt) {
-			return out[i].ModifiedAt.After(out[j].ModifiedAt)
+	sort.Slice(rows, func(i, j int) bool {
+		if !rows[i].sess.ModifiedAt.Equal(rows[j].sess.ModifiedAt) {
+			return rows[i].sess.ModifiedAt.After(rows[j].sess.ModifiedAt)
 		}
-		return out[i].SessionID < out[j].SessionID
+		return rows[i].sess.SessionID < rows[j].sess.SessionID
 	})
-	if len(out) > limit {
-		out = out[:limit]
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]ResumableSession, len(rows))
+	for i, r := range rows {
+		first, prompts := readGrokChatPromptsFn(filepath.Join(r.dir, grokChatHistoryFile))
+		r.sess.FirstPrompt = first
+		r.sess.Prompts = prompts
+		out[i] = r.sess
 	}
 	return out
+}
+
+// readGrokChatPrompts collects up to resumePromptsMax real user turns from a
+// grok chat_history.jsonl. Grok writes context dumps and skill reminders as
+// type=user too; only entries with prompt_index and no synthetic_reason are
+// the user's own turns. <user_query> inner text is preferred because the
+// wrapper starts with '<' and cleanPromptText would otherwise drop it.
+func readGrokChatPrompts(path string) (first string, prompts []string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", nil
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for i := 0; scanner.Scan() && i < resumePromptsScanLines; i++ {
+		if len(prompts) >= resumePromptsMax {
+			break
+		}
+		var line struct {
+			Type            string          `json:"type"`
+			Content         json.RawMessage `json:"content"`
+			SyntheticReason string          `json:"synthetic_reason"`
+			PromptIndex     *int            `json:"prompt_index"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			continue
+		}
+		if line.Type != "user" || line.SyntheticReason != "" || line.PromptIndex == nil {
+			continue
+		}
+		text := grokPromptText(line.Content)
+		if text == "" {
+			continue
+		}
+		if first == "" {
+			first = truncateRunes(text, resumePromptMax)
+		}
+		prompts = append(prompts, truncateRunes(text, resumePromptDetailMax))
+	}
+	return first, prompts
+}
+
+func grokPromptText(raw json.RawMessage) string {
+	text := grokRawContentText(raw)
+	if inner := grokUserQueryInner(text); inner != "" {
+		return cleanPromptText(inner)
+	}
+	return cleanPromptText(text)
+}
+
+func grokRawContentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return str
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func grokUserQueryInner(s string) string {
+	const open, close = "<user_query>", "</user_query>"
+	i := strings.Index(s, open)
+	if i < 0 {
+		return ""
+	}
+	i += len(open)
+	j := strings.Index(s[i:], close)
+	if j < 0 {
+		return ""
+	}
+	return s[i : i+j]
 }
 
 // resumableCandidate is one transcript file that survived collectResumableLimited's
@@ -247,6 +356,11 @@ type resumableCandidate struct {
 // nothing about work avoided, and that would have let a cache bug hide inside a
 // still-green laziness test.
 var readResumableHeadFn = readResumableHead
+
+// readGrokChatPromptsFn is the grok counterpart: collectGrokResumable fills
+// prompts only after the cap, and the test that proves that counts how often
+// this is reached.
+var readGrokChatPromptsFn = readGrokChatPrompts
 
 // collectResumableLimited is the Claude-only lazy collector. The mixed-list
 // merge and shared cap live in collectResumableFromLimited. limit is assumed

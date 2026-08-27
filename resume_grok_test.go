@@ -83,11 +83,136 @@ func TestCollectResumableIncludesFinishedGrokSession(t *testing.T) {
 		t.Errorf("MessageCount = %d, want %d", s.MessageCount, msgs)
 	}
 	if s.FirstPrompt != "" || len(s.Prompts) != 0 {
-		t.Errorf("grok prompts = %q %v, want empty", s.FirstPrompt, s.Prompts)
+		t.Errorf("grok prompts = %q %v, want empty when chat_history.jsonl is missing", s.FirstPrompt, s.Prompts)
 	}
 	wantMod := time.Date(2026, 8, 14, 17, 0, 0, 0, time.UTC)
 	if !s.ModifiedAt.Equal(wantMod) {
 		t.Errorf("ModifiedAt = %v, want last_active_at %v", s.ModifiedAt, wantMod)
+	}
+}
+
+func writeGrokChatHistory(t *testing.T, home, cwd, sid string, lines ...string) {
+	t.Helper()
+	dir := filepath.Dir(grokSummaryFile(t, home, cwd, sid))
+	body := ""
+	if len(lines) > 0 {
+		body = strings.Join(lines, "\n") + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, grokChatHistoryFile), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func grokChatUserContent(text string, extra map[string]any) string {
+	m := map[string]any{
+		"type":    "user",
+		"content": []map[string]string{{"type": "text", "text": text}},
+	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+func grokChatUserQuery(idx int, text string) string {
+	return grokChatUserContent("<user_query>\n"+text+"\n</user_query>", map[string]any{"prompt_index": idx})
+}
+
+// TestCollectResumableFillsGrokPromptsFromChatHistory is the grok half of
+// TestReadResumableHeadCollectsPrompts: picker search keys off Prompts, and
+// grok keeps those in chat_history.jsonl, not summary.json.
+func TestCollectResumableFillsGrokPromptsFromChatHistory(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, 8, 14, 18, 0, 0, 0, time.UTC)
+	const (
+		sid = "grok-sess-prompts"
+		cwd = "/work/trecs-brain"
+	)
+	writeGrokResumable(t, home, cwd, sid, now.Add(-time.Hour),
+		grokResumeSummary("Ticket review", cwd, "develop", 12, "2026-08-14T17:00:00.000000000Z", "2026-08-14T16:00:00.000000000Z"))
+	huge := strings.Repeat("y", resumePromptDetailMax+40)
+	writeGrokChatHistory(t, home, cwd, sid,
+		`{"type":"system","content":"You are Grok"}`,
+		// No prompt_index. Text does not start with '<' so cleanPromptText
+		// would keep it if the filter failed.
+		grokChatUserContent("workspace dump that must not match", nil),
+		// Has prompt_index; synthetic_reason is what must drop it.
+		grokChatUserContent("skill reminder that must not match", map[string]any{
+			"synthetic_reason": "skills",
+			"prompt_index":     0,
+		}),
+		grokChatUserQuery(0, "first  grok prompt"),
+		`{"type":"assistant","content":"working"}`,
+		grokChatUserQuery(1, huge),
+		grokChatUserContent("untagged spawned scout prompt", map[string]any{"prompt_index": 2}),
+		grokChatUserQuery(3, "fourth prompt is dropped"),
+	)
+
+	got := collectResumableFrom(home, nil, now)
+	if len(got) != 1 {
+		t.Fatalf("got %d sessions %v, want 1 grok row", len(got), ids(got))
+	}
+	s := got[0]
+	if len(s.Prompts) != resumePromptsMax {
+		t.Fatalf("collected %d prompts (%q), want %d", len(s.Prompts), s.Prompts, resumePromptsMax)
+	}
+	if s.Prompts[0] != "first grok prompt" {
+		t.Errorf("prompts[0] = %q, want inner <user_query> text", s.Prompts[0])
+	}
+	if r := []rune(s.Prompts[1]); len(r) != resumePromptDetailMax || !strings.HasSuffix(s.Prompts[1], "…") {
+		t.Errorf("prompts[1] length = %d, want %d with an ellipsis", len(r), resumePromptDetailMax)
+	}
+	if s.Prompts[2] != "untagged spawned scout prompt" {
+		t.Errorf("prompts[2] = %q, want the untagged prompt_index turn", s.Prompts[2])
+	}
+	if s.FirstPrompt != "first grok prompt" {
+		t.Errorf("FirstPrompt = %q, want the first real user query", s.FirstPrompt)
+	}
+
+	searchText := resumeSearchText(got, "mac")
+	if _, idx := filterNewPickerLines(searchText, "first grok prompt"); len(idx) != 1 || idx[0] != 0 {
+		t.Errorf("search 'first grok prompt' matched %v, want [0]", idx)
+	}
+	if _, idx := filterNewPickerLines(searchText, "spawned scout"); len(idx) != 1 || idx[0] != 0 {
+		t.Errorf("search 'spawned scout' matched %v, want [0]", idx)
+	}
+	if _, idx := filterNewPickerLines(searchText, "must not match"); len(idx) != 0 {
+		t.Errorf("search 'must not match' matched %v, want none (dump/synthetic)", idx)
+	}
+}
+
+func TestCollectGrokResumableReadsChatHistoryOnlyAfterCap(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, 8, 14, 18, 0, 0, 0, time.UTC)
+	const cwd = "/work/trecs-brain"
+	for i, sid := range []string{"grok-cap-0", "grok-cap-1", "grok-cap-2"} {
+		writeGrokResumable(t, home, cwd, sid, now.Add(-time.Duration(i+1)*time.Minute),
+			grokResumeSummary(sid, cwd, "main", 2, "", ""))
+		writeGrokChatHistory(t, home, cwd, sid, grokChatUserQuery(0, "prompt for "+sid))
+	}
+
+	scans := 0
+	real := readGrokChatPromptsFn
+	readGrokChatPromptsFn = func(path string) (string, []string) {
+		scans++
+		return real(path)
+	}
+	t.Cleanup(func() { readGrokChatPromptsFn = real })
+
+	const limit = 2
+	got := collectGrokResumable(home, nil, now, limit)
+	if len(got) != limit {
+		t.Fatalf("got %d sessions %v, want %d", len(got), ids(got), limit)
+	}
+	if got[0].SessionID != "grok-cap-0" || got[1].SessionID != "grok-cap-1" {
+		t.Fatalf("order = %v, want grok-cap-0 then grok-cap-1", ids(got))
+	}
+	if scans != limit {
+		t.Fatalf("chat_history reads = %d, want %d (capped set only)", scans, limit)
 	}
 }
 

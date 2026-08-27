@@ -9,6 +9,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The resume picker now searches Grok user prompts. It reads the first few
+  turns from `chat_history.jsonl` (same cap as Claude) so typing a query
+  matches a Grok session. The → overlay shows those prompts too. A session
+  with no history file still lists, with empty prompts.
+
 - Parked account snapshots now rotate their OAuth tokens in place (Claude
   Code's token endpoint, no `claude` binary). `account switch` installs the
   rotated blob so Claude Code starts with a fresh access token. The usage
