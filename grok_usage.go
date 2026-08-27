@@ -23,9 +23,10 @@ type grokWindow struct {
 
 // GrokUsageInfo is the parsed Grok account usage snapshot shown in the header.
 // Windows holds at most one entry — the current period from config.currentPeriod
-// (weekly / monthly / daily / credits). Credits is the calendar-month spend
-// from GET /v1/billing (used / monthlyLimit, cents). Zero value hides the cr bar.
-// Unlike Codex there is no Plan field.
+// (weekly / monthly / daily / credits). Credits is extra-usage spend against the
+// user-set cap (on-demand cap, else auto-topup maxAmountPerMonth), in cents.
+// Deprecated monthlyLimit is the included budget and is not the cap. Zero value
+// hides the cr bar. Unlike Codex there is no Plan field.
 type GrokUsageInfo struct {
 	Windows []grokWindow `json:"windows"`
 	Credits creditsInfo  `json:"credits,omitempty"`
@@ -114,42 +115,95 @@ func parseGrokUsage(body []byte) (*GrokAccountUsage, error) {
 	return &GrokAccountUsage{Info: info}, nil
 }
 
-// parseGrokMonthly decodes GET /v1/billing (no format=credits). That payload
-// has no weekly period; it carries calendar-month used/monthlyLimit in cents.
-// Bad JSON, missing config, or a zero/omitted limit → zero creditsInfo (no bar),
-// never an error — the weekly window from format=credits still renders.
-func parseGrokMonthly(body []byte) creditsInfo {
+// parseGrokMonthlyUsed reads calendar-month extra spend from GET /v1/billing
+// (no format=credits), in cents. monthlyLimit in that payload is the deprecated
+// included budget, not the extra-usage cap — it is ignored. Bad JSON or a
+// missing used field → 0.
+func parseGrokMonthlyUsed(body []byte) float64 {
 	type rawVal struct {
 		Val float64 `json:"val"`
 	}
 	var raw struct {
 		Config *struct {
-			MonthlyLimit rawVal `json:"monthlyLimit"`
-			Used         rawVal `json:"used"`
+			Used rawVal `json:"used"`
 		} `json:"config"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil || raw.Config == nil {
-		return creditsInfo{}
+		return 0
 	}
-	if raw.Config.MonthlyLimit.Val <= 0 {
+	return raw.Config.Used.Val
+}
+
+// parseGrokOnDemand reads pay-as-you-go used/cap from the format=credits body.
+func parseGrokOnDemand(body []byte) (used, cap float64) {
+	type rawVal struct {
+		Val float64 `json:"val"`
+	}
+	var raw struct {
+		Config *struct {
+			OnDemandCap  rawVal `json:"onDemandCap"`
+			OnDemandUsed rawVal `json:"onDemandUsed"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil || raw.Config == nil {
+		return 0, 0
+	}
+	return raw.Config.OnDemandUsed.Val, raw.Config.OnDemandCap.Val
+}
+
+// parseGrokAutoTopup reads GET /v1/auto-topup-rule. Purchase amounts are
+// negative cents on the ledger; the returned max is the absolute value.
+// A missing/false enabled field (proto3 omit-false) is disabled.
+func parseGrokAutoTopup(body []byte) (enabled bool, max float64) {
+	type rawVal struct {
+		Val float64 `json:"val"`
+	}
+	var raw struct {
+		Rule *struct {
+			Enabled           bool   `json:"enabled"`
+			MaxAmountPerMonth rawVal `json:"maxAmountPerMonth"`
+		} `json:"rule"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil || raw.Rule == nil || !raw.Rule.Enabled {
+		return false, 0
+	}
+	max = raw.Rule.MaxAmountPerMonth.Val
+	if max < 0 {
+		max = -max
+	}
+	return true, max
+}
+
+// grokExtraCredits picks the extra-usage bar. On-demand cap wins when set
+// (classic PAYG). Else an enabled auto-topup max is the user-set monthly cap
+// (unified billing). monthlyLimit is not a candidate.
+func grokExtraCredits(onDemandUsed, onDemandCap, monthlyUsed float64, topupOn bool, topupMax float64) creditsInfo {
+	var used, limit float64
+	switch {
+	case onDemandCap > 0:
+		used, limit = onDemandUsed, onDemandCap
+	case topupOn && topupMax > 0:
+		used, limit = monthlyUsed, topupMax
+	default:
 		return creditsInfo{}
 	}
 	return creditsInfo{
 		Enabled:       true,
-		Used:          raw.Config.Used.Val,
-		Limit:         raw.Config.MonthlyLimit.Val,
+		Used:          used,
+		Limit:         limit,
 		Currency:      "USD",
 		DecimalPlaces: 2,
 	}
 }
 
 // grokUsageURL is the endpoint the Grok CLI polls for the current-period
-// percent bar. grokBillingURL is the same path without format=credits: it
-// returns calendar-month used/monthlyLimit instead. Both unofficial; every
-// failure is non-fatal (no bar, never a crash).
+// percent bar. grokBillingURL is the same path without format=credits (month
+// spend). grokAutoTopupURL is the user-set monthly extra-usage cap. All
+// unofficial; every failure is non-fatal (no bar, never a crash).
 const (
-	grokUsageURL   = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
-	grokBillingURL = "https://cli-chat-proxy.grok.com/v1/billing"
+	grokUsageURL     = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+	grokBillingURL   = "https://cli-chat-proxy.grok.com/v1/billing"
+	grokAutoTopupURL = "https://cli-chat-proxy.grok.com/v1/auto-topup-rule"
 )
 
 // loadGrokAuth reads the Grok CLI bearer token and email from ~/.grok/auth.json.
@@ -219,9 +273,11 @@ func grokBillingGet(tok, url string) ([]byte, error) {
 }
 
 // fetchGrokUsage hits the Grok billing endpoints with the current token.
-// format=credits supplies the period window; /v1/billing supplies monthly
-// used/limit and is best-effort (a failure leaves Credits zero, weekly still
-// shows). The account email comes from loadGrokAuth, not the payload.
+// format=credits supplies the period window and any on-demand cap; /v1/billing
+// supplies calendar-month extra spend; auto-topup-rule supplies the user-set
+// monthly cap when on-demand is unset. The last two are best-effort (a failure
+// leaves Credits zero, weekly still shows). The account email comes from
+// loadGrokAuth, not the payload.
 func fetchGrokUsage() (*GrokAccountUsage, error) {
 	tok, email, err := loadGrokAuth()
 	if err != nil {
@@ -235,8 +291,18 @@ func fetchGrokUsage() (*GrokAccountUsage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if monthly, err := grokBillingGet(tok, grokBillingURL); err == nil && u.Info != nil {
-		u.Info.Credits = parseGrokMonthly(monthly)
+	if u.Info != nil {
+		odUsed, odCap := parseGrokOnDemand(body)
+		var monthlyUsed float64
+		if monthly, err := grokBillingGet(tok, grokBillingURL); err == nil {
+			monthlyUsed = parseGrokMonthlyUsed(monthly)
+		}
+		var topupOn bool
+		var topupMax float64
+		if rule, err := grokBillingGet(tok, grokAutoTopupURL); err == nil {
+			topupOn, topupMax = parseGrokAutoTopup(rule)
+		}
+		u.Info.Credits = grokExtraCredits(odUsed, odCap, monthlyUsed, topupOn, topupMax)
 	}
 	u.Account = email
 	return u, nil

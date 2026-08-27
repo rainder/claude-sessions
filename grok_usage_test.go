@@ -141,45 +141,80 @@ func TestParseGrokUsageNoReset(t *testing.T) {
 	}
 }
 
-// Live capture from GET /v1/billing (no format=credits). Amounts are cents.
-func TestParseGrokMonthly(t *testing.T) {
+// Live capture from GET /v1/billing (no format=credits). monthlyLimit is the
+// deprecated included budget — not the extra-usage cap — so only used is kept.
+func TestParseGrokMonthlyUsed(t *testing.T) {
 	body := []byte(`{"config":{
   "monthlyLimit":{"val":10000},
-  "used":{"val":368},
-  "onDemandCap":{"val":0},
-  "billingPeriodStart":"2026-08-01T00:00:00+00:00",
-  "billingPeriodEnd":"2026-09-01T00:00:00+00:00"
+  "used":{"val":3578},
+  "onDemandCap":{"val":0}
 }}`)
-	c := parseGrokMonthly(body)
-	if !c.Enabled {
-		t.Fatal("Enabled = false, want true")
-	}
-	if c.Used != 368 || c.Limit != 10000 {
-		t.Errorf("used/limit = %v/%v, want 368/10000", c.Used, c.Limit)
-	}
-	if c.Currency != "USD" || c.DecimalPlaces != 2 {
-		t.Errorf("currency/places = %q/%d, want USD/2", c.Currency, c.DecimalPlaces)
+	if got := parseGrokMonthlyUsed(body); got != 3578 {
+		t.Errorf("used = %v, want 3578", got)
 	}
 }
 
-func TestParseGrokMonthlyOmittedUsed(t *testing.T) {
-	c := parseGrokMonthly([]byte(`{"config":{"monthlyLimit":{"val":10000}}}`))
-	if !c.Enabled || c.Limit != 10000 || c.Used != 0 {
-		t.Errorf("got %+v, want enabled with used=0 limit=10000", c)
+func TestParseGrokMonthlyUsedOmitted(t *testing.T) {
+	if got := parseGrokMonthlyUsed([]byte(`{"config":{"monthlyLimit":{"val":10000}}}`)); got != 0 {
+		t.Errorf("omitted used = %v, want 0", got)
 	}
 }
 
-func TestParseGrokMonthlyZeroLimit(t *testing.T) {
-	c := parseGrokMonthly([]byte(`{"config":{"monthlyLimit":{"val":0},"used":{"val":12}}}`))
+func TestParseGrokMonthlyUsedBadJSON(t *testing.T) {
+	if got := parseGrokMonthlyUsed([]byte(`not json`)); got != 0 {
+		t.Errorf("bad JSON used = %v, want 0", got)
+	}
+}
+
+// Live capture from GET /v1/auto-topup-rule. Purchase amounts are negative cents.
+func TestParseGrokAutoTopup(t *testing.T) {
+	body := []byte(`{"rule":{
+  "enabled":true,
+  "minBeforeHittingSl":{"val":5000},
+  "topupAmount":{"val":-20000},
+  "maxAmountPerMonth":{"val":-200000}
+}}`)
+	on, max := parseGrokAutoTopup(body)
+	if !on {
+		t.Fatal("enabled = false, want true")
+	}
+	if max != 200000 {
+		t.Errorf("max = %v, want 200000 (abs of -200000 cents = $2000)", max)
+	}
+}
+
+func TestParseGrokAutoTopupDisabled(t *testing.T) {
+	on, max := parseGrokAutoTopup([]byte(`{"rule":{"topupAmount":{"val":-20000}}}`))
+	if on || max != 0 {
+		t.Errorf("disabled rule: on=%v max=%v, want false/0", on, max)
+	}
+}
+
+func TestParseGrokOnDemand(t *testing.T) {
+	used, cap := parseGrokOnDemand([]byte(`{"config":{"onDemandCap":{"val":5000},"onDemandUsed":{"val":300}}}`))
+	if used != 300 || cap != 5000 {
+		t.Errorf("on-demand used/cap = %v/%v, want 300/5000", used, cap)
+	}
+}
+
+func TestGrokExtraCreditsPrefersOnDemandCap(t *testing.T) {
+	c := grokExtraCredits(300, 5000, 3578, true, 200000)
+	if !c.Enabled || c.Used != 300 || c.Limit != 5000 {
+		t.Errorf("got %+v, want on-demand 300/5000", c)
+	}
+}
+
+func TestGrokExtraCreditsUsesAutoTopupMax(t *testing.T) {
+	c := grokExtraCredits(0, 0, 3578, true, 200000)
+	if !c.Enabled || c.Used != 3578 || c.Limit != 200000 {
+		t.Errorf("got %+v, want auto-topup 3578/200000", c)
+	}
+}
+
+func TestGrokExtraCreditsIgnoresDeprecatedMonthlyLimit(t *testing.T) {
+	c := grokExtraCredits(0, 0, 3578, false, 0)
 	if c.Enabled || c.Limit != 0 {
-		t.Errorf("got %+v, want disabled (no monthly cap)", c)
-	}
-}
-
-func TestParseGrokMonthlyBadJSON(t *testing.T) {
-	c := parseGrokMonthly([]byte(`not json`))
-	if c.Enabled || c.Limit != 0 {
-		t.Errorf("got %+v, want zero credits on bad JSON", c)
+		t.Errorf("got %+v, want no bar (monthlyLimit is not the extra cap)", c)
 	}
 }
 
