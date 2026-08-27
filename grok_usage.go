@@ -12,7 +12,7 @@ import (
 )
 
 // grokWindow is one rate-limit window from the Grok billing endpoint. Label is
-// the human-readable span (wk / mo / 1d / cr, see grokPeriodLabel); ResetsAt is
+// the human-readable span (wk / mo / 1d / use, see grokPeriodLabel); ResetsAt is
 // currentPeriod.end. JSON tags carry it through server→client propagation and
 // the disk cache — not the API's field names, which parseGrokUsage translates.
 type grokWindow struct {
@@ -23,9 +23,12 @@ type grokWindow struct {
 
 // GrokUsageInfo is the parsed Grok account usage snapshot shown in the header.
 // Windows holds at most one entry — the current period from config.currentPeriod
-// (weekly / monthly / daily / credits). Unlike Codex there is no Plan field.
+// (weekly / monthly / daily / credits). Credits is the calendar-month spend
+// from GET /v1/billing (used / monthlyLimit, cents). Zero value hides the cr bar.
+// Unlike Codex there is no Plan field.
 type GrokUsageInfo struct {
 	Windows []grokWindow `json:"windows"`
+	Credits creditsInfo  `json:"credits,omitempty"`
 }
 
 // GrokAccountUsage pairs a Grok snapshot with the account it belongs to, so a
@@ -39,7 +42,8 @@ type GrokAccountUsage struct {
 }
 
 // grokPeriodLabel maps config.currentPeriod.type to a short header label.
-// Unknown types fall to "cr" (credits) rather than inventing a span.
+// Unknown types fall to "use" rather than inventing a span. "cr" is reserved
+// for the monthly spend segment (grokSegs), matching claudeSegs.
 func grokPeriodLabel(periodType string) string {
 	switch periodType {
 	case "USAGE_PERIOD_TYPE_WEEKLY":
@@ -49,7 +53,7 @@ func grokPeriodLabel(periodType string) string {
 	case "USAGE_PERIOD_TYPE_DAILY":
 		return "1d"
 	default:
-		return "cr"
+		return "use"
 	}
 }
 
@@ -110,9 +114,43 @@ func parseGrokUsage(body []byte) (*GrokAccountUsage, error) {
 	return &GrokAccountUsage{Info: info}, nil
 }
 
-// grokUsageURL is the endpoint the Grok CLI polls for billing. Unofficial and
-// undocumented, so every failure is non-fatal (no bar, never a crash).
-const grokUsageURL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+// parseGrokMonthly decodes GET /v1/billing (no format=credits). That payload
+// has no weekly period; it carries calendar-month used/monthlyLimit in cents.
+// Bad JSON, missing config, or a zero/omitted limit → zero creditsInfo (no bar),
+// never an error — the weekly window from format=credits still renders.
+func parseGrokMonthly(body []byte) creditsInfo {
+	type rawVal struct {
+		Val float64 `json:"val"`
+	}
+	var raw struct {
+		Config *struct {
+			MonthlyLimit rawVal `json:"monthlyLimit"`
+			Used         rawVal `json:"used"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil || raw.Config == nil {
+		return creditsInfo{}
+	}
+	if raw.Config.MonthlyLimit.Val <= 0 {
+		return creditsInfo{}
+	}
+	return creditsInfo{
+		Enabled:       true,
+		Used:          raw.Config.Used.Val,
+		Limit:         raw.Config.MonthlyLimit.Val,
+		Currency:      "USD",
+		DecimalPlaces: 2,
+	}
+}
+
+// grokUsageURL is the endpoint the Grok CLI polls for the current-period
+// percent bar. grokBillingURL is the same path without format=credits: it
+// returns calendar-month used/monthlyLimit instead. Both unofficial; every
+// failure is non-fatal (no bar, never a crash).
+const (
+	grokUsageURL   = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+	grokBillingURL = "https://cli-chat-proxy.grok.com/v1/billing"
+)
 
 // loadGrokAuth reads the Grok CLI bearer token and email from ~/.grok/auth.json.
 // The file is a map keyed by issuer URL; each entry has key (JWT), email, and
@@ -157,15 +195,10 @@ func loadGrokAuth() (token, email string, err error) {
 	return fallbackToken, fallbackEmail, nil
 }
 
-// fetchGrokUsage hits the Grok billing endpoint with the current token. Headers
-// mirror what the Grok CLI sends. 5s HTTP timeout, 1MB response cap, non-200 is
-// an error. The account email comes from loadGrokAuth, not the payload.
-func fetchGrokUsage() (*GrokAccountUsage, error) {
-	tok, email, err := loadGrokAuth()
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest("GET", grokUsageURL, nil)
+// grokBillingGet GETs url with the Grok CLI's billing headers. 5s timeout,
+// 1MB cap, non-200 is an error.
+func grokBillingGet(tok, url string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -182,13 +215,28 @@ func fetchGrokUsage() (*GrokAccountUsage, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("grok usage endpoint: HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// fetchGrokUsage hits the Grok billing endpoints with the current token.
+// format=credits supplies the period window; /v1/billing supplies monthly
+// used/limit and is best-effort (a failure leaves Credits zero, weekly still
+// shows). The account email comes from loadGrokAuth, not the payload.
+func fetchGrokUsage() (*GrokAccountUsage, error) {
+	tok, email, err := loadGrokAuth()
+	if err != nil {
+		return nil, err
+	}
+	body, err := grokBillingGet(tok, grokUsageURL)
 	if err != nil {
 		return nil, err
 	}
 	u, err := parseGrokUsage(body)
 	if err != nil {
 		return nil, err
+	}
+	if monthly, err := grokBillingGet(tok, grokBillingURL); err == nil && u.Info != nil {
+		u.Info.Credits = parseGrokMonthly(monthly)
 	}
 	u.Account = email
 	return u, nil

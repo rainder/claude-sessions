@@ -1780,6 +1780,49 @@ func TestWriteGrokUsage(t *testing.T) {
 	}
 }
 
+func TestWriteGrokUsageCredits(t *testing.T) {
+	var b strings.Builder
+	writeGrokUsage(&b, "grok", &GrokUsageInfo{
+		Windows: []grokWindow{
+			{Label: "wk", Pct: 6, ResetsAt: time.Now().Add(5 * 24 * time.Hour)},
+		},
+		Credits: creditsInfo{Enabled: true, Used: 368, Limit: 10000, Currency: "USD", DecimalPlaces: 2},
+	}, 0)
+	out := b.String()
+	if lines := strings.Count(out, "\n"); lines != 1 {
+		t.Errorf("writeGrokUsage wrote %d lines, want 1: %q", lines, out)
+	}
+	if !strings.Contains(out, "wk") {
+		t.Errorf("missing weekly window: %q", out)
+	}
+	if !strings.Contains(out, "cr") {
+		t.Errorf("missing cr label: %q", out)
+	}
+	if !strings.Contains(out, "4%") {
+		t.Errorf("missing rounded credits percentage: %q", out)
+	}
+	if !strings.Contains(out, "$4") || strings.Contains(out, "/") {
+		t.Errorf("want spent-only figure $4, no limit: %q", out)
+	}
+	if got := strings.Count(out, "█") + strings.Count(out, "░"); got != 2*usageBarMax {
+		t.Errorf("bar cells = %d, want %d (wk + cr × max width)", got, 2*usageBarMax)
+	}
+}
+
+func TestWriteGrokUsageCreditsOnly(t *testing.T) {
+	var b strings.Builder
+	writeGrokUsage(&b, "grok", &GrokUsageInfo{
+		Credits: creditsInfo{Enabled: true, Used: 368, Limit: 10000, Currency: "USD", DecimalPlaces: 2},
+	}, 0)
+	out := b.String()
+	if !strings.Contains(out, "cr") || !strings.Contains(out, "$4") {
+		t.Errorf("credits-only line missing cr/$4: %q", out)
+	}
+	if strings.Contains(out, "wk") {
+		t.Errorf("credits-only line grew a window label: %q", out)
+	}
+}
+
 func TestWriteGrokUsageEmpty(t *testing.T) {
 	var b strings.Builder
 	writeGrokUsage(&b, "grok", nil, 0)

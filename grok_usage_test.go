@@ -141,6 +141,48 @@ func TestParseGrokUsageNoReset(t *testing.T) {
 	}
 }
 
+// Live capture from GET /v1/billing (no format=credits). Amounts are cents.
+func TestParseGrokMonthly(t *testing.T) {
+	body := []byte(`{"config":{
+  "monthlyLimit":{"val":10000},
+  "used":{"val":368},
+  "onDemandCap":{"val":0},
+  "billingPeriodStart":"2026-08-01T00:00:00+00:00",
+  "billingPeriodEnd":"2026-09-01T00:00:00+00:00"
+}}`)
+	c := parseGrokMonthly(body)
+	if !c.Enabled {
+		t.Fatal("Enabled = false, want true")
+	}
+	if c.Used != 368 || c.Limit != 10000 {
+		t.Errorf("used/limit = %v/%v, want 368/10000", c.Used, c.Limit)
+	}
+	if c.Currency != "USD" || c.DecimalPlaces != 2 {
+		t.Errorf("currency/places = %q/%d, want USD/2", c.Currency, c.DecimalPlaces)
+	}
+}
+
+func TestParseGrokMonthlyOmittedUsed(t *testing.T) {
+	c := parseGrokMonthly([]byte(`{"config":{"monthlyLimit":{"val":10000}}}`))
+	if !c.Enabled || c.Limit != 10000 || c.Used != 0 {
+		t.Errorf("got %+v, want enabled with used=0 limit=10000", c)
+	}
+}
+
+func TestParseGrokMonthlyZeroLimit(t *testing.T) {
+	c := parseGrokMonthly([]byte(`{"config":{"monthlyLimit":{"val":0},"used":{"val":12}}}`))
+	if c.Enabled || c.Limit != 0 {
+		t.Errorf("got %+v, want disabled (no monthly cap)", c)
+	}
+}
+
+func TestParseGrokMonthlyBadJSON(t *testing.T) {
+	c := parseGrokMonthly([]byte(`not json`))
+	if c.Enabled || c.Limit != 0 {
+		t.Errorf("got %+v, want zero credits on bad JSON", c)
+	}
+}
+
 func TestGrokPeriodLabel(t *testing.T) {
 	cases := []struct {
 		typ  string
@@ -149,9 +191,9 @@ func TestGrokPeriodLabel(t *testing.T) {
 		{"USAGE_PERIOD_TYPE_WEEKLY", "wk"},
 		{"USAGE_PERIOD_TYPE_MONTHLY", "mo"},
 		{"USAGE_PERIOD_TYPE_DAILY", "1d"},
-		{"USAGE_PERIOD_TYPE_UNKNOWN", "cr"},
-		{"", "cr"},
-		{"something_else", "cr"},
+		{"USAGE_PERIOD_TYPE_UNKNOWN", "use"},
+		{"", "use"},
+		{"something_else", "use"},
 	}
 	for _, c := range cases {
 		if got := grokPeriodLabel(c.typ); got != c.want {
@@ -171,6 +213,7 @@ func TestGrokUsageCacheRoundTrip(t *testing.T) {
 			Windows: []grokWindow{
 				{Label: "wk", Pct: 6, ResetsAt: time.Now().Add(5 * 24 * time.Hour).UTC()},
 			},
+			Credits: creditsInfo{Enabled: true, Used: 368, Limit: 10000, Currency: "USD", DecimalPlaces: 2},
 		},
 	}
 	saveGrokUsageCache(want)
@@ -183,6 +226,9 @@ func TestGrokUsageCacheRoundTrip(t *testing.T) {
 	}
 	if len(got.Info.Windows) != 1 || got.Info.Windows[0].Label != "wk" || got.Info.Windows[0].Pct != 6 {
 		t.Errorf("round-trip windows mismatch: %+v", got.Info.Windows)
+	}
+	if !got.Info.Credits.Enabled || got.Info.Credits.Used != 368 || got.Info.Credits.Limit != 10000 {
+		t.Errorf("round-trip credits mismatch: %+v", got.Info.Credits)
 	}
 }
 

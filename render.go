@@ -1118,10 +1118,11 @@ func codexSegs(info *CodexUsageInfo) []usageSeg {
 }
 
 // writeGrokUsage prints one Grok account usage line: a dim label prefix followed
-// by one bar segment for the current period (wk / mo / 1d / cr). Bars, colors,
-// percent formatting, and the dim reset trailer match writeUsage. Standalone
-// path uses lineBarW; the header shares one bar width across lines (see
-// writeUsageHeader). Nil info or no windows writes nothing.
+// by the current-period bar (wk / mo / 1d / use) and, when monthly credits are
+// present, a cr segment like writeUsage. Bars, colors, percent formatting, and
+// the dim reset trailer match writeUsage. Standalone path uses lineBarW; the
+// header shares one bar width across lines (see writeUsageHeader). Nil info or
+// no segments writes nothing.
 func writeGrokUsage(w io.Writer, label string, info *GrokUsageInfo, cols int) {
 	if info == nil {
 		return
@@ -1133,12 +1134,25 @@ func writeGrokUsage(w io.Writer, label string, info *GrokUsageInfo, cols int) {
 	renderUsageSegs(w, label, segs, lineBarW(label, segs, 0, cols))
 }
 
-// grokSegs builds one segment per Grok rate-limit window; a window with no
-// reset time gets an empty trailer — formatUntil returns "" for a zero ResetsAt.
+// grokSegs builds one segment per Grok rate-limit window plus a credits
+// segment when extra monthly usage is present. A window with no reset time
+// gets an empty trailer — formatUntil returns "" for a zero ResetsAt. The cr
+// trailer is spent-only ($N), matching claudeSegs — no /limit.
 func grokSegs(info *GrokUsageInfo) []usageSeg {
-	segs := make([]usageSeg, 0, len(info.Windows))
+	segs := make([]usageSeg, 0, len(info.Windows)+1)
 	for _, win := range info.Windows {
 		segs = append(segs, usageSeg{label: win.Label, trailer: formatUntil(win.ResetsAt), pct: win.Pct})
+	}
+	if c := info.Credits; c.Enabled && c.Limit > 0 {
+		sym := c.Currency
+		if sym == "" || sym == "USD" {
+			sym = "$"
+		}
+		segs = append(segs, usageSeg{
+			label:   "cr",
+			trailer: sym + moneyGrouped(c.Used, c.DecimalPlaces),
+			pct:     c.Pct(),
+		})
 	}
 	return segs
 }
