@@ -1472,6 +1472,39 @@ func TestGrokStatusFromEvents(t *testing.T) {
 			waitingFor: "input",
 		},
 		{
+			// Grok auto-allows the tool (wait_ms:0), then the question
+			// stays on screen until the user answers. permission_resolved
+			// is that auto-allow, not the answer. Live shape:
+			// tool_started → permission_prompt → requested →
+			// resolved allow → tool_execution, no tool_completed yet.
+			name: "an allowed ask_user_question is still waiting for the answer",
+			lines: []string{
+				`{"type":"phase_changed","phase":"tool_execution"}`,
+				`{"type":"tool_started","tool_name":"ask_user_question"}`,
+				`{"type":"phase_changed","phase":"permission_prompt"}`,
+				`{"type":"permission_requested","tool_name":"ask_user_question"}`,
+				`{"type":"permission_resolved","tool_name":"ask_user_question","decision":"allow","wait_ms":0}`,
+				`{"type":"phase_changed","phase":"tool_execution"}`,
+			},
+			status:     "waiting",
+			waitingFor: "input",
+		},
+		{
+			// Deny means the question never ran. Grok often skips
+			// tool_completed and goes straight to loop_started;
+			// waitingOn must not stick through the next turn.
+			name: "a denied ask_user_question is not left waiting",
+			lines: []string{
+				`{"type":"tool_started","tool_name":"ask_user_question"}`,
+				`{"type":"permission_requested","tool_name":"ask_user_question"}`,
+				`{"type":"permission_resolved","tool_name":"ask_user_question","decision":"deny"}`,
+				`{"type":"phase_changed","phase":"tool_execution"}`,
+				`{"type":"loop_started"}`,
+				`{"type":"phase_changed","phase":"waiting_for_model"}`,
+			},
+			status: "busy",
+		},
+		{
 			name: "a finished ask_user_question is not left waiting",
 			lines: []string{
 				`{"type":"tool_started","tool_name":"ask_user_question"}`,

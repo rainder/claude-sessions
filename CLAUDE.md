@@ -259,7 +259,12 @@ Grok writes no `status` field. The live signal is `events.jsonl` beside
 `permission_requested` / `permission_resolved`). `grokStatusFromEvents` maps
 that log onto Claude's vocabulary so render, sort and `StatusDisplay` need no
 grok branch: an open `ask_user_question` is Status `waiting` (WaitingFor
-`"input"`). An open tool permission prompt (`permission_requested` /
+`"input"`). Grok auto-allows that tool (`permission_resolved`, `wait_ms:0`)
+and then waits on the question while the last phase is `tool_execution`;
+the resolve is not the answer. `tool_completed` and `turn_ended` end the
+wait; `permission_resolved` with `deny`/`cancelled` also ends it, because
+the question never ran.
+An open tool permission prompt (`permission_requested` /
 `permission_prompt`, including `run_terminal_command`) keeps Status `busy` —
 it is a running turn, not a fully-stopped question — but still sets
 WaitingFor to `"permission prompt"`, mirroring the exact
@@ -286,7 +291,8 @@ the wrong claim about a session that reported none. The file is tailed
 chunk, and CollectLocal runs on a 2s tick. An open `ask_user_question` older
 than the window with later non-question events would read as busy —
 accepted, because a session still blocked on the user writes nothing after
-the `tool_started`. A long foreground bash tool is still `busy`. After
+the question's own `permission_resolved` / `tool_execution` trailer. A long
+foreground bash tool is still `busy`. After
 `turn_ended`, an open background command or monitor is `shell` — grok
 writes `task_backgrounded` to `updates.jsonl` when it backgrounds the
 task, and `task_completed` when that task exits, and

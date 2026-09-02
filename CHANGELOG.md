@@ -323,6 +323,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A Grok row sitting on `ask_user_question` no longer shows STATUS `busy`.
+  Grok auto-allows the tool (`permission_resolved`, `wait_ms:0`) and then
+  waits for the answer; that allow is not the answer. STATUS is
+  `waiting:input` until `tool_completed`. A deny or cancel still ends the
+  wait, because the question never ran.
 - Auto-save of `latest` now includes Grok sessions. Restore resumes them
   with `grok --resume` in that session's cwd. A host with only Grok rows
   no longer leaves `latest` frozen.

@@ -268,10 +268,11 @@ const grokEventsFile = "events.jsonl"
 // whole-file read on a 2s tick would cost the same shape the resume
 // collector's laziness exists to avoid. 8KB is ~100 events. An open
 // ask_user_question or a turn_ended that is still the live state sits at
-// the end, so the tail is the whole signal. An open question older than
+// the end, so the tail is the whole signal. Grok auto-allows the question
+// tool and then waits, so the last events are permission_resolved plus
+// tool_execution, not a lone tool_started. An open question older than
 // the window with later non-question events would read as busy — accepted,
-// because a session still blocked on the user writes nothing after the
-// tool_started.
+// because a session still blocked on the user writes nothing after that.
 const grokEventsTailSize = 8 * 1024
 
 // grokEvent is the subset of one events.jsonl line this tool reads. Grok
@@ -281,6 +282,7 @@ type grokEvent struct {
 	Type     string `json:"type"`
 	Phase    string `json:"phase"`
 	ToolName string `json:"tool_name"`
+	Decision string `json:"decision"`
 }
 
 // grokSessionStatus maps a session's events.jsonl tail onto Claude's
@@ -370,6 +372,9 @@ func readGrokEventsTail(path string) []byte {
 // indistinguishable from a session mid-turn for as long as it takes someone
 // to notice. ask_user_question is the one case that fully blocks the agent
 // on an answer rather than a click, so it alone gets Status "waiting".
+// permission_resolved allow on that tool is the auto-allow, not the answer —
+// the question stays open until tool_completed or turn_ended, even if the
+// last phase is tool_execution. deny/cancelled means the question never ran.
 // turn_ended wins over a leftover streaming phase: grok does not write an
 // idle phase, so the last phase_changed after a finished turn is still
 // streaming_text. A torn line is skipped, never a reason to drop the rest.
@@ -410,8 +415,15 @@ func grokStatusFromEvents(data []byte) (status, waitingFor string) {
 				permWaiting = true
 			}
 		case "permission_resolved":
+			// allow is not the user's answer: grok auto-allows
+			// ask_user_question (wait_ms:0) and then waits on the
+			// question itself. deny/cancelled means the question
+			// never ran; grok often skips tool_completed after
+			// that, so the wait must end here.
 			if grokUserWaitTool(ev.ToolName) {
-				waitingOn = false
+				if grokPermissionRefused(ev.Decision) {
+					waitingOn = false
+				}
 			} else {
 				permWaiting = false
 			}
@@ -474,6 +486,16 @@ func grokBusyPhase(phase string) bool {
 func grokUserWaitTool(name string) bool {
 	switch name {
 	case "ask_user_question", "AskUserQuestion":
+		return true
+	}
+	return false
+}
+
+// grokPermissionRefused reports a permission_resolved that did not let the
+// tool run. Live values are deny and (rarely) cancelled; allow is the rest.
+func grokPermissionRefused(decision string) bool {
+	switch decision {
+	case "deny", "cancelled":
 		return true
 	}
 	return false
