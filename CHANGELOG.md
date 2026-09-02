@@ -9,6 +9,10 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The live session table now shows AGE and SEEN as two columns. AGE is time
+  since the session started. SEEN is time since last activity (what AGE
+  used to show). Created sort marks AGE. Updated sort marks SEEN.
+
 - The resume picker now searches Grok user prompts. It reads the first few
   turns from `chat_history.jsonl` (same cap as Claude) so typing a query
   matches a Grok session. The → overlay shows those prompts too. A session

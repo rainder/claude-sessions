@@ -186,18 +186,33 @@ func findHeaderRow(t *testing.T, out string) string {
 // runes: the DIR sort arrow is a 3-byte glyph.
 func tokColumnCell(t *testing.T, hdr, row string) string {
 	t.Helper()
+	return timeColumnCell(t, hdr, row, "TOK")
+}
+
+// timeColumnCell returns the 5-wide field for a %5s header label (TOK, AGE,
+// SEEN, and their sort-arrow forms). Indexes are in runes: ▲/▼ are 1 rune
+// and 3 bytes.
+func timeColumnCell(t *testing.T, hdr, row, col string) string {
+	t.Helper()
 	plainHdr, plainRow := stripANSI(hdr), stripANSI(row)
-	byteI := strings.Index(plainHdr, "TOK")
-	if byteI < 0 {
-		t.Fatalf("TOK not in header: %q", hdr)
+	label := col
+	for _, suf := range []string{"▼", "▲"} {
+		if strings.Contains(plainHdr, col+suf) {
+			label = col + suf
+			break
+		}
 	}
-	start := utf8.RuneCountInString(plainHdr[:byteI]) - 2
+	byteI := strings.Index(plainHdr, label)
+	if byteI < 0 {
+		t.Fatalf("%s not in header: %q", col, hdr)
+	}
+	start := utf8.RuneCountInString(plainHdr[:byteI]) - (5 - utf8.RuneCountInString(label))
 	if start < 0 {
-		t.Fatalf("TOK column start %d: %q", start, hdr)
+		t.Fatalf("%s column start %d: %q", col, start, hdr)
 	}
 	runes := []rune(plainRow)
 	if start+5 > len(runes) {
-		t.Fatalf("row shorter than TOK column: %q", plainRow)
+		t.Fatalf("row shorter than %s column: %q", col, plainRow)
 	}
 	return string(runes[start : start+5])
 }
@@ -2270,7 +2285,7 @@ func TestDeriveFullWorktreePath(t *testing.T) {
 		Home:    "/home/andy",
 		GitRoot: "/home/andy/Developer/project-name/.claude/worktrees/some-feature",
 	}
-	row := deriveFull(s, now, "dir")
+	row := deriveFull(s, now)
 	want := "project-name:some-feature"
 	if row.cwdStr != want {
 		t.Errorf("cwdStr = %q, want %q", row.cwdStr, want)
@@ -2285,7 +2300,7 @@ func TestDeriveFullInferredWorktree(t *testing.T) {
 		GitRoot:      "/home/andy/Developer/project-name",
 		WorktreeName: "DR-3141",
 	}
-	row := deriveFull(s, now, "dir")
+	row := deriveFull(s, now)
 	want := "project-name:DR-3141"
 	if row.cwdStr != want {
 		t.Errorf("cwdStr = %q, want %q", row.cwdStr, want)
@@ -2330,7 +2345,7 @@ func TestDeriveMinimalUsesRepoDirName(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		row := deriveMinimal(tc.s, now, "dir")
+		row := deriveMinimal(tc.s, now)
 		if row.dir != tc.want {
 			t.Errorf("%s: dir = %q, want %q", tc.name, row.dir, tc.want)
 		}
@@ -2352,7 +2367,7 @@ func TestDeriveFullUsesSessionHome(t *testing.T) {
 		{"old remote", Session{CWD: "/home/rue/service", Host: "beluga"}, "/h/r/service"},
 	}
 	for _, tc := range cases {
-		row := deriveFull(tc.s, now, "dir")
+		row := deriveFull(tc.s, now)
 		if row.cwdStr != tc.want {
 			t.Errorf("%s cwd = %q, want %q", tc.name, row.cwdStr, tc.want)
 		}
@@ -2435,8 +2450,8 @@ func TestClaudeSegsBlankTrailerForAnElapsedReset(t *testing.T) {
 
 func TestSortIndicator(t *testing.T) {
 	now := time.Now()
-	// Started 2h ago, updated just now: the AGE cell distinguishes the
-	// created basis ("2h") from the updated basis ("0s").
+	// Started 2h ago, updated just now: AGE counts from start, SEEN from last
+	// activity. Sort mode must not swap those clocks — only the arrows move.
 	s := Session{PID: 7, Name: "srt", CWD: "/tmp/srt", Status: "idle",
 		StartedAt: now.Add(-2 * time.Hour).UnixMilli(), UpdatedAt: now.UnixMilli()}
 
@@ -2447,24 +2462,39 @@ func TestSortIndicator(t *testing.T) {
 	}
 
 	for _, view := range []string{"1", "2", "3"} {
-		if out := renderWith(view, "dir"); !strings.Contains(out, "DIR▲") || strings.Contains(out, "AGE▲") || strings.Contains(out, "AGE▼") {
+		out := renderWith(view, "dir")
+		hdr := findHeaderRow(t, out)
+		ageI, seenI := strings.Index(hdr, "AGE"), strings.Index(hdr, "SEEN")
+		if ageI < 0 || seenI < 0 || ageI >= seenI {
+			t.Errorf("view %s dir: want AGE then SEEN: %q", view, hdr)
+		}
+		if !strings.Contains(out, "DIR▲") || strings.Contains(out, "AGE▲") || strings.Contains(out, "AGE▼") || strings.Contains(out, "SEEN▲") || strings.Contains(out, "SEEN▼") {
 			t.Errorf("view %s dir: want DIR▲ only, got header in:\n%s", view, out)
 		}
-		if out := renderWith(view, "updated"); !strings.Contains(out, "AGE▼") || strings.Contains(out, "DIR▲") {
-			t.Errorf("view %s updated: want AGE▼ only:\n%s", view, out)
+		if out := renderWith(view, "updated"); !strings.Contains(out, "SEEN▼") || strings.Contains(out, "AGE▼") || strings.Contains(out, "DIR▲") {
+			t.Errorf("view %s updated: want SEEN▼ only:\n%s", view, out)
 		}
-		if out := renderWith(view, "created-asc"); !strings.Contains(out, "AGE▲") {
+		if out := renderWith(view, "created"); !strings.Contains(out, "AGE▼") || strings.Contains(out, "SEEN▼") {
+			t.Errorf("view %s created: want AGE▼:\n%s", view, out)
+		}
+		if out := renderWith(view, "created-asc"); !strings.Contains(out, "AGE▲") || strings.Contains(out, "SEEN▲") {
 			t.Errorf("view %s created-asc: want AGE▲:\n%s", view, out)
 		}
-		row := findRow(t, renderWith(view, "created"), "srt")
-		if !strings.Contains(row, "2h") {
-			t.Errorf("view %s created: AGE should count from start (2h): %q", view, row)
+		if out := renderWith(view, "updated-asc"); !strings.Contains(out, "SEEN▲") || strings.Contains(out, "AGE▲") {
+			t.Errorf("view %s updated-asc: want SEEN▲:\n%s", view, out)
 		}
-		row = findRow(t, renderWith(view, "updated"), "srt")
-		if strings.Contains(row, "2h") {
-			t.Errorf("view %s updated: AGE should count from update, not start: %q", view, row)
+		for _, mode := range []string{"created", "updated"} {
+			out := renderWith(view, mode)
+			hdr := findHeaderRow(t, out)
+			row := findRow(t, out, "srt")
+			if got := strings.TrimSpace(timeColumnCell(t, hdr, row, "AGE")); got != "2h" {
+				t.Errorf("view %s %s: AGE = %q, want 2h: %q", view, mode, got, row)
+			}
+			if got := strings.TrimSpace(timeColumnCell(t, hdr, row, "SEEN")); got != "0s" {
+				t.Errorf("view %s %s: SEEN = %q, want 0s: %q", view, mode, got, row)
+			}
 		}
-		out := renderWith(view, "status")
+		out = renderWith(view, "status")
 		if view == "2" {
 			if !strings.Contains(out, "S▲") {
 				t.Errorf("view %s status: want S▲:\n%s", view, out)
@@ -2472,7 +2502,7 @@ func TestSortIndicator(t *testing.T) {
 		} else if !strings.Contains(out, "STATUS▲") {
 			t.Errorf("view %s status: want STATUS▲:\n%s", view, out)
 		}
-		if strings.Contains(out, "DIR▲") || strings.Contains(out, "AGE▲") || strings.Contains(out, "AGE▼") {
+		if strings.Contains(out, "DIR▲") || strings.Contains(out, "AGE▲") || strings.Contains(out, "AGE▼") || strings.Contains(out, "SEEN▲") || strings.Contains(out, "SEEN▼") {
 			t.Errorf("view %s status: only status column should carry arrow:\n%s", view, out)
 		}
 	}

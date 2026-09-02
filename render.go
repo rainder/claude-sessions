@@ -1374,6 +1374,13 @@ func formatAge(seconds float64) string {
 	}
 }
 
+// sessionAgeSeen formats AGE (time since start) and SEEN (time since last
+// activity). Both columns keep their own clock; sort mode only moves the arrow.
+func sessionAgeSeen(s Session, now time.Time) (age, seen string) {
+	return formatAge(now.Sub(time.UnixMilli(s.StartedAt)).Seconds()),
+		formatAge(now.Sub(s.Updated()).Seconds())
+}
+
 // squashPath shortens each path component except the last to the first letter
 // of each hyphen/underscore-separated word.
 //
@@ -1966,21 +1973,23 @@ func RenderAll(w io.Writer, viewMode string, local LocalHost, remotes []RemoteRe
 	return frame.overflowing
 }
 
-// sortLabels returns the DIR, STATUS and AGE header labels, suffixing ▲/▼ on
-// the column that carries the active sort: DIR for the dir mode (ascending),
-// STATUS for the status mode, AGE for the time modes. In created modes the AGE
-// column shows age since start (see ageBasis), so the arrow always sits on the
-// column being sorted.
-func sortLabels(sortMode string) (dirLabel, statusLabel, ageLabel string) {
+// sortLabels returns the DIR, STATUS, AGE and SEEN header labels, suffixing
+// ▲/▼ on the column that carries the active sort: DIR for the dir mode
+// (ascending), STATUS for the status mode, AGE for created, SEEN for updated.
+func sortLabels(sortMode string) (dirLabel, statusLabel, ageLabel, seenLabel string) {
 	switch sortMode {
 	case "status":
-		return "DIR", "STATUS▲", "AGE"
-	case "created", "updated":
-		return "DIR", "STATUS", "AGE▼"
-	case "created-asc", "updated-asc":
-		return "DIR", "STATUS", "AGE▲"
+		return "DIR", "STATUS▲", "AGE", "SEEN"
+	case "created":
+		return "DIR", "STATUS", "AGE▼", "SEEN"
+	case "updated":
+		return "DIR", "STATUS", "AGE", "SEEN▼"
+	case "created-asc":
+		return "DIR", "STATUS", "AGE▲", "SEEN"
+	case "updated-asc":
+		return "DIR", "STATUS", "AGE", "SEEN▲"
 	default: // dir
-		return "DIR▲", "STATUS", "AGE"
+		return "DIR▲", "STATUS", "AGE", "SEEN"
 	}
 }
 
@@ -1992,15 +2001,6 @@ func minimalStatusLabel(sortMode string) string {
 		return "S▲"
 	}
 	return "S"
-}
-
-// ageBasis is the timestamp the AGE column counts from: session start in the
-// created sort modes, last update otherwise.
-func ageBasis(s Session, sortMode string) time.Time {
-	if sortMode == "created" || sortMode == "created-asc" {
-		return time.UnixMilli(s.StartedAt)
-	}
-	return s.Updated()
 }
 
 // RenderFull renders local sessions only (used by `--once` when there are no
@@ -2030,15 +2030,17 @@ type drowFull struct {
 	costStr   string
 	tokStr    string
 	ageStr    string
+	seenStr   string
 	sidShort  string
 }
 
-func deriveFull(s Session, now time.Time, sortMode string) drowFull {
+func deriveFull(s Session, now time.Time) drowFull {
 	sid := s.SessionID
 	if len(sid) > 8 {
 		sid = sid[:8]
 	}
 	name, nameDim := s.DisplayName()
+	age, seen := sessionAgeSeen(s, now)
 	return drowFull{
 		s:         s,
 		nameStr:   name,
@@ -2050,7 +2052,8 @@ func deriveFull(s Session, now time.Time, sortMode string) drowFull {
 		ctxStr:    formatTokens(s.ContextTokens),
 		costStr:   formatCost(s.CostUSD, s.CostSubagentsUSD),
 		tokStr:    formatTokens(s.TokensSpent),
-		ageStr:    formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
+		ageStr:    age,
+		seenStr:   seen,
 		sidShort:  sid,
 	}
 }
@@ -2125,13 +2128,13 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowFull, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveFull(s, now, sortMode)
+			r := deriveFull(s, now)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
 	}
 
-	dirLabel, statusLabel, ageLabel := sortLabels(sortMode)
+	dirLabel, statusLabel, ageLabel, seenLabel := sortLabels(sortMode)
 	nameW, dirW, modelW, costW, statusW, tmuxW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), utf8.RuneCountInString(statusLabel), len("TMUX")
 	pidW := len("PID")
 	for _, r := range all {
@@ -2153,10 +2156,10 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			rowIndent(gv)+"%*s  %-*s  %-*s  %-*s  %-*s  %*s  %5s  %-*s  %5s  %5s  %-8s  %s ",
+			rowIndent(gv)+"%*s  %-*s  %-*s  %-*s  %-*s  %*s  %5s  %-*s  %5s  %5s  %5s  %-8s  %s ",
 			pidW, "PID", nameW, "NAME", dirW, dirLabel, modelW, "MODEL",
 			statusW, statusLabel, costW, "COST",
-			"CTX", tmuxW, "TMUX", "CPU%", ageLabel, "VER", "SID",
+			"CTX", tmuxW, "TMUX", "CPU%", ageLabel, seenLabel, "VER", "SID",
 		)
 	}
 	hdr := buildHdr()
@@ -2195,7 +2198,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 					sidCell = dim(sidCell)
 				}
 			}
-			body := fmt.Sprintf("%*d  %s  %s  %s  %s  %s  %s  %s  %5s  %5s  %-8s  %s ",
+			body := fmt.Sprintf("%*d  %s  %s  %s  %s  %s  %s  %s  %5s  %5s  %5s  %-8s  %s ",
 				pidW, r.s.PID,
 				nameStr,
 				marqueeCell(r.cwdStr, dirW, step),
@@ -2204,7 +2207,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 				costCell(r.costStr, costW),
 				ctxCell(r.ctxStr, r.s.ContextTokens, r.s.ContextWindow, plainCells),
 				tmuxCell,
-				r.s.CPU, r.ageStr, r.s.Version, sidCell,
+				r.s.CPU, r.ageStr, r.seenStr, r.s.Version, sidCell,
 			)
 			row := decorateSessionRow(r.s, selected, body, gv)
 			w.record(r.s.ID(), true)
@@ -2253,13 +2256,13 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowFull, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveFull(s, now, sortMode)
+			r := deriveFull(s, now)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
 	}
 
-	dirLabel, statusLabel, ageLabel := sortLabels(sortMode)
+	dirLabel, statusLabel, ageLabel, seenLabel := sortLabels(sortMode)
 	nameW, dirW, modelW, costW, statusW := len("NAME"), utf8.RuneCountInString(dirLabel), len("MODEL"), len("COST"), utf8.RuneCountInString(statusLabel)
 	for _, r := range all {
 		nameW = max(nameW, nameCellTextWidth(r.nameStr, r.badgeStr))
@@ -2273,10 +2276,10 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			rowIndent(gv)+"%-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s  %5s  %5s ",
+			rowIndent(gv)+"%-*s  %-*s  %-*s  %-*s  %*s  %5s  %5s  %5s  %5s  %5s ",
 			nameW, "NAME", dirW, dirLabel, statusW, statusLabel,
 			modelW, "MODEL", costW, "COST",
-			"TOK", "CTX", "CPU%", ageLabel,
+			"TOK", "CTX", "CPU%", ageLabel, seenLabel,
 		)
 	}
 	hdr := buildHdr()
@@ -2304,7 +2307,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 			if utf8.RuneCountInString(r.cwdStr) > dirW {
 				overflowing = true
 			}
-			body := fmt.Sprintf("%s  %s  %s  %s  %s  %5s  %s  %5s  %5s ",
+			body := fmt.Sprintf("%s  %s  %s  %s  %s  %5s  %s  %5s  %5s  %5s ",
 				nameStr,
 				marqueeCell(r.cwdStr, dirW, step),
 				statusCell,
@@ -2312,7 +2315,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 				costCell(r.costStr, costW),
 				r.tokStr,
 				ctxCell(r.ctxStr, r.s.ContextTokens, r.s.ContextWindow, plainCells),
-				r.s.CPU, r.ageStr,
+				r.s.CPU, r.ageStr, r.seenStr,
 			)
 			row := decorateSessionRow(r.s, selected, body, gv)
 			w.record(r.s.ID(), true)
@@ -2357,9 +2360,10 @@ type drowMinimal struct {
 	nameDim  bool   // true when display is auto-derived, not user-set
 	badgeStr string // tool marker rendered after display ("grok"), "" for claude
 	ageStr   string
+	seenStr  string
 }
 
-func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
+func deriveMinimal(s Session, now time.Time) drowMinimal {
 	dir, ok := repoDirName(s.CWD, s.GitRoot, s.WorktreeName)
 	if !ok {
 		cwd := displayCWD(s.CWD, s.Home)
@@ -2370,13 +2374,15 @@ func deriveMinimal(s Session, now time.Time, sortMode string) drowMinimal {
 	}
 	disp, dimName := s.DisplayName()
 	disp = truncateRunes(disp, maxNameCellWidth)
+	age, seen := sessionAgeSeen(s, now)
 	return drowMinimal{
 		s:        s,
 		dir:      dir,
 		display:  disp,
 		nameDim:  dimName,
 		badgeStr: toolBadge(s),
-		ageStr:   formatAge(now.Sub(ageBasis(s, sortMode)).Seconds()),
+		ageStr:   age,
+		seenStr:  seen,
 	}
 }
 
@@ -2389,13 +2395,13 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 	for si, sec := range sections {
 		sectionRows[si] = make([]drowMinimal, len(sec.rows))
 		for i, s := range sec.rows {
-			r := deriveMinimal(s, now, sortMode)
+			r := deriveMinimal(s, now)
 			sectionRows[si][i] = r
 			all = append(all, r)
 		}
 	}
 
-	dirLabel, _, ageLabel := sortLabels(sortMode)
+	dirLabel, _, ageLabel, seenLabel := sortLabels(sortMode)
 	statusLabel := minimalStatusLabel(sortMode)
 	statusW := utf8.RuneCountInString(statusLabel)
 	dirW, nameW := utf8.RuneCountInString(dirLabel), len("NAME")
@@ -2408,8 +2414,8 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
-			rowIndent(gv)+"%-*s  %-*s  %-*s  %5s ",
-			dirW, dirLabel, nameW, "NAME", statusW, statusLabel, ageLabel,
+			rowIndent(gv)+"%-*s  %-*s  %-*s  %5s  %5s ",
+			dirW, dirLabel, nameW, "NAME", statusW, statusLabel, ageLabel, seenLabel,
 		)
 	}
 	hdr := buildHdr()
@@ -2434,11 +2440,12 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 				overflowing = true
 			}
 			body := fmt.Sprintf(
-				"%s  %s  %s  %5s ",
+				"%s  %s  %s  %5s  %5s ",
 				marqueeCell(r.dir, dirW, step),
 				nameStr,
 				statusCell,
 				r.ageStr,
+				r.seenStr,
 			)
 			row := decorateSessionRow(r.s, selected, body, gv)
 			w.record(r.s.ID(), true)

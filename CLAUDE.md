@@ -219,7 +219,7 @@ renders dimmed like claude's own derived names. A session whose summary has not
 been written yet still renders as a row. A row with no parseable `opened_at`
 **and** no summary has nothing on disk to date it by, so `grokSessionFrom`
 stamps collection time rather than leave `StartedAt` at zero — `Session.Updated`
-would otherwise answer the epoch and the AGE column would read ~20679d.
+would otherwise answer the epoch and the AGE and SEEN columns would read ~20679d.
 
 `collectGrokLocal` fills what the registry and summary know, plus a derived
 `Status` / `WaitingFor` from the session's `events.jsonl`. `CollectLocal`

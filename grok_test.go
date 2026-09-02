@@ -218,7 +218,7 @@ func TestCollectGrokLocalReadsRegistryAndSummary(t *testing.T) {
 		t.Errorf("StartedAt = %d, want %d", s.StartedAt, want)
 	}
 	// last_active_at wins over updated_at: it is the field grok stamps on
-	// every turn, and the one the AGE column is meant to reflect.
+	// every turn, and the one the SEEN column is meant to reflect.
 	if want := mustMillis(t, "2026-08-14T18:34:09.451788812Z"); s.UpdatedAt != want {
 		t.Errorf("UpdatedAt = %d, want %d", s.UpdatedAt, want)
 	}
@@ -659,7 +659,7 @@ func TestCollectGrokLocalKeepsRowWithoutASummary(t *testing.T) {
 
 // With no parseable opened_at and no summary there is nothing on disk to date
 // the row by, and a zero StartedAt would make Session.Updated answer the epoch
-// — an AGE column reading ~20679d. Collection time is the honest stand-in.
+// — AGE and SEEN columns reading ~20679d. Collection time is the honest stand-in.
 func TestCollectGrokLocalStampsARowWithNoUsableTimestamp(t *testing.T) {
 	allPIDsAlive(t)
 	home := t.TempDir()
