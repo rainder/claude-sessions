@@ -218,6 +218,16 @@ func TestGrokExtraCreditsIgnoresDeprecatedMonthlyLimit(t *testing.T) {
 	}
 }
 
+// Live capture 2026-09-05: auto-topup enabled, $500 topups, no
+// maxAmountPerMonth (proto3 omit-zero). That is not "no cap" — it is an
+// unset field, so the extra-usage bar still renders against $10,000.
+func TestGrokExtraCreditsDefaultsMissingAutoTopupMax(t *testing.T) {
+	c := grokExtraCredits(0, 0, 91353, true, 0)
+	if !c.Enabled || c.Used != 91353 || c.Limit != 1_000_000 {
+		t.Errorf("got %+v, want default $10k 91353/1000000", c)
+	}
+}
+
 func TestGrokPeriodLabel(t *testing.T) {
 	cases := []struct {
 		typ  string

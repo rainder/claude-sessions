@@ -418,6 +418,10 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Grok extra-usage bar now uses a $10,000 cap when auto-topup is on and
+  `maxAmountPerMonth` is missing. A set max still wins. An on-demand cap still
+  wins first. This is display only; it does not write a billing rule.
+
 - `GET /usage` no longer calls Anthropic. It used to fetch the live account's
   and every known account's rate-limit percentages on a remote caller's
   behalf, single-flighted and briefly cached — which stopped the endpoint from

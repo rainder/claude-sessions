@@ -25,8 +25,10 @@ type grokWindow struct {
 // Windows holds at most one entry — the current period from config.currentPeriod
 // (weekly / monthly / daily / credits). Credits is extra-usage spend against the
 // user-set cap (on-demand cap, else auto-topup maxAmountPerMonth), in cents.
-// Deprecated monthlyLimit is the included budget and is not the cap. Zero value
-// hides the cr bar. Unlike Codex there is no Plan field.
+// An enabled auto-topup with no maxAmountPerMonth (proto3 omit-zero) uses
+// grokDefaultMonthlyCreditsLimit rather than hiding the bar. Deprecated
+// monthlyLimit is the included budget and is not the cap. Zero value hides
+// the cr bar. Unlike Codex there is no Plan field.
 type GrokUsageInfo struct {
 	Windows []grokWindow `json:"windows"`
 	Credits creditsInfo  `json:"credits,omitempty"`
@@ -174,15 +176,23 @@ func parseGrokAutoTopup(body []byte) (enabled bool, max float64) {
 	return true, max
 }
 
+// grokDefaultMonthlyCreditsLimit is the display cap, in cents, when auto-topup
+// is on but maxAmountPerMonth is omitted. $10,000 — not a live billing write.
+const grokDefaultMonthlyCreditsLimit = 1_000_000
+
 // grokExtraCredits picks the extra-usage bar. On-demand cap wins when set
 // (classic PAYG). Else an enabled auto-topup max is the user-set monthly cap
-// (unified billing). monthlyLimit is not a candidate.
+// (unified billing). An enabled rule with no max uses
+// grokDefaultMonthlyCreditsLimit. monthlyLimit is not a candidate.
 func grokExtraCredits(onDemandUsed, onDemandCap, monthlyUsed float64, topupOn bool, topupMax float64) creditsInfo {
 	var used, limit float64
 	switch {
 	case onDemandCap > 0:
 		used, limit = onDemandUsed, onDemandCap
-	case topupOn && topupMax > 0:
+	case topupOn:
+		if topupMax <= 0 {
+			topupMax = grokDefaultMonthlyCreditsLimit
+		}
 		used, limit = monthlyUsed, topupMax
 	default:
 		return creditsInfo{}
@@ -275,9 +285,10 @@ func grokBillingGet(tok, url string) ([]byte, error) {
 // fetchGrokUsage hits the Grok billing endpoints with the current token.
 // format=credits supplies the period window and any on-demand cap; /v1/billing
 // supplies calendar-month extra spend; auto-topup-rule supplies the user-set
-// monthly cap when on-demand is unset. The last two are best-effort (a failure
-// leaves Credits zero, weekly still shows). The account email comes from
-// loadGrokAuth, not the payload.
+// monthly cap when on-demand is unset. An enabled rule with no max still
+// yields a bar at grokDefaultMonthlyCreditsLimit. The last two are best-effort
+// (a failure leaves Credits zero, weekly still shows). The account email comes
+// from loadGrokAuth, not the payload.
 func fetchGrokUsage() (*GrokAccountUsage, error) {
 	tok, email, err := loadGrokAuth()
 	if err != nil {
