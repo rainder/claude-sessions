@@ -272,11 +272,12 @@ WaitingFor to `"permission prompt"`, mirroring the exact
 writes for its own sessions at a permission prompt. `Waiting()` keys off
 WaitingFor alone, not Status, so both shapes register as blocked on the
 user — and `sessionStatusRank` would bury a waiting row that only set
-Status. `StatusDisplay()` (session.go) leads with the literal word
+Status. `StatusDisplay()` (session.go) returns the literal word
 `"waiting"` whenever WaitingFor is non-empty, for both claude and grok rows
-alike, rather than echoing the underlying `busy`/`waiting` Status —
-`statusDisplayColor` (render.go) makes the STATUS cell's color agree,
-overriding to the `waiting` color whenever `Waiting()` is true. A last event
+alike, rather than echoing the underlying `busy`/`waiting` Status or
+appending the reason — `statusDisplayColor` (render.go) makes the STATUS
+cell's color agree, overriding to the `waiting` color whenever `Waiting()`
+is true. A last event
 of `turn_ended` is `idle` (grok never
 writes an idle phase, so the last `phase_changed` after a finished turn is
 still `streaming_text`); an open turn or a busy phase (`waiting_for_model`,

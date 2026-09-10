@@ -428,14 +428,14 @@ func TestDisabledGrokRowRendersPlainName(t *testing.T) {
 
 // A grok row with no derived Status takes the same "-" placeholder the MODEL,
 // A permission prompt (WaitingFor set, but Status still "busy" — the shape
-// Claude Code itself writes) must display as "waiting:...", not "busy:...":
+// Claude Code itself writes) must display as "waiting", not "busy":
 // the raw Status field describes the turn as still in flight, but WaitingFor
 // non-empty means the session is genuinely blocked on the user, and the
-// label should say so.
+// label should say so without the reason suffix.
 func TestStatusDisplayLeadsWithWaitingForAPermissionPrompt(t *testing.T) {
 	s := Session{Status: "busy", WaitingFor: "permission prompt"}
-	if got := s.StatusDisplay(); got != "waiting:permission prompt" {
-		t.Errorf("StatusDisplay() = %q, want %q", got, "waiting:permission prompt")
+	if got := s.StatusDisplay(); got != "waiting" {
+		t.Errorf("StatusDisplay() = %q, want %q", got, "waiting")
 	}
 	if got := statusDisplayColor(s); got != statusColor["waiting"] {
 		t.Errorf("statusDisplayColor() = %q, want the waiting color %q", got, statusColor["waiting"])
@@ -470,8 +470,8 @@ func TestGrokRowWithDerivedStatusRendersIt(t *testing.T) {
 		t.Errorf("statusGlyphFor(grok busy) = %q, want %q", got, statusGlyph["busy"])
 	}
 	waiting := Session{Tool: toolGrok, Status: "waiting", WaitingFor: "read_file"}
-	if got := statusCellText(waiting); got != "waiting:read_file" {
-		t.Errorf("statusCellText(grok waiting) = %q, want waiting:read_file", got)
+	if got := statusCellText(waiting); got != "waiting" {
+		t.Errorf("statusCellText(grok waiting) = %q, want waiting", got)
 	}
 }
 

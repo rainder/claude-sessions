@@ -87,15 +87,16 @@ type Session struct {
 // Claude Code one.
 func (s Session) IsGrok() bool { return s.Tool == toolGrok }
 
-// StatusDisplay returns the status label including the waitingFor suffix
-// when relevant (e.g. "waiting:permission prompt"). Any non-empty WaitingFor
-// means blocked on the user (see Waiting()), so the label always leads with
-// "waiting" rather than echoing the raw Status underneath it — a mid-turn
-// permission prompt has Status "busy", which would otherwise render as
-// ordinary background work instead of something needing a click.
+// StatusDisplay returns the status label. Any non-empty WaitingFor means
+// blocked on the user (see Waiting()), so the label is always "waiting"
+// rather than echoing the raw Status underneath it — a mid-turn permission
+// prompt has Status "busy", which would otherwise render as ordinary
+// background work instead of something needing a click. WaitingFor itself
+// is not shown: the STATUS column is the blocked-on-user signal, not the
+// reason.
 func (s Session) StatusDisplay() string {
 	if s.WaitingFor != "" {
-		return "waiting:" + s.WaitingFor
+		return "waiting"
 	}
 	return s.Status
 }

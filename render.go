@@ -96,7 +96,7 @@ var statusColor = map[string]string{
 // non-empty WaitingFor is a blocked-on-user state (Waiting()) regardless of
 // the raw Status underneath it — a mid-turn permission prompt is Status
 // "busy" — so it always gets the "waiting" color, matching StatusDisplay's
-// own "waiting:<reason>" text rather than coloring it as ordinary busy work.
+// own "waiting" text rather than coloring it as ordinary busy work.
 func statusDisplayColor(s Session) string {
 	if s.Waiting() {
 		return statusColor["waiting"]

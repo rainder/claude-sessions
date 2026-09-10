@@ -325,6 +325,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `~/.claude/.account-switch.lock`; a live Claude Code process rewriting the
   credential mid-switch remains an accepted, documented residual window.
 
+### Changed
+
+- STATUS now shows `waiting` with no reason suffix. A blocked session used
+  to render as `waiting:permission prompt` or `waiting:input`. The color
+  and sort rank are unchanged.
+
 ### Fixed
 
 - A Grok row sitting on `ask_user_question` no longer shows STATUS `busy`.
