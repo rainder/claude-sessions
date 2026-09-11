@@ -225,6 +225,39 @@ func TestGrokHasOpenBackgroundIgnoresEmptyID(t *testing.T) {
 	}
 }
 
+func TestGrokHasOpenBackgroundTracksSubagent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p,
+		`{"params":{"update":{"sessionUpdate":"subagent_spawned","subagent_id":"sa-1"}}}`,
+		`{"params":{"update":{"sessionUpdate":"subagent_spawned","subagent_id":"sa-2"}}}`,
+		`{"params":{"update":{"sessionUpdate":"subagent_finished","subagent_id":"sa-1","status":"completed"}}}`,
+	)
+	if !grokHasOpenBackground(p) {
+		t.Fatal("open sa-2 should report background")
+	}
+
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(f, `{"params":{"update":{"sessionUpdate":"subagent_finished","subagent_id":"sa-2","status":"completed"}}}`)
+	f.Close()
+	if grokHasOpenBackground(p) {
+		t.Error("after sa-2 finished, want no open background")
+	}
+}
+
+func TestGrokHasOpenBackgroundIgnoresEmptySubagentID(t *testing.T) {
+	p := filepath.Join(t.TempDir(), grokUpdatesFile)
+	writeLines(t, p,
+		`{"params":{"update":{"sessionUpdate":"subagent_spawned","subagent_id":""}}}`,
+		`{"params":{"update":{"sessionUpdate":"subagent_finished","subagent_id":"ghost"}}}`,
+	)
+	if grokHasOpenBackground(p) {
+		t.Error("empty id and unmatched finish should not report background")
+	}
+}
+
 func TestScanGrokCostSumsTotalTokens(t *testing.T) {
 	p := filepath.Join(t.TempDir(), grokUpdatesFile)
 	writeLines(t, p,

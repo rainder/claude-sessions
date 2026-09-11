@@ -27,14 +27,15 @@ type grokPromptCost struct {
 
 // grokCostCacheEntry holds the incremental scan state for one updates.jsonl:
 // the byte offset consumed so far, the running dollar cost and token count,
-// the last counted totals per prompt_id, and the background task ids still
-// open (task_backgrounded with no matching task_completed).
+// the last counted totals per prompt_id, and the background ids still
+// open (task_backgrounded with no matching task_completed, or
+// subagent_spawned with no matching subagent_finished).
 type grokCostCacheEntry struct {
 	offset  int64
 	costUSD float64
 	tokens  int
 	seen    map[string]grokPromptCost // last counted totals per prompt_id
-	open    map[string]bool           // background task_id still running
+	open    map[string]bool           // background task_id or subagent_id still running
 }
 
 func newGrokCostCacheEntry() *grokCostCacheEntry {
@@ -180,7 +181,8 @@ func scanGrokCost(path string) (cost float64, tokens int) {
 }
 
 // grokHasOpenBackground reports whether updates.jsonl still has a
-// task_backgrounded id with no matching task_completed. It shares
+// task_backgrounded id with no matching task_completed, or a
+// subagent_spawned id with no matching subagent_finished. It shares
 // scanGrokCost's incremental cache so a CollectLocal tick reads the
 // new bytes once. A missing file is false.
 func grokHasOpenBackground(path string) bool {
@@ -193,10 +195,13 @@ func grokHasOpenBackground(path string) bool {
 
 // grokApplyBackground updates e.open from one updates.jsonl line.
 // task_backgrounded adds task_id; task_completed removes
-// task_snapshot.task_id. Empty ids and torn lines are ignored.
+// task_snapshot.task_id. subagent_spawned adds subagent_id;
+// subagent_finished removes it. Empty ids and torn lines are ignored.
 func grokApplyBackground(line []byte, e *grokCostCacheEntry) {
 	if !bytes.Contains(line, []byte("task_backgrounded")) &&
-		!bytes.Contains(line, []byte("task_completed")) {
+		!bytes.Contains(line, []byte("task_completed")) &&
+		!bytes.Contains(line, []byte("subagent_spawned")) &&
+		!bytes.Contains(line, []byte("subagent_finished")) {
 		return
 	}
 	var ev struct {
@@ -204,6 +209,7 @@ func grokApplyBackground(line []byte, e *grokCostCacheEntry) {
 			Update struct {
 				SessionUpdate string `json:"sessionUpdate"`
 				TaskID        string `json:"task_id"`
+				SubagentID    string `json:"subagent_id"`
 				TaskSnapshot  struct {
 					TaskID string `json:"task_id"`
 				} `json:"task_snapshot"`
@@ -220,6 +226,14 @@ func grokApplyBackground(line []byte, e *grokCostCacheEntry) {
 		}
 	case "task_completed":
 		if id := ev.Params.Update.TaskSnapshot.TaskID; id != "" {
+			delete(e.open, id)
+		}
+	case "subagent_spawned":
+		if id := ev.Params.Update.SubagentID; id != "" {
+			e.open[id] = true
+		}
+	case "subagent_finished":
+		if id := ev.Params.Update.SubagentID; id != "" {
 			delete(e.open, id)
 		}
 	}

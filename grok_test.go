@@ -1591,6 +1591,18 @@ func grokTaskCompleted(id string) string {
 	return `{"params":{"update":{"sessionUpdate":"task_completed","task_snapshot":{"task_id":"` + id + `"}}}}`
 }
 
+// grokSubagentSpawned / grokSubagentFinished are the updates.jsonl shapes
+// grok writes for spawn_subagent. The parent turn can end while the child
+// is still running (run_in_background), so status overlays shell from these
+// the same way it does for task_backgrounded.
+func grokSubagentSpawned(id string) string {
+	return `{"params":{"update":{"sessionUpdate":"subagent_spawned","subagent_id":"` + id + `"}}}`
+}
+
+func grokSubagentFinished(id string) string {
+	return `{"params":{"update":{"sessionUpdate":"subagent_finished","subagent_id":"` + id + `","status":"completed"}}}`
+}
+
 func TestCollectGrokLocalOpenBackgroundAfterTurnEndedIsShell(t *testing.T) {
 	allPIDsAlive(t)
 	home := t.TempDir()
@@ -1718,6 +1730,76 @@ func TestCollectGrokLocalOpenBackgroundClearsWhenCompleted(t *testing.T) {
 	if rows[0].Status != "idle" || rows[0].WaitingFor != "" {
 		t.Errorf("after complete Status/WaitingFor = %q/%q, want idle/",
 			rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
+func TestCollectGrokLocalOpenSubagentAfterTurnEndedIsShell(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"phase_changed","phase":"tool_execution"}`,
+		`{"type":"tool_started","tool_name":"spawn_subagent"}`,
+		`{"type":"tool_completed","tool_name":"spawn_subagent"}`,
+		`{"type":"turn_ended","outcome":"completed"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokSubagentSpawned("01a0907c-ccbf-7c90-8351-e5a712d79798"),
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "shell" || rows[0].WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want shell/", rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
+func TestCollectGrokLocalFinishedSubagentStaysIdle(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"turn_ended","outcome":"completed"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokSubagentSpawned("sa-1"),
+		grokSubagentFinished("sa-1"),
+		grokSubagentSpawned("sa-2"),
+		grokSubagentFinished("sa-2"),
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "idle" || rows[0].WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want idle/", rows[0].Status, rows[0].WaitingFor)
+	}
+}
+
+func TestCollectGrokLocalBusyWinsOverOpenSubagent(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"turn_started"}`,
+		`{"type":"phase_changed","phase":"streaming_text"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokSubagentSpawned("sa-1"),
+	)
+
+	rows := collectGrokLocal(home)
+	if len(rows) != 1 {
+		t.Fatalf("collectGrokLocal returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != "busy" || rows[0].WaitingFor != "" {
+		t.Errorf("Status/WaitingFor = %q/%q, want busy/", rows[0].Status, rows[0].WaitingFor)
 	}
 }
 

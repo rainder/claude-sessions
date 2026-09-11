@@ -234,7 +234,8 @@ and CTX stays `-`. Color uses `contextWindowTokens` on the same file
 the incremental sum of `turn_completed` `costUsdTicks` on sibling
 `updates.jsonl`, divided by 1e10 (Grok's documented unit). A missing file or
 no ticks is 0 / "—". The same incremental pass tracks open background
-tasks (`task_backgrounded` / `task_completed`) for the shell overlay.
+tasks (`task_backgrounded` / `task_completed`) and open subagents
+(`subagent_spawned` / `subagent_finished`) for the shell overlay.
 Do not scan the whole file every tick: only new bytes, same contract as
 `scanCostIncremental`. Turns without `costUsdTicks` are
 skipped for dollars (may understate, accepted) but still count
@@ -294,11 +295,13 @@ than the window with later non-question events would read as busy —
 accepted, because a session still blocked on the user writes nothing after
 the question's own `permission_resolved` / `tool_execution` trailer. A long
 foreground bash tool is still `busy`. After
-`turn_ended`, an open background command or monitor is `shell` — grok
-writes `task_backgrounded` to `updates.jsonl` when it backgrounds the
-task, and `task_completed` when that task exits, and
-`grokSessionStatus` overlays `shell` on an idle (or empty) events
-answer while any id is still open. waiting and a live turn still win.
+`turn_ended`, an open background command, monitor, or spawn_subagent is
+`shell` — grok writes `task_backgrounded` to `updates.jsonl` when it
+backgrounds a command, `subagent_spawned` when it backgrounds a
+subagent, and `task_completed` / `subagent_finished` when that work
+exits, and `grokSessionStatus` overlays `shell` on an idle (or empty)
+events answer while any id is still open. waiting and a live turn still
+win.
 A grok row's NAME cell renders identically to a claude one — `toolBadge`
 returns "" for every row, so there is no tool marker distinguishing them
 visually.
