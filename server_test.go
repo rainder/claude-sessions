@@ -4239,36 +4239,68 @@ func TestDisableHandlerUnauthorized(t *testing.T) {
 // account switch against the machine running `go test`.
 func TestAccountSwitchHandler(t *testing.T) {
 	cases := []struct {
-		name       string
-		body       string
-		switchErr  error
-		warnings   []string
-		wantStatus int
-		wantOK     bool
-		wantCode   string
-		wantCalled bool
+		name        string
+		body        string
+		switchErr   error
+		warnings    []string
+		wantStatus  int
+		wantOK      bool
+		wantCode    string
+		wantCalled  bool
+		wantAccount string
 	}{
 		{
-			name:       "valid name switches and reports the new email",
+			name:       "missing tool never reaches the switch",
 			body:       `{"name":"avisoma"}`,
-			wantStatus: http.StatusOK,
-			wantOK:     true,
-			wantCalled: true,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   codeBadTool,
+			wantCalled: false,
+		},
+		{
+			name:       "empty tool never reaches the switch",
+			body:       `{"tool":"","name":"avisoma"}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   codeBadTool,
+			wantCalled: false,
+		},
+		{
+			name:       "unknown tool never reaches the switch",
+			body:       `{"tool":"codex","name":"avisoma"}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   codeBadTool,
+			wantCalled: false,
+		},
+		{
+			name:        "valid name switches and reports the new email",
+			body:        `{"tool":"claude","name":"avisoma"}`,
+			wantStatus:  http.StatusOK,
+			wantOK:      true,
+			wantCalled:  true,
+			wantAccount: "andy@avisoma.example",
+		},
+		{
+			name:        "grok tool reaches the seam",
+			body:        `{"tool":"grok","name":"personal"}`,
+			wantStatus:  http.StatusOK,
+			wantOK:      true,
+			wantCalled:  true,
+			wantAccount: "andy@personal.example",
 		},
 		{
 			// A successful switch that raised a warning carries it on the
 			// success response — refusing would block the very case it warns
 			// about (see runningSessionsWarning).
-			name:       "warnings ride the success response",
-			body:       `{"name":"avisoma"}`,
-			warnings:   []string{"2 Claude Code sessions are still running (pid 11, 12)."},
-			wantStatus: http.StatusOK,
-			wantOK:     true,
-			wantCalled: true,
+			name:        "warnings ride the success response",
+			body:        `{"tool":"claude","name":"avisoma"}`,
+			warnings:    []string{"2 Claude Code sessions are still running (pid 11, 12)."},
+			wantStatus:  http.StatusOK,
+			wantOK:      true,
+			wantCalled:  true,
+			wantAccount: "andy@avisoma.example",
 		},
 		{
 			name:       "unknown snapshot is a bad request, nothing touched",
-			body:       `{"name":"nope"}`,
+			body:       `{"tool":"claude","name":"nope"}`,
 			switchErr:  fmt.Errorf("%w for %q (known: avisoma)", errUnknownAccount, "nope"),
 			wantStatus: http.StatusBadRequest,
 			wantCode:   codeUnknownAccount,
@@ -4276,7 +4308,7 @@ func TestAccountSwitchHandler(t *testing.T) {
 		},
 		{
 			name:       "a failed switch is a server error",
-			body:       `{"name":"avisoma"}`,
+			body:       `{"tool":"claude","name":"avisoma"}`,
 			switchErr:  errors.New("keychain write: exit status 1"),
 			wantStatus: http.StatusInternalServerError,
 			wantCode:   codeSwitchFailed,
@@ -4284,7 +4316,7 @@ func TestAccountSwitchHandler(t *testing.T) {
 		},
 		{
 			name:       "an empty name never reaches the switch",
-			body:       `{}`,
+			body:       `{"tool":"claude"}`,
 			wantStatus: http.StatusBadRequest,
 			wantCode:   codeUnknownAccount,
 		},
@@ -4294,8 +4326,11 @@ func TestAccountSwitchHandler(t *testing.T) {
 			called := false
 			s := &server{
 				token: "secret",
-				switchAcct: func(name string) (string, []string, error) {
+				switchAcct: func(tool, name string) (string, []string, error) {
 					called = true
+					if tool != accountToolClaude && tool != accountToolGrok {
+						t.Fatalf("seam tool = %q", tool)
+					}
 					if tc.switchErr != nil {
 						return "", nil, tc.switchErr
 					}
@@ -4324,8 +4359,8 @@ func TestAccountSwitchHandler(t *testing.T) {
 			if r.Code != tc.wantCode {
 				t.Fatalf("code = %q, want %q", r.Code, tc.wantCode)
 			}
-			if tc.wantOK && r.Account != "andy@avisoma.example" {
-				t.Fatalf("account = %q, want the new live email", r.Account)
+			if tc.wantOK && r.Account != tc.wantAccount {
+				t.Fatalf("account = %q, want %q", r.Account, tc.wantAccount)
 			}
 			if !tc.wantOK && r.Message == "" {
 				t.Fatal("failure carries no message")
@@ -4337,11 +4372,21 @@ func TestAccountSwitchHandler(t *testing.T) {
 	}
 }
 
+func TestSwitchAccountToRefusesUnknownTool(t *testing.T) {
+	_, _, err := (&server{}).switchAccountTo("nope", "avisoma")
+	if err == nil {
+		t.Fatal("unknown tool must not fall through to a Claude switch")
+	}
+	if !strings.Contains(err.Error(), "tool is required") {
+		t.Fatalf("err = %v, want tool is required", err)
+	}
+}
+
 func TestAccountSwitchHandlerUnauthorized(t *testing.T) {
 	called := false
 	s := &server{
 		token:      "secret",
-		switchAcct: func(string) (string, []string, error) { called = true; return "", nil, nil },
+		switchAcct: func(string, string) (string, []string, error) { called = true; return "", nil, nil },
 	}
 	req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(`{"name":"avisoma"}`))
 	rec := httptest.NewRecorder()
@@ -4358,8 +4403,11 @@ func TestAccountSwitchHandlerUnauthorized(t *testing.T) {
 
 func TestAccountSwitchHandlerBadJSON(t *testing.T) {
 	s := &server{
-		token:      "secret",
-		switchAcct: func(string) (string, []string, error) { t.Fatal("switch called for a bad body"); return "", nil, nil },
+		token: "secret",
+		switchAcct: func(string, string) (string, []string, error) {
+			t.Fatal("switch called for a bad body")
+			return "", nil, nil
+		},
 	}
 	req := httptest.NewRequest("POST", "/account/switch", strings.NewReader(`{"name":`))
 	req.Header.Set("Authorization", "Bearer secret")

@@ -393,7 +393,7 @@ func switchAccountLocked(name string) (string, []string, error) {
 	identity, err := os.ReadFile(snapshotAccountPath(home, name))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", nil, fmt.Errorf("snapshot %q has no identity snapshot — run 'claude-sessions account save %s' while logged into it first", name, name)
+			return "", nil, fmt.Errorf("snapshot %q has no identity snapshot — run 'claude-sessions account claude save %s' while logged into it first", name, name)
 		}
 		return "", nil, fmt.Errorf("read identity snapshot %q: %w", name, err)
 	}
@@ -423,7 +423,7 @@ func switchAccountLocked(name string) (string, []string, error) {
 	// file) writer could otherwise exploit between two separate reads.
 	snapEmail := strings.TrimSpace(identitySnapshotEmail(snapshot))
 	if snapEmail == "" {
-		return "", nil, fmt.Errorf("snapshot %q's identity snapshot has no email — run 'claude-sessions account save %s' while logged into it first", name, name)
+		return "", nil, fmt.Errorf("snapshot %q's identity snapshot has no email — run 'claude-sessions account claude save %s' while logged into it first", name, name)
 	}
 
 	// 1.6. Refuse if a previous switch was interrupted mid-flight (killed
@@ -441,7 +441,7 @@ func switchAccountLocked(name string) (string, []string, error) {
 	if pending := readPendingSwitchMarker(home); pending != "" {
 		return "", nil, fmt.Errorf("a previous switch to %q did not finish (process interrupted?) — "+
 			"run '/login' in Claude Code to confirm the live account and refresh its identity, then "+
-			"'claude-sessions account save <that account's name>' to resync its snapshot and clear this warning "+
+			"'claude-sessions account claude save <that account's name>' to resync its snapshot and clear this warning "+
 			"(save always clears it, since capturing what's live is exactly the confirmation this is waiting for); "+
 			"or remove %s directly if you're certain nothing needs correcting", pending, pendingSwitchMarkerPath(home))
 	}
@@ -599,7 +599,7 @@ func runningSessionsWarning(name string, sessions []Session) string {
 	}
 	return fmt.Sprintf("%d Claude Code %s still running (pid %s). %s the outgoing account's "+
 		"token and can overwrite — or, if their own refresh is refused, wipe — the credential "+
-		"this switch just installed. Close them and re-run 'claude-sessions account switch %s' "+
+		"this switch just installed. Close them and re-run 'claude-sessions account claude switch %s' "+
 		"if the switch does not stick.", len(pids), noun, list, verb, name)
 }
 
@@ -633,11 +633,11 @@ func validateSnapshotCredential(home, name, snapEmail string) ([]byte, error) {
 	}
 	if strings.TrimSpace(creds.RefreshToken) == "" {
 		return nil, fmt.Errorf("snapshot %q has no refresh token, so it would stop working as soon as "+
-			"its access token ages out — run 'claude-sessions account save %s' while logged into that account", name, name)
+			"its access token ages out — run 'claude-sessions account claude save %s' while logged into that account", name, name)
 	}
 	if exp := msExpiry(creds.RefreshTokenExpiresAt); !exp.IsZero() && exp.Before(time.Now()) {
 		return nil, fmt.Errorf("snapshot %q's refresh token expired on %s, so installing it would log this host out — "+
-			"run 'claude-sessions account save %s' while logged into that account", name, exp.UTC().Format(time.RFC3339), name)
+			"run 'claude-sessions account claude save %s' while logged into that account", name, exp.UTC().Format(time.RFC3339), name)
 	}
 	if access := msExpiry(creds.ExpiresAt); access.IsZero() || !access.After(time.Now()) {
 		// Nothing left to ask the endpoint with. The two checks above stand.
@@ -650,7 +650,7 @@ func validateSnapshotCredential(home, name, snapEmail string) ([]byte, error) {
 	if !strings.EqualFold(verified, snapEmail) {
 		return nil, fmt.Errorf("snapshot %q holds a credential for %s but its identity file says %s — "+
 			"switching would leave this host logged in as one account and labelled as the other; "+
-			"run 'claude-sessions account save %s' while logged into the right account", name, verified, snapEmail, name)
+			"run 'claude-sessions account claude save %s' while logged into the right account", name, verified, snapEmail, name)
 	}
 	return data, nil
 }

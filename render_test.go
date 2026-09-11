@@ -1877,7 +1877,7 @@ func TestDedupeGrokAccounts(t *testing.T) {
 		remotes := []RemoteResult{
 			{Name: "pi", GrokUsage: &GrokAccountUsage{Account: "dev@example.com", Info: info()}},
 		}
-		got := dedupeGrokAccounts(local, remotes)
+		got := dedupeGrokAccounts(local, nil, remotes)
 		if len(got) != 1 {
 			t.Fatalf("len = %d, want 1: %#v", len(got), got)
 		}
@@ -1897,7 +1897,7 @@ func TestDedupeGrokAccounts(t *testing.T) {
 		remotes := []RemoteResult{
 			{Name: "pi", GrokUsage: &GrokAccountUsage{Account: "bot@ci.com", Info: info()}},
 		}
-		got := dedupeGrokAccounts(local, remotes)
+		got := dedupeGrokAccounts(local, nil, remotes)
 		if len(got) != 2 {
 			t.Fatalf("len = %d, want 2: %#v", len(got), got)
 		}
@@ -1915,7 +1915,7 @@ func TestDedupeGrokAccounts(t *testing.T) {
 			{Name: "beluga", GrokUsage: &GrokAccountUsage{Account: "", Info: info()}},
 			{Name: "walrus", GrokUsage: &GrokAccountUsage{Account: "", Info: info()}},
 		}
-		got := dedupeGrokAccounts(local, remotes)
+		got := dedupeGrokAccounts(local, nil, remotes)
 		if len(got) != 3 {
 			t.Fatalf("len = %d, want 3 (unknowns never merge): %#v", len(got), got)
 		}
@@ -1930,7 +1930,7 @@ func TestDedupeGrokAccounts(t *testing.T) {
 			{Name: "old", GrokUsage: nil}, // pre-propagation / no-grok server
 			{Name: "live", GrokUsage: &GrokAccountUsage{Account: "bot@ci.com", Info: info()}},
 		}
-		got := dedupeGrokAccounts(local, remotes)
+		got := dedupeGrokAccounts(local, nil, remotes)
 		if len(got) != 1 {
 			t.Fatalf("len = %d, want 1 (only the live snapshot): %#v", len(got), got)
 		}
@@ -1947,12 +1947,40 @@ func TestDedupeGrokAccounts(t *testing.T) {
 		remotes := []RemoteResult{
 			{Name: "pi", GrokUsage: &GrokAccountUsage{Account: "andy@avisoma.com", Info: info()}},
 		}
-		got := dedupeGrokAccounts(local, remotes)
+		got := dedupeGrokAccounts(local, nil, remotes)
 		if len(got) != 2 {
 			t.Fatalf("len = %d, want 2: %#v", len(got), got)
 		}
 		if got[0].label != "andy@trecs.aero" || got[1].label != "andy@avisoma.com" {
 			t.Errorf("labels = %q,%q want full emails on collision", got[0].label, got[1].label)
+		}
+	})
+
+	t.Run("parked known with a different email is a second line", func(t *testing.T) {
+		local := GrokAccountUsage{Account: "live@x.ai", Info: info()}
+		known := []KnownGrokAccountUsage{
+			{Name: "parked", Account: "parked@x.ai", Info: info()},
+		}
+		got := dedupeGrokAccounts(local, known, nil)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2: %#v", len(got), got)
+		}
+		if got[0].email != "live@x.ai" || got[1].email != "parked@x.ai" {
+			t.Errorf("emails = %q,%q want live then parked", got[0].email, got[1].email)
+		}
+	})
+
+	t.Run("parked known with the live email is dropped", func(t *testing.T) {
+		local := GrokAccountUsage{Account: "live@x.ai", Info: info()}
+		known := []KnownGrokAccountUsage{
+			{Name: "same", Account: "LIVE@x.ai", Info: info()},
+		}
+		got := dedupeGrokAccounts(local, known, nil)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1 (live wins): %#v", len(got), got)
+		}
+		if got[0].email != "live@x.ai" {
+			t.Errorf("email = %q, want the live account", got[0].email)
 		}
 	})
 }

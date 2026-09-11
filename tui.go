@@ -176,6 +176,9 @@ func RunTUI(interval time.Duration) error {
 	knownAccountsHub := NewKnownAccountsHub()
 	defer knownAccountsHub.Shutdown()
 
+	knownGrokAccountsHub := NewKnownGrokAccountsHub()
+	defer knownGrokAccountsHub.Shutdown()
+
 	// Each remote host's accounts come from its own /usage endpoint rather than
 	// riding /sessions. That endpoint never calls Anthropic at all any more — it
 	// reports identity only (names and emails, for the Ctrl+W switch picker and
@@ -474,10 +477,11 @@ func RunTUI(interval time.Duration) error {
 			Sessions:  local,
 			HostUsage: hostUsageHub.Snapshot(),
 		}, remotes, state.sel, &LocalUsage{
-			Claude:        usageHub.Snapshot(),
-			Codex:         codexUsageHub.Snapshot(),
-			Grok:          grokUsageHub.Snapshot(),
-			KnownAccounts: derefKnownAccounts(knownAccountsHub.Snapshot()),
+			Claude:            usageHub.Snapshot(),
+			Codex:             codexUsageHub.Snapshot(),
+			Grok:              grokUsageHub.Snapshot(),
+			KnownAccounts:     derefKnownAccounts(knownAccountsHub.Snapshot()),
+			KnownGrokAccounts: derefKnownGrokAccounts(knownGrokAccountsHub.Snapshot()),
 		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled, groupSort: groupSortOn})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
@@ -552,6 +556,7 @@ func RunTUI(interval time.Duration) error {
 				codexUsageHub.Pause()
 				grokUsageHub.Pause()
 				knownAccountsHub.Pause()
+				knownGrokAccountsHub.Pause()
 				remoteUsageHub.Pause()
 				hostUsageHub.Pause()
 			},
@@ -561,6 +566,7 @@ func RunTUI(interval time.Duration) error {
 				codexUsageHub.Resume()
 				grokUsageHub.Resume()
 				knownAccountsHub.Resume()
+				knownGrokAccountsHub.Resume()
 				remoteUsageHub.Resume()
 				hostUsageHub.Resume()
 			},
@@ -957,6 +963,8 @@ func RunTUI(interval time.Duration) error {
 					// header email and picker marker catch up with the toast.
 					usageHub.Kick()
 					knownAccountsHub.Kick()
+					grokUsageHub.Kick()
+					knownGrokAccountsHub.Kick()
 					// A remote switch needs no kick to be *correct* — every host
 					// re-resolves which account is live on each /usage call, with no
 					// cache to go stale — but refresh anyway so the picker's and

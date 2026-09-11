@@ -22,8 +22,8 @@ func TestAccountRowsFrom(t *testing.T) {
 				ActiveName: "trecs",
 			},
 			want: []accountRow{
-				{Host: "box", Name: "avisoma", Email: "andy@avisoma.com"},
-				{Host: "box", Name: "trecs", Email: "andy@trecs.aero", Active: true},
+				{Host: "box", Name: "avisoma", Email: "andy@avisoma.com", Tool: accountToolClaude},
+				{Host: "box", Name: "trecs", Email: "andy@trecs.aero", Active: true, Tool: accountToolClaude},
 			},
 		},
 		{
@@ -34,14 +34,14 @@ func TestAccountRowsFrom(t *testing.T) {
 				ActiveName: "avisoma",
 			},
 			want: []accountRow{
-				{Host: "box", Name: "avisoma", Email: "andy@avisoma.com", Active: true},
-				{Host: "box", Name: "trecs", Email: "andy@trecs.aero"},
+				{Host: "box", Name: "avisoma", Email: "andy@avisoma.com", Active: true, Tool: accountToolClaude},
+				{Host: "box", Name: "trecs", Email: "andy@trecs.aero", Tool: accountToolClaude},
 			},
 		},
 		{
 			name: "no usage snapshot yet leaves the active email unknown",
 			snap: accountSnapshot{ActiveName: "avisoma"},
-			want: []accountRow{{Host: "box", Name: "avisoma", Active: true}},
+			want: []accountRow{{Host: "box", Name: "avisoma", Active: true, Tool: accountToolClaude}},
 		},
 		{
 			name: "an older server reports nothing at all",
@@ -55,7 +55,7 @@ func TestAccountRowsFrom(t *testing.T) {
 				Known:      []KnownAccountUsage{{Name: "avisoma", Account: "andy@avisoma.com"}},
 				ActiveName: "avisoma",
 			},
-			want: []accountRow{{Host: "box", Name: "avisoma", Email: "andy@avisoma.com", Active: true}},
+			want: []accountRow{{Host: "box", Name: "avisoma", Email: "andy@avisoma.com", Active: true, Tool: accountToolClaude}},
 		},
 	}
 	for _, tt := range tests {
@@ -86,8 +86,8 @@ func TestLocalAccountListing(t *testing.T) {
 		t.Fatalf("error = %q", got.Error)
 	}
 	want := []accountRow{
-		{Host: "local", Name: "avisoma", Email: "andy@avisoma.com"},
-		{Host: "local", Name: "trecs", Email: "andy@trecs.aero", Active: true},
+		{Host: "local", Name: "avisoma", Email: "andy@avisoma.com", Tool: accountToolClaude},
+		{Host: "local", Name: "trecs", Email: "andy@trecs.aero", Active: true, Tool: accountToolClaude},
 	}
 	if len(got.Rows) != len(want) {
 		t.Fatalf("rows = %+v, want %+v", got.Rows, want)

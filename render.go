@@ -1231,7 +1231,7 @@ type grokAccountLine struct {
 // dedupeGrokAccounts resolves which Grok usage lines the header shows and in
 // what order, mirroring dedupeCodexAccounts for the Grok provider. The only
 // differences are the snapshot type and the remote source field (r.GrokUsage).
-func dedupeGrokAccounts(local GrokAccountUsage, remotes []RemoteResult) []grokAccountLine {
+func dedupeGrokAccounts(local GrokAccountUsage, localKnown []KnownGrokAccountUsage, remotes []RemoteResult) []grokAccountLine {
 	var lines []grokAccountLine
 	seen := make(map[string]bool)
 	add := func(account, host string, info *GrokUsageInfo, isLocal bool) {
@@ -1255,6 +1255,30 @@ func dedupeGrokAccounts(local GrokAccountUsage, remotes []RemoteResult) []grokAc
 		if r.GrokUsage != nil {
 			add(r.GrokUsage.Account, r.Name, r.GrokUsage.Info, false)
 		}
+	}
+	// Pass 2: parked local grok snapshots. Skip emails already covered by a
+	// live/remote-live line (even one with no numbers). Drop nil-Info. Do
+	// not pull remote parked grok numbers — GET /usage reports identity only.
+	liveEmails := make(map[string]bool, len(seen)+1)
+	for k, v := range seen {
+		liveEmails[k] = v
+	}
+	if local.Account != "" {
+		liveEmails[strings.ToLower(local.Account)] = true
+	}
+	for _, r := range remotes {
+		if r.GrokUsage != nil && r.GrokUsage.Account != "" {
+			liveEmails[strings.ToLower(r.GrokUsage.Account)] = true
+		}
+	}
+	for _, k := range localKnown {
+		if k.Info == nil {
+			continue
+		}
+		if k.Account != "" && liveEmails[strings.ToLower(k.Account)] {
+			continue
+		}
+		add(k.Account, k.Name, k.Info, false)
 	}
 	labelCount := make(map[string]int)
 	for _, l := range lines {
@@ -1281,6 +1305,9 @@ type LocalUsage struct {
 	// (that one is Claude). Nil before the first known-accounts poll lands, or
 	// on a machine with no snapshots.
 	KnownAccounts []KnownAccountUsage
+	// KnownGrokAccounts is this machine's parked Grok snapshots' usage.
+	// Nil before the first known-grok poll lands, or on a machine with none.
+	KnownGrokAccounts []KnownGrokAccountUsage
 }
 
 // formatTokens renders a token count compactly: 0 → "-", under 1k as
@@ -1881,6 +1908,7 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	var localCodex CodexAccountUsage
 	var localGrok GrokAccountUsage
 	var localKnown []KnownAccountUsage
+	var localKnownGrok []KnownGrokAccountUsage
 	if localUsage != nil {
 		if localUsage.Claude != nil {
 			localAU = *localUsage.Claude
@@ -1892,6 +1920,7 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 			localGrok = *localUsage.Grok
 		}
 		localKnown = localUsage.KnownAccounts
+		localKnownGrok = localUsage.KnownGrokAccounts
 	}
 	sections := buildSections(local, remotes, gv, localAU.Account)
 	// Reserve each first-column slot only when at least one visible (post-filter)
@@ -1909,7 +1938,7 @@ func BuildTableFrame(viewMode string, local LocalHost, remotes []RemoteResult, s
 	// shows once. The three providers dedupe independently.
 	accounts := dedupeAccounts(localAU, localKnown, remotes)
 	codexAccounts := dedupeCodexAccounts(localCodex, remotes)
-	grokAccounts := dedupeGrokAccounts(localGrok, remotes)
+	grokAccounts := dedupeGrokAccounts(localGrok, localKnownGrok, remotes)
 	w := &frameWriter{}
 	var overflowing bool
 	switch viewMode {

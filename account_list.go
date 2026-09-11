@@ -17,6 +17,7 @@ type accountRow struct {
 	Name   string
 	Email  string
 	Active bool
+	Tool   string // "claude" or "grok"; the picker shows it, the list table does not
 }
 
 // accountListing is one host's contribution to the table: its rows, or the
@@ -50,6 +51,7 @@ func localAccountListing() accountListing {
 			Name:   name,
 			Email:  email,
 			Active: emailMatchesLive(email, live),
+			Tool:   accountToolClaude,
 		})
 	}
 	return accountListing{Host: localAccountHost, Rows: rows}
@@ -61,14 +63,26 @@ func localAccountListing() accountListing {
 // `account list` table and the Ctrl+W picker are built from this, so neither ever
 // issues a fetch of its own.
 type accountSnapshot struct {
-	Usage      *AccountUsage
-	Known      []KnownAccountUsage
-	ActiveName string
+	Usage          *AccountUsage
+	Known          []KnownAccountUsage
+	ActiveName     string
+	GrokUsage      *GrokAccountUsage
+	GrokKnown      []KnownAccountUsage
+	GrokActiveName string
+	GrokAccount    string // live grok email from GET /usage; billing stays on GrokUsage
 }
 
 // accountSnapshotOf reads one remote host's poll result as an accountSnapshot.
 func accountSnapshotOf(r RemoteResult) accountSnapshot {
-	return accountSnapshot{Usage: r.Usage, Known: r.KnownAccounts, ActiveName: r.ActiveSnapshotName}
+	return accountSnapshot{
+		Usage:          r.Usage,
+		Known:          r.KnownAccounts,
+		ActiveName:     r.ActiveSnapshotName,
+		GrokUsage:      r.GrokUsage,
+		GrokKnown:      r.GrokKnownAccounts,
+		GrokActiveName: r.GrokActiveSnapshotName,
+		GrokAccount:    r.GrokAccount,
+	}
 }
 
 // accountRowsFrom is the union every consumer needs: the snapshots a host
@@ -80,7 +94,7 @@ func accountSnapshotOf(r RemoteResult) accountSnapshot {
 func accountRowsFrom(host string, snap accountSnapshot) []accountRow {
 	byName := make(map[string]accountRow, len(snap.Known)+1)
 	for _, a := range snap.Known {
-		byName[a.Name] = accountRow{Host: host, Name: a.Name, Email: a.Account}
+		byName[a.Name] = accountRow{Host: host, Name: a.Name, Email: a.Account, Tool: accountToolClaude}
 	}
 	if snap.ActiveName != "" {
 		email := ""
@@ -92,6 +106,7 @@ func accountRowsFrom(host string, snap accountSnapshot) []accountRow {
 			Name:   snap.ActiveName,
 			Email:  email,
 			Active: true,
+			Tool:   accountToolClaude,
 		}
 	}
 	rows := make([]accountRow, 0, len(byName))
@@ -110,6 +125,49 @@ func remoteAccountListing(r RemoteResult) accountListing {
 		return accountListing{Host: r.Name, Error: r.Error}
 	}
 	return accountListing{Host: r.Name, Rows: accountRowsFrom(r.Name, accountSnapshotOf(r))}
+}
+
+func localGrokAccountListing() accountListing {
+	names, err := grokSnapshotNames()
+	if err != nil {
+		return accountListing{Host: localAccountHost, Error: err.Error()}
+	}
+	live := liveGrokEmail()
+	rows := make([]accountRow, 0, len(names))
+	for _, name := range names {
+		email := grokSnapshotEmail(name)
+		rows = append(rows, accountRow{
+			Host:   localAccountHost,
+			Name:   name,
+			Email:  email,
+			Active: emailMatchesLive(email, live),
+			Tool:   accountToolGrok,
+		})
+	}
+	return accountListing{Host: localAccountHost, Rows: rows}
+}
+
+func grokAccountRowsFrom(host string, snap accountSnapshot) []accountRow {
+	email := snap.GrokAccount
+	if email == "" && snap.GrokUsage != nil {
+		email = snap.GrokUsage.Account
+	}
+	rows := accountRowsFrom(host, accountSnapshot{
+		Usage:      &AccountUsage{Account: email},
+		Known:      snap.GrokKnown,
+		ActiveName: snap.GrokActiveName,
+	})
+	for i := range rows {
+		rows[i].Tool = accountToolGrok
+	}
+	return rows
+}
+
+func remoteGrokAccountListing(r RemoteResult) accountListing {
+	if r.Error != "" {
+		return accountListing{Host: r.Name, Error: r.Error}
+	}
+	return accountListing{Host: r.Name, Rows: grokAccountRowsFrom(r.Name, accountSnapshotOf(r))}
 }
 
 // renderAccountTable formats the listings as one padded table, hosts in the

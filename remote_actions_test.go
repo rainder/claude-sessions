@@ -362,7 +362,7 @@ func TestSwitchAccountRemote(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
 
-	got, err := switchAccountRemote("box", "trecs")
+	got, err := switchAccountRemote("box", "trecs", accountToolClaude)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -372,7 +372,7 @@ func TestSwitchAccountRemote(t *testing.T) {
 	if gotAuth != "Bearer secret" {
 		t.Fatalf("auth = %q", gotAuth)
 	}
-	if gotBody != `{"name":"trecs"}` {
+	if gotBody != `{"tool":"claude","name":"trecs"}` {
 		t.Fatalf("body = %q", gotBody)
 	}
 	if !got.OK || got.Account != "andy@trecs.aero" {
@@ -396,7 +396,7 @@ func TestSwitchAccountRemoteRefusal(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
 
-	got, err := switchAccountRemote("box", "nope")
+	got, err := switchAccountRemote("box", "nope", accountToolClaude)
 	if err != nil {
 		t.Fatalf("err = %v, want the refusal reported in the result", err)
 	}

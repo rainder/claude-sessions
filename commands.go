@@ -643,33 +643,84 @@ func cmdListSessions(args []string) int {
 	return 0
 }
 
-// accountUsageMsg is the `account` subcommand family's usage line. `save` takes
-// no --server on purpose: it captures the credential that is live on *this*
-// machine, which is only meaningful where that credential lives.
-const accountUsageMsg = `usage: claude-sessions account switch NAME [--server SERVER]
-       claude-sessions account save NAME [--force]
-       claude-sessions account list [--server SERVER]
-       claude-sessions account remove NAME [-y|--force]`
+// accountUsageMsg is the `account` subcommand family's usage line. Every verb
+// requires an explicit tool: there is no default, and `account list` with no
+// tool does not mean "all". `save` takes no --server on purpose: it captures
+// the credential that is live on *this* machine, which is only meaningful
+// where that credential lives.
+const accountUsageMsg = `usage: claude-sessions account claude|grok switch NAME [--server SERVER]
+       claude-sessions account claude|grok save NAME [--force]
+       claude-sessions account claude|grok list [--server SERVER]
+       claude-sessions account claude|grok remove NAME [-y|--force]`
+
+const (
+	accountToolClaude = "claude"
+	accountToolGrok   = "grok"
+)
+
+func isAccountVerb(s string) bool {
+	switch s {
+	case "switch", "save", "list", "remove":
+		return true
+	}
+	return false
+}
 
 // cmdAccount dispatches the switch/save/list/remove subcommands of `account`.
+// args[0] is the tool (claude or grok); args[1] is the verb. A verb in the
+// tool slot is the pre-break form (`account save NAME`) and is refused with
+// "tool required" rather than treated as an unknown subcommand.
 func cmdAccount(args []string) int {
-	if len(args) == 0 {
+	if len(args) < 2 {
+		if len(args) == 1 && isAccountVerb(args[0]) {
+			fmt.Fprintf(os.Stderr, "account: tool required (claude or grok)\n%s\n", accountUsageMsg)
+			return 2
+		}
+		if len(args) == 1 {
+			fmt.Fprintf(os.Stderr, "account: unknown subcommand %q\n%s\n", args[0], accountUsageMsg)
+			return 2
+		}
 		fmt.Fprintln(os.Stderr, accountUsageMsg)
 		return 2
 	}
-	switch args[0] {
-	case "switch":
-		return cmdAccountSwitch(args[1:])
-	case "save":
-		return cmdAccountSave(args[1:])
-	case "list":
-		return cmdAccountList(args[1:])
-	case "remove":
-		return cmdAccountRemove(args[1:])
-	default:
-		fmt.Fprintf(os.Stderr, "account: unknown subcommand %q\n%s\n", args[0], accountUsageMsg)
+	tool, verb := args[0], args[1]
+	if tool != accountToolClaude && tool != accountToolGrok {
+		if isAccountVerb(tool) {
+			fmt.Fprintf(os.Stderr, "account: tool required (claude or grok)\n%s\n", accountUsageMsg)
+			return 2
+		}
+		fmt.Fprintf(os.Stderr, "account: unknown subcommand %q\n%s\n", tool, accountUsageMsg)
 		return 2
 	}
+	if !isAccountVerb(verb) {
+		fmt.Fprintf(os.Stderr, "account: unknown subcommand %q\n%s\n", verb, accountUsageMsg)
+		return 2
+	}
+	rest := args[2:]
+	if tool == accountToolGrok {
+		switch verb {
+		case "switch":
+			return cmdGrokAccountSwitch(rest)
+		case "save":
+			return cmdGrokAccountSave(rest)
+		case "list":
+			return cmdGrokAccountList(rest)
+		case "remove":
+			return cmdGrokAccountRemove(rest)
+		}
+	}
+	switch verb {
+	case "switch":
+		return cmdAccountSwitch(rest)
+	case "save":
+		return cmdAccountSave(rest)
+	case "list":
+		return cmdAccountList(rest)
+	case "remove":
+		return cmdAccountRemove(rest)
+	}
+	fmt.Fprintf(os.Stderr, "account: unknown subcommand %q\n%s\n", verb, accountUsageMsg)
+	return 2
 }
 
 // accountArgs is what the `account` subcommands parse out of their arguments.
@@ -743,7 +794,7 @@ func cmdAccountSwitch(args []string) int {
 	}
 	name := a.name
 	if a.server != "" {
-		return cmdAccountSwitchRemote(name, a.server)
+		return cmdAccountSwitchRemote(accountToolClaude, name, a.server)
 	}
 	email, warnings, err := switchAccount(name)
 	if err != nil {
@@ -768,7 +819,7 @@ func printAccountWarnings(warnings []string) {
 // cmdAccountSwitchRemote switches a configured remote's active account over
 // HTTP. The server's own refusal message is preferred over the bare transport
 // error, so an unknown name still prints the list of names that host holds.
-func cmdAccountSwitchRemote(name, server string) int {
+func cmdAccountSwitchRemote(tool, name, server string) int {
 	if _, ok := LookupServer(server); !ok {
 		cfgs, _ := LoadServerConfigs()
 		names := make([]string, len(cfgs))
@@ -778,7 +829,7 @@ func cmdAccountSwitchRemote(name, server string) int {
 		fmt.Fprintf(os.Stderr, "account switch: unknown server %q (configured: %s)\n", server, strings.Join(names, ", "))
 		return 2
 	}
-	result, err := switchAccountRemote(server, name)
+	result, err := switchAccountRemote(server, name, tool)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "account switch:", err)
 		return 1
@@ -904,7 +955,7 @@ func cmdAccountRemove(args []string) int {
 		// a human is asked.
 		fmt.Println("this snapshot stands for the account logged in right now.")
 		fmt.Println("removing it does NOT log you out — it deletes the parked copy, so nothing")
-		fmt.Println("will be able to switch back to this account until 'account save' recaptures it.")
+		fmt.Println("will be able to switch back to this account until 'account claude save' recaptures it.")
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			fmt.Fprintf(os.Stderr, "account remove: refusing without -y (not a terminal, so nothing can confirm)\n")
 			return 1
@@ -925,7 +976,149 @@ func cmdAccountRemove(args []string) int {
 	// here without ever having seen the warning above, and a switch during the
 	// prompt can make a removal live that was not when it was planned.
 	if wasLive {
-		fmt.Printf("note: %s was the account logged in here; nothing can switch back to it until 'account save %s' recaptures it\n", name, name)
+		fmt.Printf("note: %s was the account logged in here; nothing can switch back to it until 'account claude save %s' recaptures it\n", name, name)
+	}
+	return 0
+}
+
+func cmdGrokAccountSwitch(args []string) int {
+	a, err := parseAccountArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "account switch: %v\n%s\n", err, accountUsageMsg)
+		return 2
+	}
+	if a.name == "" {
+		fmt.Fprintln(os.Stderr, accountUsageMsg)
+		return 2
+	}
+	if a.force || a.assumeYes {
+		fmt.Fprintf(os.Stderr, "account switch: --force/-y are not supported (a switch never prompts)\n")
+		return 2
+	}
+	name := a.name
+	if a.server != "" {
+		return cmdAccountSwitchRemote(accountToolGrok, name, a.server)
+	}
+	email, warnings, err := switchGrokAccount(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "account switch:", err)
+		return 1
+	}
+	printAccountWarnings(warnings)
+	fmt.Println(accountSwitchedLine(name, email))
+	return 0
+}
+
+func cmdGrokAccountSave(args []string) int {
+	a, err := parseAccountArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "account save: %v\n%s\n", err, accountUsageMsg)
+		return 2
+	}
+	name := a.name
+	if name == "" {
+		fmt.Fprintln(os.Stderr, accountUsageMsg)
+		return 2
+	}
+	if a.server != "" {
+		fmt.Fprintf(os.Stderr, "account save: --server is not supported (a snapshot captures the credential live on this machine)\n")
+		return 2
+	}
+	if a.assumeYes {
+		fmt.Fprintf(os.Stderr, "account save: -y is not supported; use --force to reassign a snapshot to another account\n")
+		return 2
+	}
+	if err := saveGrokAccountSnapshot(name, a.force); err != nil {
+		fmt.Fprintln(os.Stderr, "account save:", err)
+		return 1
+	}
+	email := grokSnapshotEmail(name)
+	if email == "" {
+		fmt.Printf("saved snapshot %s\n", name)
+		return 0
+	}
+	fmt.Printf("saved snapshot %s (%s)\n", name, email)
+	return 0
+}
+
+func cmdGrokAccountList(args []string) int {
+	a, err := parseAccountArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "account list: %v\n%s\n", err, accountUsageMsg)
+		return 2
+	}
+	if a.name != "" {
+		fmt.Fprintf(os.Stderr, "account list: unexpected argument: %s\n%s\n", a.name, accountUsageMsg)
+		return 2
+	}
+	if a.force || a.assumeYes {
+		fmt.Fprintf(os.Stderr, "account list: --force/-y are not supported (listing changes nothing)\n")
+		return 2
+	}
+	if server := a.server; server != "" {
+		srv, ok := LookupServer(server)
+		if !ok {
+			cfgs, _ := LoadServerConfigs()
+			names := make([]string, len(cfgs))
+			for i, c := range cfgs {
+				names[i] = c.Name
+			}
+			fmt.Fprintf(os.Stderr, "account list: unknown server %q (configured: %s)\n", server, strings.Join(names, ", "))
+			return 2
+		}
+		fmt.Print(renderAccountTable([]accountListing{remoteGrokAccountListing(oneRemoteUsage(srv))}))
+		return 0
+	}
+	listings := []accountListing{localGrokAccountListing()}
+	for _, r := range FetchAllRemoteUsage() {
+		listings = append(listings, remoteGrokAccountListing(r))
+	}
+	fmt.Print(renderAccountTable(listings))
+	return 0
+}
+
+func cmdGrokAccountRemove(args []string) int {
+	a, err := parseAccountArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "account remove: %v\n%s\n", err, accountUsageMsg)
+		return 2
+	}
+	name := a.name
+	force := a.force || a.assumeYes
+	if name == "" {
+		fmt.Fprintln(os.Stderr, accountUsageMsg)
+		return 2
+	}
+	if a.server != "" {
+		fmt.Fprintf(os.Stderr, "account remove: --server is not supported (a snapshot only exists on the machine holding it)\n")
+		return 2
+	}
+	plan, err := planGrokAccountRemoval(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "account remove:", err)
+		return 1
+	}
+	if plan.Live && !force {
+		fmt.Println("this snapshot stands for the Grok account logged in right now.")
+		fmt.Println("removing it does NOT log you out — it deletes the parked copy, so nothing")
+		fmt.Println("will be able to switch back to this account until 'account grok save' recaptures it.")
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintf(os.Stderr, "account remove: refusing without -y (not a terminal, so nothing can confirm)\n")
+			return 1
+		}
+		if !confirm(fmt.Sprintf("remove snapshot %q anyway? [y/N] ", name)) {
+			fmt.Println("aborted")
+			return 0
+		}
+	}
+	removed, wasLive, err := removeGrokAccountSnapshot(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "account remove:", err)
+		return 1
+	}
+	fmt.Printf("removed snapshot %s (%s)\n", name, strings.Join(removed, ", "))
+	if wasLive {
+		fmt.Printf("note: %s was the Grok account logged in here; nothing can switch back to it until 'account grok save %s' recaptures it\n", name, name)
 	}
 	return 0
 }

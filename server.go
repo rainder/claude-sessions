@@ -103,6 +103,9 @@ const (
 	// codeSwitchFailed: the name was known but the switch itself failed. The
 	// outgoing credential is still backed up — see switchAccount's step order.
 	codeSwitchFailed = "switch_failed"
+	// codeBadTool: POST /account/switch with a missing, empty, or unknown tool.
+	// There is no default; claude is not implied.
+	codeBadTool = "bad_tool"
 )
 
 // worktreeInfo describes a worktree a kill has just left idle.
@@ -685,11 +688,12 @@ type server struct {
 	// hold the response or the request_id slot. Tests set it to run inline, so
 	// an assertion about the group never has to chase a goroutine.
 	groupGo func(func())
-	// switchAcct makes a named claude-switch snapshot this host's active account;
-	// nil falls back to switchAccount. Injectable for the same reason as the
-	// seams above, and more urgently: without it a handler test would perform a
-	// real account switch against the machine running `go test`.
-	switchAcct func(name string) (string, []string, error)
+	// switchAcct makes a named snapshot this host's active account for the
+	// given tool (claude or grok); nil falls back to switchAccountTo.
+	// Injectable for the same reason as the seams above, and more urgently:
+	// without it a handler test would perform a real account switch against
+	// the machine running `go test`.
+	switchAcct func(tool, name string) (string, []string, error)
 	// attest re-reads one PID's own session file; nil falls back to
 	// readSessionByPID. Used for the last-moment identity check before a
 	// destructive act, and separate from collect because it must be the cheapest
@@ -933,11 +937,18 @@ func spawnSuffix(requestID string) string {
 	return hex.EncodeToString(sum[:])[:6]
 }
 
-func (s *server) switchAccountTo(name string) (string, []string, error) {
+func (s *server) switchAccountTo(tool, name string) (string, []string, error) {
 	if s.switchAcct != nil {
-		return s.switchAcct(name)
+		return s.switchAcct(tool, name)
 	}
-	return switchAccount(name)
+	switch tool {
+	case accountToolGrok:
+		return switchGrokAccount(name)
+	case accountToolClaude:
+		return switchAccount(name)
+	default:
+		return "", nil, fmt.Errorf("tool is required (claude or grok)")
+	}
 }
 
 // attestSession re-reads the one file that establishes identity for pid,
@@ -1148,9 +1159,15 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 // (see FetchRemoteUsage). Every field is optional: a host with no snapshots
 // reports only its live account.
 type usageResponse struct {
-	Usage              *AccountUsage       `json:"usage,omitempty"`
-	KnownAccounts      []KnownAccountUsage `json:"knownAccounts,omitempty"`
-	ActiveSnapshotName string              `json:"activeSnapshotName,omitempty"`
+	Usage                  *AccountUsage       `json:"usage,omitempty"`
+	KnownAccounts          []KnownAccountUsage `json:"knownAccounts,omitempty"`
+	ActiveSnapshotName     string              `json:"activeSnapshotName,omitempty"`
+	GrokKnownAccounts      []KnownAccountUsage `json:"grokKnownAccounts,omitempty"` // Name + Account only, Info nil
+	GrokActiveSnapshotName string              `json:"grokActiveSnapshotName,omitempty"`
+	// GrokAccount is the live Grok login's email. Identity only — no billing.
+	// Mirrors Usage.Account for Claude so `account grok list --server` and the
+	// remote picker can label the active snapshot. Empty when no grok login.
+	GrokAccount string `json:"grokAccount,omitempty"`
 }
 
 // usage handles GET /usage: this host's account identity — which accounts it
@@ -1198,6 +1215,26 @@ func (s *server) usage(w http.ResponseWriter, r *http.Request) {
 	// — it is what labels this host's heading in the client's table.
 	if liveEmail != "" {
 		resp.Usage = &AccountUsage{Account: liveEmail}
+	}
+
+	grokLive := liveGrokEmail()
+	grokNames, _ := grokSnapshotNames()
+	grokKnown := make([]KnownAccountUsage, 0, len(grokNames))
+	grokActive := ""
+	for _, name := range grokNames {
+		email := grokSnapshotEmail(name)
+		if emailMatchesLive(email, grokLive) {
+			if grokActive == "" {
+				grokActive = name
+			}
+			continue
+		}
+		grokKnown = append(grokKnown, KnownAccountUsage{Name: name, Account: email})
+	}
+	resp.GrokKnownAccounts = grokKnown
+	resp.GrokActiveSnapshotName = grokActive
+	if grokLive != "" {
+		resp.GrokAccount = grokLive
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1646,10 +1683,18 @@ func (s *server) accountSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		Tool string `json:"tool"`
 		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request body", http.StatusBadRequest)
+		return
+	}
+	if req.Tool != accountToolClaude && req.Tool != accountToolGrok {
+		writeJSON(w, http.StatusBadRequest, accountSwitchResult{
+			Code:    codeBadTool,
+			Message: "tool is required (claude or grok)",
+		})
 		return
 	}
 	if req.Name == "" {
@@ -1659,7 +1704,7 @@ func (s *server) accountSwitch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	email, warnings, err := s.switchAccountTo(req.Name)
+	email, warnings, err := s.switchAccountTo(req.Tool, req.Name)
 	if err != nil {
 		if errors.Is(err, errUnknownAccount) {
 			writeJSON(w, http.StatusBadRequest, accountSwitchResult{

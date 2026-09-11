@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -216,52 +215,38 @@ const (
 	grokAutoTopupURL = "https://cli-chat-proxy.grok.com/v1/auto-topup-rule"
 )
 
-// loadGrokAuth reads the Grok CLI bearer token and email from ~/.grok/auth.json.
-// The file is a map keyed by issuer URL; each entry has key (JWT), email, and
-// optional expires_at. Prefer the first entry whose map key starts with
-// "https://auth.x.ai::" and has a non-empty key; else the first entry with a
-// non-empty key. Missing file / empty token → error the caller treats as "no
-// grok bars". expires_at is deliberately not checked (Codex does not either) —
-// a 401 just yields no bar. Read-only; never write or refresh the token.
+// loadGrokAuth reads the Grok CLI bearer token and email from
+// $GROK_HOME/auth.json (or ~/.grok/auth.json). The file is a map keyed by
+// issuer URL; each entry has key (JWT), email, and optional expires_at.
+// Prefer the first entry whose map key starts with "https://auth.x.ai::" and
+// has a non-empty key; else the first entry with a non-empty key. Missing
+// file / empty token → error the caller treats as "no grok bars". expires_at
+// is deliberately not checked (Codex does not either) — a 401 just yields no
+// bar. Read-only; never write or refresh the token.
 func loadGrokAuth() (token, email string, err error) {
-	home, err := os.UserHomeDir()
+	path, err := grokAuthPath()
 	if err != nil {
 		return "", "", err
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".grok", "auth.json"))
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", "", err
 	}
-	var raw map[string]struct {
-		Key       string `json:"key"`
-		Email     string `json:"email"`
-		ExpiresAt string `json:"expires_at"`
+	doc, err := parseGrokAuth(data)
+	if err != nil {
+		return "", "", err
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return "", "", fmt.Errorf("parse grok auth: %w", err)
-	}
-	const preferredPrefix = "https://auth.x.ai::"
-	var fallbackToken, fallbackEmail string
-	for issuer, entry := range raw {
-		if entry.Key == "" {
-			continue
-		}
-		if strings.HasPrefix(issuer, preferredPrefix) {
-			return entry.Key, entry.Email, nil
-		}
-		if fallbackToken == "" {
-			fallbackToken, fallbackEmail = entry.Key, entry.Email
-		}
-	}
-	if fallbackToken == "" {
-		return "", "", fmt.Errorf("no grok access token")
-	}
-	return fallbackToken, fallbackEmail, nil
+	return doc.key(), doc.email(), nil
 }
 
-// grokBillingGet GETs url with the Grok CLI's billing headers. 5s timeout,
+// grokBillingGet is the billing-endpoint seam. Production points at
+// grokBillingGetHTTP; TestMain defaults it to a panic so a forgotten
+// override cannot spend a real parked or live Grok token.
+var grokBillingGet = grokBillingGetHTTP
+
+// grokBillingGetHTTP GETs url with the Grok CLI's billing headers. 5s timeout,
 // 1MB cap, non-200 is an error.
-func grokBillingGet(tok, url string) ([]byte, error) {
+func grokBillingGetHTTP(tok, url string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -277,9 +262,20 @@ func grokBillingGet(tok, url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("grok usage endpoint: HTTP %d", resp.StatusCode)
+		return nil, &grokHTTPError{Status: resp.StatusCode}
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// grokHTTPError is a non-200 from the Grok billing endpoints. Status is what
+// KnownGrokAccountsHub uses to decide whether to attempt a parked-token
+// refresh (401/403) before omitting the account.
+type grokHTTPError struct {
+	Status int
+}
+
+func (e *grokHTTPError) Error() string {
+	return fmt.Sprintf("grok usage endpoint: HTTP %d", e.Status)
 }
 
 // fetchGrokUsage hits the Grok billing endpoints with the current token.
@@ -294,6 +290,12 @@ func fetchGrokUsage() (*GrokAccountUsage, error) {
 	if err != nil {
 		return nil, err
 	}
+	return fetchGrokUsageWith(tok, email)
+}
+
+// fetchGrokUsageWith is fetchGrokUsage given a token and email, so a parked
+// snapshot can be polled without touching live auth.json.
+func fetchGrokUsageWith(tok, email string) (*GrokAccountUsage, error) {
 	body, err := grokBillingGet(tok, grokUsageURL)
 	if err != nil {
 		return nil, err

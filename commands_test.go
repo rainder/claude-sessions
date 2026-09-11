@@ -447,7 +447,7 @@ func TestCmdAccountDispatchesRemove(t *testing.T) {
 	f.setLive("tok-live")
 	f.setIdentity("andy@avisoma.com")
 
-	if got := cmdAccount([]string{"remove", "trecs"}); got != 0 {
+	if got := cmdAccount([]string{"claude", "remove", "trecs"}); got != 0 {
 		t.Fatalf("exit = %d, want 0", got)
 	}
 	if names, _ := snapshotAccountNames(); len(names) != 0 {

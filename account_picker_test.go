@@ -95,6 +95,16 @@ func TestRenderAccountPickerUnknownSize(t *testing.T) {
 	}
 }
 
+func TestApplyAccountSwitchRequiresTool(t *testing.T) {
+	_, _, err := applyAccountSwitch("", "avisoma", "")
+	if err == nil {
+		t.Fatal("empty tool must refuse, not default to claude")
+	}
+	if !strings.Contains(err.Error(), "tool is required") {
+		t.Fatalf("err = %v, want tool is required", err)
+	}
+}
+
 func TestAccountSwitchToast(t *testing.T) {
 	got := accountSwitchToast("box", "trecs", "andy@trecs.aero", nil)
 	if !strings.Contains(got, "box") || !strings.Contains(got, "trecs") || !strings.Contains(got, "andy@trecs.aero") {

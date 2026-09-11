@@ -93,13 +93,15 @@ claude-sessions service install [--port N] [--bind ADDR] | uninstall | restart |
 claude-sessions snapshot save [name]       # save the local session set (name defaults to a timestamp)
 claude-sessions snapshot restore NAME      # recreate a saved set (best-effort; requires an explicit name)
 claude-sessions snapshot list              # list saved snapshots
-claude-sessions account switch NAME [--server S]
-                                            # switch the active Claude account (local or remote)
-claude-sessions account save NAME [--force]
+claude-sessions account claude|grok switch NAME [--server S]
+                                            # switch the active Claude or Grok account (local or remote)
+claude-sessions account claude|grok save NAME [--force]
                                             # capture the live credential + identity as a snapshot
                                             # (--force reassigns a snapshot to a different account)
-claude-sessions account list [--server S]  # what accounts each host knows, and which is active
-claude-sessions account remove NAME [-y]   # delete a parked snapshot (never touches the live login)
+claude-sessions account claude|grok list [--server S]
+                                            # what accounts each host knows for that tool, and which is active
+claude-sessions account claude|grok remove NAME [-y]
+                                            # delete a parked snapshot (never touches the live login)
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
 claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)
@@ -444,7 +446,10 @@ tui.go               alt-screen + raw mode + key reader + main loop
 usage.go             account rate-limit polling (5h/weekly bars in header)
 known_accounts.go    per-account snapshot discovery + read-only usage polling
 account_cache.go     per-account disk cache (numbers + backoff, one file each)
-account.go           account switching (credential + identity snapshots, flock)
+account.go           Claude account switching (credential + identity snapshots, flock)
+grok_account.go      Grok account snapshots (save/switch/list/remove)
+grok_oauth.go        Grok OIDC refresh for parked snapshots
+grok_known_accounts.go  parked Grok usage bars (TUI client)
 account_list.go      `account list` rows + table
 account_picker.go    Ctrl+W account picker overlay + switch action
 actions.go           local action handlers (kill/attach/preview/new)

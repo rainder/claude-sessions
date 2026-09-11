@@ -242,7 +242,7 @@ func rotateSnapshotForSwitch(home, name string, data []byte) ([]byte, error) {
 		return refreshed, nil
 	}
 	if isInvalidGrant(rerr) {
-		return nil, fmt.Errorf("snapshot %q's refresh token is no longer valid — run 'claude-sessions account save %s' while logged into that account", name, name)
+		return nil, fmt.Errorf("snapshot %q's refresh token is no longer valid — run 'claude-sessions account claude save %s' while logged into that account", name, name)
 	}
 	return data, nil
 }

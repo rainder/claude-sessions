@@ -53,8 +53,14 @@ type RemoteResult struct {
 	// The host resolves it from its own files on every /usage call, so it is
 	// never stale, even immediately after an account switch.
 	ActiveSnapshotName string
-	Error              string // "" on success, short reason otherwise
-	Loading            bool   // true for a placeholder slot whose first fetch hasn't returned yet
+	// GrokKnownAccounts / GrokActiveSnapshotName / GrokAccount are this host's
+	// Grok snapshots and live email, identity only (Info always nil). Overlaid
+	// from GET /usage like the Claude fields; old servers omit them.
+	GrokKnownAccounts      []KnownAccountUsage
+	GrokActiveSnapshotName string
+	GrokAccount            string
+	Error                  string // "" on success, short reason otherwise
+	Loading                bool   // true for a placeholder slot whose first fetch hasn't returned yet
 	// Stale marks a result whose Sessions/HostUsage/Usage/CodexUsage/GrokUsage
 	// are carried over from the last successful fetch because the current one
 	// failed (see Error). Only ever set alongside a non-empty Error.
@@ -167,6 +173,9 @@ func applyRemoteUsage(r RemoteResult, u usageResponse) RemoteResult {
 	r.Usage = u.Usage
 	r.KnownAccounts = u.KnownAccounts
 	r.ActiveSnapshotName = u.ActiveSnapshotName
+	r.GrokKnownAccounts = u.GrokKnownAccounts
+	r.GrokActiveSnapshotName = u.GrokActiveSnapshotName
+	r.GrokAccount = u.GrokAccount
 	return r
 }
 

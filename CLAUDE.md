@@ -1564,9 +1564,9 @@ two stay interchangeable: identical file names, formats and paths
 (`.<name>.keychain-cred` / `.<name>.credentials.json` / `.<name>.account.json`),
 so either tool can switch an account on any machine with no migration step.
 `account_list.go` renders `account list`; `account_picker.go` is the Ctrl+W
-overlay and its action. Entry points: the `account switch|save|list|remove`
+overlay and its action. Entry points: the `account claude|grok switch|save|list|remove`
 subcommands, `POST /account/switch` (bearer auth like every mutating endpoint,
-`400 unknown_account` / `500 switch_failed`, no `session_id`-style precondition
+`400 unknown_account` / `500 switch_failed` / `400 bad_tool`, no `session_id`-style precondition
 because it is host identity, not a session), and Ctrl+W in the TUI (picker →
 Enter → done, no confirm dialog). `remove` is CLI-only on purpose — no
 endpoint, no TUI binding: deleting a switch target is rare, irreversible
@@ -1584,7 +1584,7 @@ credential. `switch` and `list` reject both.
 is read or written past a failure here) → require the target to have a
 readable, parseable `.<name>.account.json` identity snapshot with a real,
 non-null email (a file that merely exists and parses isn't enough — see
-below), refusing with a message naming `account save <name>` as the fix if it
+below), refusing with a message naming `account claude save <name>` as the fix if it
 doesn't (nothing is read or written past this failure either) → refuse if a
 previous switch left the pending-switch marker armed (see below) → if it is
 already current, return immediately, a *true* no-op touching zero files
@@ -1595,7 +1595,7 @@ be installed (`validateSnapshotCredential`) → **step 2.5**, collect the
 advisory session warning (`switchSessionWarnings`) → **step 2.6**, rotate the
 parked snapshot via Claude Code's OAuth token endpoint (`rotateSnapshotForSwitch`;
 always attempted, even when access is still valid, so Claude Code starts with
-a fresh token; `invalid_grant` refuses and names `account save`; any other
+a fresh token; `invalid_grant` refuses and names `account claude save`; any other
 error keeps the original bytes) and persist the new blob into the snapshot
 file before the live write → unconditional rescue copy
 of the live credential to the single rolling `.last-switch-rescue.<ext>` slot → when the
@@ -1653,7 +1653,7 @@ still returns before validate and before this step — do not refresh a parked
 copy of the live account. `invalid_grant` refuses; other errors keep the
 original bytes.
 
-`account save NAME` refuses to file the live credential under a name whose
+`account claude save NAME` refuses to file the live credential under a name whose
 `.<name>.account.json` already names a *different* account — that is the
 misattribution every other guard here exists to prevent, reached by hand.
 Refreshing a snapshot of the same account after a relogin is untouched, and a
@@ -1686,7 +1686,7 @@ correct: every switch this tool performs now leaves identity in sync with the
 credential it installs, with no exception to reason about. On both machines
 this ships to, every snapshot already has its identity file (verified, not
 assumed), so this precondition costs nothing in practice; a legacy
-credential-only snapshot self-heals with one `account save <name>` run while
+credential-only snapshot self-heals with one `account claude save <name>` run while
 logged into it. The check is on the DATA, not the file's mere existence:
 `identitySlice` (the counterpart that builds a snapshot in `saveAccountSnapshot`)
 writes an explicit JSON `null` for any identity key `~/.claude.json` didn't
@@ -1713,7 +1713,7 @@ is to run it again, and doing so with a stale identity cache would
 misattribute the outgoing backup to the wrong snapshot and corrupt it — for
 ANY subsequent switch target, not just a retry of the same one. The marker is
 armed right before the credential write and disarmed right after the identity
-patch succeeds; while armed, every switch (any target) refuses. `account save
+patch succeeds; while armed, every switch (any target) refuses. `account claude save
 <name>` ALSO clears the marker (not just a completed `switchAccountLocked`) —
 capturing what's live right now under a name is exactly the human
 confirmation the marker is waiting for, and making `save` the one complete

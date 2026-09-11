@@ -39,6 +39,13 @@ func TestMain(m *testing.M) {
 	oauthTokenRefresh = func(string, []string) (*oauthTokenResponse, error) {
 		panic("test reached the real oauth token endpoint")
 	}
+	grokTokenRefresh = func(string, string) (*grokTokenResponse, error) {
+		panic("test reached the real grok token endpoint")
+	}
+	grokBillingGet = func(string, string) ([]byte, error) {
+		panic("test reached the real grok billing endpoint")
+	}
+	_ = os.Unsetenv("GROK_HOME")
 	// Same rule for the identity probe beside it: a test that reaches the
 	// profile endpoint would spend the developer's own token on a real request,
 	// so the default is loud. Every path that probes gates on an unexpired
@@ -490,8 +497,8 @@ func TestSwitchAccountRefusesCredentialOnlyTarget(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want a refusal")
 	}
-	if !strings.Contains(err.Error(), "account save trecs") {
-		t.Fatalf("err = %v, want it to name the fix (`account save trecs`)", err)
+	if !strings.Contains(err.Error(), "account claude save trecs") {
+		t.Fatalf("err = %v, want it to name the fix (`account claude save trecs`)", err)
 	}
 	// A refused switch must be a true no-op, same guarantee as the
 	// already-active case: nothing on disk moved.
@@ -1166,7 +1173,7 @@ func TestSwitchAccountRefusesExpiredRefreshToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want a refusal")
 	}
-	if !strings.Contains(err.Error(), "account save trecs") {
+	if !strings.Contains(err.Error(), "account claude save trecs") {
 		t.Fatalf("err = %v, want it to name the fix", err)
 	}
 	assertTreeUnchanged(t, f.home, before)
@@ -1238,7 +1245,7 @@ func TestSwitchAccountRefusesMisattributedSnapshot(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want a refusal")
 	}
-	for _, want := range []string{"someone@elsewhere.example", "andy@trecs.aero", "account save trecs"} {
+	for _, want := range []string{"someone@elsewhere.example", "andy@trecs.aero", "account claude save trecs"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err = %v, want it to name %q", err, want)
 		}
@@ -1293,7 +1300,7 @@ func TestSwitchAccountWarnsAboutRunningSessions(t *testing.T) {
 		t.Fatalf("warnings = %v, want exactly one", warnings)
 	}
 	// Pids are sorted, so the same set always renders the same line.
-	for _, want := range []string{"2 Claude Code sessions", "pid 17, 4242", "account switch trecs"} {
+	for _, want := range []string{"2 Claude Code sessions", "pid 17, 4242", "account claude switch trecs"} {
 		if !strings.Contains(warnings[0], want) {
 			t.Fatalf("warning = %q, want it to contain %q", warnings[0], want)
 		}
@@ -1594,7 +1601,7 @@ func TestSwitchAccountRefreshInvalidGrantRefuses(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want a refusal")
 	}
-	if !strings.Contains(err.Error(), "account save trecs") {
+	if !strings.Contains(err.Error(), "account claude save trecs") {
 		t.Fatalf("err = %v, want it to name the fix", err)
 	}
 	assertTreeUnchanged(t, f.home, before)

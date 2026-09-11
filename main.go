@@ -103,11 +103,10 @@ subcommands:
                                   save/restore the local session set; name
                                   defaults to a timestamp; restore recreates
                                   each session (best-effort) via tmux + resume
-  account switch NAME [--server SERVER] | save NAME | list [--server SERVER]
-                                  switch the active Claude Code account from a
-                                  claude-switch credential snapshot, capture the
-                                  live one as a snapshot, or list what each host
-                                  knows about
+  account claude|grok switch NAME [--server SERVER] | save NAME | list [--server SERVER] | remove NAME
+                                  switch the active Claude or Grok account from a
+                                  parked snapshot, capture the live one, list
+                                  what each host knows, or remove a parked copy
   summary [claude|codex]          print or set the ticket/conversation
                                   summary backend (default claude)
   notify-test                     send a test push to every registered device

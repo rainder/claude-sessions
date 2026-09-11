@@ -25,7 +25,7 @@ const accountPickerEmpty = "no known account snapshots"
 
 // accountPickerEmptyHint tells the user how to create one, naming the command
 // that does it.
-const accountPickerEmptyHint = "claude-sessions account save <name>"
+const accountPickerEmptyHint = "claude-sessions account claude save <name>  (or grok)"
 
 // accountActiveGlyph marks the account the host is currently logged into.
 const accountActiveGlyph = "●"
@@ -81,7 +81,11 @@ func accountPickerRow(row accountRow, nameW int) string {
 	if row.Active {
 		marker = accountActiveGlyph
 	}
-	return fmt.Sprintf("%s %-*s  %s", marker, nameW, row.Name, dim(displayEmail(row.Email)))
+	tool := row.Tool
+	if tool == "" {
+		tool = "-"
+	}
+	return fmt.Sprintf("%-6s %s %-*s  %s", tool, marker, nameW, row.Name, dim(displayEmail(row.Email)))
 }
 
 // renderAccountPicker draws the bordered box centered in a cols x rows terminal:
@@ -227,7 +231,7 @@ func actSwitchAccount(c *actCtx) (toast string, switched bool) {
 	if host != "" {
 		label = host
 	}
-	choice, ok := pickAccount(host, accountRowsFrom(label, c.accounts(host)), c.modalWakes)
+	choice, ok := pickAccount(host, hostAccountRows(label, host, c.accounts), c.modalWakes)
 	if !ok || choice.Active {
 		return "", false
 	}
@@ -241,7 +245,7 @@ func actSwitchAccount(c *actCtx) (toast string, switched bool) {
 	defer c.enterRaw()
 	fmt.Printf("\nswitching %s to %s... ", label, choice.Name)
 
-	email, warnings, err := applyAccountSwitch(host, choice.Name)
+	email, warnings, err := applyAccountSwitch(host, choice.Name, choice.Tool)
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
 		return "account switch failed: " + err.Error(), false
@@ -254,11 +258,32 @@ func actSwitchAccount(c *actCtx) (toast string, switched bool) {
 // local row, over that host's HTTP API for a remote one — the same local/remote
 // split every other action takes. Returns the email now live there, plus any
 // advisory warnings that host raised about the switch.
-func applyAccountSwitch(host, name string) (string, []string, error) {
+func hostAccountRows(label, host string, accounts func(string) accountSnapshot) []accountRow {
+	var snap accountSnapshot
+	if accounts != nil {
+		snap = accounts(host)
+	}
+	claude := accountRowsFrom(label, snap)
+	var grok []accountRow
 	if host == "" {
+		grok = localGrokAccountListing().Rows
+	} else {
+		grok = grokAccountRowsFrom(label, snap)
+	}
+	return append(claude, grok...)
+}
+
+func applyAccountSwitch(host, name, tool string) (string, []string, error) {
+	if tool != accountToolClaude && tool != accountToolGrok {
+		return "", nil, fmt.Errorf("tool is required (claude or grok)")
+	}
+	if host == "" {
+		if tool == accountToolGrok {
+			return switchGrokAccount(name)
+		}
 		return switchAccount(name)
 	}
-	result, err := switchAccountRemote(host, name)
+	result, err := switchAccountRemote(host, name, tool)
 	if err != nil {
 		return "", nil, err
 	}
