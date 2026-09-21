@@ -239,6 +239,10 @@ func RunTUI(interval time.Duration) error {
 	// inspectorHub polls the previewed session while the inspector screen is
 	// open; nil on the session list. Shut down on exit if still open.
 	var inspectorHub *InspectorHub
+	// resizeSeq runs pin/shrink/revert off this loop so a slow remote host
+	// cannot stall entering or leaving preview. Attach and the quit-path
+	// defer still wait so revert lands before a real attach or process exit.
+	var resizeSeq inspectorResizeSeq
 	// ticketSummarySec fetches the DR-XXXX summary for the inspected session, the
 	// same cache-backed fetch the 'i' info dialog runs; nil when the open session
 	// carries no ticket id (and on the session list). Its result is drawn above
@@ -291,10 +295,16 @@ func RunTUI(interval time.Duration) error {
 	// content shorter than `big`, issues a second resize down to it. A failed
 	// or too-early probe just leaves the pane at its full oversized height —
 	// best-effort, same as every other resize call here.
-	shrinkInspectorPaneToContent := func(sess Session, cols, big, floor int) {
+	shrinkInspectorPaneToContent := func(sess Session, cols, big, floor int, gen uint64) {
 		time.Sleep(inspectorPaneSettleDelay)
+		if !resizeSeq.current(gen) {
+			return
+		}
 		res, err := defaultInspectorFetch(sessionSelectionTarget(sess), PreviewLimits{MaxLines: big, MaxBytes: 512 << 10})
 		if err != nil {
+			return
+		}
+		if !resizeSeq.current(gen) {
 			return
 		}
 		if rows, ok := capInspectorPaneRows(res.Content, big, floor); ok {
@@ -303,13 +313,13 @@ func RunTUI(interval time.Duration) error {
 	}
 
 	defer func() {
+		// Drop any in-flight pin/shrink, join queued work, then revert if
+		// the inspector is still open (quit skipped closeInspector). A hard
+		// process kill (SIGKILL) still bypasses this — accepted, see the
+		// design spec's known limitations.
+		resizeSeq.begin()
+		resizeSeq.wait()
 		if inspectorHub != nil {
-			// Covers every RunTUI return path that skips closeInspector — most
-			// notably quitting outright (Ctrl+D/'q') while the inspector is
-			// open, which previously left the target's tmux window pinned to
-			// manual-size mode forever. A hard process kill (SIGKILL) still
-			// bypasses this — accepted, see the design spec's known
-			// limitations.
 			resizeInspected(state.inspector.snapshot.Session, 0, 0, true)
 			inspectorHub.Shutdown()
 		}
@@ -662,6 +672,11 @@ func RunTUI(interval time.Duration) error {
 				return fetchTicketSummaryCached(ctx, ticketID)
 			})
 		}
+		state.mode = screenInspector
+		state.inspector = newInspectorViewState(target.id)
+		state.inspectorTargetGone = false
+		screen.Invalidate()
+		render()
 		if cols, rows, err := term.GetSize(fd); err == nil && cols > 0 {
 			// Best-effort only: the ticket-summary block usually hasn't loaded
 			// yet at this point — prefetchTicketSummaries (settleRows, above)
@@ -670,32 +685,41 @@ func RunTUI(interval time.Duration) error {
 			// queued behind ticketPrefetchConcurrency, still lands here cold —
 			// so this can still slightly under-reserve rows on first open, the
 			// accepted one-shot tradeoff documented in the design spec.
-			// Synchronous, not fired in a goroutine: closeInspector's and the
-			// quit-path defer's reverts assume the entry resize has already
-			// landed, so an async entry can race a quick close/quit and leave
-			// the window pinned to window-size=manual with no un-pin ever
-			// following it. Bounded at 5s worst case by resizeRemote's own
-			// timeout (remote_actions.go) — the same shape send_keys.go's
-			// local resolveLivePIDLocal path already accepts on the UI thread.
+			// Queued, not run on this loop: a slow remote resize used to stall
+			// both entering preview and the left-key leave that followed it.
+			// resizeSeq keeps pin-then-revert in order, and closeInspector's
+			// begin() drops a pin that has not started yet.
 			if innerRows := rows - inspectorChromeRows; innerRows > 0 {
 				big := innerRows * inspectorPaneRowMultiplier
-				resizeInspected(sess, cols, big, false)
-				shrinkInspectorPaneToContent(sess, cols, big, innerRows)
+				gen := resizeSeq.begin()
+				ih := inspectorHub
+				resizeSeq.run(func() {
+					if !resizeSeq.current(gen) {
+						return
+					}
+					resizeInspected(sess, cols, big, false)
+					if !resizeSeq.current(gen) {
+						return
+					}
+					shrinkInspectorPaneToContent(sess, cols, big, innerRows, gen)
+					if resizeSeq.current(gen) && ih != nil {
+						ih.Refresh()
+					}
+				})
 			}
 		}
-		state.mode = screenInspector
-		state.inspector = newInspectorViewState(target.id)
-		state.inspectorTargetGone = false
-		screen.Invalidate()
-		render()
 	}
 
 	// closeInspector tears the hub down (which closes its wake fd — so nil the
 	// reference before the next pollEvents rebuilds the wakes slice), resets the
 	// inspector state, and returns to a freshly-refreshed session list.
 	closeInspector := func() {
+		resizeSeq.begin()
 		if inspectorHub != nil {
-			resizeInspected(state.inspector.snapshot.Session, 0, 0, true)
+			sess := state.inspector.snapshot.Session
+			resizeSeq.run(func() {
+				resizeInspected(sess, 0, 0, true)
+			})
 			inspectorHub.Shutdown()
 			inspectorHub = nil
 		}
@@ -833,6 +857,10 @@ func RunTUI(interval time.Duration) error {
 		for _, ev := range events {
 			if state.mode == screenInspector {
 				quit, absorb := handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render, func() {
+					// Revert must land before the real attach, or the window
+					// stays pinned at the previewer's size for the whole
+					// interactive session (see preview-resize design spec).
+					resizeSeq.wait()
 					screen.Invalidate()
 					actAttach(makeCtx())
 					refresh(true)
@@ -911,6 +939,7 @@ func RunTUI(interval time.Duration) error {
 			case "q", "Q", "\x03", "\x04":
 				return nil
 			case KeyEnter:
+				resizeSeq.wait()
 				screen.Invalidate()
 				actAttach(makeCtx())
 				refresh(true)
@@ -937,6 +966,7 @@ func RunTUI(interval time.Duration) error {
 				screen.Invalidate()
 				render()
 			case "a", "A":
+				resizeSeq.wait()
 				screen.Invalidate()
 				actAttach(makeCtx())
 				refresh(true)

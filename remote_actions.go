@@ -468,11 +468,10 @@ func sendKeysRemote(host string, pid int, sessionID, text string) (actionResult,
 // never optional, since this is a new endpoint with no legacy caller to
 // stay compatible with (see resizeBody, server.go). Uses the same short 5s
 // timeout as fetchRemoteCwdSuggestions/fetchRemoteResumable above, not
-// remoteRequest's 30s default: every tui.go call site is synchronous on the
-// UI thread (openInspector, closeInspector, the quit-path defer, and the
-// Enter-to-attach handler via closeInspector), so a slow or unreachable host
-// must not stall entering/leaving preview — on the quit path in particular,
-// the terminal-restore defers already registered would otherwise leave the
+// remoteRequest's 30s default: open/close queue this off the UI thread, but
+// attach and the quit-path defer still wait for it, and a background job
+// must not hang for the full 30s. On the quit path in particular, the
+// terminal-restore defers already registered would otherwise leave the
 // terminal stuck in raw/alt-screen mode for the full 30s.
 func resizeRemote(host string, pid int, sessionID string, cols, rows int, revert bool) (actionResult, error) {
 	body, err := json.Marshal(map[string]any{
