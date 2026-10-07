@@ -1013,8 +1013,8 @@ func RunTUI(interval time.Duration) error {
 				settleRows(false)
 				state.requestSelectionAnchor()
 				render()
-			case "!", "@", "#", "$", "%", "^", "&", "*", "(":
-				// Shift+1..9 assign the selected session's group (single membership;
+			case "!", "@", "#", "$", "%", "^", "&", "*", "(", ")":
+				// Shift+0..9 assign the selected session's group (single membership;
 				// same group again ungroups). Sessions with no SessionID are ignored.
 				// The group is written on the host that owns the session, so a
 				// remote row goes over HTTP — hence the same refresh(true) kick
@@ -1338,11 +1338,14 @@ func groupFilterTransition(cur groupFilter, armed bool, k string) (next groupFil
 }
 
 // shiftDigitGroup maps a US-layout Shift+1..9 keystroke to its group number
-// (1..9), or 0 for any other key.
+// (1..9), Shift+0 to groupPriority, or 0 for any other key.
 func shiftDigitGroup(key string) int {
 	const shifted = "!@#$%^&*("
 	if len(key) != 1 {
 		return 0
+	}
+	if key[0] == ')' {
+		return groupPriority
 	}
 	if i := strings.IndexByte(shifted, key[0]); i >= 0 {
 		return i + 1
@@ -1469,7 +1472,7 @@ func groupsOfRows(local []Session, remotes []RemoteResult) map[string]int {
 }
 
 func sessionFooter() string {
-	return dim("-/+ disable/enable  ·  d hide disabled  ·  1-9 only  ·  h1-9 hide  ·  ⇧1-9 group  ·  / search  ·  ? help")
+	return dim("-/+ disable/enable  ·  d hide disabled  ·  1-9 only  ·  h1-9 hide  ·  ⇧0-9 group  ·  / search  ·  ? help")
 }
 
 func sessionBottomRow(toast string, toastActive bool) string {
@@ -1495,7 +1498,7 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command · p prompt in background)")
 	fmt.Fprintln(&b, "    r            resume a past session (searchable · local + remote)")
 	fmt.Fprintln(&b, "    - / +        disable / enable session")
-	fmt.Fprintln(&b, "    Shift-1..9   assign session to group ①..⑨ (same group again ungroups)")
+	fmt.Fprintln(&b, "    Shift-0..9   assign session to group ⓪..⑨ (⓪ = top priority · same group again ungroups)")
 	fmt.Fprintln(&b, "    Ctrl-X       kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")

@@ -374,10 +374,14 @@ func sessionLess(a, b Session, mode string) bool {
 	}
 }
 
-// groupSortRank maps a group number to its group-first sort key: groups 1-9
-// rank by their own number; ungrouped (0, or any out-of-range value) ranks
-// last (10), sinking below every named group.
+// groupSortRank maps a group number to its group-first sort key: groupPriority
+// (shown as group 0) ranks first (0), groups 1-9 rank by their own number;
+// ungrouped (0, or any out-of-range value) ranks last (10), sinking below every
+// named group.
 func groupSortRank(group int) int {
+	if group == groupPriority {
+		return 0
+	}
 	if group < 1 || group > 9 {
 		return 10
 	}

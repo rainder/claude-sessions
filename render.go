@@ -163,9 +163,10 @@ func sessionRowPlain(session Session, selected bool) bool {
 	return session.Headless() || (session.Disabled && !selected)
 }
 
-// groupSGR is the fixed per-group badge palette (SGR codes), 1..9.
+// groupSGR is the fixed per-group badge palette (SGR codes), 1..9 plus groupPriority.
 var groupSGR = map[int]string{
 	1: "36", 2: "35", 3: "33", 4: "32", 5: "34", 6: "31", 7: "96", 8: "95", 9: "97",
+	groupPriority: "1;93",
 }
 
 // groupView carries the client-side view state threaded through the render
@@ -263,9 +264,12 @@ func matchesTextFilter(s Session, host, query string) bool {
 	return true
 }
 
-// groupBadgeGlyph returns the circled digit for a group (U+2460 is ①), or "" for
-// an ungrouped group.
+// groupBadgeGlyph returns the circled digit for a group (U+2460 is ①), ⓪
+// (U+24EA) for groupPriority, or "" for an ungrouped group.
 func groupBadgeGlyph(group int) string {
+	if group == groupPriority {
+		return "\u24ea"
+	}
 	if group < 1 || group > 9 {
 		return ""
 	}

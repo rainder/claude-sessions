@@ -5242,7 +5242,7 @@ func TestFlagsHandlerRejectsMalformedBody(t *testing.T) {
 		{"unknown field", `{"session_id":"sess-55","extra":1}`},
 		{"trailing content", `{"session_id":"sess-55"}{}`},
 		{"null group", `{"session_id":"sess-55","group":null}`},
-		{"group too high", `{"session_id":"sess-55","group":10}`},
+		{"group too high", `{"session_id":"sess-55","group":11}`},
 		{"group negative", `{"session_id":"sess-55","group":-1}`},
 		{"group not a number", `{"session_id":"sess-55","group":"3"}`},
 		{"null disabled", `{"session_id":"sess-55","disabled":null}`},
@@ -5443,7 +5443,7 @@ func TestNewSessionRejectsABadGroup(t *testing.T) {
 		want  string
 	}{
 		{name: "zero", group: "0", want: "bad group"},
-		{name: "above the range", group: "10", want: "bad group"},
+		{name: "above the range", group: "11", want: "bad group"},
 		{name: "negative", group: "-1", want: "bad group"},
 		{name: "not a number", group: `"abc"`, want: "bad json"},
 	}

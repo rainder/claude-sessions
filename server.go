@@ -365,7 +365,7 @@ func decodeFlagsRequest(w http.ResponseWriter, r *http.Request) (flagsRequest, e
 		if err := json.Unmarshal(body.Group, &group); err != nil {
 			return flagsRequest{}, fmt.Errorf("group must be a number 0-9")
 		}
-		if group < 0 || group > 9 {
+		if group != 0 && !validGroup(group) {
 			return flagsRequest{}, fmt.Errorf("group must be a number 0-9")
 		}
 		req.Group = &group

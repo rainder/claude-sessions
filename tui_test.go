@@ -182,7 +182,7 @@ func TestSortDescStatus(t *testing.T) {
 
 func TestSessionDisableFooterAndHelp(t *testing.T) {
 	footer := sessionFooter()
-	for _, want := range []string{"-/+ disable/enable", "d hide disabled", "1-9 only", "h1-9 hide", "⇧1-9 group", "/ search"} {
+	for _, want := range []string{"-/+ disable/enable", "d hide disabled", "1-9 only", "h1-9 hide", "⇧0-9 group", "/ search"} {
 		if !strings.Contains(footer, want) {
 			t.Fatalf("footer %q missing %q", footer, want)
 		}
@@ -435,7 +435,7 @@ func TestShiftDigitGroup(t *testing.T) {
 	cases := map[string]int{
 		"!": 1, "@": 2, "#": 3, "$": 4, "%": 5,
 		"^": 6, "&": 7, "*": 8, "(": 9,
-		"1": 0, ")": 0, KeyUp: 0, "": 0,
+		")": groupPriority, "1": 0, "0": 0, KeyUp: 0, "": 0,
 	}
 	for key, want := range cases {
 		if got := shiftDigitGroup(key); got != want {

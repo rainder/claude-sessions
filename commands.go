@@ -251,7 +251,7 @@ func parseNewArgs(args []string) (newArgs, error) {
 			}
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil || !validSpawnGroup(n) {
-				return newArgs{}, fmt.Errorf("--group must be a number %d-%d, got %q", spawnGroupMin, spawnGroupMax, args[i+1])
+				return newArgs{}, fmt.Errorf("--group must be a number %d-%d or %d (top priority, shown as 0), got %q", spawnGroupMin, spawnGroupMax, groupPriority, args[i+1])
 			}
 			a.group = n
 			i++

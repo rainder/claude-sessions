@@ -199,12 +199,12 @@ func TestSetGroupAfterSpawnWithNoTmuxNameWarns(t *testing.T) {
 }
 
 func TestValidSpawnGroup(t *testing.T) {
-	for _, n := range []int{1, 5, 9} {
+	for _, n := range []int{1, 5, 9, groupPriority} {
 		if !validSpawnGroup(n) {
 			t.Errorf("validSpawnGroup(%d) = false, want true", n)
 		}
 	}
-	for _, n := range []int{-1, 0, 10, 99} {
+	for _, n := range []int{-1, 0, 11, 99} {
 		if validSpawnGroup(n) {
 			t.Errorf("validSpawnGroup(%d) = true, want false", n)
 		}

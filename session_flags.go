@@ -149,7 +149,16 @@ func (s *FlagsStore) Flags(sessionID string) sessionFlags {
 // Disabled reports whether sessionID is currently marked disabled on this host.
 func (s *FlagsStore) Disabled(sessionID string) bool { return s.Flags(sessionID).Disabled }
 
-// Group returns the group (1..9) assigned to sessionID, or 0 if none.
+// groupPriority is the stored value of the user-facing "group 0": the highest
+// priority group, shown as ⓪ and ranked above groups 1..9 by the group-first
+// sort. It cannot be stored as 0, because 0 already means "ungrouped" in the
+// flags store, on the wire and under omitempty.
+const groupPriority = 10
+
+// validGroup reports whether g is an assignable group: 1..9 or groupPriority.
+func validGroup(g int) bool { return (g >= 1 && g <= 9) || g == groupPriority }
+
+// Group returns the group (1..9, or groupPriority) assigned to sessionID, or 0 if none.
 func (s *FlagsStore) Group(sessionID string) int { return s.Flags(sessionID).Group }
 
 // Overlay sets each session's Group and Disabled fields from the store (no

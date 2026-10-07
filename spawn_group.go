@@ -29,7 +29,7 @@ const (
 )
 
 // validSpawnGroup reports whether n names a group a spawn may request.
-func validSpawnGroup(n int) bool { return n >= spawnGroupMin && n <= spawnGroupMax }
+func validSpawnGroup(n int) bool { return validGroup(n) }
 
 // spawnGroupPollInterval/spawnGroupTimeout bound the wait for the spawned
 // session to appear. Vars rather than consts so tests can shrink them instead

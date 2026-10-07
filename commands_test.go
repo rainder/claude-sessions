@@ -94,7 +94,7 @@ func TestParseNewArgs(t *testing.T) {
 		},
 		{
 			name:    "group above the range",
-			args:    []string{"--dir", "/tmp", "--group", "10"},
+			args:    []string{"--dir", "/tmp", "--group", "11"},
 			wantErr: true,
 		},
 		{
