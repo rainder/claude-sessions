@@ -250,6 +250,66 @@ func TestLaunchdDefaultLogPath(t *testing.T) {
 	}
 }
 
+// TMPDIR is baked only when the installing shell has one, so the service and
+// the TUI share one set of os.TempDir() cache files (usage_numbers.go).
+func TestCaptureTmpDir(t *testing.T) {
+	t.Setenv("TMPDIR", "/home/andy/tmp")
+	if got := captureTmpDir(); got != "/home/andy/tmp" {
+		t.Errorf("captureTmpDir() = %q, want the environment's TMPDIR", got)
+	}
+	t.Setenv("TMPDIR", "")
+	if got := captureTmpDir(); got != "" {
+		t.Errorf("captureTmpDir() = %q with no TMPDIR, want empty", got)
+	}
+}
+
+func TestSystemdRenderWithTmpDir(t *testing.T) {
+	svc := &systemdService{home: "/home/andy", user: "andy"}
+	got := svc.Render(serviceConfig{
+		BinPath: "/home/andy/.local/bin/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/home/andy/.local/bin:/usr/bin:/bin",
+		TmpDir:  "/home/andy/tmp",
+	})
+	want := `[Unit]
+Description=claude-sessions server
+
+[Service]
+ExecStart="/home/andy/.local/bin/claude-sessions" "-s" "--port" "8765" "--bind" "tailscale"
+Environment="PATH=/home/andy/.local/bin:/usr/bin:/bin"
+Environment="TMPDIR=/home/andy/tmp"
+StandardOutput=null
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`
+	if got != want {
+		t.Errorf("Render() mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestLaunchdRenderWithTmpDir(t *testing.T) {
+	svc := &launchdService{home: "/Users/andy", uid: 501}
+	got := svc.Render(serviceConfig{
+		BinPath: "/Users/andy/.local/bin/claude-sessions",
+		Port:    8765,
+		Bind:    "tailscale",
+		Path:    "/usr/bin",
+		TmpDir:  "/var/folders/x&y/T/",
+		LogPath: "/Users/andy/Library/Logs/claude-sessions.log",
+	})
+	want := "  <key>EnvironmentVariables</key>\n  <dict>\n" +
+		"    <key>PATH</key><string>/usr/bin</string>\n" +
+		"    <key>TMPDIR</key><string>/var/folders/x&amp;y/T/</string>\n" +
+		"  </dict>\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("Render() environment dict mismatch, want:\n%s\ngot:\n%s", want, got)
+	}
+}
+
 func TestSystemdRender(t *testing.T) {
 	svc := &systemdService{home: "/home/andy", user: "andy"}
 	got := svc.Render(serviceConfig{
@@ -461,6 +521,7 @@ func TestServiceConfigValidate(t *testing.T) {
 		{name: "newline in BinPath", mutate: func(cfg *serviceConfig, nl string) { cfg.BinPath += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "binary path"},
 		{name: "newline in Bind", mutate: func(cfg *serviceConfig, nl string) { cfg.Bind += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "--bind value"},
 		{name: "newline in Path", mutate: func(cfg *serviceConfig, nl string) { cfg.Path += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "PATH"},
+		{name: "newline in TmpDir", mutate: func(cfg *serviceConfig, nl string) { cfg.TmpDir += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "TMPDIR"},
 		{name: "newline in LogPath", mutate: func(cfg *serviceConfig, nl string) { cfg.LogPath += nl + "ExecStartPre=/bin/sh -c evil" }, errContain: "log path"},
 	}
 	for _, tt := range tests {

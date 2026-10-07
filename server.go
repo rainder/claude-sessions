@@ -662,6 +662,10 @@ type server struct {
 	// or a nil return (no fetch yet, or no Grok auth) omits the "grok_usage" key.
 	// Rides /sessions like Codex — not GET /usage (Anthropic identity only).
 	grokUsageSnapshot func() *GrokAccountUsage
+	// numbers backs GET /usage/numbers (usage_numbers.go): one long-lived
+	// source, so its single-flight lock, refresh clock and fetcher memory span
+	// requests. nil answers 503; tests inject their own.
+	numbers *usageNumbersSource
 	// previewLoader is the preview backend; nil means LoadPreview. Tests inject
 	// a stub to assert bounds and header wiring without touching tmux.
 	previewLoader func(int, PreviewLimits) (PreviewResult, error)
@@ -2509,6 +2513,7 @@ func cmdServer(args []string) int {
 		hostSnapshot:       hostUsageHub.Snapshot,
 		codexUsageSnapshot: codexUsageHub.Snapshot,
 		grokUsageSnapshot:  grokUsageHub.Snapshot,
+		numbers:            newUsageNumbersSource(usageNumbersSourceService),
 		devices:            devices,
 		flags:              flagsStore,
 	}
@@ -2540,6 +2545,7 @@ func cmdServer(args []string) int {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("GET /usage", s.usage)
+	mux.HandleFunc("GET /usage/numbers", s.usageNumbers)
 	mux.HandleFunc("GET /cwd-suggestions", s.cwdSuggestions)
 	mux.HandleFunc("GET /presets", s.presets)
 	mux.HandleFunc("GET /resumable", s.resumable)

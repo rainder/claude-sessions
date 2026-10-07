@@ -64,6 +64,8 @@ func main() {
 		os.Exit(cmdAccount(args[1:]))
 	case "summary":
 		os.Exit(cmdSummary(args[1:]))
+	case "usage":
+		os.Exit(cmdUsage(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -107,6 +109,9 @@ subcommands:
                                   switch the active Claude or Grok account from a
                                   parked snapshot, capture the live one, list
                                   what each host knows, or remove a parked copy
+  usage [--json] [--local]        print Claude/Grok/Codex quota numbers (asks
+                                  the local service, else builds locally;
+                                  --local skips the service)
   summary [claude|codex]          print or set the ticket/conversation
                                   summary backend (default claude)
   notify-test                     send a test push to every registered device

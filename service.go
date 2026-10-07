@@ -47,6 +47,7 @@ type serviceConfig struct {
 	Port    int
 	Bind    string
 	Path    string // baked into the unit; see capturePath
+	TmpDir  string // baked into the unit when non-empty; see captureTmpDir
 	LogPath string // empty on Linux — journald handles it
 }
 
@@ -60,6 +61,7 @@ func (cfg serviceConfig) validate() error {
 		{"binary path", cfg.BinPath},
 		{"--bind value", cfg.Bind},
 		{"PATH", cfg.Path},
+		{"TMPDIR", cfg.TmpDir},
 		{"log path", cfg.LogPath},
 	} {
 		if strings.ContainsAny(f.val, "\n\r") {
@@ -139,6 +141,18 @@ func capturePath() string {
 	return fallbackPath
 }
 
+// captureTmpDir returns the TMPDIR to bake into the unit file, or "" to leave
+// it out. Every per-user cache this binary keeps (the per-account usage
+// files, the Grok/Codex usage files) lives under os.TempDir(), which reads
+// TMPDIR. A supervisor starts the service without the shell's TMPDIR, so
+// without this the service and the TUI write two separate sets of cache
+// files, and GET /usage/numbers cannot see what the TUI's pollers wrote.
+// Empty means the shell has none either, so both already agree on the
+// platform default.
+func captureTmpDir() string {
+	return os.Getenv("TMPDIR")
+}
+
 // launchdService installs a per-user LaunchAgent. It is constructed with home
 // and uid rather than reading them itself so tests can render a plist for a
 // fixed identity from any machine.
@@ -192,6 +206,9 @@ func (s *launchdService) Render(cfg serviceConfig) string {
 	b.WriteString("  </array>\n")
 	b.WriteString("  <key>EnvironmentVariables</key>\n  <dict>\n")
 	fmt.Fprintf(&b, "    <key>PATH</key><string>%s</string>\n", xmlEscape(cfg.Path))
+	if cfg.TmpDir != "" {
+		fmt.Fprintf(&b, "    <key>TMPDIR</key><string>%s</string>\n", xmlEscape(cfg.TmpDir))
+	}
 	b.WriteString("  </dict>\n")
 	b.WriteString("  <key>RunAtLoad</key><true/>\n")
 	b.WriteString("  <key>KeepAlive</key><true/>\n")
@@ -327,6 +344,9 @@ func (s *systemdService) Render(cfg serviceConfig) string {
 	}
 	fmt.Fprintf(&b, "ExecStart=%s\n", strings.Join(quoted, " "))
 	fmt.Fprintf(&b, "Environment=%s\n", systemdQuote("PATH="+cfg.Path))
+	if cfg.TmpDir != "" {
+		fmt.Fprintf(&b, "Environment=%s\n", systemdQuote("TMPDIR="+cfg.TmpDir))
+	}
 	// StandardOutput=null: cmdServer prints the auth token to stdout twice at
 	// startup (the banner and the servers.yaml snippet), and journald would
 	// retain it durably — readable by root and the journal group, re-stamped
@@ -762,6 +782,7 @@ func serviceInstall(mgr serviceManager, run runner, args []string) int {
 		Port:    flags.port,
 		Bind:    flags.bind,
 		Path:    capturePath(),
+		TmpDir:  captureTmpDir(),
 		LogPath: mgr.defaultLogPath(),
 	}
 	// Reject anything a rendered unit file can't represent safely BEFORE

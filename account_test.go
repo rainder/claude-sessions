@@ -45,6 +45,14 @@ func TestMain(m *testing.M) {
 	grokBillingGet = func(string, string) ([]byte, error) {
 		panic("test reached the real grok billing endpoint")
 	}
+	// usage / GET /usage/numbers fetch Grok and Codex directly when their
+	// cache files are stale; fetchCodexUsage has no deeper seam, so both are
+	// fail-closed here.
+	// The live Claude leg too: fetchUsage → loadOAuthToken runs the real
+	// `security` on darwin before usageInfoFetch's own panic is ever reached.
+	usageNumbersLiveFetch = func() (*AccountUsage, error) { panic("test reached the real claude usage fetch") }
+	usageNumbersGrokFetch = func() (*GrokAccountUsage, error) { panic("test reached the real grok usage fetch") }
+	usageNumbersCodexFetch = func() (*CodexAccountUsage, error) { panic("test reached the real codex usage fetch") }
 	_ = os.Unsetenv("GROK_HOME")
 	// Same rule for the identity probe beside it: a test that reaches the
 	// profile endpoint would spend the developer's own token on a real request,

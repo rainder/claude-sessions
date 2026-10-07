@@ -1055,6 +1055,9 @@ budget is the one machine actually running a client against it, whether that's
 this host's own TUI/CLI (`UsageHub`/`KnownAccountsHub`) or a client SSHed
 into it and run there directly. The Codex side (`codex_usage.go`) still polls
 on the server and still rides `/sessions`; only the Anthropic half changed.
+One narrow exception: `GET /usage/numbers` may run one fetcher pass on the
+server when no hub has written recently — see "`usage` / `GET /usage/numbers`"
+below.
 
 `snapshotAccountNames` lists snapshots with `os.ReadDir` + a name filter, never
 `filepath.Glob`: the home directory is data, not a pattern, so a home path
@@ -1556,6 +1559,73 @@ can never render bare and pass as this machine's live account. Host headings
 show each host's active account email, dimmed, after `LOAD` (`section.account`,
 fed by that host's `Usage.Account` — which is why `/usage` reports the live
 email even when it reported no numbers for it).
+
+### `usage` / `GET /usage/numbers`
+
+`usage_numbers.go` serves account quota numbers to callers that cannot read
+the TUI header (an orchestrator session): `claude-sessions usage [--json]
+[--local]` and the authed `GET /usage/numbers`. Both answer one stable shape,
+`usageNumbersResponse` (`generatedAt`, `source` = `service`|`local`, and
+`claude`/`grok`/`codex` lists, never `null`). Its json tags are the contract;
+`UsageInfo` and friends are mapped into it, never tagged, because their field
+names are what the disk caches hold. Credits are in **major** units. Claude
+lists the live account first (`active`), then every other snapshot by name,
+skipping any whose email matches live (the hub's skip rule). An account with
+no numbers still appears, as `stale: true` plus a `reason` when one is known.
+
+`GET /usage` stays identity-only. This route is the one place a server may
+spend Anthropic budget, and only under one rule, owned by the long-lived
+`usageNumbersSource`: if any `claude-sessions-account-<uid>-*.json` in
+`os.TempDir()` was written within `usageRefreshInterval`, a hub (the TUI) is
+polling, so answer from disk. Otherwise, at most once per interval, run ONE
+pass of the same `newUsageFetcher` / `newKnownAccountsFetcher` closures the
+hubs use. They read and write the shared per-account files, so the disk
+backoff holds and an armed account gets no request. A mutex single-flights the
+decision. Grok and Codex come from the server's own hub cache files; only the
+local (no service) path fetches them, once, when the file is missing or older
+than one interval. A missing login or a failed fetch is an empty list or the
+old entry, never an error.
+
+The CLI asks the service first (loopback, then this host's Tailscale address
+— an installed service usually binds `--bind tailscale`), with the token file
+and a 45s timeout: the service holds its mutex across a pass that fetches
+accounts one at a time. A failure splits two ways. No service to ask —
+unreachable, no token, 401, or 404 from an older server — means a **full**
+local build. A service that is there but slow or broken — timeout, 5xx, bad
+body — means a **disk-only** build (`newDiskOnlyUsageNumbersSource`: no Claude
+pass, no Grok/Codex fetch). That service may be mid-pass and has not yet
+written its files, so a full build would see no hub alive and run a second
+pass beside it. Both answer `source: local`. `--local` forces a full local
+build.
+
+The local source never fetches a live account that has no claude-switch
+snapshot (`requireLiveSlot`). Such an account has no cache file, so a
+throwaway process has no backoff memory for it, and every `usage --local`
+would be a new request. That entry is identity only, `stale: true`,
+`reason: "no snapshot"`. The known-accounts pass is unchanged. The service
+source does not apply this rule: its `lastLive` and the live fetcher's `fb*`
+memory already bound it to one pass per interval.
+
+`expired` and every reason other than `rate limited` reach only the request
+whose pass saw them. The disk path can infer `rate limited` from a backoff
+streak and nothing else. So while the TUI is the poller, `expired` is never
+set — a dead credential shows as old numbers going stale.
+
+The hub-alive check only works if the service and the TUI share one temp dir.
+The user's shell may set `TMPDIR` while a supervisor starts the service
+without it, which gives two separate sets of cache files. So `service install`
+bakes a non-empty `TMPDIR` into the unit beside `PATH` (`captureTmpDir`), and
+omits it when the shell has none. This takes effect only when `service install`
+runs again — `service restart` reloads the unit file as it is and does not
+render it again. A deploy of this change must run `install` once per host.
+Until then the service and the TUI keep separate cache dirs, and the service
+acts as a second poller (still at most one pass per interval, and only when
+asked).
+
+Stale has one rule (`usageNumbersStale`): no `fetchedAt`, older than
+`usageNumbersStaleAfter` (two intervals), or marked stale by the fetcher in
+this pass. `loadAccountCache`'s own `Stale` is not an input — it is set on
+every disk read.
 
 ### Account switching
 

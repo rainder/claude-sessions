@@ -1212,3 +1212,37 @@ func cmdSummary(args []string) int {
 		return 2
 	}
 }
+
+// cmdUsage prints Claude/Grok/Codex quota numbers (usage_numbers.go). It asks
+// the local service first and builds locally when that fails; --local skips
+// the service. --json prints usageNumbersResponse, the same shape either way.
+func cmdUsage(args []string) int {
+	const usageMsg = "usage: claude-sessions usage [--json] [--local]"
+	jsonOut, localOnly := false, false
+	for _, a := range args {
+		switch a {
+		case "--json":
+			jsonOut = true
+		case "--local":
+			localOnly = true
+		case "-h", "--help":
+			fmt.Println(usageMsg)
+			return 0
+		default:
+			fmt.Fprintf(os.Stderr, "usage: unknown argument %q\n%s\n", a, usageMsg)
+			return 2
+		}
+	}
+	resp := collectUsageNumbers(localOnly)
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(resp); err != nil {
+			fmt.Fprintln(os.Stderr, "usage:", err)
+			return 1
+		}
+		return 0
+	}
+	renderUsageNumbers(os.Stdout, resp, time.Now())
+	return 0
+}

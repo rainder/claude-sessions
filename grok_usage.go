@@ -351,18 +351,27 @@ func saveGrokUsageCache(u *GrokAccountUsage) {
 // went unbounded for carry-forward; this is still the constant's use for warm
 // restarts of non-Anthropic pollers.
 func loadGrokUsageCache() *GrokAccountUsage {
+	u, fetchedAt := loadGrokUsageCacheEntry()
+	if u == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > usageCacheMaxAge {
+		return nil
+	}
+	return u
+}
+
+// loadGrokUsageCacheEntry returns the cached snapshot and when it was fetched, with
+// no age bound — nil and a zero time if absent or unreadable. `usage` /
+// GET /usage/numbers (usage_numbers.go) reads it this way because it reports
+// the reading's age and its own stale flag rather than hiding an old one.
+func loadGrokUsageCacheEntry() (*GrokAccountUsage, time.Time) {
 	data, err := os.ReadFile(grokUsageCachePath())
 	if err != nil {
-		return nil
+		return nil, time.Time{}
 	}
 	var c cachedGrokUsage
 	if err := json.Unmarshal(data, &c); err != nil {
-		return nil
+		return nil, time.Time{}
 	}
-	if c.FetchedAt.IsZero() || time.Since(c.FetchedAt) > usageCacheMaxAge {
-		return nil
-	}
-	return &c.Usage
+	return &c.Usage, c.FetchedAt
 }
 
 // GrokUsageHub polls the Grok billing endpoint in the background, mirroring

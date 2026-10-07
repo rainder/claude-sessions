@@ -102,6 +102,8 @@ claude-sessions account claude|grok list [--server S]
                                             # what accounts each host knows for that tool, and which is active
 claude-sessions account claude|grok remove NAME [-y]
                                             # delete a parked snapshot (never touches the live login)
+claude-sessions usage [--json] [--local]   # Claude/Grok/Codex quota numbers (asks the local
+                                            # service, else builds locally; --local skips it)
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
 claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)
@@ -326,7 +328,9 @@ session yet — because a failure to answer is not an answer of "not loaded".
 `install` bakes the invoking shell's `PATH` into the unit. Supervisors start
 services with a near-empty `PATH`, and this binary shells out to `tmux`,
 `tailscale`, `pngpaste`, and `claude` by bare name; without it, tmux detection
-silently finds nothing and `--bind tailscale` crash-loops.
+silently finds nothing and `--bind tailscale` crash-loops. It also bakes a
+non-empty `TMPDIR`, so the service and the TUI share one set of usage cache
+files (`usage` / `GET /usage/numbers` depend on that).
 
 Neither unit keeps stdout: the server prints the bearer token there at startup,
 and a service log is durable in a way a terminal isn't. launchd never rotates
@@ -446,6 +450,7 @@ tui.go               alt-screen + raw mode + key reader + main loop
 usage.go             account rate-limit polling (5h/weekly bars in header)
 known_accounts.go    per-account snapshot discovery + read-only usage polling
 account_cache.go     per-account disk cache (numbers + backoff, one file each)
+usage_numbers.go     `usage` CLI + GET /usage/numbers (quota numbers, stable JSON)
 account.go           Claude account switching (credential + identity snapshots, flock)
 grok_account.go      Grok account snapshots (save/switch/list/remove)
 grok_oauth.go        Grok OIDC refresh for parked snapshots
