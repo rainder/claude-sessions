@@ -560,7 +560,9 @@ func fetchServiceUsageNumbers() (usageNumbersResponse, usageNumbersFallback, err
 	ctx, cancel := context.WithTimeout(context.Background(), usageNumbersServiceTimeout)
 	defer cancel()
 	resp, status, err := usageNumbersAttempt(ctx, srv)
-	if err != nil && status == 0 && !isTimeoutErr(err) {
+	// A --bind tailscale service answers loopback only for /paste-request,
+	// so a 404 there is that listener, not an older server: try Tailscale.
+	if err != nil && (status == 0 || status == http.StatusNotFound) && !isTimeoutErr(err) {
 		if ts := localTailscaleIPv4(ctx); ts != "" {
 			srv.Host = ts
 			resp, status, err = usageNumbersAttempt(ctx, srv)

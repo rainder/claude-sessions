@@ -508,6 +508,23 @@ func TestCollectUsageNumbersFallsBack(t *testing.T) {
 		}
 	})
 
+	t.Run("loopback 404 falls through to tailscale", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.Host, "127.0.0.1") {
+				http.Error(w, "paste-only listener", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, usageNumbersResponse{Source: usageNumbersSourceService})
+		}))
+		defer srv.Close()
+		u, _ := url.Parse(srv.URL)
+		lb := pointUsageNumbersAt(t, u.Host)
+		localTailscaleIPv4 = func(context.Context) string { return "localhost" }
+		if got := collectUsageNumbers(false); got.Source != usageNumbersSourceService || *lb != (localBuilds{}) {
+			t.Errorf("source = %q, builds = %+v, want the service answer", got.Source, *lb)
+		}
+	})
+
 	t.Run("service answers", func(t *testing.T) {
 		var hits atomic.Int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

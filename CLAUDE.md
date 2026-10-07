@@ -1587,7 +1587,9 @@ than one interval. A missing login or a failed fetch is an empty list or the
 old entry, never an error.
 
 The CLI asks the service first (loopback, then this host's Tailscale address
-— an installed service usually binds `--bind tailscale`), with the token file
+— an installed service usually binds `--bind tailscale`, and then its
+loopback listener serves only `/paste-request`, so a loopback 404 moves on to
+Tailscale rather than counting as an older server), with the token file
 and a 45s timeout: the service holds its mutex across a pass that fetches
 accounts one at a time. A failure splits two ways. No service to ask —
 unreachable, no token, 401, or 404 from an older server — means a **full**
