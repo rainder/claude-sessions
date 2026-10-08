@@ -248,6 +248,147 @@ func TestListSessionsLocalSkipsRemotes(t *testing.T) {
 	}
 }
 
+// TestListSessionsUsesServiceAndSkipsLocalFiles: a service answer is the
+// session list. The command must not also read the temp home's session file.
+func TestListSessionsUsesServiceAndSkipsLocalFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	prev := listSessionsFromService
+	t.Cleanup(func() { listSessionsFromService = prev })
+	listSessionsFromService = func() ([]Session, HostUsage, bool) {
+		return []Session{{
+			PID:       7,
+			SessionID: "from-service",
+			CWD:       "/work/from-service",
+			CostUSD:   3.5,
+		}}, HostUsage{NumCPU: 4}, true
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	localSess := Session{
+		PID:        os.Getpid(),
+		SessionID:  "from-disk",
+		CWD:        "/work/from-disk",
+		Entrypoint: "cli",
+		Status:     "idle",
+	}
+	data, err := json.Marshal(localSess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", os.Getpid()))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var rc int
+	out := captureStdout(t, func() { rc = cmdListSessions([]string{"--json", "--local"}) })
+	if rc != 0 {
+		t.Fatalf("exit = %d, want 0", rc)
+	}
+	var hosts []struct {
+		HostUsage HostUsage `json:"hostUsage"`
+		Sessions  []Session `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(out), &hosts); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	if len(hosts) != 1 {
+		t.Fatalf("hosts = %d, want 1", len(hosts))
+	}
+	if hosts[0].HostUsage.NumCPU != 4 {
+		t.Fatalf("numCPU = %d, want the service value 4", hosts[0].HostUsage.NumCPU)
+	}
+	if len(hosts[0].Sessions) != 1 || hosts[0].Sessions[0].SessionID != "from-service" {
+		t.Fatalf("sessions = %+v, want only from-service", hosts[0].Sessions)
+	}
+	if hosts[0].Sessions[0].CostUSD != 3.5 {
+		t.Fatalf("costUsd = %v, want 3.5", hosts[0].Sessions[0].CostUSD)
+	}
+}
+
+// TestListSessionsFallbackOmitsCost: with no service, list-sessions still
+// reads the model tail. It does not price the transcript. CollectLocal does.
+func TestListSessionsFallbackOmitsCost(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const sessionID = "list-fallback-cost"
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess := Session{
+		PID:        os.Getpid(),
+		SessionID:  sessionID,
+		CWD:        "/work/list-sessions-cost",
+		Status:     "idle",
+		Entrypoint: "cli",
+	}
+	data, err := json.Marshal(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", os.Getpid()))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj := filepath.Join(home, ".claude", "projects", "proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := asstLine("msg-1", "req-1", "claude-opus-4-8", 1_000_000)
+	transcript := filepath.Join(proj, sessionID+".jsonl")
+	if err := os.WriteFile(transcript, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var rc int
+	out := captureStdout(t, func() { rc = cmdListSessions([]string{"--json", "--local"}) })
+	if rc != 0 {
+		t.Fatalf("exit = %d, want 0", rc)
+	}
+	var hosts []struct {
+		Sessions []Session `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(out), &hosts); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	var got *Session
+	for i := range hosts[0].Sessions {
+		if hosts[0].Sessions[i].SessionID == sessionID {
+			got = &hosts[0].Sessions[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("session %s missing:\n%s", sessionID, out)
+	}
+	if got.Model != "claude-opus-4-8" {
+		t.Errorf("model = %q, want claude-opus-4-8", got.Model)
+	}
+	if got.ContextTokens == 0 {
+		t.Error("contextTokens = 0, want the transcript tail")
+	}
+	if got.CostUSD != 0 || got.TokensSpent != 0 {
+		t.Errorf("costUsd/tokensSpent = %v/%d, want 0/0", got.CostUSD, got.TokensSpent)
+	}
+
+	full, err := CollectLocal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var priced *Session
+	for i := range full {
+		if full[i].SessionID == sessionID {
+			priced = &full[i]
+			break
+		}
+	}
+	if priced == nil || priced.CostUSD == 0 {
+		t.Fatalf("CollectLocal costUsd = %v, want a priced transcript", priced)
+	}
+}
+
 func TestParseKillFlags(t *testing.T) {
 	cases := []struct {
 		name    string

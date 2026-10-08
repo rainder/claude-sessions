@@ -189,8 +189,20 @@ func isScratchCWD(cwd string) bool {
 }
 
 // CollectLocal reads every *.json under ~/.claude/sessions, filters out dead
-// pids, and enriches each session with CPU% and tmux pane info.
+// pids, and enriches each session with CPU%, tmux pane info, and cost.
+// Cost comes from a full read of each transcript the first time a process
+// sees it. The offset cache lives in memory, so a new process pays that
+// read again. The long-lived service keeps the cache. list-sessions asks
+// the service first and calls collectLocal(false) only when it cannot.
 func CollectLocal() ([]Session, error) {
+	return collectLocal(true)
+}
+
+// collectLocal is CollectLocal. scanUpdates false skips the transcript and
+// updates.jsonl cost passes. Model, context, and the Grok event tail stay.
+// An open Grok background task then stays idle, because shell status is
+// read from the same updates.jsonl the cost pass reads.
+func collectLocal(scanUpdates bool) ([]Session, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -241,7 +253,7 @@ func CollectLocal() ([]Session, error) {
 	for _, s := range out {
 		claudePIDs[s.PID] = true
 	}
-	for _, g := range collectGrokLocal(home) {
+	for _, g := range collectGrokRows(home, scanUpdates) {
 		if claudePIDs[g.PID] {
 			continue
 		}
@@ -272,7 +284,9 @@ func CollectLocal() ([]Session, error) {
 			m := cachedMeta(p)
 			s.Model = m.Model
 			s.ContextTokens = m.ContextTokens
-			s.CostUSD, s.CostSubagentsUSD, s.TokensSpent = scanSessionCost(p)
+			if scanUpdates {
+				s.CostUSD, s.CostSubagentsUSD, s.TokensSpent = scanSessionCost(p)
+			}
 		}
 	}
 	// Sort by cwd (case-insensitive), newest-started first as tiebreaker. This

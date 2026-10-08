@@ -286,3 +286,147 @@ func TestServerRequestAttemptReportsBodyReadAsResponseReceived(t *testing.T) {
 		t.Fatalf("error = %v, want unexpected EOF", err)
 	}
 }
+
+// withListSessionsSeams restores the list-sessions fetch seams. A test that
+// leaves one swapped would send the next test at the live service.
+func withListSessionsSeams(t *testing.T) {
+	t.Helper()
+	prevCfg := listSessionsServiceConfig
+	prevTS := listSessionsTailscaleIPv4
+	prevAttempt := listSessionsAttempt
+	t.Cleanup(func() {
+		listSessionsServiceConfig = prevCfg
+		listSessionsTailscaleIPv4 = prevTS
+		listSessionsAttempt = prevAttempt
+	})
+}
+
+func stubListSessionsLoopback(t *testing.T) {
+	t.Helper()
+	listSessionsServiceConfig = func() (ServerConfig, error) {
+		return ServerConfig{Host: "127.0.0.1", Port: 8765, Token: "t"}, nil
+	}
+	listSessionsTailscaleIPv4 = func(context.Context) string {
+		t.Fatal("tailscale lookup was not expected")
+		return ""
+	}
+}
+
+func TestFetchListSessionsRetriesTailscaleAfterLoopback404(t *testing.T) {
+	withListSessionsSeams(t)
+	stubListSessionsLoopback(t)
+	var hosts []string
+	listSessionsTailscaleIPv4 = func(context.Context) string { return "100.80.11.125" }
+	listSessionsAttempt = func(ctx context.Context, srv ServerConfig) ([]byte, int, error) {
+		hosts = append(hosts, srv.Host)
+		if srv.Host == "127.0.0.1" {
+			return []byte("missing"), http.StatusNotFound, fmt.Errorf("HTTP %d", http.StatusNotFound)
+		}
+		body := `{"sessions":[{"pid":7,"sessionId":"svc","costUsd":1.5}],"hostUsage":{"numCPU":4}}`
+		return []byte(body), http.StatusOK, nil
+	}
+
+	sessions, usage, ok := fetchListSessionsFromService()
+	if !ok {
+		t.Fatal("ok = false, want a Tailscale answer")
+	}
+	if len(sessions) != 1 || sessions[0].SessionID != "svc" || sessions[0].CostUSD != 1.5 {
+		t.Fatalf("sessions = %+v, want svc at cost 1.5", sessions)
+	}
+	if usage.NumCPU != 4 {
+		t.Fatalf("numCPU = %d, want 4", usage.NumCPU)
+	}
+	if len(hosts) != 2 || hosts[0] != "127.0.0.1" || hosts[1] != "100.80.11.125" {
+		t.Fatalf("hosts = %v, want loopback then Tailscale", hosts)
+	}
+}
+
+func TestFetchListSessionsDoesNotRetryOn401(t *testing.T) {
+	withListSessionsSeams(t)
+	stubListSessionsLoopback(t)
+	attempts := 0
+	listSessionsAttempt = func(ctx context.Context, srv ServerConfig) ([]byte, int, error) {
+		attempts++
+		return []byte("no"), http.StatusUnauthorized, fmt.Errorf("HTTP %d", http.StatusUnauthorized)
+	}
+
+	_, _, ok := fetchListSessionsFromService()
+	if ok {
+		t.Fatal("ok = true on 401")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestFetchListSessionsRetriesTailscaleAfterConnectionError(t *testing.T) {
+	withListSessionsSeams(t)
+	stubListSessionsLoopback(t)
+	var hosts []string
+	listSessionsTailscaleIPv4 = func(context.Context) string { return "100.80.11.125" }
+	listSessionsAttempt = func(ctx context.Context, srv ServerConfig) ([]byte, int, error) {
+		hosts = append(hosts, srv.Host)
+		if srv.Host == "127.0.0.1" {
+			return nil, 0, fmt.Errorf("connection refused")
+		}
+		return []byte(`{"sessions":[{"pid":7,"sessionId":"svc"}]}`), http.StatusOK, nil
+	}
+
+	sessions, _, ok := fetchListSessionsFromService()
+	if !ok || len(sessions) != 1 || sessions[0].SessionID != "svc" {
+		t.Fatalf("result = (%+v, %v), want svc", sessions, ok)
+	}
+	if len(hosts) != 2 || hosts[0] != "127.0.0.1" || hosts[1] != "100.80.11.125" {
+		t.Fatalf("hosts = %v, want loopback then Tailscale", hosts)
+	}
+}
+
+func TestFetchListSessionsDoesNotRetryOnTimeout(t *testing.T) {
+	withListSessionsSeams(t)
+	stubListSessionsLoopback(t)
+	attempts := 0
+	listSessionsAttempt = func(ctx context.Context, srv ServerConfig) ([]byte, int, error) {
+		attempts++
+		return nil, 0, context.DeadlineExceeded
+	}
+
+	_, _, ok := fetchListSessionsFromService()
+	if ok {
+		t.Fatal("ok = true on timeout")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestFetchListSessionsRejectsBadJSON(t *testing.T) {
+	withListSessionsSeams(t)
+	stubListSessionsLoopback(t)
+	listSessionsAttempt = func(ctx context.Context, srv ServerConfig) ([]byte, int, error) {
+		return []byte("{"), http.StatusOK, nil
+	}
+
+	_, _, ok := fetchListSessionsFromService()
+	if ok {
+		t.Fatal("ok = true on a body that is not JSON")
+	}
+}
+
+func TestFetchListSessionsEmptySessionsIsSlice(t *testing.T) {
+	withListSessionsSeams(t)
+	stubListSessionsLoopback(t)
+	listSessionsAttempt = func(ctx context.Context, srv ServerConfig) ([]byte, int, error) {
+		return []byte(`{"hostUsage":{"numCPU":2}}`), http.StatusOK, nil
+	}
+
+	sessions, usage, ok := fetchListSessionsFromService()
+	if !ok {
+		t.Fatal("ok = false")
+	}
+	if sessions == nil || len(sessions) != 0 {
+		t.Fatalf("sessions = %#v, want an empty slice", sessions)
+	}
+	if usage.NumCPU != 2 {
+		t.Fatalf("numCPU = %d, want 2", usage.NumCPU)
+	}
+}

@@ -1627,6 +1627,46 @@ func TestCollectGrokLocalOpenBackgroundAfterTurnEndedIsShell(t *testing.T) {
 	}
 }
 
+// TestCollectGrokRowsSkipsUpdatesScan: scanUpdates false keeps the events
+// tail and skips updates.jsonl. shell and cost both come from that file.
+func TestCollectGrokRowsSkipsUpdatesScan(t *testing.T) {
+	allPIDsAlive(t)
+	home := t.TempDir()
+	grokFixture(t, home, grokActiveOne)
+	grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, grokSummaryFull)
+	grokEventsFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		`{"type":"phase_changed","phase":"tool_execution"}`,
+		`{"type":"tool_completed","tool_name":"run_terminal_command"}`,
+		`{"type":"turn_ended","outcome":"completed"}`,
+	)
+	grokUpdatesFixture(t, home, "/work/trecs-brain", grokActiveOneID,
+		grokTurnLineUsage("prompt-1", ticksPtr(550018000), 1000),
+		grokTaskBackgrounded("task-1"),
+	)
+
+	lite := collectGrokRows(home, false)
+	if len(lite) != 1 {
+		t.Fatalf("lite rows = %d, want 1", len(lite))
+	}
+	if lite[0].Status != "idle" {
+		t.Errorf("lite status = %q, want idle", lite[0].Status)
+	}
+	if lite[0].CostUSD != 0 || lite[0].TokensSpent != 0 {
+		t.Errorf("lite cost/tokens = %v/%d, want 0/0", lite[0].CostUSD, lite[0].TokensSpent)
+	}
+
+	full := collectGrokRows(home, true)
+	if len(full) != 1 {
+		t.Fatalf("full rows = %d, want 1", len(full))
+	}
+	if full[0].Status != "shell" {
+		t.Errorf("full status = %q, want shell", full[0].Status)
+	}
+	if full[0].CostUSD == 0 {
+		t.Error("full costUsd = 0, want the turn price")
+	}
+}
+
 func TestCollectGrokLocalCompletedBackgroundStaysIdle(t *testing.T) {
 	allPIDsAlive(t)
 	home := t.TempDir()

@@ -577,10 +577,22 @@ func cmdListSessions(args []string) int {
 		}
 	}
 
-	local, err := CollectLocal()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "claude-sessions:", err)
-		return 1
+	// The service process already holds the transcript scan cache and
+	// answers GET /sessions in about a millisecond once that cache is warm.
+	// A miss (no service, paste-only loopback with no Tailscale answer,
+	// timeout) lists this host without reading those cost logs.
+	local, hostUsage, fromService := listSessionsFromService()
+	if !fromService {
+		var err error
+		local, err = collectLocal(false)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "claude-sessions:", err)
+			return 1
+		}
+		hostUsage = CollectHostUsage()
+	}
+	if local == nil {
+		local = []Session{}
 	}
 	var remotes []RemoteResult
 	if !localOnly {
@@ -592,12 +604,14 @@ func cmdListSessions(args []string) int {
 	// FlagsStore, applied server-side in GET /sessions). Disabled orders
 	// disabled rows last in both outputs; the group rides along too, and
 	// reaches `list-sessions --json` as each row's "group" key.
+	// The service copy is overlaid again here so a group written since that
+	// response still shows. A missing store entry clears the badge, which
+	// is the same rule as a local collect.
 	LoadFlagsStore().Overlay(local)
 	sortMode := LoadSortMode()
 	groupSortOn := LoadGroupSort()
 	SortSessions(local, sortMode, groupSortOn)
 	remotes = sortRemotes(remotes, sortMode, groupSortOn)
-	hostUsage := CollectHostUsage()
 
 	if jsonOut {
 		hosts := make([]map[string]any, 0, 1+len(remotes))

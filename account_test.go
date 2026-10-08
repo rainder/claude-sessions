@@ -67,6 +67,12 @@ func TestMain(m *testing.M) {
 	// ~/.config/claude-sessions/summary-backend happens to say instead of
 	// the "claude" every existing claudeSummarizeFunc override assumes.
 	summaryBackendFunc = func() string { return "claude" }
+	// list-sessions asks the local service first. Left real, every command
+	// test would read this machine's live session list instead of the
+	// temp home it just wrote. A miss selects the no-cost local collect.
+	listSessionsFromService = func() ([]Session, HostUsage, bool) {
+		return nil, HostUsage{}, false
+	}
 	os.Exit(m.Run())
 }
 

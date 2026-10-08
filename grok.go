@@ -72,13 +72,20 @@ var grokPIDAlive = pidAlive
 // alternative — failing CollectLocal — would let a torn read of a file this
 // tool does not own blank the entire session list.
 func collectGrokLocal(home string) []Session {
+	return collectGrokRows(home, true)
+}
+
+// collectGrokRows is collectGrokLocal. scanUpdates false skips
+// updates.jsonl, so cost stays empty and an open background task is not
+// promoted to shell. The events.jsonl tail still sets status.
+func collectGrokRows(home string, scanUpdates bool) []Session {
 	entries, ok := readGrokRegistry(home)
 	if !ok {
 		return nil
 	}
 	out := make([]Session, 0, len(entries))
 	for _, e := range entries {
-		if s, ok := grokSessionFrom(home, e); ok {
+		if s, ok := grokSessionFrom(home, e, scanUpdates); ok {
 			out = append(out, s)
 		}
 	}
@@ -89,7 +96,7 @@ func collectGrokLocal(home string) []Session {
 // visibility filters CollectLocal applies to claude rows. ok=false means the
 // entry describes nothing worth showing: a session that has already exited, a
 // malformed entry, or a scratch cwd.
-func grokSessionFrom(home string, e grokActiveSession) (Session, bool) {
+func grokSessionFrom(home string, e grokActiveSession, scanUpdates bool) (Session, bool) {
 	if e.PID == 0 || e.SessionID == "" {
 		return Session{}, false
 	}
@@ -135,14 +142,16 @@ func grokSessionFrom(home string, e grokActiveSession) (Session, bool) {
 	// when a background command, monitor, or spawn_subagent is still open.
 	// Grok never writes a status field. Missing events and no open
 	// background leave both empty so the TUI keeps the "-" placeholder.
-	s.Status, s.WaitingFor = grokSessionStatus(home, e.CWD, e.SessionID)
+	s.Status, s.WaitingFor = grokSessionStatus(home, e.CWD, e.SessionID, scanUpdates)
 	// CTX comes from signals.json, not from a transcript scan. A missing,
 	// unreadable or unparseable file leaves both fields at 0 so CTX stays "-".
 	if sig, ok := readGrokSignals(home, e.CWD, e.SessionID); ok {
 		s.ContextTokens = sig.ContextTokensUsed
 		s.ContextWindow = sig.ContextWindowTokens
 	}
-	s.CostUSD, s.CostSubagentsUSD, s.TokensSpent = scanGrokSessionCost(home, e.CWD, e.SessionID)
+	if scanUpdates {
+		s.CostUSD, s.CostSubagentsUSD, s.TokensSpent = scanGrokSessionCost(home, e.CWD, e.SessionID)
+	}
 	s.WorktreeName = grokInferredWorktree(home, e.CWD, e.SessionID, s.Name)
 	return s, true
 }
@@ -292,12 +301,17 @@ type grokEvent struct {
 // open background command, monitor, or spawn_subagent — grok writes
 // no status field, and events call that state idle because the
 // tool_completed fires the moment the task is backgrounded.
-func grokSessionStatus(home, cwd, sessionID string) (string, string) {
+func grokSessionStatus(home, cwd, sessionID string, scanUpdates bool) (string, string) {
 	status, waitingFor := grokStatusFromEvents(readGrokEventsTail(grokEventsPath(home, cwd, sessionID)))
 	if waitingFor != "" {
 		return status, waitingFor
 	}
 	if status != "" && status != "idle" {
+		return status, waitingFor
+	}
+	// shell is read from updates.jsonl. The list-sessions fallback skips
+	// that file, so an open background task stays idle there.
+	if !scanUpdates {
 		return status, waitingFor
 	}
 	if grokHasOpenBackground(grokUpdatesPath(home, cwd, sessionID)) {
@@ -749,7 +763,7 @@ func grokSessionByPID(home string, pid int) (Session, bool) {
 		if e.PID != pid {
 			continue
 		}
-		return grokSessionFrom(home, e)
+		return grokSessionFrom(home, e, true)
 	}
 	return Session{}, false
 }

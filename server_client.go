@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -12,6 +13,11 @@ const (
 	localServerHost    = "127.0.0.1"
 	localServerPort    = 8765
 	localServerTimeout = 750 * time.Millisecond
+	// listSessionsServerTimeout is the budget for one GET /sessions from
+	// list-sessions. The TUI's 750ms budget is a paint tick. This command
+	// can wait for one collect inside the long-lived service. A miss falls
+	// back to a local collect that does not scan cost logs.
+	listSessionsServerTimeout = 15 * time.Second
 )
 
 var (
@@ -118,4 +124,89 @@ func collectClientLocalWith(
 
 func collectClientLocal() ([]Session, error) {
 	return collectClientLocalWith(fetchLocalServerSessions, CollectLocal)
+}
+
+// listSessionsFromService is what list-sessions calls for this host's rows.
+// Tests replace it. A real call would read the developer's own service and
+// hide the temp-home session files the command tests set up. TestMain
+// installs a miss so those tests stay on the local fallback.
+var listSessionsFromService = fetchListSessionsFromService
+
+// listSessionsServiceConfig reads the existing server token. It does not
+// create one: a missing token means there is no service to ask.
+var listSessionsServiceConfig = func() (ServerConfig, error) {
+	tok, err := readServerToken()
+	if err != nil {
+		return ServerConfig{}, err
+	}
+	return ServerConfig{Host: localServerHost, Port: localServerPort, Token: tok}, nil
+}
+
+// listSessionsAttempt is one GET /sessions. status is the HTTP status when
+// a response arrived, and 0 when none did.
+var listSessionsAttempt = doListSessionsAttempt
+
+// listSessionsTailscaleIPv4 resolves this host's Tailscale address. Tests
+// replace it so the 404 retry does not run the real tailscale binary.
+var listSessionsTailscaleIPv4 = tailscaleIPv4Context
+
+func doListSessionsAttempt(ctx context.Context, srv ServerConfig) ([]byte, int, error) {
+	u := fmt.Sprintf("http://%s/sessions", hostPort(srv.Host, srv.Port))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+srv.Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return data, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return data, resp.StatusCode, nil
+}
+
+// fetchListSessionsFromService asks the local service for this host's rows.
+// Loopback is first. A 404 there is the paste-only listener a
+// --bind tailscale service leaves on 127.0.0.1, so that status retries on
+// this host's Tailscale address. The usage command uses the same rule.
+// A timeout does not retry: the deadline is already spent.
+//
+// ok is false when no usable answer comes back (no token, unreachable,
+// 401, 404 on both, timeout, 5xx, or a body that is not JSON). The caller
+// then lists this host without reading cost logs.
+func fetchListSessionsFromService() (sessions []Session, usage HostUsage, ok bool) {
+	srv, err := listSessionsServiceConfig()
+	if err != nil {
+		return nil, HostUsage{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), listSessionsServerTimeout)
+	defer cancel()
+	data, status, err := listSessionsAttempt(ctx, srv)
+	if err != nil && (status == 0 || status == http.StatusNotFound) && !isTimeoutErr(err) {
+		if ts := listSessionsTailscaleIPv4(ctx); ts != "" && ts != srv.Host {
+			srv.Host = ts
+			data, status, err = listSessionsAttempt(ctx, srv)
+		}
+	}
+	if err != nil {
+		return nil, HostUsage{}, false
+	}
+	var resp struct {
+		HostUsage HostUsage `json:"hostUsage"`
+		Sessions  []Session `json:"sessions"`
+	}
+	if json.Unmarshal(data, &resp) != nil {
+		return nil, HostUsage{}, false
+	}
+	if resp.Sessions == nil {
+		resp.Sessions = []Session{}
+	}
+	return resp.Sessions, resp.HostUsage, true
 }
