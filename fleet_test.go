@@ -17,7 +17,8 @@ func fleetTestServer(t *testing.T, sessions []Session) *server {
 	return &server{
 		token:   "tok",
 		collect: func() ([]Session, error) { return sessions, nil },
-		fleet:   fleetDeps{dir: t.TempDir(), secret: "sec"},
+		fleet: fleetDeps{dir: t.TempDir(), secret: "sec",
+			sayLogPath: filepath.Join(t.TempDir(), "state", "fleet-say.log")},
 	}
 }
 

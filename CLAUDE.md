@@ -948,9 +948,20 @@ draws the prompt, the parser finds no box and every send is refused (fails
 closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens;
 `pane-synth-*` are hand-built in the same escape style for states that cannot
 be produced on demand. A `dialog`, `input_busy` or `not_submitted` refusal
-that read the pane logs its last 15 lines (escapes stripped, dim text kept)
-to the server's stderr only — never to the response — so a refusal that
-cannot be reproduced later still leaves the screen behind.
+that read the pane appends an entry to
+`$XDG_STATE_HOME/claude-sessions/fleet-say.log` (default
+`~/.local/state/claude-sessions/fleet-say.log`; dir 0700, file 0600) — never
+to the response — so a refusal that cannot be reproduced later still leaves
+the screen behind. An entry is a `<RFC3339 UTC> refused code=… target=…`
+header, the last 15 pane lines (escapes stripped, dim text kept, `  | `
+prefix), the raw `-e` bytes of the last 6 lines (`  raw "%q"`, for when the
+parser itself is wrong), and a blank line, written in one `O_APPEND` write.
+Over 1 MiB the file moves to `fleet-say.log.1` (replacing an older one) before
+the append. Write errors are dropped; they never fail a say. **Why a file, not
+stderr:** the service's systemd unit runs with `StandardOutput=null`, and in
+practice journald showed nothing from the server either (stderr is not nulled
+in the unit, but nothing arrived), so the stderr log reached nobody.
+`fleetDeps.sayLogPath` points tests at a temp dir.
 
 **Cursors.** Chat: `since=<byte position>` in the transcript; the server
 returns every turn that changed after it (a later line of the same assistant

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -213,11 +214,11 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if typed, found := paneInputText(screen); !found {
-		s.logFleetRefusal("dialog", screen)
+		s.logFleetRefusal("dialog", fresh.Tmux, screen)
 		refuse("dialog", "FLEET input box is not visible")
 		return
 	} else if typed != "" {
-		s.logFleetRefusal("input_busy", screen)
+		s.logFleetRefusal("input_busy", fresh.Tmux, screen)
 		refuse("input_busy", "input box not empty")
 		return
 	}
@@ -271,7 +272,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	if !landed {
 		_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
 			Text: "web-say typed but not submitted", CardID: cardID})
-		s.logFleetRefusal("not_submitted", lastScreen)
+		s.logFleetRefusal("not_submitted", fresh.Tmux, lastScreen)
 		refuse("not_submitted", "Text was typed but not sent. FLEET changed state. Check the terminal.")
 		return
 	}
@@ -291,28 +292,82 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, fleetSayResult{OK: true, Queued: fresh.Status == "busy"})
 }
 
-// fleetRefusalLogLines is how much of the screen a refused say logs.
-const fleetRefusalLogLines = 15
+const (
+	// fleetRefusalLogLines is how much of the screen a refused say logs as
+	// text; fleetRefusalRawLines how much of it also goes in raw, escapes and
+	// all, for when the parser itself is what is wrong.
+	fleetRefusalLogLines = 15
+	fleetRefusalRawLines = 6
+	// fleetSayLogMax: past this size the log moves to .1 before an append.
+	fleetSayLogMax = 1 << 20
+)
 
-// logFleetRefusal writes the bottom of the pane that made a say refuse to the
-// server's stderr, so a refusal nobody can reproduce later ("the box is not
-// visible", but it looks fine now) still leaves the screen behind. Stderr
-// only, never the HTTP response: the pane can hold anything. Escapes are
-// stripped but dim text is kept — the placeholder is part of what was shown.
-func (s *server) logFleetRefusal(code, screen string) {
-	logf := s.fleet.logf
-	if logf == nil {
-		logf = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format, args...) }
+// logFleetRefusal appends the bottom of the pane that made a say refuse to
+// the say log file, so a refusal nobody can reproduce later ("the box is not
+// visible", but it looks fine now) still leaves the screen behind. A file,
+// not stderr: the systemd unit runs with StandardOutput=null, and in practice
+// journald showed nothing from the server, so the stderr log reached nobody.
+// Never the HTTP response: the pane can hold anything. The
+// text lines have escapes stripped but keep dim text (the placeholder is part
+// of what was shown); the raw lines keep every byte, %q-quoted.
+func (s *server) logFleetRefusal(code, target, screen string) {
+	path := s.fleet.sayLogPath
+	if path == "" {
+		path = fleetSayLogDefault()
+	}
+	if path == "" {
+		return
 	}
 	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
-	if len(lines) > fleetRefusalLogLines {
-		lines = lines[len(lines)-fleetRefusalLogLines:]
-	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "fleet: say refused (%s); last %d pane lines:\n", code, fleetRefusalLogLines)
-	for _, l := range lines {
+	fmt.Fprintf(&b, "%s refused code=%s target=%s\n", s.fleetNow().UTC().Format(time.RFC3339), code, target)
+	for _, l := range lastN(lines, fleetRefusalLogLines) {
 		l = strings.ReplaceAll(stripPaneEscapes(l), "\u00a0", " ")
 		b.WriteString("  | " + strings.TrimRight(l, " ") + "\n")
 	}
-	logf("%s", b.String())
+	for _, l := range lastN(lines, fleetRefusalRawLines) {
+		fmt.Fprintf(&b, "  raw %q\n", l)
+	}
+	b.WriteString("\n")
+	appendFleetSayLog(path, b.String())
+}
+
+func lastN(lines []string, n int) []string {
+	if len(lines) > n {
+		return lines[len(lines)-n:]
+	}
+	return lines
+}
+
+// fleetSayLogDefault is $XDG_STATE_HOME/claude-sessions/fleet-say.log, or
+// ~/.local/state/claude-sessions/fleet-say.log when that is unset (or not
+// absolute, which the XDG spec says to ignore). "" when there is no home.
+func fleetSayLogDefault() string {
+	if x := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(x) {
+		return filepath.Join(x, "claude-sessions", "fleet-say.log")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "state", "claude-sessions", "fleet-say.log")
+}
+
+// appendFleetSayLog appends one whole entry with a single O_APPEND write
+// (dir 0700, file 0600). A file over fleetSayLogMax first moves to path+".1",
+// replacing an older one. Errors are dropped: a log that cannot be written
+// must never fail or change a say.
+func appendFleetSayLog(path, entry string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	if st, err := os.Stat(path); err == nil && st.Size() > fleetSayLogMax {
+		_ = os.Rename(path, path+".1")
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(entry)
+	_ = f.Close()
 }
