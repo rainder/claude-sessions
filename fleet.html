@@ -784,11 +784,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // stale: a render was skipped while the chat was hidden (phone view).
   // follow: the log is at (or near) the bottom, so new turns scroll into
   // view; else they raise the "New messages" pill (unseen). savedTop: the
-  // log's scroll offset when the phone Chat view was left. local: messages
-  // whose delivery is unknown, shown as outgoing bubbles after the turns:
-  // {id, text, ts, confirm (first "Send again" tap seen), timer, busy}.
+  // log's scroll offset when the phone Chat view was left. local: chat
+  // attempts whose delivery is not known yet (see "chat messages with
+  // unknown delivery").
   const chat = {sid: null, pos: null, turns: new Map(), reason: "", open: new Set(), key: "", readOnly: false, stale: false,
-    follow: true, unseen: false, rev: 0, savedTop: null, local: [], localSeq: 0};
+    follow: true, unseen: false, rev: 0, savedTop: null, local: []};
   const hist = {entries: [], next: null, filter: "", loading: false, loaded: false};
   // Start FLEET: flight = the POST is out; watch = a start is under way (ours
   // or another device's) and the page polls state fast until FLEET is alive;
@@ -1605,10 +1605,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (!prev || prev.text !== turn.text || prev.at !== turn.at || prev.role !== turn.role) {
         chat.turns.set(turn.uuid, turn);
         changed = true;
-        if (turn.role === "user" && dropLocalMatch(turn)) changed = true;
       }
     }
     chat.pos = num(d.pos) ? d.pos : 0;
+    if (changed && reconcileLocal()) changed = true;
     const key = chat.reason + "|" + chat.turns.size + "|" + ro;
     if (changed || key !== chat.key) { chat.key = key; guard(renderChat); }
   }
@@ -1624,7 +1624,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     // streaming reply also raises the pill while Andy reads further up.
     let rev = 0;
     for (const t of chat.turns.values()) rev += t.text.length + 1;
-    for (const m of chat.local) rev += m.text.length + 1;
+    const shown = chat.local.filter(m => !m.hidden);
+    for (const m of shown) rev += m.text.length + 1;
     const grew = rev > chat.rev;
     const nodes = [];
     for (const t of chat.turns.values()) {
@@ -1637,8 +1638,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       wrap.dataset.uuid = t.uuid;
       nodes.push(wrap);
     }
-    if (!nodes.length && !chat.local.length) nodes.push(el("p", "chat-empty", reasonText[chat.reason] || (chat.reason ? "No chat to show (" + chat.reason + ")." : "No messages yet.")));
-    for (const m of chat.local) nodes.push(localBubble(m));
+    if (!nodes.length && !shown.length) nodes.push(el("p", "chat-empty", reasonText[chat.reason] || (chat.reason ? "No chat to show (" + chat.reason + ")." : "No messages yet.")));
+    for (const m of shown) nodes.push(localBubble(m));
     log.replaceChildren(...nodes);
     // Fold only turns that really overflow 12 lines.
     for (const w of log.querySelectorAll(".turn[data-uuid]")) {
@@ -1680,28 +1681,70 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // A message whose send got no clear answer may have reached FLEET. It
   // stays as an outgoing bubble with an amber note until it shows in the
   // transcript, Andy dismisses it, or "Send again" (two taps) gets it
-  // through.
+  // through. Every attempt is in localStorage before its POST goes out, so a
+  // reload or a tab eviction mid-send still shows it. Entry: {id, text, sid
+  // (the FLEET session it went to), ts, status: "sending" | "unconfirmed",
+  // hidden (a first send still in flight: no bubble yet), confirm, timer,
+  // busy}.
+  const CHAT_KEY = "fleet.chat.v1", CHAT_MAX = 10;
   const normText = t => t.replace(/\s+/g, " ").trim();
-  function dropLocalMatch(turn) {
-    const n = normText(turn.text), at = Date.parse(turn.at);
-    const i = chat.local.findIndex(m => normText(m.text) === n && !m.busy && (!isFinite(at) || at >= m.ts - 60000));
-    if (i < 0) return false;
-    clearTimeout(chat.local[i].timer);
-    chat.local.splice(i, 1);
-    return true;
+  function saveChatStore() {
+    const now = Date.now();
+    const out = chat.local.filter(m => now - m.ts <= PEND_MAX).slice(-CHAT_MAX)
+      .map(m => ({id: m.id, text: m.text, sessionId: m.sid, at: new Date(m.ts).toISOString(), status: m.status}));
+    try {
+      if (out.length) localStorage.setItem(CHAT_KEY, JSON.stringify(out));
+      else localStorage.removeItem(CHAT_KEY);
+    } catch { /* storage off: memory only */ }
   }
-  function addLocal(text) {
-    chat.local.push({id: ++chat.localSeq, text, ts: Date.now(), confirm: false, timer: 0, busy: false});
-    chat.follow = true;
-    guard(renderChat);
+  // An attempt from an earlier page load never got its answer here, so
+  // every restored entry is unconfirmed.
+  function loadChatStore() {
+    let list = null;
+    try { list = JSON.parse(localStorage.getItem(CHAT_KEY) || "null"); } catch { list = null; }
+    if (!Array.isArray(list)) return;
+    const now = Date.now();
+    for (const v of list) {
+      const o = obj(v);
+      if (!o || !str(o.text) || !str(o.id)) continue;
+      const ts = Date.parse(str(o.at)), st = str(o.status);
+      if (!isFinite(ts) || now - ts > PEND_MAX || now - ts < -PEND_MAX) continue;
+      if (st !== "sending" && st !== "unconfirmed") continue;
+      if (chat.local.some(m => m.id === str(o.id))) continue;
+      chat.local.push({id: str(o.id), text: str(o.text), sid: str(o.sessionId), ts, status: "unconfirmed", hidden: false, confirm: false, timer: 0, busy: false});
+    }
+    chat.local = chat.local.slice(-CHAT_MAX);
+    saveChatStore();
+  }
+  loadChatStore();
+  const newLocalID = () => Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  // reconcileLocal drops every shown bubble whose text is already a user
+  // turn in the transcript, sent at or after the attempt (60 s allowed for
+  // clock skew). It checks all loaded turns, not only new ones.
+  function reconcileLocal() {
+    if (!chat.local.length) return false;
+    const users = [...chat.turns.values()].filter(t => t.role === "user").map(t => ({n: normText(t.text), at: Date.parse(t.at)}));
+    const keep = chat.local.filter(m => m.busy || m.hidden ||
+      !users.some(u => u.n === normText(m.text) && (!isFinite(u.at) || u.at >= m.ts - 60000)));
+    if (keep.length === chat.local.length) return false;
+    for (const m of chat.local) if (!keep.includes(m)) clearTimeout(m.timer);
+    chat.local = keep;
+    saveChatStore();
+    return true;
   }
   function dropLocal(m) {
     clearTimeout(m.timer);
     chat.local = chat.local.filter(x => x !== m);
+    saveChatStore();
     guard(renderChat);
   }
+  // The bubble names an earlier FLEET session when the chat now shows a
+  // different one: sending it again goes to the current session.
+  const otherSession = m => !!(m.sid && chat.sid && m.sid !== chat.sid);
   function localBubble(m) {
-    const again = el("button", "link-btn" + (m.confirm ? " confirm" : ""), m.busy ? "Sending…" : m.confirm ? "Tap again to send" : "Send again");
+    const other = otherSession(m);
+    const again = el("button", "link-btn" + (m.confirm ? " confirm" : ""),
+      m.busy ? "Sending…" : m.confirm ? "Tap again to send" : other ? "Send to the current session" : "Send again");
     again.type = "button";
     again.disabled = m.busy;
     again.addEventListener("click", () => {
@@ -1724,23 +1767,50 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const w = el("div", "turn user local",
       el("div", "who", el("b", "", "Andy"), el("span", "", clockWithDay(new Date(m.ts).toISOString()))),
       el("div", "body", m.text),
-      el("div", "local-warn", el("span", "dot"), el("span", "", "Not confirmed — check the chat before you send it again")),
+      el("div", "local-warn", el("span", "dot"), el("span", "", other
+        ? "Sent to an earlier FLEET session — not confirmed"
+        : "Not confirmed — check the chat before you send it again")),
       el("div", "local-acts", again, dis));
-    w.dataset.local = String(m.id);
+    w.dataset.local = m.id;
     return w;
+  }
+  // sendAttempt: one POST for entry m, stored as "sending" first. ok
+  // deletes the entry; no clear answer keeps it as an unconfirmed bubble;
+  // an HTTP error restores what was there before (a first send: no entry,
+  // so the draft stays the only copy).
+  async function sendAttempt(m) {
+    const before = {ts: m.ts, sid: m.sid, status: m.status};
+    m.ts = Date.now(); m.sid = chat.sid || ""; m.status = "sending";
+    if (!chat.local.includes(m)) chat.local.push(m);
+    saveChatStore();
+    const res = await say(m.text, null);
+    if (res.ok) {
+      chat.local = chat.local.filter(x => x !== m);
+    } else if (res.unclear) {
+      m.status = "unconfirmed";
+      m.hidden = false;
+      chat.follow = true;
+      reconcileLocal();
+    } else if (m.hidden) {
+      chat.local = chat.local.filter(x => x !== m);
+    } else {
+      Object.assign(m, before);
+    }
+    saveChatStore();
+    return res;
   }
   async function resendLocal(m) {
     if (chatBusy || m.busy || !canSendNow()) return;
     chatBusy = true; m.busy = true;
     applyEnabled();
-    const res = await say(m.text, null);
+    guard(renderChat);
+    const res = await sendAttempt(m);
     chatBusy = false; m.busy = false;
     if (res.ok) {
       toast(res.queued ? "Sent. FLEET is busy. It reads this next." : "Sent to FLEET.");
-      dropLocal(m);
       afterSend();
     } else if (res.unclear) {
-      m.ts = Date.now();
+      reconcileLocal();
       toast("Delivery not confirmed. Check the chat before you send it again.", true);
       afterSend();
     } else {
@@ -1774,7 +1844,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     chatBusy = true;
     const btn = $("say-send");
     btn.disabled = true; btn.textContent = "Sending…";
-    const res = await say(text, null);
+    const m = {id: newLocalID(), text, sid: "", ts: 0, status: "sending", hidden: true, confirm: false, timer: 0, busy: false};
+    const res = await sendAttempt(m);
     chatBusy = false;
     btn.textContent = "Send";
     if (res.ok) {
@@ -1787,7 +1858,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       // bubble, so a plain Send cannot repeat it by accident.
       if (ta.value.trim() === text) ta.value = "";
       grow();
-      addLocal(text);
+      guard(renderChat);
       toast("Delivery not confirmed. Check the chat before you send it again.", true);
       afterSend();
     } else {
