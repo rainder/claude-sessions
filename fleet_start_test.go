@@ -377,47 +377,121 @@ func TestFleetStartUnauthorizedIsJSON(t *testing.T) {
 }
 
 func TestFleetStartRefusesWhileAStartIsPending(t *testing.T) {
-	s, calls, now := fleetStartServer(t, nil)
-	tmuxUp := true
-	var asked []string
-	s.fleet.tmuxAlive = func(name string) bool { asked = append(asked, name); return tmuxUp }
-	fleetBlock := func() map[string]any {
-		s.invalidateSessions()
-		return getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
+	cases := []struct {
+		name   string
+		cmd    string // pane command once FLEET has not appeared; "" = session gone
+		ending bool   // that state ends the pending start
+	}{
+		{"claude still running", "claude", false},
+		{"node (claude) still running", "node", false},
+		{"claude exited to zsh", "zsh", true},
+		{"claude exited to bash", "bash", true},
+		{"login shell", "-fish", true},
+		{"sh", "sh", true},
+		{"dash", "dash", true},
+		{"session gone", "", true},
 	}
-	if w, _ := postFleetStart(s, nil); w.Code != http.StatusOK {
-		t.Fatalf("first: %d", w.Code)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, calls, now := fleetStartServer(t, nil)
+			var asked []string
+			s.fleet.paneCommand = func(name string) (string, bool) {
+				asked = append(asked, name)
+				return c.cmd, c.cmd != ""
+			}
+			fleetBlock := func() map[string]any {
+				s.invalidateSessions()
+				return getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
+			}
+			if w, _ := postFleetStart(s, nil); w.Code != http.StatusOK {
+				t.Fatalf("first: %d", w.Code)
+			}
+			// Inside the 60 s gap and the 90 s window: pending, with the tmux
+			// name, and no retryAfter (the gap is not the only block).
+			*now = now.Add(10 * time.Second)
+			fl := fleetBlock()
+			if fl["pending"] != true || fl["pendingTmux"] != "FLEET-abc" || fl["canStart"] != false ||
+				fl["starting"] == nil || fl["retryAfter"] != nil {
+				t.Fatalf("at 10 s: %v", fl)
+			}
+			if len(asked) != 0 {
+				t.Fatalf("tmux asked inside the window: %v", asked)
+			}
+			// Past the 60 s gap, inside the 90 s window: always pending.
+			*now = now.Add(60 * time.Second)
+			if w, out := postFleetStart(s, nil); w.Code != http.StatusConflict || out.Code != "starting" || len(*calls) != 1 {
+				t.Fatalf("in the window: %d %+v", w.Code, out)
+			}
+			// Past the window: the pane decides.
+			*now = now.Add(30 * time.Second)
+			fl = fleetBlock()
+			if len(asked) == 0 || asked[len(asked)-1] != "FLEET-abc" {
+				t.Fatalf("tmux asked %v, want the started tmux name", asked)
+			}
+			if c.ending {
+				if fl["pending"] != false || fl["pendingTmux"] != nil || fl["canStart"] != true {
+					t.Fatalf("after the window: %v", fl)
+				}
+				if w, _ := postFleetStart(s, nil); w.Code != http.StatusOK || len(*calls) != 2 {
+					t.Fatalf("start after it ended: %d", w.Code)
+				}
+				return
+			}
+			if fl["pending"] != true || fl["pendingTmux"] != "FLEET-abc" || fl["canStart"] != false || fl["starting"] != nil {
+				t.Fatalf("after the window: %v", fl)
+			}
+			if w, out := postFleetStart(s, nil); w.Code != http.StatusConflict || out.Code != "starting" || len(*calls) != 1 {
+				t.Fatalf("pane still runs claude: %d %+v", w.Code, out)
+			}
+		})
 	}
-	// Past the 60 s gap, inside the 90 s window.
-	*now = now.Add(70 * time.Second)
-	if w, out := postFleetStart(s, nil); w.Code != http.StatusConflict || out.Code != "starting" || len(*calls) != 1 {
-		t.Fatalf("in the window: %d %+v", w.Code, out)
+}
+
+func TestFleetStateRetryAfterOnlyForTheGap(t *testing.T) {
+	s, _, now := fleetStartServer(t, nil)
+	s.fleet.spawn = func(string, string, string) (string, error) { return "", errors.New("no tmux") }
+	postFleetStart(s, nil) // failed: no pending start, but the gap runs
+	*now = now.Add(20*time.Second + 200*time.Millisecond)
+	fl := getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
+	if fl["canStart"] != false || fl["pending"] != false || fl["retryAfter"] != float64(40) {
+		t.Fatalf("in the gap: %v", fl)
 	}
-	// Past the window, but the tmux session still runs and FLEET has not
-	// shown up (a trust dialog, say): still that start.
-	*now = now.Add(30 * time.Second)
-	if w, out := postFleetStart(s, nil); w.Code != http.StatusConflict || out.Code != "starting" || len(*calls) != 1 {
-		t.Fatalf("tmux alive: %d %+v", w.Code, out)
+	*now = now.Add(40 * time.Second)
+	s.invalidateSessions()
+	fl = getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
+	if fl["canStart"] != true || fl["retryAfter"] != nil {
+		t.Fatalf("after the gap: %v", fl)
 	}
-	if len(asked) == 0 || asked[len(asked)-1] != "FLEET-abc" {
-		t.Fatalf("has-session asked %v, want the started tmux name", asked)
+	// Not offered at all when FLEET is ambiguous, gap or not.
+	*now = now.Add(-30 * time.Second)
+	s.collect = func() ([]Session, error) { return []Session{{PID: 1, Name: "FLEET"}, {PID: 2, Name: "FLEET"}}, nil }
+	s.invalidateSessions()
+	fl = getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
+	if fl["canStart"] != false || fl["retryAfter"] != nil {
+		t.Fatalf("ambiguous: %v", fl)
 	}
-	if fl := fleetBlock(); fl["canStart"] != false || fl["starting"] != nil {
-		t.Fatalf("state, tmux alive: %v", fl)
+}
+
+func TestFleetStateLastLiveUsesDiscoveryList(t *testing.T) {
+	s, _, _ := fleetStartServer(t, nil)
+	writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(22), CWD: t.TempDir()})
+	n := 0
+	s.collect = func() ([]Session, error) {
+		n++
+		if n == 1 { // discovery's list holds the last id under another name
+			return []Session{{PID: 3, Name: "other", SessionID: fleetUUID(22)}}, nil
+		}
+		return nil, nil
 	}
-	// The tmux session is gone: a new start may run.
-	tmuxUp = false
-	if fl := fleetBlock(); fl["canStart"] != true {
-		t.Fatalf("state, tmux gone: %v", fl)
-	}
-	if w, _ := postFleetStart(s, nil); w.Code != http.StatusOK || len(*calls) != 2 {
-		t.Fatalf("tmux gone: %d", w.Code)
+	fl := getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
+	if fl["lastLive"] != true || n != 1 {
+		t.Fatalf("lastLive %v after %d collections", fl["lastLive"], n)
 	}
 }
 
 func TestFleetStartPendingEndsWhenFleetAppears(t *testing.T) {
 	s, _, now := fleetStartServer(t, nil)
-	s.fleet.tmuxAlive = func(string) bool { return true }
+	s.fleet.paneCommand = func(string) (string, bool) { return "claude", true }
 	postFleetStart(s, nil)
 	s.collect = func() ([]Session, error) { return []Session{{PID: 9, Name: "FLEET", SessionID: fleetUUID(17)}}, nil }
 	s.invalidateSessions()

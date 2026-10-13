@@ -936,10 +936,15 @@ from the terminal a second ago) → 409 `already_running` / `ambiguous`, 500
 `start_failed` when the list fails. Only an attempt past discovery stamps the
 60 s, and a failed spawn still counts. A start that is still pending refuses
 with 409 `starting`: inside the 90 s window, or while the tmux session it
-created still exists and FLEET has not appeared (`tmux has-session` behind the
-`tmuxAlive` seam). A claude stuck at a trust dialog is still that start, and a
-second spawn beside it would be a second FLEET. FLEET seen alive, or the tmux
-session gone, ends it. If fleet-last.json's id is live under another name,
+created still runs something other than a shell and FLEET has not appeared
+(`#{pane_current_command}` behind the `paneCommand` seam). A claude stuck at a
+trust dialog is still that start, and a second spawn beside it would be a
+second FLEET. `SpawnNew` types the command into a shell, so a claude that
+exits early (bad `--resume`, a quit dialog, a crash) leaves a bare
+sh/bash/zsh/fish/dash pane behind: that ends the start, as do a gone session
+and FLEET seen alive — otherwise one failed start would lock Start out for
+good. State reports `pending`, `pendingTmux`, and `retryAfter` (only when the
+60 s gap is the one block). If fleet-last.json's id is live under another name,
 409 `last_live` (two processes on one transcript, or a second FLEET), and
 state reports `lastLive: true` with `canStart: false`. Mode: **resume** when
 fleet-last.json is valid, `findTranscript` finds the transcript, and its

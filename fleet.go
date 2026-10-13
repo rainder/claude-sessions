@@ -84,8 +84,10 @@ type fleetDeps struct {
 	lastStartAt   time.Time // last attempt that passed discovery; a failed spawn counts
 	startingAt    time.Time // zero → no start in the 90 s window
 	startingMode  string
-	startedTmux   string            // tmux name of the last web start until FLEET shows up or it is gone
-	tmuxAlive     func(string) bool // nil → spawnGroupTmuxAlive (tmux has-session)
+	startedTmux   string // tmux name of the last web start until FLEET shows up or it is gone
+	// paneCommand reports a tmux session's pane command; ok false when the
+	// session is gone. nil → tmux display-message #{pane_current_command}.
+	paneCommand func(name string) (cmd string, ok bool)
 }
 
 func (s *server) fleetDir() string {
@@ -149,6 +151,14 @@ type fleetSession struct {
 	LastLive bool `json:"lastLive,omitempty"`
 	// Starting: a web start in the last 90 s, and FLEET not alive yet.
 	Starting *fleetStarting `json:"starting,omitempty"`
+	// Pending: the last web start may still become FLEET — inside the 90 s
+	// window, or its tmux pane still runs something other than a shell.
+	// PendingTmux names that tmux session.
+	Pending     bool   `json:"pending"`
+	PendingTmux string `json:"pendingTmux,omitempty"`
+	// RetryAfter: seconds until the 60 s start gap is free, set only when
+	// that gap is the one thing keeping canStart false.
+	RetryAfter int `json:"retryAfter,omitempty"`
 }
 
 // fleetReasonCodes maps discovery's human reason text onto its code.
@@ -197,16 +207,23 @@ func fleetStatus(sess Session) string {
 // discoverFleet resolves FLEET from the cached session list. An alive FLEET
 // is remembered in fleet-last.json (written only when it changed).
 func (s *server) discoverFleet() (Session, fleetSession) {
+	sess, fl, _ := s.discoverFleetList()
+	return sess, fl
+}
+
+// discoverFleetList is discoverFleet plus the session list it used (nil
+// when listing failed), so later checks agree with discovery.
+func (s *server) discoverFleetList() (Session, fleetSession, []Session) {
 	sessions, err := s.cachedSessions()
 	if err != nil {
-		return Session{}, fleetSessionDown("session list failed")
+		return Session{}, fleetSessionDown("session list failed"), nil
 	}
 	sess, reason := findFleet(sessions)
 	if reason != "" {
-		return Session{}, fleetSessionDown(reason)
+		return Session{}, fleetSessionDown(reason), sessions
 	}
 	s.rememberFleet(sess)
-	return sess, fleetSession{Alive: true, SessionID: sess.SessionID, PID: sess.PID, Status: fleetStatus(sess)}
+	return sess, fleetSession{Alive: true, SessionID: sess.SessionID, PID: sess.PID, Status: fleetStatus(sess)}, sessions
 }
 
 func fleetSessionDown(reason string) fleetSession {
@@ -339,11 +356,10 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	for k, v := range state {
 		out[k] = v
 	}
-	_, fl := s.discoverFleet()
+	_, fl, sessions := s.discoverFleetList()
 	if !fl.Alive {
 		_, _, _, fl.HasLast = s.fleetLastPlan()
 	}
-	sessions, _ := s.cachedSessions() // the list discovery just used
 	s.fleetStartInfo(&fl, sessions)
 	out["fleet"] = fl
 	out["stale"] = fleetStateStale(state, stateErr, s.fleetNow())

@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -41,19 +43,36 @@ type fleetStartResult struct {
 	LastMissing bool `json:"lastMissing,omitempty"`
 }
 
-func (s *server) fleetTmuxAlive(name string) bool {
-	if s.fleet.tmuxAlive != nil {
-		return s.fleet.tmuxAlive(name)
+// tmuxPaneCommand returns the command the session's active pane runs, or
+// ok false when tmux cannot answer (the session is gone).
+func tmuxPaneCommand(name string) (string, bool) {
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", name, "#{pane_current_command}").Output()
+	if err != nil {
+		return "", false
 	}
-	return spawnGroupTmuxAlive(name)
+	return strings.TrimSpace(string(out)), true
 }
 
+func (s *server) fleetPaneCommand(name string) (string, bool) {
+	if s.fleet.paneCommand != nil {
+		return s.fleet.paneCommand(name)
+	}
+	return tmuxPaneCommand(name)
+}
+
+// fleetShells are pane commands that mean claude is no longer running there.
+var fleetShells = map[string]bool{"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true}
+
 // fleetStartPending reports whether the last web start may still become
-// FLEET: inside the 90 s window, or its tmux session still exists and FLEET
-// has not appeared. A claude stuck at a trust dialog is still that start; a
-// second spawn beside it would make two FLEETs. alive (FLEET seen) or a gone
-// tmux session ends it for good. Callers must not hold startStateMu.
-func (s *server) fleetStartPending(alive bool) (pending bool, starting *fleetStarting) {
+// FLEET: inside the 90 s window, or its tmux session still runs something
+// that is not a shell and FLEET has not appeared. A claude stuck at a trust
+// dialog is still that start; a second spawn beside it would make two FLEETs.
+// SpawnNew types the command into a shell, so a claude that exited (a bad
+// --resume, a quit dialog, a crash) leaves the session behind as a bare
+// shell: that, a gone session, or FLEET seen alive ends the start for good.
+// tmux is the started session's name while pending. Callers must not hold
+// startStateMu.
+func (s *server) fleetStartPending(alive bool) (pending bool, starting *fleetStarting, tmux string) {
 	f := &s.fleet
 	now := s.fleetNow()
 	f.startStateMu.Lock()
@@ -63,33 +82,32 @@ func (s *server) fleetStartPending(alive bool) (pending bool, starting *fleetSta
 	if !f.startingAt.IsZero() && now.Sub(f.startingAt) >= fleetStartingFor {
 		f.startingAt, f.startingMode = time.Time{}, ""
 	}
+	tname := f.startedTmux
 	if !f.startingAt.IsZero() {
 		starting = &fleetStarting{At: f.startingAt.UTC().Format(time.RFC3339), Mode: f.startingMode}
 		f.startStateMu.Unlock()
-		return true, starting
+		return true, starting, tname
 	}
-	tname := f.startedTmux
 	f.startStateMu.Unlock()
 	if tname == "" {
-		return false, nil
+		return false, nil, ""
 	}
-	// has-session runs outside the lock: a poll must not hold it on a fork.
-	if s.fleetTmuxAlive(tname) {
-		return true, nil
+	// tmux runs outside the lock: a poll must not hold it on a fork.
+	if cmd, ok := s.fleetPaneCommand(tname); ok && !fleetShells[strings.TrimPrefix(filepath.Base(cmd), "-")] {
+		return true, nil, tname
 	}
 	f.startStateMu.Lock()
 	if f.startedTmux == tname {
 		f.startedTmux = ""
 	}
 	f.startStateMu.Unlock()
-	return false, nil
+	return false, nil, ""
 }
 
-// fleetStartInfo fills fl's canStart, starting and lastLive. sessions is the
-// list discovery used (nil when it failed).
+// fleetStartInfo fills fl's start fields. sessions is the list discovery
+// used (nil when it failed).
 func (s *server) fleetStartInfo(fl *fleetSession, sessions []Session) {
-	pending, starting := s.fleetStartPending(fl.Alive)
-	fl.Starting = starting
+	fl.Pending, fl.Starting, fl.PendingTmux = s.fleetStartPending(fl.Alive)
 	if fl.Code == "not_live" {
 		if l, ok := readFleetLast(s.fleetLastPath()); ok {
 			fl.LastLive = sessionIDLive(sessions, l.SessionID)
@@ -99,8 +117,15 @@ func (s *server) fleetStartInfo(fl *fleetSession, sessions []Session) {
 	now := s.fleetNow()
 	f.startStateMu.Lock()
 	defer f.startStateMu.Unlock()
-	fl.CanStart = fl.Code == "not_live" && !fl.LastLive && !pending && !f.startInFlight &&
-		(f.lastStartAt.IsZero() || now.Sub(f.lastStartAt) >= fleetStartGap)
+	startable := fl.Code == "not_live" && !fl.LastLive && !fl.Pending && !f.startInFlight
+	gapLeft := time.Duration(0)
+	if !f.lastStartAt.IsZero() {
+		gapLeft = fleetStartGap - now.Sub(f.lastStartAt)
+	}
+	fl.CanStart = startable && gapLeft <= 0
+	if startable && gapLeft > 0 {
+		fl.RetryAfter = int((gapLeft + time.Second - 1) / time.Second)
+	}
 }
 
 func sessionIDLive(sessions []Session, sid string) bool {
@@ -192,7 +217,7 @@ func (s *server) fleetStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, reason := findFleet(sessions)
-	if pending, _ := s.fleetStartPending(reason == ""); pending {
+	if pending, _, _ := s.fleetStartPending(reason == ""); pending {
 		writeJSON(w, http.StatusConflict, fleetStartResult{Code: "starting",
 			Error: "FLEET is still starting. Wait, or check its tmux session."})
 		return

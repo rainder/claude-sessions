@@ -23,8 +23,8 @@ func fleetTestServer(t *testing.T, sessions []Session) *server {
 			// fleet-last.json and chat/start look up transcripts.
 			lastPath: filepath.Join(t.TempDir(), "cfg", "fleet-last.json"),
 			home:     t.TempDir(),
-			// Never tmux has-session: no test may shell out to tmux.
-			tmuxAlive: func(string) bool { return false }},
+			// No test may shell out to tmux: every started session is gone.
+			paneCommand: func(string) (string, bool) { return "", false }},
 	}
 }
 
