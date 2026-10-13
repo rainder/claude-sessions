@@ -213,9 +213,11 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if typed, found := paneInputText(screen); !found {
+		s.logFleetRefusal("dialog", screen)
 		refuse("dialog", "FLEET input box is not visible")
 		return
 	} else if typed != "" {
+		s.logFleetRefusal("input_busy", screen)
 		refuse("input_busy", "input box not empty")
 		return
 	}
@@ -250,6 +252,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	// is still there and holds what was just typed (it was empty before).
 	// Other text in the box is not ours: keep polling, then give up.
 	landed := false
+	lastScreen := ""
 	for i := 0; i < fleetLandPolls && !landed; i++ {
 		if i > 0 {
 			sleep(fleetLandEvery)
@@ -258,6 +261,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+		lastScreen = screen
 		typed, found := paneInputText(screen)
 		if !found {
 			break
@@ -267,6 +271,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	if !landed {
 		_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
 			Text: "web-say typed but not submitted", CardID: cardID})
+		s.logFleetRefusal("not_submitted", lastScreen)
 		refuse("not_submitted", "Text was typed but not sent. FLEET changed state. Check the terminal.")
 		return
 	}
@@ -284,4 +289,30 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "fleet: web-say log append failed: %v\n", err)
 	}
 	writeJSON(w, http.StatusOK, fleetSayResult{OK: true, Queued: fresh.Status == "busy"})
+}
+
+// fleetRefusalLogLines is how much of the screen a refused say logs.
+const fleetRefusalLogLines = 15
+
+// logFleetRefusal writes the bottom of the pane that made a say refuse to the
+// server's stderr, so a refusal nobody can reproduce later ("the box is not
+// visible", but it looks fine now) still leaves the screen behind. Stderr
+// only, never the HTTP response: the pane can hold anything. Escapes are
+// stripped but dim text is kept — the placeholder is part of what was shown.
+func (s *server) logFleetRefusal(code, screen string) {
+	logf := s.fleet.logf
+	if logf == nil {
+		logf = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format, args...) }
+	}
+	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
+	if len(lines) > fleetRefusalLogLines {
+		lines = lines[len(lines)-fleetRefusalLogLines:]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "fleet: say refused (%s); last %d pane lines:\n", code, fleetRefusalLogLines)
+	for _, l := range lines {
+		l = strings.ReplaceAll(stripPaneEscapes(l), "\u00a0", " ")
+		b.WriteString("  | " + strings.TrimRight(l, " ") + "\n")
+	}
+	logf("%s", b.String())
 }

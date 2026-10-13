@@ -1,0 +1,69 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.296[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mFable 5.1 with high effort · Claude Max[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m~/Developer/claude-sessions/.claude/worktrees/fleet-login-code[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                         [38;5;246m● high · /effort[39m
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1mBash command[22m
+
+[39m   go test ./...
+
+[39m Do you want to proceed?
+[39m [38;5;153m❯ 1. Yes[39m
+[39m   2. Yes, and don't ask again for go test commands
+[39m   3. No, and tell Claude what to do differently [38;5;246m(esc)[39m
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────

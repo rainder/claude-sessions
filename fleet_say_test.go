@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -51,6 +52,7 @@ func newSayRig(t *testing.T, sessions []Session) *sayRig {
 	rig.s.fleet.typeText = func(_ string, text string) error { rig.typed = append(rig.typed, text); return nil }
 	rig.s.fleet.pressEnter = func(string) error { rig.enters++; return nil }
 	rig.s.fleet.paneInMode = func(string) (bool, error) { return false, nil }
+	rig.s.fleet.logf = func(string, ...any) {}
 	return rig
 }
 
@@ -384,5 +386,74 @@ func TestFleetSayRefusesLeadingBangOrHash(t *testing.T) {
 	}
 	if len(rig.typed) != 0 {
 		t.Fatalf("typed %q", rig.typed)
+	}
+}
+
+// A refusal that read the pane logs the screen it saw to the server's stderr,
+// escapes stripped, and never puts it in the response.
+func TestFleetSayRefusalLogsPaneLines(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	var logged strings.Builder
+	rig.s.fleet.logf = func(format string, args ...any) { fmt.Fprintf(&logged, format, args...) }
+	var lines []string
+	for i := 0; i < 20; i++ {
+		lines = append(lines, fmt.Sprintf("old line %02d", i))
+	}
+	rig.captures = []string{strings.Join(lines, "\n") + "\n" + dialogCapture}
+	code, res := rig.post(t, `{"text":"hi"}`, nil)
+	if code != http.StatusOK || res.Code != "dialog" {
+		t.Fatalf("%d %+v", code, res)
+	}
+	out := logged.String()
+	if !strings.HasPrefix(out, "fleet: say refused (dialog); last 15 pane lines:\n") {
+		t.Fatalf("log = %q", out)
+	}
+	if !strings.Contains(out, "  |  Do you want to proceed?\n") || !strings.Contains(out, "  | old line 19\n") ||
+		strings.Contains(out, "old line 08") || strings.Contains(out, "\x1b") {
+		t.Fatalf("log must hold the last 15 stripped lines: %q", out)
+	}
+	if strings.Count(out, "  | ") != 15 {
+		t.Fatalf("log has %d pane lines, want 15: %q", strings.Count(out, "  | "), out)
+	}
+	if strings.Contains(res.Error, "proceed") {
+		t.Fatalf("pane text leaked into the response: %+v", res)
+	}
+}
+
+func TestFleetSayInputBusyAndNotSubmittedLog(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	var logged strings.Builder
+	rig.s.fleet.logf = func(format string, args ...any) { fmt.Fprintf(&logged, format, args...) }
+	rig.captures = []string{"\x1b[2mdim kept\x1b[0m\n" + boxCapture("someone typing")}
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.Code != "input_busy" {
+		t.Fatalf("%+v", res)
+	}
+	if out := logged.String(); !strings.Contains(out, "say refused (input_busy)") ||
+		!strings.Contains(out, "  | dim kept\n") || !strings.Contains(out, "  | ❯ someone typing\n") {
+		t.Fatalf("log = %q", out)
+	}
+
+	logged.Reset()
+	rig.now = rig.now.Add(time.Minute)
+	rig.captures = []string{emptyBoxCapture, boxCapture("other words")}
+	if _, res := rig.post(t, `{"text":"hello"}`, nil); res.Code != "not_submitted" {
+		t.Fatalf("%+v", res)
+	}
+	if out := logged.String(); !strings.Contains(out, "say refused (not_submitted)") ||
+		!strings.Contains(out, "  | ❯ other words\n") {
+		t.Fatalf("log = %q", out)
+	}
+}
+
+// Refusals that never read the pane log nothing.
+func TestFleetSayOtherRefusalsDoNotLogPane(t *testing.T) {
+	rig := newSayRig(t, nil)
+	var logged strings.Builder
+	rig.s.fleet.logf = func(format string, args ...any) { fmt.Fprintf(&logged, format, args...) }
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.Code != "not_live" {
+		t.Fatalf("%+v", res)
+	}
+	if logged.Len() != 0 {
+		t.Fatalf("log = %q", logged.String())
 	}
 }

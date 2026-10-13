@@ -913,11 +913,25 @@ capture and typing, or between the second capture and Enter, still takes the
 keys — and typing alone can answer it, since digit keys select options.
 Nothing outside Claude Code can lock its state.
 
-**Input-box parser** (`paneInputText`, `capture-pane -p -e`): the region
-between the last two `─` rule lines whose first line starts with `❯`; dim text
-(SGR 2) is Claude Code's placeholder and is dropped. If Claude Code changes how
-it draws the prompt, the parser finds no box and every send is refused (fails
-closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens.
+**Input-box parser** (`paneInputText`, `capture-pane -p -e`): anchored on the
+**last** line starting with `❯`, closed by the nearest `─` rule line above and
+below it. Box text is the rest of that line plus the lines down to the bottom
+rule; lines between the top rule and `❯` (notices, a queued message) and
+everything below the bottom rule (status, a task panel with its own rule,
+menus) are ignored. Dim text (SGR 2) is Claude Code's placeholder and is
+dropped. It used to take "the last two rule lines", and a rule drawn under the
+status lines, a notice above the prompt, or a rule wrapped into two lines in a
+narrow pane made a normal idle box read as not visible. The slash and `@` menus
+draw above the box with their own `❯` row, which is why the anchor is the
+*last* `❯` line. A dialog with a `❯ 1. Yes` row between two rules reads as
+non-empty text and refuses as `input_busy`. If Claude Code changes how it
+draws the prompt, the parser finds no box and every send is refused (fails
+closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens;
+`pane-synth-*` are hand-built in the same escape style for states that cannot
+be produced on demand. A `dialog`, `input_busy` or `not_submitted` refusal
+that read the pane logs its last 15 lines (escapes stripped, dim text kept)
+to the server's stderr only — never to the response — so a refusal that
+cannot be reproduced later still leaves the screen behind.
 
 **Cursors.** Chat: `since=<byte position>` in the transcript; the server
 returns every turn that changed after it (a later line of the same assistant
