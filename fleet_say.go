@@ -129,18 +129,20 @@ func tmuxPressEnter(target string) error {
 const fleetEventTag = "[claude-sessions event]"
 
 // fleetEventPhraseRe finds the tag's words in folded text (fleetFoldText),
-// with up to three non-alphanumeric characters between them. FLEET is an LLM
+// with any run of non-alphanumeric characters between them (a bounded run let
+// "claude----sessions" through). FLEET is an LLM
 // and reads text the way a person does, so "claude sessions event" or
 // "claudesessions event" reads as the tag's words as much as the exact bytes
 // do.
-var fleetEventPhraseRe = regexp.MustCompile(`claude[^a-z0-9]{0,3}sessions?[^a-z0-9]{0,3}event`)
+var fleetEventPhraseRe = regexp.MustCompile(`claude[^a-z0-9]*sessions?[^a-z0-9]*event`)
 
 // fleetEventTagRe is the page-send refusal: the phrase after an opening
-// bracket of any kind (folded to [ ( { <), with optional spaces between. A
+// bracket of any kind (folded to [ ( { <), with any non-alphanumeric run
+// between (spaces, "--", "**"). A
 // bare "claude-sessions events stopped" is ordinary text; the bracket is what
 // makes it read as a tag. Anywhere in the text: flattening turns a later line
 // into mid-text, so "only at the start" would not be enough.
-var fleetEventTagRe = regexp.MustCompile(`[\[({<] *claude[^a-z0-9]{0,3}sessions?[^a-z0-9]{0,3}event`)
+var fleetEventTagRe = regexp.MustCompile(`[\[({<][^a-z0-9]*claude[^a-z0-9]*sessions?[^a-z0-9]*event`)
 
 // fleetLookalikes maps Cyrillic, Greek and other letters that look like the
 // Latin letters of the tag's words (c l a u d e s i o n v t) onto them. It is

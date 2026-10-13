@@ -367,7 +367,7 @@ func idleTmux(t string) string {
 
 // idlePhraseRe is fleetEventPhraseRe for text that is already sanitized
 // ASCII with single spaces, where folding is only lowercasing.
-var idlePhraseRe = regexp.MustCompile(`(?i)claude[^A-Za-z0-9]{0,3}sessions?[^A-Za-z0-9]{0,3}event`)
+var idlePhraseRe = regexp.MustCompile(`(?i)claude[^A-Za-z0-9]*sessions?[^A-Za-z0-9]*event`)
 
 // idleScrubTag replaces every run of the tag's words with "(x)". The "x" is
 // alphanumeric, so a replacement can never join its neighbours into a new
