@@ -128,10 +128,57 @@ func tmuxPressEnter(target string) error {
 // never be able to forge one.
 const fleetEventTag = "[claude-sessions event]"
 
-// fleetEventTagRe finds the tag anywhere, in any case, with any whitespace
-// inside the brackets (newlines too: flattening turns a later line into
-// mid-text, so "only at the start" would not be enough).
-var fleetEventTagRe = regexp.MustCompile(`(?i)\[\s*claude-sessions\s+event\s*\]`)
+// fleetEventPhraseRe finds the tag's words in folded text (fleetFoldText),
+// brackets or not, with any run of space, '-', '_' or '.' between them. FLEET
+// is an LLM and reads text the way a person does, so "claude sessions event"
+// or "claudesessions event" looks like the tag to it as much as the exact
+// bytes do. Anywhere in the text: flattening turns a later line into
+// mid-text, so "only at the start" would not be enough.
+var fleetEventPhraseRe = regexp.MustCompile(`claude[ ._-]*sessions?[ ._-]*event`)
+
+// fleetFoldText maps lookalikes to the ASCII they look like, for the tag
+// check only (the text that is typed is not changed). It drops format and
+// zero-width characters (category Cf, which holds U+200B–U+200F, U+2060,
+// U+FEFF and the soft hyphen) and combining marks (Mn), maps fullwidth ASCII
+// U+FF01–U+FF5E to ASCII, dash variants to '-', bracket lookalikes to '['
+// and ']', collapses every run of Unicode whitespace to one space, and
+// lowercases.
+func fleetFoldText(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		switch {
+		case unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Mn, r):
+			continue
+		case unicode.IsSpace(r):
+			space = true
+			continue
+		case r >= 0xFF01 && r <= 0xFF5E:
+			r -= 0xFEE0
+		case r >= 0x2010 && r <= 0x2015, r == 0x2043, r == 0x2212, r == 0xFE58, r == 0xFE63, r == 0x2E3A, r == 0x2E3B:
+			r = '-'
+		case strings.ContainsRune("⁅〈《「『【〔〖〘〚⟦⟨⟪⟬⟮⦃⦅⦇⦉⦋⦍⦏⦑⦓⦕⦗﹇﹝｢", r):
+			r = '['
+		case strings.ContainsRune("⁆〉》」』】〕〗〙〛⟧⟩⟫⟭⟯⦄⦆⦈⦊⦌⦎⦐⦒⦔⦖⦘﹈﹞｣", r):
+			r = ']'
+		case r == 0x2024 || r == 0xFE52:
+			r = '.'
+		case r == 0xFE4D || r == 0xFE4E || r == 0xFE4F:
+			r = '_'
+		}
+		if space && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		space = false
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
+}
+
+// fleetHasEventTag reports whether s, once folded, contains the tag's words.
+func fleetHasEventTag(s string) bool {
+	return fleetEventPhraseRe.MatchString(fleetFoldText(s))
+}
 
 const fleetReservedTagMsg = "Text may not contain [claude-sessions event]. That tag is reserved for server events."
 
@@ -139,7 +186,7 @@ const fleetReservedTagMsg = "Text may not contain [claude-sessions event]. That 
 // code is "reserved_tag" or "bad_text" and msg the 400 reason. Every page
 // send goes through here; the idle-event sender does not.
 func fleetCleanSayText(raw string) (text, code, msg string) {
-	if fleetEventTagRe.MatchString(raw) {
+	if fleetHasEventTag(raw) {
 		return "", "reserved_tag", fleetReservedTagMsg
 	}
 	text, err := sanitizeFleetText(raw)

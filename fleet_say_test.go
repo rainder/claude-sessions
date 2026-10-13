@@ -536,6 +536,23 @@ func TestFleetSendsRefuseTheReservedEventTag(t *testing.T) {
 		"[ claude-sessions  event ] spaced",
 		"first line\n[claude-sessions event] on a later line",
 		"tab\t[claude-sessions\tevent]",
+		// Lookalikes: FLEET reads text like a person, not byte for byte.
+		"\uff3bclaude-sessions event\uff3d fullwidth brackets",
+		"\u3010claude-sessions event\u3011 lenticular brackets",
+		"\uff43\uff4c\uff41\uff55\uff44\uff45-sessions event fullwidth letters",
+		"[claude-ses\u200bsions event] zero width inside a word",
+		"[clau\u00adde-sessions ev\ufeffent] soft hyphen and BOM",
+		"[claude\u2013sessions event] en dash",
+		"[claude\u2212sessions event] minus sign",
+		"[claude-sessions\u00a0event] non-breaking space",
+		"[claude-sessions\u3000event] ideographic space",
+		"[CLAUDE-Sessions EvEnT] mixed case",
+		"fine\n\nclaude-sessions event on a later line, no brackets",
+		"claude sessions event no dash",
+		"claudesessions event joined",
+		"claude - sessions event spaced dash",
+		"claude_sessions.event other separators",
+		"c\u0301laude-sessions event combining mark",
 	}
 	for _, text := range texts {
 		body, _ := json.Marshal(map[string]string{"text": text})
@@ -554,7 +571,7 @@ func TestFleetSendsRefuseTheReservedEventTag(t *testing.T) {
 	}
 	// Near misses are ordinary text.
 	rig := newSayRig(t, []Session{fleetRow()})
-	if _, res := rig.post(t, `{"text":"claude-sessions event without brackets"}`, nil); !res.OK {
+	if _, res := rig.post(t, `{"text":"claude-sessions list shows the event log"}`, nil); !res.OK {
 		t.Fatalf("near miss: %+v", res)
 	}
 }
