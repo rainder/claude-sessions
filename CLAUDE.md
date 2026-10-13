@@ -915,13 +915,16 @@ sends. `fleet.code` in `/fleet/state` is the machine form of the reason:
 
 **fleet-last.json** (`~/.config/claude-sessions/fleet-last.json`,
 `{sessionId, cwd, tmux, seenAt}`) is the FLEET discovery last saw alive. It is
-written (temp + rename, 0600) only when the id, cwd or tmux name differ from
-the copy in memory, and the first discovery loads that copy from the file, so
+written (temp + rename, 0600) only when the id or cwd differ from the copy in
+memory (a new tmux name alone is stored with the next write, not written), and the first discovery loads that copy from the file, so
 neither a state poll nor a restart rewrites an unchanged file; `seenAt` moves
 only on a write. Any read or parse error is "no last session", and the id must
-pass the resume id format check (`validateResumeSessionID`) before it is used
-anywhere — it goes into a shell command and a transcript glob.
-`fleet.hasLast` is true when FLEET is down and a start would resume it.
+be a UUID (`validFleetSessionID`) before it is used anywhere — it goes into a
+shell command and a transcript glob, and the looser resume id check admits
+`--dangerously-skip-permissions`. `fleet.hasLast` is true when FLEET is down
+and a start would resume it. The transcript lookup behind that and the
+read-only chat (`fleetTranscript`) runs on every poll while FLEET is down, so
+it is memoized per id: a hit until the file disappears, a miss for 30 s.
 
 **Start FLEET** (`POST /fleet/start`, fleet_start.go). Guards, in order, and
 why: fleet auth, cookie needs `sameOrigin` (it starts a process); one attempt
@@ -931,17 +934,29 @@ tap in that window would see "not running" and start a second FLEET; then a
 **fresh** `collectLocal` (not the cached list: FLEET may have been started
 from the terminal a second ago) → 409 `already_running` / `ambiguous`, 500
 `start_failed` when the list fails. Only an attempt past discovery stamps the
-60 s, and a failed spawn still counts. Mode: **resume** when fleet-last.json
-is valid, its cwd is still a directory and `findTranscript` finds the
-transcript (409 if that id is live under another name: two processes on one
-transcript), else **fresh** in `~/Developer/trecs-brain` running `/fleet`.
+60 s, and a failed spawn still counts. A start that is still pending refuses
+with 409 `starting`: inside the 90 s window, or while the tmux session it
+created still exists and FLEET has not appeared (`tmux has-session` behind the
+`tmuxAlive` seam). A claude stuck at a trust dialog is still that start, and a
+second spawn beside it would be a second FLEET. FLEET seen alive, or the tmux
+session gone, ends it. If fleet-last.json's id is live under another name,
+409 `last_live` (two processes on one transcript, or a second FLEET), and
+state reports `lastLive: true` with `canStart: false`. Mode: **resume** when
+fleet-last.json is valid, `findTranscript` finds the transcript, and its
+folder still exists. That folder is the cwd in the transcript head
+(`readResumableHeadFn`, as the resume picker reads it), not the session's
+cwd: claude keys a transcript to the folder it started in, and a session's
+cwd moves when it enters a worktree; fleet-last.json's cwd is only the
+fallback for a head with none. Else **fresh** in `~/Developer/trecs-brain`
+running `/fleet`; when fleet-last.json named a session that could not be
+resumed, the 200 carries `lastMissing: true` and the log line says so.
 The command is the `Opus` preset (`claude --model=opus` when missing) plus
 `--resume <id> -n FLEET` or `-n FLEET '/fleet'`; `-n` makes the name
 user-set, so discovery matches the new session. A success logs a `web-start`
 line, invalidates the session cache, and sets `fleet.starting` for 90 s or
-until FLEET is seen alive. `fleet.canStart` is `not_live` with no start in
-flight or pending and the 60 s free. Errors never carry paths; the spawn
-error goes to stderr.
+until FLEET is seen alive. `fleet.canStart` is `not_live`, not `lastLive`,
+no start in flight or pending, and the 60 s free. Errors never carry paths;
+the spawn error goes to stderr. A 401 here is JSON (`code: unauthorized`).
 
 **Read-only chat.** When the code is `not_live` and fleet-last.json names a
 session whose transcript exists, `/fleet/chat` answers that transcript with
@@ -953,10 +968,14 @@ icons (`fleet_assets/`, embedded) need no auth: they hold nothing secret and a
 home-screen launch fetches them before any cookie. `sw.js` sends
 `Service-Worker-Allowed: /fleet` (its default scope would be `/fleet/` only)
 and `no-cache`; the rest are cached a day. The page CSP adds `manifest-src`
-and `worker-src 'self'`. The worker (`fleet_sw.js`; bump `VERSION` on every
-change) caches only the manifest, the icons, and `/fleet` itself — network
+and `worker-src 'self'`. The worker (`fleet_sw.js`) gets its cache
+`VERSION` from the server: `@VERSION@` is replaced once at start with a short
+hash of the worker, the manifest and the icons (`fleetServiceWorkerBody`), so
+an asset change drops installed clients' old cache with no manual bump. It
+caches only the manifest, the icons, and `/fleet` itself — network
 first, stored only when the response carries `X-Fleet-App: 1`, which only the
-app page sends, and served from the cache only when the network fails. It
+app page sends, and served from the cache only when the network fails. A
+failed cache store never costs the response. It
 never handles a non-GET, anything outside `/fleet`, any `c=` link, or
 state/chat/log/usage/say/start/login*: those are live data, actions, or
 depend on auth, and a cached answer would show an old FLEET or a stale login.
