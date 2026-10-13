@@ -564,7 +564,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         btn.addEventListener("click", () => openSheet(c, o, false, explicit));
         box.append(btn);
       }
-      if (leanOpt && str(leanOpt.send)) {
+      // FLEET never lets a lean stand in for an explicit-yes item, so the
+      // Lean button is for needs-you cards only.
+      if (!explicit && leanOpt && str(leanOpt.send)) {
         const lb = el("button", "opt lean-btn", el("span", "k", lean), el("span", "", "Lean"));
         lb.type = "button";
         lb.disabled = !canSend;
@@ -816,7 +818,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const d = obj(JSON.parse(text));
     if (!d) throw new Error("bad chat body");
     const sid = str(d.sessionId);
-    if (chat.sid !== null && sid !== chat.sid) {
+    if (!sid && chat.sid) {
+      // A brief discovery failure, not a new session: keep the chat.
+      chat.reason = str(d.reason);
+      const key = chat.reason + "|" + chat.turns.size;
+      if (key !== chat.key) { chat.key = key; guard(renderChat); }
+      return;
+    }
+    if (sid && chat.sid !== null && sid !== chat.sid) {
       // Another FLEET session: start over from the top of its transcript.
       chat.sid = sid; chat.pos = 0; chat.turns.clear(); chat.reason = str(d.reason);
       guard(renderChat);
@@ -1064,6 +1073,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   window.addEventListener("resize", measureHeader);
 
   // ---- boot --------------------------------------------------------------
+  // The cross-site hop lands on /fleet?hop=1; tidy the address bar.
+  if (new URLSearchParams(location.search).get("hop") === "1") history.replaceState(null, "", "/fleet");
   measureHeader();
   renderFilters();
   renderUsage(null);

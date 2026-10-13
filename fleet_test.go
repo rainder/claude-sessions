@@ -91,10 +91,40 @@ func TestFleetLoginWrongToken(t *testing.T) {
 	}
 }
 
-func TestFleetPageNeedsAuthAndSetsHeaders(t *testing.T) {
+func TestFleetPageNoAuthHopsOnce(t *testing.T) {
 	s := fleetTestServer(t, nil)
 	w := httptest.NewRecorder()
 	fleetMux(s).ServeHTTP(w, httptest.NewRequest("GET", "/fleet", nil))
+	if w.Code != http.StatusOK || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("no auth, no hop: %d cookies %v", w.Code, w.Result().Cookies())
+	}
+	if body := w.Body.String(); !strings.Contains(body, `location.replace("/fleet?hop=1")`) ||
+		!strings.Contains(body, `url=/fleet?hop=1`) {
+		t.Fatalf("hop page = %q", body)
+	}
+	h := w.Header()
+	if h.Get("Referrer-Policy") != "no-referrer" || h.Get("Cache-Control") != "no-store" ||
+		!strings.Contains(h.Get("Content-Type"), "text/html") {
+		t.Fatalf("hop headers = %v", h)
+	}
+	w = httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, httptest.NewRequest("GET", "/fleet?hop=1", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("no auth after the hop: %d, want 401", w.Code)
+	}
+	r := httptest.NewRequest("GET", "/fleet?hop=1", nil)
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "tok"})
+	w = httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/fleet/state") {
+		t.Fatalf("cookie after the hop: %d", w.Code)
+	}
+}
+
+func TestFleetPageNeedsAuthAndSetsHeaders(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	w := httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, httptest.NewRequest("GET", "/fleet?hop=1", nil))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("no auth: %d", w.Code)
 	}
@@ -127,6 +157,19 @@ func TestFindFleet(t *testing.T) {
 	two := []Session{{PID: 1, Name: "FLEET"}, {PID: 3, Name: "FLEET"}}
 	if _, reason := findFleet(two); reason != "ambiguous" {
 		t.Fatalf("two: %q", reason)
+	}
+	// A derived name or a grok row is not the user's FLEET, and does not
+	// make the real one ambiguous.
+	others := []Session{
+		{PID: 4, Name: "FLEET", NameSource: "derived"},
+		{PID: 5, Name: "FLEET", Tool: toolGrok},
+		{PID: 1, Name: "FLEET", NameSource: "user"},
+	}
+	if got, reason := findFleet(others); reason != "" || got.PID != 1 {
+		t.Fatalf("others: %+v %q", got, reason)
+	}
+	if _, reason := findFleet(others[:2]); reason != "not running" {
+		t.Fatalf("only others: %q", reason)
 	}
 }
 
@@ -334,6 +377,16 @@ func TestFleetLogSpansChunks(t *testing.T) {
 	out := getFleetJSON(t, s, "/fleet/log?n=3")
 	if got := out["entries"].([]any); len(got) != 3 {
 		t.Fatalf("want 3 entries across chunks, got %d", len(got))
+	}
+}
+
+func TestFleetLogBeforePastEndAfterTruncate(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	body := fleetLogLines(0, 3)
+	writeFleetFile(t, s, "log.jsonl", body)
+	out := getFleetJSON(t, s, fmt.Sprintf("/fleet/log?n=2&before=%d", len(body)+100))
+	if len(out["entries"].([]any)) != 0 || out["next"] != nil {
+		t.Fatalf("cursor past a truncated log must return nothing: %v", out)
 	}
 }
 

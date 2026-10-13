@@ -43,9 +43,10 @@ type fleetDeps struct {
 
 	logMu sync.Mutex // serializes this process's log.jsonl appends
 
-	typeText   func(target, text string) error // nil → tmux send-keys -l
-	pressEnter func(target string) error       // nil → tmux send-keys Enter
-	sleep      func(time.Duration)             // nil → time.Sleep
+	typeText   func(target, text string) error   // nil → tmux send-keys -l
+	pressEnter func(target string) error         // nil → tmux send-keys Enter
+	sleep      func(time.Duration)               // nil → time.Sleep
+	paneInMode func(target string) (bool, error) // nil → tmux display #{pane_in_mode}
 
 	sayMu     sync.Mutex // one send at a time, so two devices never interleave keystrokes
 	lastSayAt time.Time
@@ -100,12 +101,14 @@ type fleetSession struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// findFleet picks the one local session named exactly FLEET.
+// findFleet picks the one local claude session the user named exactly FLEET.
 func findFleet(sessions []Session) (Session, string) {
 	var hit Session
 	n := 0
 	for _, sess := range sessions {
-		if sess.Name == fleetSessionName {
+		// Only a claude row with a user-set name: a derived title or a grok
+		// row that happens to read "FLEET" is not the user's FLEET.
+		if sess.Name == fleetSessionName && sess.Tool == "" && sess.NameSource != "derived" {
 			hit = sess
 			n++
 		}
@@ -170,14 +173,17 @@ func (s *server) fleetPage(w http.ResponseWriter, r *http.Request) {
 			Name: fleetCookieName, Value: s.token, Path: "/fleet", MaxAge: fleetCookieMaxAge,
 			HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil,
 		})
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>FLEET</title>` +
-			`<meta http-equiv="refresh" content="0;url=/fleet"><script>location.replace("/fleet")</script>`))
+		writeFleetHop(w, "/fleet")
 		return
 	}
 	if s.fleetAuth(r) == fleetAuthNone {
+		// A later plain /fleet link tapped in another app is a cross-site
+		// navigation too, so the Strict cookie is not sent. One same-site hop
+		// to ?hop=1 brings it along; a second miss there is a real 401.
+		if r.URL.Query().Get("hop") != "1" {
+			writeFleetHop(w, "/fleet?hop=1")
+			return
+		}
 		http.Error(w, "Unauthorized. Run `claude-sessions fleet-url` on the host and open that URL.", http.StatusUnauthorized)
 		return
 	}
@@ -188,6 +194,17 @@ func (s *server) fleetPage(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
 	_, _ = w.Write(fleetPageHTML)
+}
+
+// writeFleetHop answers a tiny page that moves on to to by script, so the
+// next request is a same-site navigation that carries the Strict cookie.
+// to is a fixed path, never request data.
+func writeFleetHop(w http.ResponseWriter, to string) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>FLEET</title>` +
+		`<meta http-equiv="refresh" content="0;url=` + to + `"><script>location.replace("` + to + `")</script>`))
 }
 
 // fleetUsage is GET /usage/numbers under fleet auth: the cookie has
@@ -351,6 +368,9 @@ func (s *server) readFleetLogPage(before int64, n int) ([]json.RawMessage, *int6
 		return nil, nil, err
 	}
 	end := st.Size()
+	if before > end { // the log was truncated or rotated under the cursor
+		return nil, nil, nil
+	}
 	if before >= 0 && before < end {
 		end = before
 	}

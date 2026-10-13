@@ -855,30 +855,44 @@ cookie, so it opens nothing outside `/fleet*`. `claude-sessions fleet-url`
 prints `/fleet?t=<token>`; that request sets the cookie and answers a small
 HTML hop that `location.replace`s to `/fleet` — **not a 303**: a link tapped in
 another app is a cross-site navigation, and the browser would not send the new
-Strict cookie on its redirect. The page sends `Referrer-Policy: same-origin`,
+Strict cookie on its redirect. A later plain `/fleet` link tapped in another
+app has the same problem: the cookie is not sent. So `/fleet` with no auth and
+no `?hop=1` answers the same hop, to `/fleet?hop=1`; that same-site request
+carries the cookie, and the page then `replaceState`s back to `/fleet`. A miss
+on `?hop=1` is a real 401. The page sends `Referrer-Policy: same-origin`,
 **not `no-referrer`**: with `no-referrer` browsers send `Origin: null` on POST,
 and the CSRF guard would refuse every send. `/fleet/usage` exists only because
 the cookie path cannot reach `/usage/numbers`.
 
-**Discovery.** Exactly one local row with `Name == "FLEET"` (exact match: other
-rows contain the word). 0 → not running, 2+ → `ambiguous`; both refuse sends.
+**Discovery.** Exactly one local claude row (`Tool == ""`) with a user-set
+`Name == "FLEET"` (exact match: other rows contain the word; a derived title or
+a grok row is not counted). 0 → not running, 2+ → `ambiguous`; both refuse
+sends.
 
 **Say guards, in order, and why each exists.** Cookie auth needs `Origin` (or
 `Referer`) host == `r.Host`. Newlines flatten to spaces and other control bytes
 are refused: tmux types a literal newline as Enter, and ESC could drive the
-TUI. `send-keys -l --`: without `--` a text starting with `-` is read as tmux
+TUI. A leading `!` or `#` is a 400: Claude Code switches to bash or memory mode
+on it, the box glyph changes, and every later send would refuse until the box
+is cleared at the terminal. `send-keys -l --`: without `--` a text starting with `-` is read as tmux
 flags. 1 s gap and a 10 s per-text double-tap map, stamped after Enter.
 Identity: cached discovery, then a fresh `resolveLivePID`, then `findFleet`
 again on that fresh list; an empty session id is refused because it would
 switch off `resolveLivePID`'s check. `WaitingFor != ""` refuses, and so does a
 pane whose input box is not visible: typed text plus Enter would answer a
 permission dialog. A box that already holds text refuses (another device, or
-Andy at the terminal). Then the text is typed, the pane is captured **again**,
-and Enter is pressed only if the box is still there and now holds text — the
-box was empty before, so that text is ours (it is not compared: Claude Code may
-show a long text as `[Pasted text #1]`). **Residual race, accepted:** a dialog
-that opens in the milliseconds between that capture and Enter still takes the
-Enter. Nothing outside Claude Code can lock its state.
+Andy at the terminal). A pane in tmux copy-mode (`#{pane_in_mode}`) refuses:
+keys then go to the copy-mode key table, a `q` in the text leaves copy-mode, and
+only the rest reaches Claude — a mangled message that could then be submitted.
+Then the text is typed, the pane is captured **again**, and Enter is pressed
+only if the box is still there and holds our text: with all whitespace removed,
+the box text is a non-empty prefix of the sent text (Claude may wrap it or still
+be drawing it), or it starts with `[Pasted text` (how Claude Code shows a long
+text). Other text keeps the poll going; a vanished box stops it. **Residual
+race, accepted:** a dialog that opens in the milliseconds between the first
+capture and typing, or between the second capture and Enter, still takes the
+keys — and typing alone can answer it, since digit keys select options.
+Nothing outside Claude Code can lock its state.
 
 **Input-box parser** (`paneInputText`, `capture-pane -p -e`): the region
 between the last two `─` rule lines whose first line starts with `❯`; dim text

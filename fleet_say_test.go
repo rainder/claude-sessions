@@ -14,9 +14,12 @@ import (
 
 const (
 	emptyBoxCapture = "out\n────────────────────\n❯ \n────────────────────\n status\n"
-	typedBoxCapture = "out\n────────────────────\n❯ hi\n────────────────────\n status\n"
 	dialogCapture   = "────────────────────\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n"
 )
+
+func boxCapture(text string) string {
+	return "out\n────────────────────\n❯ " + text + "\n────────────────────\n status\n"
+}
 
 type sayRig struct {
 	s        *server
@@ -41,12 +44,13 @@ func newSayRig(t *testing.T, sessions []Session) *sayRig {
 			return c, nil
 		}
 		if len(rig.typed) > rig.enters {
-			return typedBoxCapture, nil
+			return boxCapture(rig.typed[len(rig.typed)-1]), nil
 		}
 		return emptyBoxCapture, nil
 	}
 	rig.s.fleet.typeText = func(_ string, text string) error { rig.typed = append(rig.typed, text); return nil }
 	rig.s.fleet.pressEnter = func(string) error { rig.enters++; return nil }
+	rig.s.fleet.paneInMode = func(string) (bool, error) { return false, nil }
 	return rig
 }
 
@@ -322,5 +326,63 @@ func TestFleetSayUnauthorized(t *testing.T) {
 	fleetMux(rig.s).ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized || len(rig.typed) != 0 {
 		t.Fatalf("%d", w.Code)
+	}
+}
+
+func TestFleetSayRefusesCopyMode(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	rig.s.fleet.paneInMode = func(string) (bool, error) { return true, nil }
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "pane_mode" ||
+		res.Error != "The FLEET pane is in scroll mode. Press q in the terminal, then try again." {
+		t.Fatalf("%+v", res)
+	}
+	rig.s.fleet.paneInMode = func(string) (bool, error) { return false, errors.New("tmux gone") }
+	rig.now = rig.now.Add(time.Minute)
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "no_pane" {
+		t.Fatalf("%+v", res)
+	}
+	if len(rig.typed) != 0 {
+		t.Fatalf("nothing may be typed into copy mode: %q", rig.typed)
+	}
+}
+
+func TestFleetSayLandedCheck(t *testing.T) {
+	long := "Andy decides: DR-1 — yes (explicit). " + strings.Repeat("word ", 20)
+	for name, tc := range map[string]struct {
+		text, box string
+		want      bool
+	}{
+		"exact text":     {"hi there", "hi there", true},
+		"wrapped prefix": {strings.TrimSpace(long), strings.TrimSpace(long[:60]), true},
+		"pasted":         {"hi", "[Pasted text #1 +2 lines]", true},
+		"other text":     {"hi", "zzz", false},
+		"longer than":    {"hi", "hi there", false},
+	} {
+		rig := newSayRig(t, []Session{fleetRow()})
+		rig.captures = []string{emptyBoxCapture, boxCapture(tc.box)}
+		_, res := rig.post(t, `{"text":"`+tc.text+`"}`, nil)
+		if tc.want {
+			if !res.OK || rig.enters != 1 {
+				t.Errorf("%s: %+v enters %d", name, res, rig.enters)
+			}
+		} else if res.Code != "not_submitted" || rig.enters != 0 {
+			t.Errorf("%s: %+v enters %d", name, res, rig.enters)
+		}
+	}
+}
+
+func TestFleetSayRefusesLeadingBangOrHash(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	for _, text := range []string{"!ls", "#remember this", "  !ls"} {
+		r := httptest.NewRequest("POST", "http://ws.ts.net:8765/fleet/say", strings.NewReader(`{"text":"`+text+`"}`))
+		r.Header.Set("Authorization", "Bearer tok")
+		w := httptest.NewRecorder()
+		fleetMux(rig.s).ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != "text must not start with ! or #" {
+			t.Errorf("%q: %d %q", text, w.Code, w.Body.String())
+		}
+	}
+	if len(rig.typed) != 0 {
+		t.Fatalf("typed %q", rig.typed)
 	}
 }

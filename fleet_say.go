@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -92,6 +93,41 @@ func tmuxTypeLiteral(target, text string) error {
 	return exec.Command("tmux", "send-keys", "-t", target, "-l", "--", text).Run()
 }
 
+// tmuxPaneInMode reports whether target is in a tmux mode such as copy-mode.
+// Keys sent then go to the mode's key table, not to Claude: a "q" in the
+// text leaves copy-mode and only the rest reaches the input box.
+func tmuxPaneInMode(target string) (bool, error) {
+	if target == "" {
+		return false, errors.New("no tmux pane")
+	}
+	out, err := exec.Command("tmux", "display", "-p", "-t", target, "#{pane_in_mode}").Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) == "1", nil
+}
+
+// fleetTextLanded reports whether the input box holds what was just typed.
+// Claude may wrap a long line or still be drawing it, so the box text only
+// has to be a non-empty prefix of the sent text, whitespace ignored. A long
+// paste shows as a "[Pasted text ...]" placeholder instead.
+func fleetTextLanded(box, sent string) bool {
+	if strings.HasPrefix(box, "[Pasted text") {
+		return true
+	}
+	b, t := stripSpace(box), stripSpace(sent)
+	return b != "" && strings.HasPrefix(t, b)
+}
+
+func stripSpace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 func tmuxPressEnter(target string) error {
 	if target == "" {
 		return errors.New("no tmux pane")
@@ -121,6 +157,13 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	text, err := sanitizeFleetText(raw)
 	if err != nil {
 		http.Error(w, "bad text", http.StatusBadRequest)
+		return
+	}
+	// Claude Code switches to bash mode on a leading "!" and memory mode on
+	// "#". The box glyph changes, so every later send would refuse until the
+	// box is cleared at the terminal.
+	if text[0] == '!' || text[0] == '#' {
+		http.Error(w, "text must not start with ! or #", http.StatusBadRequest)
 		return
 	}
 
@@ -190,6 +233,17 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		refuse("input_busy", "input box not empty")
 		return
 	}
+	inMode := f.paneInMode
+	if inMode == nil {
+		inMode = tmuxPaneInMode
+	}
+	if mode, err := inMode(fresh.Tmux); err != nil {
+		refuse("no_pane", "cannot read the FLEET pane")
+		return
+	} else if mode {
+		refuse("pane_mode", "The FLEET pane is in scroll mode. Press q in the terminal, then try again.")
+		return
+	}
 
 	typeText, pressEnter, sleep := f.typeText, f.pressEnter, f.sleep
 	if typeText == nil {
@@ -208,6 +262,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	// The first capture is a snapshot: a dialog may have opened since, and
 	// Enter would pick its highlighted option. Press Enter only once the box
 	// is still there and holds what was just typed (it was empty before).
+	// Other text in the box is not ours: keep polling, then give up.
 	landed := false
 	for i := 0; i < fleetLandPolls && !landed; i++ {
 		if i > 0 {
@@ -221,7 +276,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		if !found {
 			break
 		}
-		landed = typed != ""
+		landed = fleetTextLanded(typed, text)
 	}
 	if !landed {
 		_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
