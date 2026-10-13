@@ -1,1 +1,1076 @@
-<!doctype html><meta charset="utf-8"><title>FLEET</title><p>FLEET</p>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f5f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f1012" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:,">
+<title>FLEET</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f5f5f2; --surface: #ffffff; --surface2: #f0f0ec; --text: #1b1c1f; --muted: #686970;
+  --line: #e2e2dc; --accent: #2a5fd3; --accent-tint: #e9effc; --on-accent: #ffffff;
+  --red: #c0302a; --red-tint: #fcecea; --red-line: #efc3bf;
+  --amber: #a25a00; --amber-tint: #fdf3e2; --amber-line: #ecd3a5;
+  --green: #2d8649; --shadow: 0 10px 30px rgba(20, 20, 30, .18);
+  --hdr: 84px; --r: 12px;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1012; --surface: #18191c; --surface2: #212327; --text: #e8e8eb; --muted: #9c9da4;
+    --line: #2b2d32; --accent: #86abff; --accent-tint: #1b2741; --on-accent: #0f1012;
+    --red: #ff7b72; --red-tint: #2b1716; --red-line: #5c2b28;
+    --amber: #f0b45b; --amber-tint: #2a2114; --amber-line: #5a4422;
+    --green: #63c585; --shadow: 0 10px 30px rgba(0, 0, 0, .5);
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 var(--sans); }
+button { font: inherit; color: inherit; }
+button:focus-visible, textarea:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+[hidden] { display: none !important; }
+.mono { font-family: var(--mono); font-size: .86em; }
+.muted { color: var(--muted); }
+
+/* Header */
+header.top {
+  position: sticky; top: 0; z-index: 20;
+  padding: max(env(safe-area-inset-top), 10px) max(env(safe-area-inset-right), 16px) 10px max(env(safe-area-inset-left), 16px);
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  -webkit-backdrop-filter: saturate(1.4) blur(12px); backdrop-filter: saturate(1.4) blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.hdr-inner { max-width: 1600px; margin: 0 auto; }
+.hdr-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.brand { font-weight: 750; font-size: 17px; letter-spacing: .12em; margin-right: 2px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 99px; background: var(--surface2); font-size: 13px; white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.st-idle .dot { background: var(--green); }
+.st-busy .dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.st-waiting { color: var(--amber); } .st-waiting .dot { background: var(--amber); }
+.st-down { color: var(--red); } .st-down .dot { background: var(--red); }
+.offline { color: var(--muted); } .offline .dot { background: var(--muted); }
+.hdr-ago { margin-left: auto; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.chips { display: flex; gap: 6px; margin-top: 8px; overflow-x: auto; scrollbar-width: none; }
+.chips::-webkit-scrollbar { display: none; }
+.chip { flex: none; padding: 4px 9px 5px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 12px; line-height: 1.25; min-width: 82px; }
+.chip .lbl { color: var(--muted); margin-right: 5px; }
+.chip .val { font-weight: 650; font-variant-numeric: tabular-nums; }
+.chip .bar { height: 3px; border-radius: 2px; background: var(--line); margin-top: 4px; overflow: hidden; }
+.chip .bar i { display: block; height: 100%; width: 0; background: var(--muted); border-radius: 2px; }
+.chip.warn .val { color: var(--amber); } .chip.warn .bar i { background: var(--amber); }
+.chip.high .val { color: var(--red); } .chip.high .bar i { background: var(--red); }
+.chip.old { opacity: .6; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .st-busy .dot, .sent .dot { animation: none; } }
+
+/* Page */
+main { max-width: 1600px; margin: 0 auto; padding: 12px max(env(safe-area-inset-right), 16px) calc(96px + env(safe-area-inset-bottom)) max(env(safe-area-inset-left), 16px); }
+.banners { display: grid; gap: 8px; margin-bottom: 12px; }
+.banners:empty { display: none; }
+.banner { padding: 10px 12px; border-radius: 10px; border: 1px solid; font-size: 14px; font-weight: 550; }
+.banner.red { background: var(--red-tint); border-color: var(--red-line); color: var(--red); }
+.banner.amber { background: var(--amber-tint); border-color: var(--amber-line); color: var(--amber); }
+.now { margin: 0 0 14px; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+.now b { color: var(--text); font-weight: 600; margin-right: 4px; }
+.layout { display: flex; flex-direction: column; gap: 22px; }
+.col { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+section { min-width: 0; }
+.sec-h { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.sec-h .n { font-weight: 600; letter-spacing: 0; padding: 0 7px; border-radius: 99px; background: var(--surface2); font-variant-numeric: tabular-nums; }
+.sec-yes .sec-h { color: var(--red); } .sec-yes .sec-h .n { background: var(--red-tint); }
+.sec-needs .sec-h { color: var(--amber); } .sec-needs .sec-h .n { background: var(--amber-tint); }
+.empty { margin: 0; padding: 10px 12px; font-size: 14px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
+
+/* Decision cards */
+.card { background: var(--surface); border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--r); padding: 12px 12px 12px 14px; margin-bottom: 10px; }
+.card:last-child { margin-bottom: 0; }
+.card.k-yes { border-color: var(--red-line); border-left-color: var(--red); }
+.card.k-needs { border-color: var(--amber-line); border-left-color: var(--amber); }
+.card-top { display: flex; align-items: flex-start; gap: 8px; }
+.card-title { flex: 1; min-width: 0; display: block; padding: 2px 0; background: none; border: 0; text-align: left; cursor: pointer; }
+.card-title .tk { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.card-title .tt { font-weight: 620; font-size: 15.5px; overflow-wrap: anywhere; }
+.card-title .chev { display: inline-block; margin-left: 6px; color: var(--muted); font-size: 12px; transition: transform .15s; }
+.card-title[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.icon-btn { flex: none; width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface2); cursor: pointer; font-size: 17px; line-height: 1; }
+.lean-line { margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
+.lean-line b { color: var(--text); }
+.opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 8px; margin-top: 10px; }
+.opt { display: flex; align-items: center; gap: 9px; min-height: 46px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.opt:hover:not(:disabled) { border-color: var(--muted); }
+.opt:disabled { opacity: .45; cursor: not-allowed; }
+.opt .k { flex: none; display: grid; place-items: center; min-width: 24px; height: 24px; padding: 0 5px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); font-family: var(--mono); font-size: 12px; font-weight: 700; }
+.opt.is-lean { border-color: var(--accent); }
+.opt.lean-btn { background: var(--accent-tint); border-color: var(--accent); color: var(--accent); font-weight: 620; }
+.opt.lean-btn .k { border-color: var(--accent); color: var(--accent); background: transparent; }
+.card-more { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); font-size: 14px; }
+.summary { margin: 0 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.opt-lines { margin: 0 0 10px; padding: 0; list-style: none; display: grid; gap: 4px; }
+.opt-lines li { overflow-wrap: anywhere; }
+.opt-lines .k { font-family: var(--mono); font-weight: 700; margin-right: 6px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 0; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.links { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.sent { display: flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 13px; color: var(--accent); font-weight: 550; }
+.sent .dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+
+/* Compact lists */
+.rows { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.row { border-top: 1px solid var(--line); }
+.row:first-child { border-top: 0; }
+.row > summary, .row > .row-head { display: block; padding: 9px 12px; list-style: none; }
+.row > summary { cursor: pointer; }
+.row > summary::-webkit-details-marker { display: none; }
+.row-l1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.row-l1 .tk { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.row-l1 .tt { min-width: 0; font-weight: 520; overflow-wrap: anywhere; }
+.row-l2 { margin-top: 2px; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
+.row-l2 .sess { font-family: var(--mono); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-l2 .wo { color: var(--amber); }
+.row-body { padding: 0 12px 10px; font-size: 14px; }
+
+/* Chat */
+.chat { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); min-width: 0; }
+.chat .sec-h { margin: 0; padding: 10px 12px 0; }
+.chat-log { flex: 1; min-height: 180px; max-height: 62vh; overflow-y: auto; padding: 4px 12px 8px; overscroll-behavior: contain; }
+.turn { margin: 10px 0; max-width: 94%; }
+.turn.user { margin-left: auto; }
+.turn .who { display: flex; gap: 8px; font-size: 12px; color: var(--muted); margin: 0 2px 3px; }
+.turn.user .who { justify-content: flex-end; }
+.turn .who b { color: var(--text); font-weight: 650; }
+.turn .body { background: var(--surface2); border-radius: 12px; padding: 8px 11px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14.5px; line-height: 1.45; }
+.turn.user .body { background: var(--accent-tint); }
+.turn .body.fold { max-height: calc(12 * 1.45em + 16px); overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 78%, transparent); mask-image: linear-gradient(to bottom, #000 78%, transparent); }
+.link-btn { background: none; border: 0; padding: 4px 2px; color: var(--accent); cursor: pointer; font-size: 13px; font-weight: 550; }
+.chat-empty { margin: 18px 0; text-align: center; font-size: 14px; color: var(--muted); }
+.composer { border-top: 1px solid var(--line); padding: 10px 12px 12px; }
+.composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.composer textarea { flex: 1; min-width: 0; min-height: 46px; max-height: 200px; resize: none; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: 16px/1.35 var(--sans); }
+.composer textarea:disabled { opacity: .6; }
+.hint { margin: 6px 2px 0; font-size: 12px; color: var(--muted); }
+.kbd-hint { display: none; }
+@media (hover: hover) and (pointer: fine) { .kbd-hint { display: inline; } }
+.btn { min-height: 46px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface2); cursor: pointer; font-weight: 600; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn-danger { background: var(--red); border-color: var(--red); color: #fff; }
+@media (prefers-color-scheme: dark) { .btn-danger { color: #1a0d0c; } }
+
+/* History */
+.filters { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: none; }
+.filters::-webkit-scrollbar { display: none; }
+.fchip { flex: none; min-height: 32px; padding: 0 11px; border-radius: 99px; border: 1px solid var(--line); background: var(--surface); font-size: 13px; cursor: pointer; }
+.fchip[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+.hist { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.hday { padding: 6px 12px; font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); background: var(--surface2); }
+.hent { display: grid; grid-template-columns: 3.1em 1fr; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 14px; }
+.hday + .hent { border-top: 0; }
+.hent .t { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12.5px; padding-top: 2px; }
+.hent .c { min-width: 0; overflow-wrap: anywhere; }
+.ty { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 5px; font-size: 11.5px; font-weight: 650; background: var(--surface2); color: var(--muted); vertical-align: 1px; }
+.ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say { color: var(--accent); }
+.hent .tk { font-family: var(--mono); font-size: 12px; margin-right: 6px; }
+.hent a { margin-left: 6px; white-space: nowrap; }
+.more-row { padding: 10px 12px; border-top: 1px solid var(--line); text-align: center; }
+
+/* Confirm sheet */
+dialog.sheet { border: 0; padding: 0; width: calc(100% - 32px); max-width: 520px; max-height: calc(100% - 32px); border-radius: 16px; background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
+.sheet-in { padding: 18px 18px 16px; display: grid; gap: 12px; }
+.kicker { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.sheet.explicit .kicker { color: var(--red); }
+.sheet h2 { margin: 0; font-size: 19px; line-height: 1.3; }
+.sheet-card { margin: 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+.sheet-text { margin: 0; padding: 12px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15.5px; max-height: 38vh; overflow-y: auto; }
+.sheet.explicit .sheet-text { border: 2px solid var(--red); background: var(--red-tint); }
+.sheet-note { margin: 0; font-size: 14px; color: var(--red); font-weight: 550; }
+.sheet-actions { display: grid; gap: 8px; margin-top: 4px; }
+.sheet-actions .btn { width: 100%; min-height: 50px; }
+.readok { margin: 0; padding: 12px; text-align: center; font-size: 14px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
+@media (max-width: 640px) {
+  dialog.sheet { width: 100%; max-width: 100%; margin: auto 0 0; border-radius: 18px 18px 0 0; }
+  .sheet-in { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+}
+
+/* Toast */
+.toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 50; transform: translate(-50%, 12px); opacity: 0; pointer-events: none;
+  max-width: min(92vw, 480px); padding: 11px 15px; border-radius: 11px; background: var(--text); color: var(--bg); font-size: 14px; box-shadow: var(--shadow); transition: opacity .18s, transform .18s; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.err { border-left: 4px solid var(--red); }
+
+/* Wide screens: card sections in two columns beside the chat. */
+@media (min-width: 900px) {
+  body { font-size: 14.5px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "decide chat" "lists chat"; grid-template-rows: auto 1fr; gap: 22px 22px; align-items: start; }
+  .col-decide { grid-area: decide; } .col-lists { grid-area: lists; }
+  .chat { grid-area: chat; position: sticky; top: calc(var(--hdr) + 12px); height: calc(100vh - var(--hdr) - 28px); }
+  .chat-log { max-height: none; }
+}
+@media (min-width: 1280px) {
+  .layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr); grid-template-areas: "decide lists chat"; grid-template-rows: auto; }
+}
+</style>
+</head>
+<body>
+<header class="top" id="top">
+  <div class="hdr-inner">
+    <div class="hdr-row">
+      <span class="brand">FLEET</span>
+      <span class="pill" id="status"><span class="dot"></span><span id="status-t">loading</span></span>
+      <span class="pill offline" id="offline" hidden title="The last request failed. The page tries again."><span class="dot"></span>offline</span>
+      <span class="hdr-ago" id="ago"></span>
+    </div>
+    <div class="chips" id="chips" aria-label="Quota"></div>
+  </div>
+</header>
+
+<main>
+  <div class="banners" id="banners" role="status" aria-live="polite"></div>
+  <p class="now" id="now" hidden></p>
+
+  <div class="layout">
+    <div class="col col-decide">
+      <section class="sec-yes" id="sec-yes" aria-labelledby="h-yes">
+        <h2 class="sec-h" id="h-yes">Needs your explicit yes <span class="n" id="n-yes">0</span></h2>
+        <div id="list-yes"></div>
+      </section>
+      <section class="sec-needs" id="sec-needs" aria-labelledby="h-needs">
+        <h2 class="sec-h" id="h-needs">Needs you <span class="n" id="n-needs">0</span></h2>
+        <div id="list-needs"></div>
+      </section>
+      <p class="empty" id="no-decisions" hidden>Nothing needs you now.</p>
+    </div>
+
+    <section class="chat" id="chat" aria-labelledby="h-chat">
+      <h2 class="sec-h" id="h-chat">Chat</h2>
+      <div class="chat-log" id="chat-log" aria-live="polite"></div>
+      <div class="composer">
+        <div class="composer-row">
+          <textarea id="say" rows="1" maxlength="4096" placeholder="Write to FLEET" aria-label="Message to FLEET"></textarea>
+          <button class="btn btn-primary" id="say-send" type="button">Send</button>
+        </div>
+        <p class="hint"><span class="kbd-hint">Ctrl+Enter sends. </span>New lines become spaces.</p>
+      </div>
+    </section>
+
+    <div class="col col-lists">
+      <section aria-labelledby="h-working">
+        <h2 class="sec-h" id="h-working">Working <span class="n" id="n-working">0</span></h2>
+        <div id="list-working"></div>
+      </section>
+      <section aria-labelledby="h-waiting">
+        <h2 class="sec-h" id="h-waiting">Waiting <span class="n" id="n-waiting">0</span></h2>
+        <div id="list-waiting"></div>
+      </section>
+      <section aria-labelledby="h-done">
+        <h2 class="sec-h" id="h-done">Done today <span class="n" id="n-done">0</span></h2>
+        <div id="list-done"></div>
+      </section>
+      <section aria-labelledby="h-history">
+        <h2 class="sec-h" id="h-history">History</h2>
+        <div class="filters" id="filters" role="group" aria-label="Filter history"></div>
+        <div class="hist" id="hist"></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
+  <div class="sheet-in">
+    <p class="kicker" id="sheet-kicker"></p>
+    <h2 id="sheet-title"></h2>
+    <p class="sheet-card" id="sheet-card"></p>
+    <p class="sheet-text" id="sheet-text"></p>
+    <p class="sheet-note" id="sheet-note" hidden>FLEET reads this as your explicit approval of a write.</p>
+    <div class="sheet-actions">
+      <button class="btn" id="sheet-read" type="button" hidden>I read this</button>
+      <p class="readok" id="sheet-readok" hidden>&#10003; You read the text. Approve it below.</p>
+      <button class="btn btn-danger" id="sheet-approve" type="button" hidden>Yes, I approve this write</button>
+      <button class="btn btn-primary" id="sheet-send" type="button" hidden>Send</button>
+      <button class="btn" id="sheet-cancel" type="button">Cancel</button>
+    </div>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="assertive"></div>
+
+<script>
+"use strict";
+(function () {
+  // Every node is built with createElement + textContent. Card, chat and log
+  // text is untrusted; links go through safeLink (http and https only).
+
+  const TYPES = ["merge", "kill", "spawn", "ticket", "decision", "ruling", "relay", "web-say", "note"];
+  const BACKOFF_CAP = 60000;
+  const $ = id => document.getElementById(id);
+
+  // ---- defensive readers -------------------------------------------------
+  const str = v => typeof v === "string" ? v : (typeof v === "number" && isFinite(v) ? String(v) : "");
+  const arr = v => Array.isArray(v) ? v : [];
+  const obj = v => (v && typeof v === "object" && !Array.isArray(v)) ? v : null;
+  const num = v => typeof v === "number" && isFinite(v);
+
+  function el(tag, cls) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    for (let i = 2; i < arguments.length; i++) {
+      const k = arguments[i];
+      if (k === null || k === undefined || k === false || k === "") continue;
+      e.append(typeof k === "string" ? document.createTextNode(k) : k);
+    }
+    return e;
+  }
+
+  function safeLink(url, label) {
+    let u;
+    try { u = new URL(url); } catch { return document.createTextNode(label); }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return document.createTextNode(label);
+    const a = document.createElement("a");
+    a.href = u.href; a.textContent = label; a.target = "_blank"; a.rel = "noopener noreferrer";
+    return a;
+  }
+
+  // ---- time --------------------------------------------------------------
+  const vilniusDay = d => new Intl.DateTimeFormat("en-CA", {timeZone: "Europe/Vilnius", year: "numeric", month: "2-digit", day: "2-digit"}).format(d);
+  const isToday = iso => { const d = new Date(iso); return !isNaN(d) && vilniusDay(d) === vilniusDay(new Date()); };
+  const parseTime = iso => { const t = Date.parse(str(iso)); return isNaN(t) ? null : t; };
+  function minsSince(iso) { const t = parseTime(iso); return t === null ? null : Math.max(0, Math.floor((Date.now() - t) / 60000)); }
+  function ago(iso) {
+    const m = minsSince(iso);
+    if (m === null) return "";
+    if (m < 1) return "now";
+    if (m < 60) return m + " min ago";
+    const h = Math.floor(m / 60);
+    if (h < 48) return h + " h ago";
+    return Math.floor(h / 24) + " d ago";
+  }
+  function ageText(m) { return m < 120 ? m + " min" : Math.floor(m / 60) + " h"; }
+  const localDay = d => d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
+  function clock(iso) {
+    const t = parseTime(iso);
+    if (t === null) return "";
+    return new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
+  }
+  function clockWithDay(iso) {
+    const t = parseTime(iso);
+    if (t === null) return "";
+    const d = new Date(t);
+    if (localDay(d) === localDay(new Date())) return clock(iso);
+    return d.toLocaleDateString([], {month: "short", day: "numeric"}) + ", " + clock(iso);
+  }
+  function dayLabel(t) {
+    const d = new Date(t), today = new Date(), yest = new Date(Date.now() - 864e5);
+    if (localDay(d) === localDay(today)) return "Today";
+    if (localDay(d) === localDay(yest)) return "Yesterday";
+    return d.toLocaleDateString([], {weekday: "short", month: "short", day: "numeric"});
+  }
+  function relSpan(iso, prefix) {
+    const s = el("span", "rel");
+    s.dataset.at = str(iso);
+    s.dataset.prefix = prefix || "";
+    s.textContent = (prefix || "") + ago(iso);
+    return s;
+  }
+  function updateRel() {
+    for (const s of document.querySelectorAll(".rel")) s.textContent = (s.dataset.prefix || "") + ago(s.dataset.at);
+    renderAgo();
+  }
+
+  // ---- app state ---------------------------------------------------------
+  let expired = false;
+  let state = null, stateText = "", stateDay = "";
+  let alive = false;
+  const expanded = new Set();          // card ids with the detail open
+  const pending = new Map();           // cardId → updatedAt at send time
+  const failed = {};                   // poller name → last fetch failed
+  const chat = {sid: null, pos: null, turns: new Map(), reason: "", open: new Set(), key: ""};
+  const hist = {entries: [], next: null, filter: "", loading: false, loaded: false};
+
+  class AuthError extends Error {}
+
+  function expire() {
+    if (expired) return;
+    expired = true;
+    stopAll();
+    renderBanners();
+    applyEnabled();
+  }
+
+  async function getJSON(url) {
+    const r = await fetch(url, {credentials: "same-origin", cache: "no-store"});
+    if (r.status === 401) { expire(); throw new AuthError("unauthorized"); }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.text();
+  }
+
+  function guard(fn) {
+    try { fn(); } catch (e) { console.error("fleet render:", e); }
+  }
+
+  // ---- header ------------------------------------------------------------
+  function renderAgo() {
+    const at = state && state.writtenAt;
+    const a = ago(at);
+    $("ago").textContent = a ? "State written " + a : "";
+  }
+
+  function renderStatus() {
+    const pill = $("status");
+    const fl = obj(state && state.fleet);
+    let cls = "st-down", text = "not running";
+    if (fl && fl.alive === true) {
+      const s = str(fl.status);
+      if (s === "busy") { cls = "st-busy"; text = "busy"; }
+      else if (s === "waiting") { cls = "st-waiting"; text = "waiting"; }
+      else { cls = "st-idle"; text = "idle"; }
+    }
+    pill.className = "pill " + cls;
+    $("status-t").textContent = text;
+  }
+
+  function renderOffline() {
+    $("offline").hidden = expired || !Object.values(failed).some(Boolean);
+  }
+
+  function usageChip(label, w, stale, title) {
+    const c = el("div", "chip");
+    const pct = w && num(w.pct) ? w.pct : null;
+    const val = el("span", "val", pct === null ? "–" : Math.round(pct) + "%");
+    const fill = el("i");
+    if (pct !== null) {
+      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+      if (pct >= 95) c.classList.add("high");
+      else if (pct >= 80) c.classList.add("warn");
+    }
+    if (stale) c.classList.add("old");
+    const tips = [];
+    if (title) tips.push(title);
+    if (w && w.resetsAt) { const r = clockWithDay(w.resetsAt); if (r) tips.push("Resets " + r); }
+    if (stale) tips.push("Old numbers");
+    if (tips.length) c.title = tips.join(" · ");
+    c.append(el("span", "lbl", label), val, el("div", "bar", fill));
+    return c;
+  }
+
+  function renderUsage(u) {
+    u = obj(u) || {};
+    const claude = arr(u.claude).map(obj).filter(Boolean);
+    const act = claude.find(c => c.active === true) || null;
+    const who = act ? str(act.account) : "";
+    const chips = [
+      usageChip("Claude 5h", act && obj(act.fiveHour), act && act.stale === true, who),
+      usageChip("Claude 7d", act && obj(act.sevenDay), act && act.stale === true, who),
+    ];
+    const g = obj(arr(u.grok)[0]);
+    let best = null;
+    if (g) for (const w of arr(g.windows)) {
+      const wo = obj(w);
+      if (wo && num(wo.pct) && (!best || wo.pct > best.pct)) best = wo;
+    }
+    const glabel = best && str(best.label) ? "Grok " + str(best.label) : "Grok";
+    chips.push(usageChip(glabel, best, g && g.stale === true, g ? str(g.account) : ""));
+    $("chips").replaceChildren(...chips);
+  }
+
+  // ---- banners -----------------------------------------------------------
+  function renderBanners() {
+    const out = [];
+    const b = (kind, text) => out.push(el("div", "banner " + kind, text));
+    if (expired) {
+      b("red", "Session expired. Run claude-sessions fleet-url on the host.");
+    } else if (state) {
+      const fl = obj(state.fleet);
+      if (!fl || fl.alive !== true) {
+        const reason = fl ? str(fl.reason) : "";
+        if (reason === "ambiguous") b("red", "Two sessions are named FLEET. The page cannot send.");
+        else if (reason === "" || reason === "not running") b("red", "FLEET is not running. You cannot send now.");
+        else b("red", "FLEET is not available (" + reason + "). You cannot send now.");
+      }
+      if (state.stale === true) {
+        const m = minsSince(state.writtenAt);
+        b("amber", m === null ? "FLEET state has no valid write time." : "FLEET state is " + ageText(m) + " old.");
+      }
+      const se = str(state.stateError);
+      if (se) {
+        let t = se.charAt(0).toUpperCase() + se.slice(1);
+        if (!/[.!?]$/.test(t)) t += ".";
+        if (se.indexOf("invalid") >= 0) t += " The page shows the last good copy.";
+        b("amber", t);
+      }
+    }
+    $("banners").replaceChildren(...out);
+  }
+
+  // ---- cards -------------------------------------------------------------
+  function optionList(c) {
+    return arr(c.options).map(obj).filter(Boolean);
+  }
+
+  function cardHead(c) {
+    const ticket = str(c.ticket), title = str(c.title) || str(c.id) || "Untitled";
+    return {ticket, title, name: ticket || title};
+  }
+
+  function decisionCard(c, explicit) {
+    const id = str(c.id);
+    const head = cardHead(c);
+    const opts = optionList(c);
+    const lean = str(c.lean);
+    const leanOpt = lean ? opts.find(o => str(o.key) === lean) : null;
+    const open = id && expanded.has(id);
+
+    const card = el("article", "card " + (explicit ? "k-yes" : "k-needs"));
+    const titleBtn = el("button", "card-title",
+      head.ticket ? el("span", "tk", head.ticket) : null,
+      el("span", "tt", head.title, el("span", "chev", "▸")));
+    titleBtn.type = "button";
+    titleBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    titleBtn.addEventListener("click", () => {
+      if (!id) return;
+      if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+      guard(renderCards);
+    });
+    const talk = el("button", "icon-btn", "💬");
+    talk.type = "button";
+    talk.title = "Write about this in the chat";
+    talk.setAttribute("aria-label", "Write about " + head.name + " in the chat");
+    talk.addEventListener("click", () => prefillChat(head.name));
+    card.append(el("div", "card-top", titleBtn, talk));
+
+    if (lean) {
+      const ll = el("p", "lean-line", "Lean: ", el("b", "", lean));
+      if (leanOpt && str(leanOpt.label)) ll.append(" · " + str(leanOpt.label));
+      card.append(ll);
+    }
+
+    const canSend = alive && !expired;
+    if (opts.length) {
+      const box = el("div", "opts");
+      for (const o of opts) {
+        const key = str(o.key), label = str(o.label) || str(o.send) || key;
+        const btn = el("button", "opt" + (leanOpt === o ? " is-lean" : ""), key ? el("span", "k", key) : null, el("span", "", label));
+        btn.type = "button";
+        btn.disabled = !canSend || !str(o.send);
+        btn.addEventListener("click", () => openSheet(c, o, false, explicit));
+        box.append(btn);
+      }
+      if (leanOpt && str(leanOpt.send)) {
+        const lb = el("button", "opt lean-btn", el("span", "k", lean), el("span", "", "Lean"));
+        lb.type = "button";
+        lb.disabled = !canSend;
+        lb.addEventListener("click", () => openSheet(c, leanOpt, true, explicit));
+        box.append(lb);
+      }
+      card.append(box);
+    }
+
+    if (open) {
+      const more = el("div", "card-more");
+      const sum = str(c.summary);
+      if (sum) more.append(el("p", "summary", sum));
+      const lines = opts.filter(o => str(o.line));
+      if (lines.length) {
+        const ul = el("ul", "opt-lines");
+        for (const o of lines) ul.append(el("li", "", el("span", "k", str(o.key)), (str(o.label) ? str(o.label) + " — " : "") + str(o.line)));
+        more.append(ul);
+      }
+      const kv = detailList(c);
+      if (kv) more.append(kv);
+      if (!more.childNodes.length) more.append(el("p", "muted", "No more detail."));
+      card.append(more);
+    }
+
+    if (id && pending.has(id)) card.append(el("div", "sent", el("span", "dot"), "Sent · waiting for FLEET"));
+    return card;
+  }
+
+  function linksNode(c) {
+    const links = arr(c.links).map(obj).filter(l => l && str(l.url));
+    if (!links.length) return null;
+    const box = el("span", "links");
+    for (const l of links) box.append(safeLink(str(l.url), str(l.label) || str(l.url)));
+    return box;
+  }
+
+  function detailList(c) {
+    const dl = el("dl", "kv");
+    const add = (k, v) => { if (v) dl.append(el("dt", "", k), el("dd", "", v)); };
+    add("Links", linksNode(c));
+    const sess = str(c.session);
+    add("Session", sess ? el("span", "mono", sess) : null);
+    add("Waiting on", str(c.waitingOn));
+    if (str(c.updatedAt)) add("Updated", relSpan(c.updatedAt));
+    return dl.childNodes.length ? dl : null;
+  }
+
+  function compactRow(c) {
+    const head = cardHead(c);
+    const l1 = el("div", "row-l1", head.ticket ? el("span", "tk", head.ticket) : null, el("span", "tt", head.title));
+    const l2 = el("div", "row-l2");
+    if (str(c.session)) { const s = el("span", "sess", str(c.session)); s.title = str(c.session); l2.append(s); }
+    if (str(c.waitingOn)) l2.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
+    if (str(c.updatedAt)) l2.append(relSpan(c.updatedAt));
+    const sum = str(c.summary), links = linksNode(c);
+    if (!sum && !links) {
+      const row = el("div", "row");
+      row.append(el("div", "row-head", l1, l2.childNodes.length ? l2 : null));
+      return row;
+    }
+    const row = el("details", "row");
+    const id = str(c.id);
+    if (id && expanded.has("row:" + id)) row.open = true;
+    row.addEventListener("toggle", () => { if (!id) return; if (row.open) expanded.add("row:" + id); else expanded.delete("row:" + id); });
+    row.append(el("summary", "", l1, l2.childNodes.length ? l2 : null));
+    const body = el("div", "row-body");
+    if (sum) body.append(el("p", "summary", sum));
+    if (links) body.append(links);
+    row.append(body);
+    return row;
+  }
+
+  function renderCards() {
+    const cards = arr(state && state.cards).map(obj).filter(Boolean);
+    const g = {yes: [], needs: [], working: [], waiting: [], done: []};
+    for (const c of cards) {
+      const k = str(c.kind);
+      if (k === "explicit-yes") g.yes.push(c);
+      else if (k === "needs-you") g.needs.push(c);
+      else if (k === "waiting") g.waiting.push(c);
+      else if (k === "done") { if (isToday(str(c.updatedAt))) g.done.push(c); }
+      else g.working.push(c);
+    }
+    $("list-yes").replaceChildren(...g.yes.map(c => decisionCard(c, true)));
+    $("list-needs").replaceChildren(...g.needs.map(c => decisionCard(c, false)));
+    $("sec-yes").hidden = !g.yes.length;
+    $("sec-needs").hidden = !g.needs.length;
+    $("no-decisions").hidden = !!(g.yes.length || g.needs.length) || !state;
+    $("n-yes").textContent = g.yes.length;
+    $("n-needs").textContent = g.needs.length;
+    for (const k of ["working", "waiting", "done"]) {
+      $("n-" + k).textContent = g[k].length;
+      const box = $("list-" + k);
+      if (!g[k].length) box.replaceChildren(el("p", "empty", k === "done" ? "Nothing done today." : "None."));
+      else box.replaceChildren(el("div", "rows", ...g[k].map(compactRow)));
+    }
+    const n = g.yes.length + g.needs.length;
+    document.title = n ? "(" + n + ") FLEET" : "FLEET";
+  }
+
+  function renderNow() {
+    const note = str(state && state.cycleNote);
+    const p = $("now");
+    p.hidden = !note;
+    p.replaceChildren(el("b", "", "Now:"), note);
+  }
+
+  function applyState(text) {
+    let st;
+    try { st = obj(JSON.parse(text)); } catch { st = null; }
+    if (!st) throw new Error("bad state body");
+    const prevWritten = state ? str(state.writtenAt) : null;
+    const day = vilniusDay(new Date());
+    const changed = text !== stateText || day !== stateDay;
+    state = st; stateText = text; stateDay = day;
+    const fl = obj(st.fleet);
+    alive = !!(fl && fl.alive === true);
+
+    // A card leaves "sent" once FLEET drops it or rewrites it.
+    if (pending.size) {
+      const now = new Map(arr(st.cards).map(obj).filter(c => c && str(c.id)).map(c => [str(c.id), str(c.updatedAt)]));
+      for (const [id, at] of pending) if (!now.has(id) || now.get(id) !== at) pending.delete(id);
+    }
+    if (changed) {
+      guard(renderStatus);
+      guard(renderBanners);
+      guard(renderNow);
+      guard(renderCards);
+      guard(applyEnabled);
+    }
+    guard(updateRel);
+    if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
+  }
+
+  // ---- confirm sheet -----------------------------------------------------
+  const sheet = {card: null, text: "", explicit: false, busy: false, armTimer: 0};
+
+  function openSheet(c, o, lean, explicit) {
+    if (!alive || expired) return;
+    const base = str(o.send);
+    if (!base) return;
+    const head = cardHead(c);
+    sheet.card = c; sheet.explicit = explicit; sheet.busy = false;
+    sheet.text = lean ? base + " (lean)" : base;
+    const d = $("sheet");
+    d.classList.toggle("explicit", explicit);
+    $("sheet-kicker").textContent = explicit ? "Explicit yes" : (lean ? "Lean option" : "Option " + str(o.key));
+    $("sheet-title").textContent = explicit ? "Approve this write?" : "Send this to FLEET?";
+    $("sheet-card").textContent = head.ticket ? head.ticket + " · " + head.title : head.title;
+    $("sheet-text").textContent = sheet.text;
+    $("sheet-note").hidden = !explicit;
+    $("sheet-read").hidden = !explicit;
+    $("sheet-readok").hidden = true;
+    $("sheet-approve").hidden = true;
+    $("sheet-send").hidden = explicit;
+    for (const b of ["sheet-read", "sheet-approve", "sheet-send", "sheet-cancel"]) $(b).disabled = false;
+    $("sheet-approve").textContent = "Yes, I approve this write";
+    $("sheet-send").textContent = "Send";
+    if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
+    (explicit ? $("sheet-read") : $("sheet-send")).focus();
+  }
+
+  function closeSheet() {
+    clearTimeout(sheet.armTimer);
+    const d = $("sheet");
+    if (d.open) { if (typeof d.close === "function") d.close(); else d.removeAttribute("open"); }
+    sheet.card = null; sheet.busy = false;
+  }
+
+  // First tap of an explicit yes. The approve button shows in a new place and
+  // stays off for a moment, so one fast double tap cannot approve.
+  $("sheet-read").addEventListener("click", () => {
+    $("sheet-read").hidden = true;
+    $("sheet-readok").hidden = false;
+    const ap = $("sheet-approve");
+    ap.hidden = false;
+    ap.disabled = true;
+    clearTimeout(sheet.armTimer);
+    sheet.armTimer = setTimeout(() => { if (!sheet.busy) { ap.disabled = false; ap.focus(); } }, 600);
+  });
+
+  async function sheetSend(btn) {
+    if (sheet.busy || !sheet.card) return;
+    sheet.busy = true;
+    for (const b of ["sheet-approve", "sheet-send", "sheet-cancel"]) $(b).disabled = true;
+    btn.textContent = "Sending…";
+    const c = sheet.card, text = sheet.text;
+    const id = str(c.id);
+    const res = await say(text, id || null);
+    closeSheet();
+    if (res.ok) {
+      if (id) pending.set(id, str(c.updatedAt));
+      guard(renderCards);
+      toast(res.queued ? "Sent. FLEET is busy. It reads your answer next." : "Sent to FLEET.");
+      afterSend();
+    } else {
+      toast(res.error, true);
+    }
+  }
+  $("sheet-approve").addEventListener("click", e => sheetSend(e.currentTarget));
+  $("sheet-send").addEventListener("click", e => sheetSend(e.currentTarget));
+  $("sheet-cancel").addEventListener("click", closeSheet);
+  $("sheet").addEventListener("cancel", e => { if (sheet.busy) e.preventDefault(); });
+  $("sheet").addEventListener("close", () => { clearTimeout(sheet.armTimer); if (!sheet.busy) sheet.card = null; });
+  $("sheet").addEventListener("click", e => { if (e.target === $("sheet") && !sheet.busy) closeSheet(); });
+
+  // ---- send --------------------------------------------------------------
+  const friendly = {
+    "too fast": "Wait one second, then send again.",
+    "input box not empty": "The FLEET input box has text in it. Clear it in the terminal, then send again.",
+    "bad text": "The server refused the text. Remove special characters and try again.",
+  };
+
+  async function say(text, cardId) {
+    let r;
+    try {
+      r = await fetch("/fleet/say", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text, cardId})});
+    } catch {
+      return {ok: false, error: "The page cannot reach the server. Try again."};
+    }
+    if (r.status === 401) { expire(); return {ok: false, error: "Session expired. Run claude-sessions fleet-url on the host."}; }
+    let raw = "", body = null;
+    try { raw = await r.text(); } catch { raw = ""; }
+    try { body = obj(JSON.parse(raw)); } catch { body = null; }
+    if (r.ok && body && body.ok === true) return {ok: true, queued: body.queued === true};
+    let msg = (body && str(body.error)) || raw.trim() || r.statusText || ("HTTP " + r.status);
+    msg = friendly[msg] || msg;
+    msg = msg.charAt(0).toUpperCase() + msg.slice(1);
+    if (!/[.!?]$/.test(msg)) msg += ".";
+    return {ok: false, error: msg};
+  }
+
+  function afterSend() {
+    loadHistory(false);
+    setTimeout(() => runNow("chat"), 400);
+    setTimeout(() => runNow("state"), 800);
+  }
+
+  // ---- chat --------------------------------------------------------------
+  const reasonText = {
+    "not running": "FLEET is not running.",
+    "ambiguous": "Two sessions are named FLEET.",
+    "transcript not found": "The page cannot find the FLEET transcript.",
+    "transcript unreadable": "The page cannot read the FLEET transcript.",
+  };
+
+  function applyChat(text) {
+    const d = obj(JSON.parse(text));
+    if (!d) throw new Error("bad chat body");
+    const sid = str(d.sessionId);
+    if (chat.sid !== null && sid !== chat.sid) {
+      // Another FLEET session: start over from the top of its transcript.
+      chat.sid = sid; chat.pos = 0; chat.turns.clear(); chat.reason = str(d.reason);
+      guard(renderChat);
+      return "again";
+    }
+    chat.sid = sid;
+    chat.reason = str(d.reason);
+    let changed = false;
+    if (d.reset === true && chat.turns.size) { chat.turns.clear(); changed = true; }
+    for (const t of arr(d.turns)) {
+      const o = obj(t);
+      if (!o || !str(o.uuid)) continue;
+      const prev = chat.turns.get(o.uuid);
+      const turn = {uuid: str(o.uuid), role: str(o.role), at: str(o.at), text: str(o.text)};
+      if (!prev || prev.text !== turn.text || prev.at !== turn.at || prev.role !== turn.role) {
+        chat.turns.set(turn.uuid, turn);
+        changed = true;
+      }
+    }
+    chat.pos = num(d.pos) ? d.pos : 0;
+    const key = chat.reason + "|" + chat.turns.size;
+    if (changed || key !== chat.key) { chat.key = key; guard(renderChat); }
+  }
+
+  function renderChat() {
+    const log = $("chat-log");
+    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    const first = !log.childNodes.length || !log.querySelector(".turn");
+    const nodes = [];
+    for (const t of chat.turns.values()) {
+      const user = t.role === "user";
+      const body = el("div", "body", t.text);
+      const wrap = el("div", "turn " + (user ? "user" : "fleet"),
+        el("div", "who", el("b", "", user ? "Andy" : "FLEET"), el("span", "", clockWithDay(t.at))),
+        body);
+      if (!chat.open.has(t.uuid)) body.classList.add("fold");
+      wrap.dataset.uuid = t.uuid;
+      nodes.push(wrap);
+    }
+    if (!nodes.length) nodes.push(el("p", "chat-empty", reasonText[chat.reason] || (chat.reason ? "No chat to show (" + chat.reason + ")." : "No messages yet.")));
+    log.replaceChildren(...nodes);
+    // Fold only turns that really overflow 12 lines.
+    for (const w of log.querySelectorAll(".turn")) {
+      const body = w.querySelector(".body");
+      const uuid = w.dataset.uuid;
+      const isOpen = chat.open.has(uuid);
+      if (!isOpen && body.scrollHeight <= body.clientHeight + 4) { body.classList.remove("fold"); continue; }
+      const t = el("button", "link-btn", isOpen ? "Show less" : "Show all");
+      t.type = "button";
+      t.addEventListener("click", () => {
+        if (chat.open.has(uuid)) chat.open.delete(uuid); else chat.open.add(uuid);
+        const keep = log.scrollTop;
+        guard(renderChat);
+        log.scrollTop = keep;
+      });
+      w.append(t);
+    }
+    if (first || nearBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  function prefillChat(name) {
+    const ta = $("say");
+    const prefix = "About " + name + ": ";
+    if (!ta.value.startsWith(prefix)) ta.value = prefix + ta.value.replace(/^\s+/, "");
+    grow();
+    $("chat").scrollIntoView({behavior: "smooth", block: "nearest"});
+    if (!ta.disabled) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }
+
+  function grow() {
+    const ta = $("say");
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight + 2, 200) + "px";
+  }
+
+  let chatBusy = false;
+  async function sendChat() {
+    const ta = $("say");
+    const text = ta.value.trim();
+    if (!text || chatBusy || !alive || expired) return;
+    chatBusy = true;
+    const btn = $("say-send");
+    btn.disabled = true; btn.textContent = "Sending…";
+    const res = await say(text, null);
+    chatBusy = false;
+    btn.textContent = "Send";
+    if (res.ok) {
+      if (ta.value.trim() === text) ta.value = "";
+      grow();
+      toast(res.queued ? "Sent. FLEET is busy. It reads this next." : "Sent to FLEET.");
+      afterSend();
+    } else {
+      toast(res.error, true);
+    }
+    applyEnabled();
+  }
+
+  $("say").addEventListener("input", grow);
+  $("say").addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChat(); }
+  });
+  $("say-send").addEventListener("click", sendChat);
+
+  function applyEnabled() {
+    const can = alive && !expired;
+    $("say").disabled = expired;
+    $("say").placeholder = expired ? "Session expired." : (can ? "Write to FLEET" : "FLEET is not running.");
+    $("say-send").disabled = !can || chatBusy;
+  }
+
+  // ---- history -----------------------------------------------------------
+  const entryKey = e => str(e.at) + "\u0000" + str(e.type) + "\u0000" + str(e.text);
+
+  async function loadHistory(more) {
+    if (expired || hist.loading) return;
+    if (more && hist.next === null) return;
+    hist.loading = true;
+    let ok = true;
+    try {
+      const url = "/fleet/log?n=50" + (more ? "&before=" + hist.next : "");
+      const d = obj(JSON.parse(await getJSON(url))) || {};
+      const got = arr(d.entries).map(obj).filter(Boolean);
+      const next = num(d.next) ? d.next : null;
+      if (more) {
+        hist.entries = hist.entries.concat(got);
+        hist.next = next;
+      } else if (hist.entries.length > got.length && got.length) {
+        // Keep older pages the user loaded; add only the new head.
+        const head = entryKey(hist.entries[0]);
+        const i = got.findIndex(e => entryKey(e) === head);
+        if (i >= 0) hist.entries = got.slice(0, i).concat(hist.entries);
+        else { hist.entries = got; hist.next = next; }
+      } else {
+        hist.entries = got; hist.next = next;
+      }
+      hist.loaded = true;
+      guard(renderHistory);
+    } catch (e) {
+      ok = e instanceof AuthError;
+      if (!ok) console.warn("fleet log:", e.message);
+    } finally {
+      hist.loading = false;
+    }
+    failed.log = !ok;
+    renderOffline();
+  }
+
+  function renderFilters() {
+    const mk = (label, val) => {
+      const b = el("button", "fchip", label);
+      b.type = "button";
+      b.setAttribute("aria-pressed", hist.filter === val ? "true" : "false");
+      b.addEventListener("click", () => { hist.filter = hist.filter === val ? "" : val; guard(renderFilters); guard(renderHistory); });
+      return b;
+    };
+    $("filters").replaceChildren(mk("All", ""), ...TYPES.map(t => mk(t, t)));
+  }
+
+  function renderHistory() {
+    const box = $("hist");
+    const list = hist.entries.filter(e => !hist.filter || str(e.type) === hist.filter);
+    const nodes = [];
+    let lastDay = "";
+    for (const e of list) {
+      const t = parseTime(e.at);
+      const day = t === null ? "?" : localDay(new Date(t));
+      if (day !== lastDay) { nodes.push(el("div", "hday", t === null ? "Unknown date" : dayLabel(t))); lastDay = day; }
+      const type = str(e.type);
+      const c = el("div", "c", el("span", "ty ty-" + type.replace(/[^a-z-]/g, ""), type || "entry"));
+      if (str(e.ticket)) c.append(el("span", "tk", str(e.ticket)));
+      if (str(e.text)) c.append(str(e.text));
+      if (str(e.url)) c.append(safeLink(str(e.url), "Open ↗"));
+      nodes.push(el("div", "hent", el("span", "t", t === null ? "" : clock(e.at)), c));
+    }
+    if (!nodes.length) {
+      const msg = !hist.loaded ? "Loading history…" : hist.entries.length ? "No " + hist.filter + " entries in the loaded history." : "No history yet.";
+      nodes.push(el("p", "empty", msg));
+      box.style.border = "0";
+    } else {
+      box.style.border = "";
+    }
+    if (hist.next !== null) {
+      const b = el("button", "btn", "Load more");
+      b.type = "button";
+      b.addEventListener("click", () => loadHistory(true));
+      nodes.push(el("div", "more-row", b));
+    }
+    box.replaceChildren(...nodes);
+  }
+
+  // ---- toast -------------------------------------------------------------
+  let toastTimer = 0;
+  function toast(text, isErr) {
+    const t = $("toast");
+    t.textContent = text;
+    t.classList.toggle("err", !!isErr);
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), isErr ? 6000 : 3000);
+  }
+
+  // ---- polling -----------------------------------------------------------
+  const pollers = {
+    state: {base: 5000, fn: async () => applyState(await getJSON("/fleet/state"))},
+    chat: {base: 3000, fn: async () => {
+      let url = "/fleet/chat?n=50";
+      if (chat.pos !== null) url += "&since=" + chat.pos;
+      return applyChat(await getJSON(url));
+    }},
+    usage: {base: 60000, fn: async () => { const t = await getJSON("/fleet/usage"); guard(() => renderUsage(JSON.parse(t))); }},
+  };
+  for (const [name, p] of Object.entries(pollers)) { p.name = name; p.cur = p.base; p.timer = 0; p.busy = false; }
+
+  async function run(p) {
+    if (expired || document.hidden || p.busy) return;
+    p.busy = true;
+    clearTimeout(p.timer);
+    let ok = true, again = false;
+    try {
+      again = (await p.fn()) === "again";
+    } catch (e) {
+      ok = e instanceof AuthError;
+      if (!ok) console.warn("fleet " + p.name + ":", e.message);
+    }
+    p.busy = false;
+    failed[p.name] = !ok;
+    renderOffline();
+    p.cur = ok ? p.base : Math.min(p.cur * 2, BACKOFF_CAP);
+    if (!expired && !document.hidden) p.timer = setTimeout(() => run(p), again ? 0 : p.cur);
+  }
+  function runNow(name) { const p = pollers[name]; if (p) run(p); }
+  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); }
+  function startAll() {
+    if (expired) return;
+    for (const p of Object.values(pollers)) { clearTimeout(p.timer); p.cur = p.base; run(p); }
+    loadHistory(false);
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopAll(); else startAll();
+  });
+
+  // Keep the sticky chat column under the header on wide screens.
+  function measureHeader() { document.documentElement.style.setProperty("--hdr", $("top").offsetHeight + "px"); }
+  window.addEventListener("resize", measureHeader);
+
+  // ---- boot --------------------------------------------------------------
+  measureHeader();
+  renderFilters();
+  renderUsage(null);
+  renderHistory();
+  applyEnabled();
+  startAll();
+})();
+</script>
+</body>
+</html>
