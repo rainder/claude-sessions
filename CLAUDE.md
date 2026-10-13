@@ -963,6 +963,14 @@ practice journald showed nothing from the server either (stderr is not nulled
 in the unit, but nothing arrived), so the stderr log reached nobody.
 `fleetDeps.sayLogPath` points tests at a temp dir.
 
+**Rich text.** Card summaries and chat turns go through `renderRich` in
+`fleet.html`, a small markdown renderer: paragraphs (single newline = `<br>`),
+`-`/`*` and numbered lists, ``` fenced blocks, `#`–`###` lines as a bold
+line, and inline `code`, **bold**, *italic*, `[label](url)`. It builds nodes
+only with `createElement` and text nodes, so raw HTML in the text shows as
+text, and links go through `safeLink` (http and https only; anything else is
+the plain label). `fleet_page_test.go` forbids the HTML sinks.
+
 **Cursors.** Chat: `since=<byte position>` in the transcript; the server
 returns every turn that changed after it (a later line of the same assistant
 message can update an earlier turn, which a uuid cursor misses) and the page
