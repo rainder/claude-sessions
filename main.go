@@ -68,6 +68,8 @@ func main() {
 		os.Exit(cmdUsage(args[1:]))
 	case "fleet-url":
 		os.Exit(cmdFleetURL(args[1:]))
+	case "idle-events":
+		os.Exit(cmdIdleEvents(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -119,6 +121,10 @@ subcommands:
                                   once, for 10 minutes; https when tailscale
                                   serve routes to this server, --http forces
                                   http); --revoke logs every device out
+  idle-events status | test --target T
+                                  show the idle-event config and state, or
+                                  type one test line into session T (tmux
+                                  session name or session id)
   summary [claude|codex]          print or set the ticket/conversation
                                   summary backend (default claude)
   notify-test                     send a test push to every registered device
