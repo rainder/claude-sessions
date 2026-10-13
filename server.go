@@ -767,6 +767,9 @@ type server struct {
 	// fleet backs the /fleet routes (fleet.go): seams plus the last good
 	// state.json copy and the say rate limit.
 	fleet fleetDeps
+
+	// idle is the idle-event loop's seams and state (idle_events.go).
+	idle idleDeps
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -2588,6 +2591,9 @@ func cmdServer(args []string) int {
 	// The FLEET page lives on this mux only, never on the loopback paste mux:
 	// it is meant for other devices on the tailnet.
 	registerFleetRoutes(mux, s)
+	// Idle events for FLEET: off until idle-events.json enables them; while
+	// off, each poll is one stat of that file.
+	go s.runIdleEvents()
 
 	// Publish the resolved port so SpawnNew (invoked without it) embeds the right
 	// port in the tmux paste binding. Intercept Ctrl+V in tmux so remote-image
