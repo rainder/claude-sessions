@@ -122,6 +122,146 @@ func tmuxPressEnter(target string) error {
 	return exec.Command("tmux", "send-keys", "-t", target, "Enter").Run()
 }
 
+// fleetCleanSayText makes raw safe to type as one prompt; msg is the 400
+// reason when it is not.
+func fleetCleanSayText(raw string) (text, msg string) {
+	text, err := sanitizeFleetText(raw)
+	if err != nil {
+		return "", "bad text"
+	}
+	// Claude Code switches to bash mode on a leading "!" and memory mode on
+	// "#". The box glyph changes, so every later send would refuse until the
+	// box is cleared at the terminal.
+	if text[0] == '!' || text[0] == '#' {
+		return "", "text must not start with ! or #"
+	}
+	return text, ""
+}
+
+// fleetSayGateLocked applies the limits every page send shares: a 1 s gap
+// after any send (FLEET or another session), and no second send of the same
+// key within 10 s. Caller holds sayMu.
+func (s *server) fleetSayGateLocked(key string) *fleetSayResult {
+	f := &s.fleet
+	now := s.fleetNow()
+	for k, at := range f.saidAt {
+		if now.Sub(at) >= fleetSayDoubleTap {
+			delete(f.saidAt, k)
+		}
+	}
+	if !f.lastSayAt.IsZero() && now.Sub(f.lastSayAt) < fleetSayGap {
+		return &fleetSayResult{Code: "rate_limited", Error: "too fast"}
+	}
+	if _, dup := f.saidAt[key]; dup {
+		return &fleetSayResult{Code: "double_tap", Error: "same text sent less than 10 s ago"}
+	}
+	return nil
+}
+
+// fleetSayDoneLocked stamps a completed send for the gate. Caller holds sayMu.
+func (s *server) fleetSayDoneLocked(key string) time.Time {
+	f := &s.fleet
+	done := s.fleetNow()
+	f.lastSayAt = done
+	if f.saidAt == nil {
+		f.saidAt = map[string]time.Time{}
+	}
+	f.saidAt[key] = done
+	return done
+}
+
+// fleetSayWho names the send target in refusal messages.
+type fleetSayWho struct {
+	subject string // "FLEET"
+	pane    string // "the FLEET pane"
+}
+
+var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane"}
+
+// fleetTypeInto is the pane half of every page send: refuse a session that
+// waits on a dialog, has no pane, shows no empty input box, or is in copy
+// mode; type the text; press Enter only once the box holds it. row must be a
+// freshly resolved session: its Tmux is the only pane address used. Caller
+// holds sayMu. The result is the response envelope; ok false with code
+// not_submitted means the text was typed but Enter was not pressed.
+func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetSayResult {
+	f := &s.fleet
+	refuse := func(code, msg string) fleetSayResult { return fleetSayResult{Code: code, Error: msg} }
+	if row.Waiting() {
+		return refuse("dialog", who.subject+" shows a dialog. Answer it in the terminal.")
+	}
+	if row.Tmux == "" {
+		return refuse("no_pane", who.subject+" has no tmux pane")
+	}
+	capture := f.capture
+	if capture == nil {
+		capture = capturePane
+	}
+	screen, err := capture(row.Tmux)
+	if err != nil {
+		return refuse("no_pane", "cannot read "+who.pane)
+	}
+	if typed, found := paneInputText(screen); !found {
+		s.logFleetRefusal("dialog", row.Tmux, screen)
+		return refuse("dialog", who.subject+" input box is not visible")
+	} else if typed != "" {
+		s.logFleetRefusal("input_busy", row.Tmux, screen)
+		return refuse("input_busy", "input box not empty")
+	}
+	inMode := f.paneInMode
+	if inMode == nil {
+		inMode = tmuxPaneInMode
+	}
+	if mode, err := inMode(row.Tmux); err != nil {
+		return refuse("no_pane", "cannot read "+who.pane)
+	} else if mode {
+		return refuse("pane_mode", strings.ToUpper(who.pane[:1])+who.pane[1:]+" is in scroll mode. Press q in the terminal, then try again.")
+	}
+
+	typeText, pressEnter, sleep := f.typeText, f.pressEnter, f.sleep
+	if typeText == nil {
+		typeText = tmuxTypeLiteral
+	}
+	if pressEnter == nil {
+		pressEnter = tmuxPressEnter
+	}
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	if err := typeText(row.Tmux, text); err != nil {
+		return refuse("send_failed", "send text: "+err.Error())
+	}
+	// The first capture is a snapshot: a dialog may have opened since, and
+	// Enter would pick its highlighted option. Press Enter only once the box
+	// is still there and holds what was just typed (it was empty before).
+	// Other text in the box is not ours: keep polling, then give up.
+	landed := false
+	lastScreen := ""
+	for i := 0; i < fleetLandPolls && !landed; i++ {
+		if i > 0 {
+			sleep(fleetLandEvery)
+		}
+		screen, err := capture(row.Tmux)
+		if err != nil {
+			continue
+		}
+		lastScreen = screen
+		typed, found := paneInputText(screen)
+		if !found {
+			break
+		}
+		landed = fleetTextLanded(typed, text)
+	}
+	if !landed {
+		s.logFleetRefusal("not_submitted", row.Tmux, lastScreen)
+		return refuse("not_submitted", "Text was typed but not sent. "+who.subject+" changed state. Check the terminal.")
+	}
+	if err := pressEnter(row.Tmux); err != nil {
+		return refuse("send_failed", "send enter: "+err.Error())
+	}
+	return fleetSayResult{OK: true, Queued: row.Status == "busy"}
+}
+
 func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	kind := s.fleetAuth(r)
 	if kind == fleetAuthNone {
@@ -141,16 +281,9 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad cardId", http.StatusBadRequest)
 		return
 	}
-	text, err := sanitizeFleetText(raw)
-	if err != nil {
-		http.Error(w, "bad text", http.StatusBadRequest)
-		return
-	}
-	// Claude Code switches to bash mode on a leading "!" and memory mode on
-	// "#". The box glyph changes, so every later send would refuse until the
-	// box is cleared at the terminal.
-	if text[0] == '!' || text[0] == '#' {
-		http.Error(w, "text must not start with ! or #", http.StatusBadRequest)
+	text, msg := fleetCleanSayText(raw)
+	if msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 
@@ -160,17 +293,8 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	refuse := func(code, msg string) { writeJSON(w, http.StatusOK, fleetSayResult{Error: msg, Code: code}) }
 
 	now := s.fleetNow()
-	for t, at := range f.saidAt {
-		if now.Sub(at) >= fleetSayDoubleTap {
-			delete(f.saidAt, t)
-		}
-	}
-	if !f.lastSayAt.IsZero() && now.Sub(f.lastSayAt) < fleetSayGap {
-		refuse("rate_limited", "too fast")
-		return
-	}
-	if _, dup := f.saidAt[text]; dup {
-		refuse("double_tap", "same text sent less than 10 s ago")
+	if res := s.fleetSayGateLocked(text); res != nil {
+		writeJSON(w, http.StatusOK, *res)
 		return
 	}
 
@@ -196,100 +320,20 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		refuse("fleet_changed", "FLEET changed. Try again.")
 		return
 	}
-	if fresh.Waiting() {
-		refuse("dialog", "FLEET shows a dialog. Answer it in the terminal.")
-		return
-	}
-	if fresh.Tmux == "" {
-		refuse("no_pane", "FLEET has no tmux pane")
-		return
-	}
-	capture := f.capture
-	if capture == nil {
-		capture = capturePane
-	}
-	screen, err := capture(fresh.Tmux)
-	if err != nil {
-		refuse("no_pane", "cannot read the FLEET pane")
-		return
-	}
-	if typed, found := paneInputText(screen); !found {
-		s.logFleetRefusal("dialog", fresh.Tmux, screen)
-		refuse("dialog", "FLEET input box is not visible")
-		return
-	} else if typed != "" {
-		s.logFleetRefusal("input_busy", fresh.Tmux, screen)
-		refuse("input_busy", "input box not empty")
-		return
-	}
-	inMode := f.paneInMode
-	if inMode == nil {
-		inMode = tmuxPaneInMode
-	}
-	if mode, err := inMode(fresh.Tmux); err != nil {
-		refuse("no_pane", "cannot read the FLEET pane")
-		return
-	} else if mode {
-		refuse("pane_mode", "The FLEET pane is in scroll mode. Press q in the terminal, then try again.")
-		return
-	}
-
-	typeText, pressEnter, sleep := f.typeText, f.pressEnter, f.sleep
-	if typeText == nil {
-		typeText = tmuxTypeLiteral
-	}
-	if pressEnter == nil {
-		pressEnter = tmuxPressEnter
-	}
-	if sleep == nil {
-		sleep = time.Sleep
-	}
-	if err := typeText(fresh.Tmux, text); err != nil {
-		refuse("send_failed", "send text: "+err.Error())
-		return
-	}
-	// The first capture is a snapshot: a dialog may have opened since, and
-	// Enter would pick its highlighted option. Press Enter only once the box
-	// is still there and holds what was just typed (it was empty before).
-	// Other text in the box is not ours: keep polling, then give up.
-	landed := false
-	lastScreen := ""
-	for i := 0; i < fleetLandPolls && !landed; i++ {
-		if i > 0 {
-			sleep(fleetLandEvery)
+	res := s.fleetTypeInto(*fresh, text, fleetSayFLEET)
+	if !res.OK {
+		if res.Code == "not_submitted" {
+			_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
+				Text: "web-say typed but not submitted", CardID: cardID})
 		}
-		screen, err := capture(fresh.Tmux)
-		if err != nil {
-			continue
-		}
-		lastScreen = screen
-		typed, found := paneInputText(screen)
-		if !found {
-			break
-		}
-		landed = fleetTextLanded(typed, text)
-	}
-	if !landed {
-		_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
-			Text: "web-say typed but not submitted", CardID: cardID})
-		s.logFleetRefusal("not_submitted", fresh.Tmux, lastScreen)
-		refuse("not_submitted", "Text was typed but not sent. FLEET changed state. Check the terminal.")
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
-	if err := pressEnter(fresh.Tmux); err != nil {
-		refuse("send_failed", "send enter: "+err.Error())
-		return
-	}
-	done := s.fleetNow()
-	f.lastSayAt = done
-	if f.saidAt == nil {
-		f.saidAt = map[string]time.Time{}
-	}
-	f.saidAt[text] = done
+	done := s.fleetSayDoneLocked(text)
 	if err := s.appendFleetLog(fleetLogEntry{At: done.UTC().Format(time.RFC3339), Type: "web-say", Text: text, CardID: cardID}); err != nil {
 		fmt.Fprintf(os.Stderr, "fleet: web-say log append failed: %v\n", err)
 	}
-	writeJSON(w, http.StatusOK, fleetSayResult{OK: true, Queued: fresh.Status == "busy"})
+	writeJSON(w, http.StatusOK, res)
 }
 
 const (
