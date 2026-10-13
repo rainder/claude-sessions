@@ -236,7 +236,9 @@ func (s *server) fleetPage(w http.ResponseWriter, r *http.Request) {
 			writeFleetHop(w, "/fleet?hop=1")
 			return
 		}
-		http.Error(w, "Unauthorized. Run `claude-sessions fleet-url` on the host and open that URL.", http.StatusUnauthorized)
+		// An installed home-screen app keeps its own cookie jar, so it can
+		// land here with no cookie and no way to open a link: ask for one.
+		fleetLoginFormPage(w)
 		return
 	}
 	h := w.Header()

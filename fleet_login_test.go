@@ -367,3 +367,52 @@ func TestLoadOrCreateFleetSecret(t *testing.T) {
 		t.Fatal("an empty secret file must be an error, not an empty secret")
 	}
 }
+
+func TestFleetLoginAcceptsPastedLinkOrCode(t *testing.T) {
+	cases := map[string]func(code string) string{
+		"bare code":         func(c string) string { return c },
+		"code with spaces":  func(c string) string { return "  " + c + "\n" },
+		"full link":         func(c string) string { return "http://100.64.0.1:7777/fleet?c=" + c },
+		"link with spaces":  func(c string) string { return " https://host.example/fleet?c=" + c + " " },
+		"link, more params": func(c string) string { return "http://h/fleet?x=1&c=" + c + "#top" },
+		"query only":        func(c string) string { return "c=" + c },
+	}
+	for name, paste := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := fleetTestServer(t, nil)
+			code := armFleetCode(t, s)
+			wantFleetLoginOK(t, redeemFleetCode(s, paste(code)))
+		})
+	}
+}
+
+func TestFleetLoginPastedLinkWithoutCodeRefused(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	armFleetCode(t, s)
+	wantFleetLoginRefused(t, redeemFleetCode(s, "http://h/fleet?c="))
+}
+
+func TestFleetHopWithoutAuthShowsLoginForm(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	w := httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, httptest.NewRequest("GET", "/fleet?hop=1", nil))
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("%d %q", w.Code, w.Header().Get("Content-Type"))
+	}
+	body := w.Body.String()
+	for _, need := range []string{"<title>Log in to FLEET</title>", "claude-sessions fleet-url", "Paste the link or the code here.",
+		`<form method="POST" action="/fleet/login">`, `name="c"`, `autocomplete="off"`, `autocapitalize="off"`, ">Log in</button>"} {
+		if !strings.Contains(body, need) {
+			t.Errorf("form page must contain %q", need)
+		}
+	}
+	if strings.Contains(body, "<script") {
+		t.Error("form page must have no script")
+	}
+	h := w.Header()
+	if !strings.Contains(h.Get("Content-Security-Policy"), "form-action 'self'") ||
+		strings.Contains(h.Get("Content-Security-Policy"), "script-src") ||
+		h.Get("Referrer-Policy") != "same-origin" || h.Get("Cache-Control") != "no-store" {
+		t.Fatalf("headers = %v", h)
+	}
+}
