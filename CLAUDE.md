@@ -961,6 +961,9 @@ the append. Write errors are dropped; they never fail a say. **Why a file, not
 stderr:** the service's systemd unit runs with `StandardOutput=null`, and in
 practice journald showed nothing from the server either (stderr is not nulled
 in the unit, but nothing arrived), so the stderr log reached nobody.
+`service install` does not bake `XDG_STATE_HOME` into the unit (only `PATH`
+and `TMPDIR`), so the service writes the log under the default path even when
+your shell sets `XDG_STATE_HOME` — look there first.
 `fleetDeps.sayLogPath` points tests at a temp dir.
 
 **Rich text.** Card summaries and chat turns go through `renderRich` in
