@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fleetTestServer(t *testing.T, sessions []Session) *server {
@@ -154,5 +158,115 @@ func TestFleetUsageAliasUsesFleetAuth(t *testing.T) {
 	fleetMux(s).ServeHTTP(w, r)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("cookie auth reaches the usage body: %d, want 503 with nil source", w.Code)
+	}
+}
+
+func writeFleetFile(t *testing.T, s *server, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(s.fleet.dir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func getFleetJSON(t *testing.T, s *server, path string) map[string]any {
+	t.Helper()
+	r := httptest.NewRequest("GET", path, nil)
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestFleetStateValidFreshAndAlive(t *testing.T) {
+	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	s := fleetTestServer(t, []Session{{PID: 7, Name: "FLEET", SessionID: "sid", Status: "busy"}})
+	s.fleet.now = func() time.Time { return now }
+	writeFleetFile(t, s, "state.json", `{"version":1,"writtenAt":"2026-10-13T09:40:00Z","cards":[{"id":"a"}],"fleet":"spoof"}`)
+	out := getFleetJSON(t, s, "/fleet/state")
+	if out["stale"] != false || out["stateError"] != nil {
+		t.Fatalf("stale/stateError: %v %v", out["stale"], out["stateError"])
+	}
+	fl := out["fleet"].(map[string]any)
+	if fl["alive"] != true || fl["sessionId"] != "sid" || fl["status"] != "busy" {
+		t.Fatalf("fleet block = %v (server keys must overwrite file keys)", fl)
+	}
+	if len(out["cards"].([]any)) != 1 {
+		t.Fatal("cards pass through")
+	}
+}
+
+func TestFleetStateStaleAfter40Minutes(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	s.fleet.now = func() time.Time { return time.Date(2026, 10, 13, 10, 20, 1, 0, time.UTC) }
+	writeFleetFile(t, s, "state.json", `{"version":1,"writtenAt":"2026-10-13T09:40:00Z","cards":[]}`)
+	if out := getFleetJSON(t, s, "/fleet/state"); out["stale"] != true {
+		t.Fatal("40m01s old must be stale")
+	}
+}
+
+func TestFleetStateMissingWrittenAtIsStale(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	writeFleetFile(t, s, "state.json", `{"version":1,"cards":[]}`)
+	if out := getFleetJSON(t, s, "/fleet/state"); out["stale"] != true {
+		t.Fatal("no writtenAt must be stale")
+	}
+}
+
+func TestFleetStateMissingFile(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	out := getFleetJSON(t, s, "/fleet/state")
+	if out["stateError"] != "FLEET has not written state yet" || len(out["cards"].([]any)) != 0 {
+		t.Fatalf("missing: %v", out)
+	}
+	if fl := out["fleet"].(map[string]any); fl["alive"] != false || fl["reason"] != "not running" {
+		t.Fatalf("fleet = %v", fl)
+	}
+}
+
+func TestFleetStateInvalidKeepsLastGood(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	writeFleetFile(t, s, "state.json", `{"version":1,"writtenAt":"2026-10-13T09:40:00Z","cards":[{"id":"good"}]}`)
+	getFleetJSON(t, s, "/fleet/state")
+	// Different size so the (mtime,size) cache key changes even on a coarse clock.
+	writeFleetFile(t, s, "state.json", `{"version":1,"cards":[{"id":"torn"`)
+	out := getFleetJSON(t, s, "/fleet/state")
+	cards := out["cards"].([]any)
+	if len(cards) != 1 || cards[0].(map[string]any)["id"] != "good" {
+		t.Fatalf("want last good copy, got %v", cards)
+	}
+	if e, _ := out["stateError"].(string); !strings.HasPrefix(e, "state.json is invalid") {
+		t.Fatalf("stateError = %v", out["stateError"])
+	}
+}
+
+func TestFleetStateInvalidWithNoGoodCopy(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	writeFleetFile(t, s, "state.json", `[1,2]`)
+	out := getFleetJSON(t, s, "/fleet/state")
+	if len(out["cards"].([]any)) != 0 || out["stateError"] == nil {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestFleetStateCardsNotArrayIsInvalid(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	writeFleetFile(t, s, "state.json", `{"version":1,"cards":{}}`)
+	if out := getFleetJSON(t, s, "/fleet/state"); out["stateError"] == nil {
+		t.Fatal("cards must be an array")
+	}
+}
+
+func TestFleetStateAmbiguous(t *testing.T) {
+	s := fleetTestServer(t, []Session{{PID: 1, Name: "FLEET"}, {PID: 2, Name: "FLEET"}})
+	out := getFleetJSON(t, s, "/fleet/state")
+	if fl := out["fleet"].(map[string]any); fl["alive"] != false || fl["reason"] != "ambiguous" {
+		t.Fatalf("fleet = %v", fl)
 	}
 }

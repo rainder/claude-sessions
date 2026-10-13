@@ -188,12 +188,95 @@ func (s *server) fleetUsage(w http.ResponseWriter, r *http.Request) {
 	s.serveUsageNumbers(w)
 }
 
-// Stubs until each route lands; every one is replaced in the commit that
-// adds its real handler.
-func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+const fleetStateMaxBytes = 1 << 20
+
+func emptyFleetState() map[string]json.RawMessage {
+	return map[string]json.RawMessage{"version": json.RawMessage("1"), "cards": json.RawMessage("[]")}
 }
 
+// loadFleetState returns the state object to serve and a stateError ("" when
+// fine). A bad file never replaces the last good copy, and never causes a 500.
+func (s *server) loadFleetState() (map[string]json.RawMessage, string) {
+	f := &s.fleet
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fallback := func(msg string) (map[string]json.RawMessage, string) {
+		if f.good != nil {
+			return f.good, msg
+		}
+		return emptyFleetState(), msg
+	}
+	path := filepath.Join(s.fleetDir(), "state.json")
+	st, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) && f.good == nil {
+			return emptyFleetState(), "FLEET has not written state yet"
+		}
+		return fallback("state.json is invalid: cannot read")
+	}
+	if f.good != nil && st.ModTime().Equal(f.goodMod) && st.Size() == f.goodSize {
+		return f.good, ""
+	}
+	if st.Size() > fleetStateMaxBytes {
+		return fallback("state.json is invalid: too large")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fallback("state.json is invalid: cannot read")
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil || obj == nil {
+		return fallback("state.json is invalid: not a JSON object")
+	}
+	var cards []json.RawMessage
+	if err := json.Unmarshal(obj["cards"], &cards); err != nil || cards == nil {
+		return fallback("state.json is invalid: cards is not an array")
+	}
+	f.good, f.goodMod, f.goodSize = obj, st.ModTime(), st.Size()
+	return obj, ""
+}
+
+func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
+	if s.fleetAuth(r) == fleetAuthNone {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	state, stateErr := s.loadFleetState()
+	out := make(map[string]any, len(state)+3)
+	for k, v := range state {
+		out[k] = v
+	}
+	_, fl := s.discoverFleet()
+	out["fleet"] = fl
+	out["stale"] = fleetStateStale(state, stateErr, s.fleetNow())
+	if stateErr != "" {
+		out["stateError"] = stateErr
+	} else {
+		out["stateError"] = nil
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, out)
+}
+
+// fleetStateStale: no parseable writtenAt, or older than fleetStaleAfter. The
+// "not written yet" placeholder is not stale; its own banner explains it.
+func fleetStateStale(state map[string]json.RawMessage, stateErr string, now time.Time) bool {
+	if stateErr == "FLEET has not written state yet" {
+		return false
+	}
+	var at string
+	if err := json.Unmarshal(state["writtenAt"], &at); err != nil {
+		return true
+	}
+	t, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		return true
+	}
+	return now.Sub(t) > fleetStaleAfter
+}
+
+// Stubs until each route lands; every one is replaced in the commit that
+// adds its real handler.
 func (s *server) fleetLog(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not implemented", http.StatusNotImplemented)
 }
