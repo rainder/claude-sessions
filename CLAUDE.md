@@ -938,7 +938,12 @@ status lines, a notice above the prompt, or a rule wrapped into two lines in a
 narrow pane made a normal idle box read as not visible. The slash and `@` menus
 draw above the box with their own `❯` row, which is why the anchor is the
 *last* `❯` line. A dialog with a `❯ 1. Yes` row between two rules reads as
-non-empty text and refuses as `input_busy`. If Claude Code changes how it
+non-empty text and refuses as `input_busy`. A rule line is at least 10 `─`,
+starts and ends with `─`, and may hold **one** label of at most 80 runes
+between `─` runs: in a named session Claude Code writes the name into the top
+rule (`──────── FLEET ─`). The parser once accepted only lines made of `─`, so
+it never found the FLEET pane's top rule and refused every send as "input box
+is not visible" (`pane-named-session-busy.ansi`). If Claude Code changes how it
 draws the prompt, the parser finds no box and every send is refused (fails
 closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens;
 `pane-synth-*` are hand-built in the same escape style for states that cannot

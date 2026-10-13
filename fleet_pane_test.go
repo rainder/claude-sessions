@@ -87,6 +87,9 @@ func TestPaneInputTextFixtures(t *testing.T) {
 		{"pane-synth-queued-preview.ansi", "", true},
 		{"pane-synth-clear-hint.ansi", "", true},
 		{"pane-synth-narrow-double-rule.ansi", "", true},
+		// A named session: Claude Code writes the name into the top rule
+		// ("──── FLEET ─"), and the box sits under a busy turn.
+		{"pane-named-session-busy.ansi", "", true},
 	}
 	for _, c := range cases {
 		text, found := paneInputText(readFixture(t, c.file))
@@ -112,6 +115,52 @@ func TestPaneInputTextPromptWithoutRuleBelowIsNotFound(t *testing.T) {
 	}
 	if _, found := paneInputText("❯ \n" + rule); found {
 		t.Fatal("a prompt line with no rule above is not a closed box")
+	}
+}
+
+func TestPaneInputTextNamedRules(t *testing.T) {
+	rule := repeatRune('─', 40) + "\n"
+	named := "\x1b[38;5;244m" + repeatRune('─', 60) + " FLEET ─\n"
+	cases := []struct {
+		name, capture, text string
+	}{
+		{"named top rule, typed text", "out\n" + named + "\x1b[39m❯ hello there\n" + rule + "status\n", "hello there"},
+		{"named bottom rule", "out\n" + rule + "❯ \n" + named + "status\n", ""},
+		{"both rules named", named + "❯ hi\n" + named, "hi"},
+	}
+	for _, c := range cases {
+		text, found := paneInputText(c.capture)
+		if !found || text != c.text {
+			t.Errorf("%s: got (%q, %v), want (%q, true)", c.name, text, found, c.text)
+		}
+	}
+}
+
+func TestIsRuleLine(t *testing.T) {
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{repeatRune('─', 10), true},
+		{repeatRune('─', 9), false},
+		{"  " + repeatRune('─', 40) + "  ", true},
+		{repeatRune('─', 60) + " FLEET ─", true},
+		{"─ FLEET " + repeatRune('─', 30), true},
+		{repeatRune('─', 5) + " my session " + repeatRune('─', 5), true},
+		{repeatRune('─', 5) + " a " + repeatRune('─', 5) + " b " + repeatRune('─', 5), false},
+		{"─── text", false},
+		{"text " + repeatRune('─', 30), false},
+		{repeatRune('─', 30) + " text", false},
+		{repeatRune('─', 4) + " FLEET ─", false},
+		{repeatRune('─', 10) + " " + repeatRune('x', 79) + " ─", false},
+		{repeatRune('─', 10) + repeatRune('x', 80) + "─", true},
+		{repeatRune('─', 10) + repeatRune('x', 81) + "─", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isRuleLine(c.line); got != c.want {
+			t.Errorf("isRuleLine(%q) = %v, want %v", c.line, got, c.want)
+		}
 	}
 }
 
