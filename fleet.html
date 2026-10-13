@@ -275,7 +275,7 @@ section { min-width: 0; }
 .hent .t { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12.5px; padding-top: 2px; }
 .hent .c { min-width: 0; overflow-wrap: anywhere; }
 .ty { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 5px; font-size: 11.5px; font-weight: 650; background: var(--surface2); color: var(--muted); vertical-align: 1px; }
-.ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say { color: var(--accent); }
+.ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say, .ty-web-start { color: var(--accent); }
 .hent .tk { font-family: var(--mono); font-size: 12px; margin-right: 6px; }
 .hent a { margin-left: 6px; white-space: nowrap; }
 .more-row { padding: 10px 12px; border-top: 1px solid var(--line); text-align: center; }
@@ -363,6 +363,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   body.v-chat .hint { display: none; }
   /* The chat view has its own not-running strip; the banner would repeat it. */
   body.v-chat .banner.nr { display: none; }
+  body.v-chat .banners:not(:has(> :not(.nr))) { display: none; }
   .turn { max-width: 90%; }
 
   .toast { top: calc(var(--hdr) + 10px); bottom: auto; transform: translate(-50%, -12px); }
@@ -508,7 +509,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // Every node is built with createElement + textContent. Card, chat and log
   // text is untrusted; links go through safeLink (http and https only).
 
-  const TYPES = ["merge", "kill", "spawn", "ticket", "decision", "ruling", "relay", "web-say", "note"];
+  const TYPES = ["merge", "kill", "spawn", "ticket", "decision", "ruling", "relay", "web-say", "web-start", "note"];
   const BACKOFF_CAP = 60000;
   const $ = id => document.getElementById(id);
 
@@ -776,11 +777,31 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return start.flight || !!(fl && obj(fl.starting));
   }
 
+  // startPhase says what the page can offer while FLEET is down:
+  //   "starting"  a start is under way (our POST, or fleet.starting);
+  //   "lastlive"  the last FLEET session runs without the FLEET name;
+  //   "can"       Start is allowed;
+  //   "still"     not_live, no start allowed, not lastLive: the 90 s
+  //               starting window ran out but the start's tmux session is
+  //               still there, so FLEET is most likely still coming up.
+  // lastLive and canStart are checked before hasLast is used anywhere.
+  function startPhase() {
+    const fl = fleetInfo();
+    if (alive || !fl) return "";
+    if (startingNow()) return "starting";
+    if (str(fl.code) !== "not_live") return "";
+    if (fl.lastLive === true) return "lastlive";
+    if (fl.canStart === true) return "can";
+    return "still";
+  }
+  const LAST_LIVE = "The last FLEET session runs without the FLEET name.";
+
   function renderStatus() {
     const pill = $("status");
     const fl = fleetInfo();
     let cls = "st-down", text = "not running";
-    if (startingNow()) { cls = "st-starting"; text = "starting"; }
+    const ph = startPhase();
+    if (ph === "starting" || ph === "still") { cls = "st-starting"; text = "starting"; }
     else if (fl && fl.alive === true) {
       const s = str(fl.status);
       if (s === "busy") { cls = "st-busy"; text = "busy"; }
@@ -890,10 +911,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       b("red", "Session expired. Run claude-sessions fleet-url on the host.");
     } else if (state) {
       const fl = obj(state.fleet);
-      if (startingNow()) {
+      const ph = startPhase();
+      if (ph === "starting") {
         out.push(startingBanner(fl));
-      } else if (fl && fl.alive !== true && str(fl.code) === "not_live") {
-        out.push(notRunningBanner(fl));
+      } else if (ph === "still") {
+        out.push(el("div", "banner blue act", el("div", "bt", el("span", "spin"),
+          el("span", "", el("span", "b-title", "FLEET is still starting…"), el("span", "b-note", "The page shows it when it runs.")))));
+      } else if (ph === "lastlive" || ph === "can") {
+        out.push(notRunningBanner(ph));
       } else if (!fl || fl.alive !== true) {
         const reason = fl ? str(fl.reason) : "";
         if (reason === "ambiguous") b("red", "Two sessions are named FLEET. The page cannot send.");
@@ -923,21 +948,21 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       el("span", "", el("span", "b-title", "Starting FLEET…"), el("span", "b-note", note))));
   }
 
-  function notRunningBanner(fl) {
-    const can = fl.canStart === true;
+  function notRunningBanner(ph) {
+    const head = el("div", "bt", el("span", "", el("span", "b-title", "FLEET is not running"),
+      el("span", "b-note", ph === "lastlive" ? LAST_LIVE + " Rename it at the terminal." : "You cannot send now.")));
+    if (ph !== "can") return el("div", "banner red act nr", head);
     const btn = el("button", "btn btn-primary", "Start FLEET");
     btn.type = "button";
-    btn.disabled = !can || expired;
+    btn.disabled = expired;
     btn.addEventListener("click", openStartSheet);
-    const note = can ? "You cannot send now." : "You cannot start it now. Wait a minute, then try again.";
-    return el("div", "banner red act nr", el("div", "bt",
-      el("span", "", el("span", "b-title", "FLEET is not running"), el("span", "b-note", note))), btn);
+    return el("div", "banner red act nr", head, btn);
   }
 
   // ---- start FLEET -------------------------------------------------------
   function openStartSheet() {
     const fl = fleetInfo();
-    if (!fl || expired || start.flight || alive) return;
+    if (!fl || expired || start.flight || startPhase() !== "can") return;
     $("start-text").textContent = fl.hasLast === true ? "Resume the last FLEET session." : "Start a new FLEET session in trecs-brain.";
     $("start-go").disabled = false;
     const d = $("start-sheet");
@@ -953,6 +978,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const startErrors = {
     already_running: "FLEET is already running.",
     ambiguous: "Two sessions are named FLEET. The page cannot start one.",
+    starting: "FLEET is still starting. Wait a moment.",
+    last_live: LAST_LIVE + " Rename it at the terminal.",
   };
 
   async function startFleet() {
@@ -970,6 +997,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (r && r.status === 401) { expire(); toast("Session expired. Run claude-sessions fleet-url on the host.", true); return; }
     if (r && r.ok && body && body.ok === true) {
       start.watch = true; start.at = Date.now();
+      if (body.lastMissing === true) toast("The last session could not be resumed. Started a new one.");
     } else if (!r) {
       toast("The page cannot reach the server. Try again.", true);
     } else {
@@ -980,6 +1008,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         msg = "Wait " + n + (n === 1 ? " second" : " seconds") + ", then start FLEET again.";
       } else if (startErrors[code]) {
         msg = startErrors[code];
+        // Another start is under way: watch it like our own.
+        if (code === "starting") { start.watch = true; start.at = Date.now(); }
       } else {
         msg = sentence((body && str(body.error)) || ("HTTP " + r.status));
         msg = code === "start_failed" ? "FLEET did not start. " + msg : msg;
@@ -1002,7 +1032,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (p.cur > base || fast) { p.cur = base; if (!p.busy && !expired && !document.hidden) { clearTimeout(p.timer); p.timer = setTimeout(() => run(p), base); } }
     }
     // Redraw only on a change: a banner rebuilt under a finger loses the tap.
-    const k = startingNow() + "|" + start.flight;
+    const k = startPhase() + "|" + start.flight;
     if (k === startKey) return;
     startKey = k;
     guard(renderStatus);
@@ -1011,16 +1041,19 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
 
   // watchStart runs on each state answer: it ends the watch with a toast when
-  // FLEET is alive, or when the start went away without it.
+  // FLEET is alive. "still" keeps the watch going (the start's tmux session
+  // is there). Only a start that ends with Start allowed again reports a
+  // failure; lastLive and other codes explain themselves in the banner.
   function watchStart() {
-    if (startingNow()) { start.watch = true; start.at = Date.now(); }
+    const ph = startPhase();
+    if (ph === "starting" || ph === "still") { start.watch = true; start.at = Date.now(); }
     else if (start.watch && alive) {
       start.watch = false;
       toast("FLEET is running.");
       runNow("chat");
-    } else if (start.watch && !start.flight && Date.now() - start.at > 10000) {
+    } else if (start.watch && !start.flight && Date.now() - start.at > 4000) {
       start.watch = false;
-      toast("FLEET did not start. Check the workstation.", true);
+      if (ph === "can") toast("FLEET did not start. Check the workstation.", true);
     }
     renderStart();
   }
@@ -1512,7 +1545,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const notLive = !alive && !expired && !!fl && str(fl.code) === "not_live";
     const strip = ro || notLive;
     const can = alive && !expired;
-    const busy = startingNow();
+    const ph = startPhase();
     $("say").disabled = expired || ro;
     $("say").placeholder = expired ? "Session expired." : (can ? "Write to FLEET" : "FLEET is not running.");
     $("say-send").disabled = !can || chatBusy;
@@ -1520,11 +1553,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("composer-row").hidden = strip;
     $("say-hint").hidden = strip;
     $("ro-top").hidden = !ro;
-    $("ro-text").textContent = busy ? "FLEET is starting…" : ro ? "Read only — FLEET is not running" : "FLEET is not running";
-    const st = $("ro-start");
-    st.hidden = !notLive;
-    st.disabled = busy || !(fl && fl.canStart === true);
-    st.textContent = busy ? "Starting…" : "Start FLEET";
+    $("ro-text").textContent = ph === "starting" ? "FLEET is starting…" : ph === "still" ? "FLEET is still starting…"
+      : ph === "lastlive" ? LAST_LIVE : ro ? "Read only — FLEET is not running" : "FLEET is not running";
+    $("ro-start").hidden = ph !== "can";
   }
   $("ro-start").addEventListener("click", openStartSheet);
 
@@ -1730,16 +1761,23 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     root.setProperty("--vvh", Math.round(vh) + "px");
     markCode();
     // iOS pans the page to show the focused input; the shell already fits.
-    if (kb && view === "chat" && vv && vv.offsetTop > 0) window.scrollTo(0, 0);
+    if (kb && view === "chat" && window.scrollY !== 0) window.scrollTo(0, 0);
   }
-  window.addEventListener("resize", measure);
+  // Viewport events fire many times a frame on iOS: measure once per frame.
+  let measureQueued = false;
+  function queueMeasure() {
+    if (measureQueued) return;
+    measureQueued = true;
+    requestAnimationFrame(() => { measureQueued = false; measure(); });
+  }
+  window.addEventListener("resize", queueMeasure);
   if (window.visualViewport) {
-    window.visualViewport.addEventListener("resize", measure);
-    window.visualViewport.addEventListener("scroll", measure);
+    window.visualViewport.addEventListener("resize", queueMeasure);
+    window.visualViewport.addEventListener("scroll", queueMeasure);
   }
   $("say").addEventListener("focus", () => setTimeout(measure, 50));
   $("say").addEventListener("blur", () => setTimeout(measure, 50));
-  if (window.ResizeObserver) new ResizeObserver(measure).observe($("top"));
+  if (window.ResizeObserver) new ResizeObserver(queueMeasure).observe($("top"));
 
   // ---- refresh -----------------------------------------------------------
   $("refresh").addEventListener("click", async () => {
