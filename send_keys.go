@@ -47,17 +47,18 @@ func sendKeys(s Session, text string) error {
 	if s.Tmux == "" {
 		return fmt.Errorf("PID %d has no tmux pane", s.PID)
 	}
-	inMode, err := sendKeysPaneInMode(s.Tmux)
+	pane := tmuxExactTarget(s.Tmux) // never a prefix match on a gone session
+	inMode, err := sendKeysPaneInMode(pane)
 	if err != nil {
 		return fmt.Errorf("read pane mode: %w", err)
 	}
 	if inMode {
 		return errors.New("pane is in scroll mode; press q in the terminal, then send again")
 	}
-	if err := sendKeysTmux("send-keys", "-t", s.Tmux, "-l", "--", text); err != nil {
+	if err := sendKeysTmux("send-keys", "-t", pane, "-l", "--", text); err != nil {
 		return fmt.Errorf("send text: %w", err)
 	}
-	if err := sendKeysTmux("send-keys", "-t", s.Tmux, "Enter"); err != nil {
+	if err := sendKeysTmux("send-keys", "-t", pane, "Enter"); err != nil {
 		return fmt.Errorf("send enter: %w", err)
 	}
 	return nil
@@ -71,7 +72,7 @@ func tmuxPaneInMode(target string) (bool, error) {
 	if target == "" {
 		return false, errors.New("no tmux pane")
 	}
-	out, err := exec.Command("tmux", "display", "-p", "-t", target, "#{pane_in_mode}").Output()
+	out, err := exec.Command("tmux", "display", "-p", "-t", tmuxExactTarget(target), "#{pane_in_mode}").Output()
 	if err != nil {
 		return false, err
 	}

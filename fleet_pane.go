@@ -11,11 +11,24 @@ import (
 // capturePane returns the visible content of a tmux pane with SGR escapes
 // kept (-e): the dim attribute is the only thing that tells Claude Code's
 // placeholder text ("Try …") apart from text a person has typed.
+// tmuxExactTarget makes a "session:win.pane" address match its session name
+// exactly. A plain -t falls back to a prefix match when the name is gone
+// (tmux 3.4: with only "spawn-x-retry" alive, "-t spawn-x:0.0" resolves to
+// it), so keys meant for an ended session would land in a different one; the
+// "=" form errors instead. An address that already starts with "=" or "%"
+// (a pane id) is left alone; "" stays "". Idempotent.
+func tmuxExactTarget(addr string) string {
+	if addr == "" || strings.HasPrefix(addr, "=") || strings.HasPrefix(addr, "%") {
+		return addr
+	}
+	return "=" + addr
+}
+
 func capturePane(target string) (string, error) {
 	if target == "" {
 		return "", fmt.Errorf("no tmux pane")
 	}
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-e", "-t", target).Output()
+	out, err := exec.Command("tmux", "capture-pane", "-p", "-e", "-t", tmuxExactTarget(target)).Output()
 	if err != nil {
 		return "", fmt.Errorf("capture pane: %w", err)
 	}

@@ -29,9 +29,12 @@ type transcriptTurn struct {
 const infoTailBytes = 256 * 1024
 
 type transcriptLine struct {
-	Type      string `json:"type"`
-	IsMeta    bool   `json:"isMeta"`
-	RequestID string `json:"requestId"`
+	Type   string `json:"type"`
+	IsMeta bool   `json:"isMeta"`
+	// IsCompactSummary marks the summary Claude Code writes after /compact;
+	// only the FLEET session view reads it (to skip it).
+	IsCompactSummary bool   `json:"isCompactSummary"`
+	RequestID        string `json:"requestId"`
 	// UUID and Timestamp identify and date one line; only the FLEET chat
 	// mirror (fleet_chat.go) reads them, every other reader ignores them.
 	UUID      string `json:"uuid"`

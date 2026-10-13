@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -24,7 +25,8 @@ func fleetTestServer(t *testing.T, sessions []Session) *server {
 			lastPath: filepath.Join(t.TempDir(), "cfg", "fleet-last.json"),
 			home:     t.TempDir(),
 			// No test may shell out to tmux: every started session is gone.
-			paneCommand: func(string) (string, bool) { return "", false }},
+			paneCommand: func(string) (string, bool) { return "", false },
+			paneHistory: func(string) (string, error) { return "", errors.New("test: no tmux") }},
 	}
 }
 
