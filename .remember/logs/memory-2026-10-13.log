@@ -1,0 +1,728 @@
+10:17:52 [hook] session-start: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:17:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:17:52 [force] bypassing cooldown + min msgs
+10:17:52 [extract] session 05dda1ca-7c0c-4ef6-9f1e-5b254bef23f4
+10:17:52 [extract] 0 exchanges (0 human)
+10:17:52 [extract] 0 exchanges, skip
+10:18:01 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:06 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:07 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:08 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:18 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:18 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:18 [cooldown] 26s < 120s, skip
+10:18:21 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:21 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:21 [cooldown] 29s < 120s, skip
+10:18:25 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:25 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:25 [cooldown] 33s < 120s, skip
+10:18:31 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:31 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:31 [cooldown] 39s < 120s, skip
+10:18:56 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:56 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:18:56 [cooldown] 64s < 120s, skip
+10:19:07 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:19:08 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:19:08 [cooldown] 76s < 120s, skip
+10:19:21 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:19:21 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:19:21 [cooldown] 89s < 120s, skip
+10:19:24 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:19:24 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:19:24 [cooldown] 92s < 120s, skip
+10:19:28 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:19:28 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:19:28 [cooldown] 96s < 120s, skip
+10:20:16 [hook] session-start: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions/.claude/worktrees/fleet-page PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:20 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:20 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:20 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:20:20 [extract] 19 exchanges (1 human)
+10:20:20 [extract] 1 human msgs < 3, skip
+10:20:28 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:28 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:28 [cooldown] 8s < 120s, skip
+10:20:44 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:44 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:44 [cooldown] 24s < 120s, skip
+10:20:48 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:48 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:20:48 [cooldown] 28s < 120s, skip
+10:21:22 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:21:22 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:21:22 [cooldown] 62s < 120s, skip
+10:27:00 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:00 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:01 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:27:01 [extract] 24 exchanges (1 human)
+10:27:01 [extract] 1 human msgs < 3, skip
+10:27:26 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:26 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:26 [cooldown] 25s < 120s, skip
+10:27:28 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:28 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:28 [cooldown] 27s < 120s, skip
+10:27:45 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:45 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:45 [cooldown] 44s < 120s, skip
+10:27:58 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:58 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:27:58 [cooldown] 57s < 120s, skip
+10:30:05 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:30:05 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:30:05 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:30:05 [extract] 31 exchanges (1 human)
+10:30:05 [extract] 1 human msgs < 3, skip
+10:30:15 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:30:16 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:30:16 [cooldown] 11s < 120s, skip
+10:30:21 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:30:21 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:30:21 [cooldown] 16s < 120s, skip
+10:31:01 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:31:01 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:31:01 [cooldown] 56s < 120s, skip
+10:32:08 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:32:08 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:32:08 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:32:08 [extract] 35 exchanges (1 human)
+10:32:08 [extract] 1 human msgs < 3, skip
+10:32:24 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:32:24 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:32:25 [cooldown] 16s < 120s, skip
+10:33:12 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:33:12 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:33:12 [cooldown] 64s < 120s, skip
+10:34:39 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:34:39 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:34:39 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:34:39 [extract] 40 exchanges (1 human)
+10:34:39 [extract] 1 human msgs < 3, skip
+10:35:09 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:09 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:09 [cooldown] 30s < 120s, skip
+10:35:19 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:19 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:19 [cooldown] 40s < 120s, skip
+10:35:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:46 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:46 [cooldown] 67s < 120s, skip
+10:35:50 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:50 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:50 [cooldown] 71s < 120s, skip
+10:35:51 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:51 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:51 [cooldown] 72s < 120s, skip
+10:35:52 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:52 [cooldown] 73s < 120s, skip
+10:35:52 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:52 [cooldown] 73s < 120s, skip
+10:35:54 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:54 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:54 [cooldown] 75s < 120s, skip
+10:35:54 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:54 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:54 [cooldown] 75s < 120s, skip
+10:35:56 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:56 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:56 [cooldown] 77s < 120s, skip
+10:35:59 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:59 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:35:59 [cooldown] 80s < 120s, skip
+10:36:00 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:01 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:01 [cooldown] 82s < 120s, skip
+10:36:04 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:04 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:04 [cooldown] 85s < 120s, skip
+10:36:10 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:10 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:10 [cooldown] 91s < 120s, skip
+10:36:13 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:13 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:13 [cooldown] 94s < 120s, skip
+10:36:19 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:19 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:19 [cooldown] 100s < 120s, skip
+10:36:21 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:21 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:21 [cooldown] 102s < 120s, skip
+10:36:25 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:25 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:26 [cooldown] 107s < 120s, skip
+10:36:31 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:32 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:32 [cooldown] 113s < 120s, skip
+10:36:35 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:35 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:35 [cooldown] 116s < 120s, skip
+10:36:44 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:44 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:36:44 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:36:44 [extract] 50 exchanges (1 human)
+10:36:44 [extract] 1 human msgs < 3, skip
+10:37:04 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:04 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:04 [cooldown] 20s < 120s, skip
+10:37:08 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:08 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:08 [cooldown] 24s < 120s, skip
+10:37:13 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:13 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:13 [cooldown] 29s < 120s, skip
+10:37:19 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:19 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:19 [cooldown] 35s < 120s, skip
+10:37:38 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:38 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:38 [cooldown] 54s < 120s, skip
+10:37:56 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:56 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:37:56 [cooldown] 72s < 120s, skip
+10:38:06 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:38:07 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:38:07 [cooldown] 83s < 120s, skip
+10:38:22 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:38:22 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:38:22 [cooldown] 98s < 120s, skip
+10:38:40 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:38:40 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:38:40 [cooldown] 116s < 120s, skip
+10:38:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:38:46 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:38:46 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:38:46 [extract] 52 exchanges (1 human)
+10:38:46 [extract] 1 human msgs < 3, skip
+10:39:14 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:39:14 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:39:14 [cooldown] 28s < 120s, skip
+10:39:34 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:39:34 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:39:34 [cooldown] 48s < 120s, skip
+10:39:39 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:39:39 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:39:39 [cooldown] 53s < 120s, skip
+10:39:44 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:39:44 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:39:44 [cooldown] 58s < 120s, skip
+10:40:06 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:40:06 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:40:06 [cooldown] 80s < 120s, skip
+10:40:24 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:40:24 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:40:24 [cooldown] 98s < 120s, skip
+10:40:30 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:40:30 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:40:30 [cooldown] 104s < 120s, skip
+10:40:40 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:40:40 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:40:40 [cooldown] 114s < 120s, skip
+10:41:01 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:01 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:01 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:41:01 [extract] 52 exchanges (1 human)
+10:41:01 [extract] 1 human msgs < 3, skip
+10:41:21 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:21 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:21 [cooldown] 20s < 120s, skip
+10:41:26 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:27 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:27 [cooldown] 26s < 120s, skip
+10:41:30 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:30 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:30 [cooldown] 29s < 120s, skip
+10:41:52 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:41:52 [cooldown] 51s < 120s, skip
+10:42:35 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:42:35 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:42:35 [cooldown] 94s < 120s, skip
+10:42:40 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:42:40 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:42:40 [cooldown] 99s < 120s, skip
+10:42:53 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:42:53 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:42:53 [cooldown] 112s < 120s, skip
+10:43:19 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:19 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:19 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:19 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:43:19 [extract] 55 exchanges (1 human)
+10:43:19 [extract] 1 human msgs < 3, skip
+10:43:24 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:24 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:24 [cooldown] 5s < 120s, skip
+10:43:24 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:24 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:24 [cooldown] 5s < 120s, skip
+10:43:27 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:27 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:27 [cooldown] 8s < 120s, skip
+10:43:28 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:28 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:28 [cooldown] 9s < 120s, skip
+10:43:28 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:28 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:28 [cooldown] 9s < 120s, skip
+10:43:31 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:32 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:32 [cooldown] 13s < 120s, skip
+10:43:33 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:33 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:33 [cooldown] 14s < 120s, skip
+10:43:38 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:38 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:38 [cooldown] 19s < 120s, skip
+10:43:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:41 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:41 [cooldown] 22s < 120s, skip
+10:43:44 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:44 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:44 [cooldown] 25s < 120s, skip
+10:43:47 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:48 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:48 [cooldown] 29s < 120s, skip
+10:43:52 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:52 [cooldown] 33s < 120s, skip
+10:43:55 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:55 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:55 [cooldown] 36s < 120s, skip
+10:43:56 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:56 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:43:56 [cooldown] 37s < 120s, skip
+10:44:00 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:01 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:01 [cooldown] 42s < 120s, skip
+10:44:02 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:02 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:02 [cooldown] 43s < 120s, skip
+10:44:09 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:09 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:09 [cooldown] 50s < 120s, skip
+10:44:10 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:10 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:10 [cooldown] 51s < 120s, skip
+10:44:16 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:17 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:17 [cooldown] 58s < 120s, skip
+10:44:21 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:21 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:44:21 [cooldown] 62s < 120s, skip
+10:45:47 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:45:47 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:45:47 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:45:47 [extract] 68 exchanges (1 human)
+10:45:47 [extract] 1 human msgs < 3, skip
+10:47:21 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:47:21 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:47:21 [cooldown] 94s < 120s, skip
+10:50:01 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:50:01 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:50:01 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:50:01 [extract] 68 exchanges (1 human)
+10:50:01 [extract] 1 human msgs < 3, skip
+10:50:24 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:50:24 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:50:24 [cooldown] 23s < 120s, skip
+10:50:48 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:50:48 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:50:49 [cooldown] 47s < 120s, skip
+10:50:57 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:50:58 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:50:58 [cooldown] 57s < 120s, skip
+10:51:06 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:06 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:06 [cooldown] 65s < 120s, skip
+10:51:07 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:08 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:08 [cooldown] 67s < 120s, skip
+10:51:22 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:22 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:22 [cooldown] 81s < 120s, skip
+10:51:35 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:35 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:35 [cooldown] 94s < 120s, skip
+10:51:50 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:50 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:50 [cooldown] 109s < 120s, skip
+10:51:52 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:51:52 [cooldown] 111s < 120s, skip
+10:52:05 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:06 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:06 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:52:06 [extract] 68 exchanges (1 human)
+10:52:06 [extract] 1 human msgs < 3, skip
+10:52:34 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:34 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:34 [cooldown] 28s < 120s, skip
+10:52:37 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:37 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:37 [cooldown] 31s < 120s, skip
+10:52:40 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:40 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:40 [cooldown] 34s < 120s, skip
+10:52:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:41 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:41 [cooldown] 35s < 120s, skip
+10:52:42 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:42 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:52:42 [cooldown] 36s < 120s, skip
+10:53:11 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:11 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:11 [cooldown] 65s < 120s, skip
+10:53:13 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:13 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:13 [cooldown] 67s < 120s, skip
+10:53:14 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:14 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:14 [cooldown] 68s < 120s, skip
+10:53:39 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:39 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:39 [cooldown] 93s < 120s, skip
+10:53:44 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:44 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:53:44 [cooldown] 98s < 120s, skip
+10:54:05 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:05 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:05 [cooldown] 119s < 120s, skip
+10:54:09 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:09 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:09 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:54:09 [extract] 68 exchanges (1 human)
+10:54:09 [extract] 1 human msgs < 3, skip
+10:54:10 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:10 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:10 [cooldown] 1s < 120s, skip
+10:54:33 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:33 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:33 [cooldown] 24s < 120s, skip
+10:54:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:47 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:47 [cooldown] 38s < 120s, skip
+10:54:50 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:50 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:50 [cooldown] 41s < 120s, skip
+10:54:56 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:56 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:56 [cooldown] 47s < 120s, skip
+10:54:56 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:56 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:54:56 [cooldown] 47s < 120s, skip
+10:56:12 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:56:12 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:56:12 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:56:12 [extract] 75 exchanges (1 human)
+10:56:12 [extract] 1 human msgs < 3, skip
+10:56:14 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:56:14 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:56:14 [cooldown] 2s < 120s, skip
+10:56:51 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:56:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:56:52 [cooldown] 40s < 120s, skip
+10:57:00 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:01 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:01 [cooldown] 49s < 120s, skip
+10:57:08 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:08 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:08 [cooldown] 56s < 120s, skip
+10:57:31 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:31 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:31 [cooldown] 79s < 120s, skip
+10:57:36 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:36 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:36 [cooldown] 84s < 120s, skip
+10:57:39 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:39 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:57:39 [cooldown] 87s < 120s, skip
+10:58:03 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:03 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:03 [cooldown] 111s < 120s, skip
+10:58:23 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:23 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:23 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+10:58:23 [extract] 75 exchanges (1 human)
+10:58:23 [extract] 1 human msgs < 3, skip
+10:58:28 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:28 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:28 [cooldown] 5s < 120s, skip
+10:58:35 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:35 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:35 [cooldown] 12s < 120s, skip
+10:58:47 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:48 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:58:48 [cooldown] 25s < 120s, skip
+10:59:10 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:59:10 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:59:10 [cooldown] 47s < 120s, skip
+10:59:32 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:59:32 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:59:32 [cooldown] 69s < 120s, skip
+10:59:52 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:59:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+10:59:52 [cooldown] 89s < 120s, skip
+11:00:14 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:00:14 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:00:14 [cooldown] 111s < 120s, skip
+11:00:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:00:46 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:00:46 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+11:00:46 [extract] 75 exchanges (1 human)
+11:00:46 [extract] 1 human msgs < 3, skip
+11:01:05 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:05 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:05 [cooldown] 19s < 120s, skip
+11:01:30 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:30 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:30 [cooldown] 44s < 120s, skip
+11:01:33 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:33 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:33 [cooldown] 47s < 120s, skip
+11:01:33 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:34 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:34 [cooldown] 48s < 120s, skip
+11:01:35 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:35 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:35 [cooldown] 49s < 120s, skip
+11:01:35 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:36 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:36 [cooldown] 50s < 120s, skip
+11:01:38 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:38 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:38 [cooldown] 52s < 120s, skip
+11:01:42 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:42 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:42 [cooldown] 56s < 120s, skip
+11:01:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:47 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:01:47 [cooldown] 61s < 120s, skip
+11:02:14 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:15 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:15 [cooldown] 89s < 120s, skip
+11:02:19 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:19 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:19 [cooldown] 93s < 120s, skip
+11:02:25 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:26 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:26 [cooldown] 100s < 120s, skip
+11:02:30 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:30 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:30 [cooldown] 104s < 120s, skip
+11:02:34 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:34 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:34 [cooldown] 108s < 120s, skip
+11:02:38 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:38 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:38 [cooldown] 112s < 120s, skip
+11:02:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:41 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:41 [cooldown] 115s < 120s, skip
+11:02:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:46 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:46 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+11:02:46 [extract] 79 exchanges (1 human)
+11:02:46 [extract] 1 human msgs < 3, skip
+11:02:51 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:51 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:51 [cooldown] 5s < 120s, skip
+11:02:57 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:57 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:02:57 [cooldown] 11s < 120s, skip
+11:03:23 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:23 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:23 [cooldown] 37s < 120s, skip
+11:03:28 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:28 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:28 [cooldown] 42s < 120s, skip
+11:03:31 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:32 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:32 [cooldown] 46s < 120s, skip
+11:03:37 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:37 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:37 [cooldown] 51s < 120s, skip
+11:03:49 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:49 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:49 [cooldown] 63s < 120s, skip
+11:03:55 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:55 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:03:55 [cooldown] 69s < 120s, skip
+11:04:05 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:05 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:05 [cooldown] 79s < 120s, skip
+11:04:05 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:05 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:06 [cooldown] 80s < 120s, skip
+11:04:09 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:09 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:09 [cooldown] 83s < 120s, skip
+11:04:42 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:43 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:43 [cooldown] 117s < 120s, skip
+11:04:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:46 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:46 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+11:04:46 [extract] 79 exchanges (1 human)
+11:04:46 [extract] 1 human msgs < 3, skip
+11:04:50 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:50 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:04:50 [cooldown] 4s < 120s, skip
+11:05:04 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:05:05 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:05:05 [cooldown] 19s < 120s, skip
+11:05:22 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:05:22 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:05:22 [cooldown] 36s < 120s, skip
+11:05:59 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:05:59 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:05:59 [cooldown] 73s < 120s, skip
+11:06:34 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:06:34 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:06:34 [cooldown] 108s < 120s, skip
+11:07:30 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:07:30 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:07:30 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+11:07:30 [extract] 87 exchanges (1 human)
+11:07:30 [extract] 1 human msgs < 3, skip
+11:07:46 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:07:51 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:07:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:07:52 [cooldown] 22s < 120s, skip
+11:13:45 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:13:46 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:13:46 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+11:13:46 [extract] 94 exchanges (2 human)
+11:13:46 [extract] 2 human msgs < 3, skip
+11:13:48 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:13:48 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:13:48 [cooldown] 2s < 120s, skip
+11:14:03 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:04 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:04 [cooldown] 18s < 120s, skip
+11:14:37 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:37 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:37 [cooldown] 51s < 120s, skip
+11:14:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:41 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:41 [cooldown] 55s < 120s, skip
+11:14:44 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:44 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:44 [cooldown] 58s < 120s, skip
+11:14:48 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:48 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:48 [cooldown] 62s < 120s, skip
+11:14:49 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:49 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:49 [cooldown] 63s < 120s, skip
+11:14:51 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:52 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:52 [cooldown] 66s < 120s, skip
+11:14:55 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:55 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:55 [cooldown] 69s < 120s, skip
+11:14:58 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:58 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:14:58 [cooldown] 72s < 120s, skip
+11:15:01 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:01 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:01 [cooldown] 75s < 120s, skip
+11:15:05 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:05 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:05 [cooldown] 79s < 120s, skip
+11:15:36 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:36 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:36 [cooldown] 110s < 120s, skip
+11:15:38 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:39 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:39 [cooldown] 113s < 120s, skip
+11:15:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:41 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:41 [cooldown] 115s < 120s, skip
+11:15:45 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:45 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:45 [cooldown] 119s < 120s, skip
+11:15:50 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:51 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:51 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+11:15:51 [extract] 98 exchanges (2 human)
+11:15:51 [extract] 2 human msgs < 3, skip
+11:15:57 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:57 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:15:57 [cooldown] 6s < 120s, skip
+11:17:00 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:00 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:00 [cooldown] 69s < 120s, skip
+11:17:00 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:00 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:00 [cooldown] 69s < 120s, skip
+11:17:03 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:04 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:04 [cooldown] 73s < 120s, skip
+11:17:11 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:11 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:11 [cooldown] 80s < 120s, skip
+11:17:38 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:38 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:38 [cooldown] 107s < 120s, skip
+11:17:39 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:40 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:17:40 [cooldown] 109s < 120s, skip
+11:18:06 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:18:06 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:18:06 [extract] session 0da56edf-a284-4d62-9503-fca028da4d94
+11:18:06 [extract] 102 exchanges (3 human)
+11:18:06 [haiku] calling (branch: main)
+11:18:10 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:18:12 [tokens] tokens: 2+12575cache→625out ($0.007354)
+11:18:12 [write] appended: ## 11:18 | main
+11:18:12 [write] position → 594
+11:18:12 [ndc] now.md → today-2026-10-13.md
+11:18:12 [ndc] running (PID 3184482)
+11:18:13 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:18:19 [ndc] tokens: 2+12575cache→936out ($0.005677)
+11:18:19 [ndc] 393→389b (-1%)
+11:18:24 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:18:28 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:18:38 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:19:01 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:19:06 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:19:17 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:19:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:19:44 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:20:04 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:20:07 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:20:11 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:20:20 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:20:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:20:54 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:21:01 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:21:17 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:21:21 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:21:27 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:21:39 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:21:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:21:43 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:22:02 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:22:07 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:22:09 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:22:17 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:22:41 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:22:45 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:22:48 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:22:58 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:23:01 [hook] session-start: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions/.claude/worktrees/fleet-login-code PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:23:01 [hook] save-session: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions/.claude/worktrees/fleet-login-code PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:23:01 [force] bypassing cooldown + min msgs
+11:23:01 [extract] session bc08b09a-0afe-49e5-b423-089412d28ea7
+11:23:01 [extract] 4 exchanges (1 human)
+11:23:01 [haiku] calling (branch: feat/fleet-login-code)
+11:23:02 [hook] post-tool: PROJECT_DIR=/workspace/home/andy/Developer/claude-sessions PIPELINE_DIR=/workspace/home/andy/.claude/plugins/cache/dpt-plugins/remember/0.8.3 PYTHON=python3 REMEMBER_DIR=/workspace/home/andy/Developer/claude-sessions/.remember
+11:23:07 [tokens] tokens: 2+12575cache→469out ($0.006114)
+11:23:07 [write] appended: ## 11:23 | feat/fleet-login-code
+11:23:07 [write] position → 34
+11:23:07 [git-backup] removed per-slug .gitignore (legacy bootstrap artifact)
