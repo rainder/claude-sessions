@@ -81,11 +81,15 @@ func decodeFleetSayBody(w http.ResponseWriter, r *http.Request) (text, cardID st
 	return body.Text, cardID, nil
 }
 
+// tmuxTypeLiteral types text into target as literal keys. The "--" ends
+// tmux's flag parsing: without it a message that starts with "-" is read as
+// flags ("-R hello" fails with "invalid flag"; others could change what
+// send-keys does).
 func tmuxTypeLiteral(target, text string) error {
 	if target == "" {
 		return errors.New("no tmux pane")
 	}
-	return exec.Command("tmux", "send-keys", "-t", target, "-l", text).Run()
+	return exec.Command("tmux", "send-keys", "-t", target, "-l", "--", text).Run()
 }
 
 func tmuxPressEnter(target string) error {
