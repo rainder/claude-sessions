@@ -59,6 +59,15 @@ type fleetDeps struct {
 	secret     string           // cookie value; "" → cookie auth off
 	secretPath string           // where revoke saves a new secret; "" → memory only
 	codes      []fleetLoginCode // live one-time codes, oldest first
+
+	// The last FLEET session seen alive (fleet_last.go). lastMu guards
+	// lastMem, the copy last written to (or first read from) lastPath, so an
+	// unchanged FLEET costs no write per state poll.
+	lastPath   string // "" → ~/.config/claude-sessions/fleet-last.json
+	home       string // "" → os.UserHomeDir(); transcripts and the default cwd
+	lastMu     sync.Mutex
+	lastLoaded bool
+	lastMem    fleetLast
 }
 
 func (s *server) fleetDir() string {
@@ -109,6 +118,18 @@ type fleetSession struct {
 	PID       int    `json:"pid"`
 	Status    string `json:"status"`
 	Reason    string `json:"reason,omitempty"`
+	// Code is the machine form of Reason; empty when alive.
+	Code string `json:"code,omitempty"`
+	// HasLast: FLEET is not alive and fleet-last.json names a session that
+	// POST /fleet/start would resume.
+	HasLast bool `json:"hasLast"`
+}
+
+// fleetReasonCodes maps discovery's human reason text onto its code.
+var fleetReasonCodes = map[string]string{
+	"not running":         "not_live",
+	"ambiguous":           "ambiguous",
+	"session list failed": "list_failed",
 }
 
 // findFleet picks the one local claude session the user named exactly FLEET.
@@ -147,17 +168,23 @@ func fleetStatus(sess Session) string {
 	}
 }
 
-// discoverFleet resolves FLEET from the cached session list.
+// discoverFleet resolves FLEET from the cached session list. An alive FLEET
+// is remembered in fleet-last.json (written only when it changed).
 func (s *server) discoverFleet() (Session, fleetSession) {
 	sessions, err := s.cachedSessions()
 	if err != nil {
-		return Session{}, fleetSession{Reason: "session list failed"}
+		return Session{}, fleetSessionDown("session list failed")
 	}
 	sess, reason := findFleet(sessions)
 	if reason != "" {
-		return Session{}, fleetSession{Reason: reason}
+		return Session{}, fleetSessionDown(reason)
 	}
+	s.rememberFleet(sess)
 	return sess, fleetSession{Alive: true, SessionID: sess.SessionID, PID: sess.PID, Status: fleetStatus(sess)}
+}
+
+func fleetSessionDown(reason string) fleetSession {
+	return fleetSession{Reason: reason, Code: fleetReasonCodes[reason]}
 }
 
 func registerFleetRoutes(mux *http.ServeMux, s *server) {
@@ -280,6 +307,9 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 		out[k] = v
 	}
 	_, fl := s.discoverFleet()
+	if !fl.Alive {
+		_, fl.HasLast = s.fleetResumable()
+	}
 	out["fleet"] = fl
 	out["stale"] = fleetStateStale(state, stateErr, s.fleetNow())
 	if stateErr != "" {
