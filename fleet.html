@@ -182,6 +182,8 @@ section { min-width: 0; }
 .chosen-line + .chosen-line { margin-top: 6px; }
 .chosen-note { display: flex; align-items: center; gap: 8px; margin: 4px 0 0 10px; font-size: 13px; color: var(--muted); }
 .chosen-note .link-btn { margin-left: auto; }
+.chosen-acts { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 0 4px; margin: 0 -4px -6px 0; }
+.noid-note { margin: 8px 2px 0; font-size: 13px; color: var(--muted); }
 .summary { margin: 0 0 10px; overflow-wrap: anywhere; }
 .links { display: flex; flex-wrap: wrap; gap: 0 16px; }
 .links a { display: inline-flex; align-items: center; min-height: 44px; }
@@ -247,6 +249,11 @@ section { min-width: 0; }
 .turn.user .body { background: var(--accent-tint); }
 .turn .body.fold { max-height: calc(12 * 1.45em + 16px); overflow: hidden;
   -webkit-mask-image: linear-gradient(to bottom, #000 78%, transparent); mask-image: linear-gradient(to bottom, #000 78%, transparent); }
+.turn.local .body { background: var(--accent-tint); white-space: pre-wrap; box-shadow: inset 0 0 0 1px var(--amber-line); }
+.local-warn { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin: 5px 2px 0; color: var(--amber); font-size: 12.5px; font-weight: 550; text-align: right; }
+.local-warn .dot { background: var(--amber); flex: none; }
+.local-acts { display: flex; justify-content: flex-end; gap: 2px; margin-right: -8px; }
+.local-acts .link-btn.confirm { color: var(--amber); }
 .link-btn { min-height: 44px; background: none; border: 0; padding: 0 8px; color: var(--accent); cursor: pointer; font-size: 13px; font-weight: 600; }
 .turn > .link-btn { margin-left: -6px; }
 .chat-empty { margin: 18px 0; text-align: center; font-size: 14px; color: var(--muted); }
@@ -730,18 +737,58 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   let state = null, stateText = "", stateDay = "";
   let alive = false;
   const expanded = new Set();          // "row:<id>" for compact rows left open
-  // cardId → {at: updatedAt at send, key, label, lean, state, inflight, changing, prev}
-  // state: "sending" | "sent" | "unconfirmed" (no HTTP answer: it may have
-  // reached FLEET). prev: {label, state} of the answer a correction replaced.
+  // cardId → {attempts, changing, cardChanged}. attempts: every answer sent
+  // for the card, oldest first: the first answer, then each correction, as
+  // {key, label, lean, state, inflight, cardAt (card updatedAt at send), ts}.
+  // state: "sending" | "sent" | "unconfirmed" (no clear HTTP answer: it may
+  // have reached FLEET). cardChanged: the last attempt is unconfirmed and the
+  // card was rewritten after it.
   const pending = new Map();
+  // The last attempt per card is kept in localStorage, so a reload in the
+  // middle of a send still shows that delivery is unknown. No chat text.
+  const PEND_KEY = "fleet.pending.v1", PEND_MAX = 24 * 3600e3;
+  const lastAttempt = p => p.attempts[p.attempts.length - 1] || null;
+  function savePending() {
+    const out = {}, now = Date.now();
+    for (const [id, p] of pending) {
+      const a = lastAttempt(p);
+      if (!a || now - a.ts > PEND_MAX) continue;
+      out[id] = {cardId: id, updatedAt: a.cardAt, key: a.key, label: a.label, at: new Date(a.ts).toISOString(), status: a.state};
+    }
+    try {
+      if (Object.keys(out).length) localStorage.setItem(PEND_KEY, JSON.stringify(out));
+      else localStorage.removeItem(PEND_KEY);
+    } catch { /* storage off (Safari private mode): memory only */ }
+  }
+  // A "sending" entry from an earlier page load never got its answer here,
+  // so it loads as unconfirmed.
+  function loadPending() {
+    let m = null;
+    try { m = obj(JSON.parse(localStorage.getItem(PEND_KEY) || "null")); } catch { m = null; }
+    if (!m) return;
+    const now = Date.now();
+    for (const [id, v] of Object.entries(m)) {
+      const o = obj(v);
+      if (!o || !id) continue;
+      const ts = Date.parse(str(o.at)), st = str(o.status);
+      if (!isFinite(ts) || now - ts > PEND_MAX || now - ts < -PEND_MAX) continue;
+      if (st !== "sending" && st !== "sent" && st !== "unconfirmed") continue;
+      pending.set(id, {changing: false, cardChanged: false, attempts: [{key: str(o.key), label: str(o.label) || str(o.key),
+        lean: false, state: st === "sent" ? "sent" : "unconfirmed", inflight: false, cardAt: str(o.updatedAt), ts}]});
+    }
+    savePending();
+  }
+  loadPending();
   const failed = {};                   // poller name → last fetch failed
   // readOnly: the turns are the last FLEET session's, FLEET is not running.
   // stale: a render was skipped while the chat was hidden (phone view).
   // follow: the log is at (or near) the bottom, so new turns scroll into
   // view; else they raise the "New messages" pill (unseen). savedTop: the
-  // log's scroll offset when the phone Chat view was left.
+  // log's scroll offset when the phone Chat view was left. local: messages
+  // whose delivery is unknown, shown as outgoing bubbles after the turns:
+  // {id, text, ts, confirm (first "Send again" tap seen), timer, busy}.
   const chat = {sid: null, pos: null, turns: new Map(), reason: "", open: new Set(), key: "", readOnly: false, stale: false,
-    follow: true, unseen: false, rev: 0, savedTop: null};
+    follow: true, unseen: false, rev: 0, savedTop: null, local: [], localSeq: 0};
   const hist = {entries: [], next: null, filter: "", loading: false, loaded: false};
   // Start FLEET: flight = the POST is out; watch = a start is under way (ours
   // or another device's) and the page polls state fast until FLEET is alive;
@@ -1110,26 +1157,46 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     talk.addEventListener("click", () => prefillChat(head.name));
     card.append(el("div", "card-top", title, talk));
 
-    // Andy's answer, once sent: shown by the title until FLEET drops or
-    // rewrites the card. The options lock while it stands. "Send a
-    // correction" unlocks them; the first answer stays in view above the
-    // correction (the old flow allowed a second send too).
+    // Andy's answers, once sent: shown by the title until FLEET drops or
+    // rewrites the card. The options lock while they stand. "Send a
+    // correction" unlocks them; earlier answers stay in view above the
+    // correction (at most the last 3). An unconfirmed last answer stays even
+    // when the card is rewritten, until Andy dismisses it or a correction
+    // is confirmed.
     const pend = id ? pending.get(id) : null;
-    const locked = !!(pend && !pend.changing);
-    if (pend) {
-      if (pend.prev) card.append(chosenLine("You chose: ", pend.prev.label, pend.prev.state));
-      const line = chosenLine(pend.prev ? "Correction: " : "You chose: ", pend.label, pend.state);
-      card.append(line);
-      if (pend.state !== "sending" && !pend.changing) {
-        const ch = el("button", "link-btn", "Send a correction");
-        ch.type = "button";
-        ch.addEventListener("click", () => { pend.changing = true; guard(renderCards); });
-        line.append(ch);
-      } else if (pend.changing) {
+    const last = pend ? lastAttempt(pend) : null;
+    const locked = !!(last && !pend.changing);
+    if (last) {
+      const from = Math.max(0, pend.attempts.length - 3);
+      pend.attempts.slice(from).forEach((a, i) =>
+        card.append(chosenLine(from + i ? "Correction: " : "You chose: ", a.label, a.state)));
+      if (pend.cardChanged && last.state === "unconfirmed")
+        card.append(el("div", "chosen-line warn", el("span", "cl-t", el("span", "dot"),
+          el("span", "", "Card changed · delivery of your last answer is still unknown — check the chat"))));
+      if (pend.changing) {
         const cancel = el("button", "link-btn", "Cancel");
         cancel.type = "button";
         cancel.addEventListener("click", () => { pend.changing = false; guard(renderCards); });
         card.append(el("div", "chosen-note", el("span", "", "Pick the correction below."), cancel));
+      } else if (last.state !== "sending") {
+        const acts = el("div", "chosen-acts");
+        if (id && canSendNow()) {
+          const ch = el("button", "link-btn", "Send a correction");
+          ch.type = "button";
+          ch.addEventListener("click", () => { pend.changing = true; guard(renderCards); });
+          acts.append(ch);
+        }
+        if (last.state === "unconfirmed") {
+          const dis = el("button", "link-btn", "Dismiss");
+          dis.type = "button";
+          dis.title = "Remove this warning";
+          dis.addEventListener("click", () => {
+            if (pending.get(id) === pend && !pend.attempts.some(a => a.inflight)) { pending.delete(id); savePending(); }
+            guard(renderCards);
+          });
+          acts.append(dis);
+        }
+        if (acts.childNodes.length) card.append(acts);
       }
     }
 
@@ -1140,12 +1207,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     // is only for a lean that matches no option.
     if (lean && !leanOpt) card.append(el("p", "lean-line", "Lean: ", el("b", "", lean)));
 
-    const canSend = alive && !expired;
+    const canSend = canSendNow() && !!id;
     if (opts.length) {
       const box = el("div", "opts");
       for (const o of opts) {
         const key = str(o.key), label = str(o.label) || str(o.send) || key, line = str(o.line);
-        const chosen = !!(pend && pend.key === key && !pend.lean);
+        const chosen = !!(last && last.key === key && !last.lean);
         const btn = el("button", "opt" + (chosen ? " chosen" : ""), key ? el("span", "k", key) : null,
           el("span", "ob", leanOpt === o ? el("span", "rec", "FLEET recommends") : null,
             el("span", "ol", label), line ? el("span", "oline", line) : null));
@@ -1158,7 +1225,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       // FLEET never lets a lean stand in for an explicit-yes item, so the
       // Lean button is for needs-you cards only.
       if (!explicit && leanOpt && str(leanOpt.send)) {
-        const chosen = !!(pend && pend.lean);
+        const chosen = !!(last && last.lean);
         const lb = el("button", "opt lean-btn" + (chosen ? " chosen" : ""), el("span", "k", lean), el("span", "ob", el("span", "ol", "Use FLEET's pick")));
         lb.type = "button";
         lb.disabled = !canSend || locked;
@@ -1166,6 +1233,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         box.append(lb);
       }
       card.append(box);
+      // Without an id the page cannot tie an answer to the card, lock it or
+      // track its delivery, so the options only show.
+      if (!id) card.append(el("p", "noid-note", "This card has no id, so the page cannot track an answer. Answer in the chat."));
     }
 
     const links = linksNode(c);
@@ -1187,8 +1257,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // An unconfirmed answer still counts as open: Andy must check it.
   function answered(c) {
     const p = pending.get(str(c.id));
-    return !!(p && (p.state === "sending" || p.state === "sent"));
+    const a = p ? lastAttempt(p) : null;
+    return !!(a && (a.state === "sending" || a.state === "sent"));
   }
+  function canSendNow() { return alive && !expired; }
 
   function linksNode(c) {
     const links = arr(c.links).map(obj).filter(l => l && str(l.url));
@@ -1300,12 +1372,23 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
   }
 
-  // A card leaves "sent" once FLEET drops it or rewrites it. An entry whose
-  // request is still in flight is kept; it is checked once it settles.
+  // A card's answers go once FLEET drops the card. A rewrite of the card
+  // clears a sent answer, but an unconfirmed one stays (flagged
+  // cardChanged): only Dismiss or a confirmed correction clears it. An entry
+  // with a request still in flight is kept; it is checked once it settles.
   function prunePending() {
     if (!pending.size) return;
     const now = new Map(arr(state && state.cards).map(obj).filter(c => c && str(c.id)).map(c => [str(c.id), str(c.updatedAt)]));
-    for (const [id, p] of pending) if (!p.inflight && (!now.has(id) || now.get(id) !== p.at)) pending.delete(id);
+    let dirty = false;
+    for (const [id, p] of pending) {
+      const a = lastAttempt(p);
+      if (a && p.attempts.some(x => x.inflight)) continue;
+      if (!a || !now.has(id)) { pending.delete(id); dirty = true; continue; }
+      const moved = now.get(id) !== a.cardAt;
+      if (moved && a.state !== "unconfirmed") { pending.delete(id); dirty = true; continue; }
+      p.cardChanged = moved;
+    }
+    if (dirty) savePending();
   }
 
   // ---- confirm sheet -----------------------------------------------------
@@ -1317,12 +1400,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // sheetValid: the card behind the open sheet is still the same in the
   // current state: present, same updatedAt, kind and status, the option with
   // the same key still sends the same text, and (for FLEET's pick) the lean
-  // is the same. A card with no id cannot be tracked and passes.
+  // is the same. A card with no id cannot be tracked and never sends here.
   function sheetValid() {
     const c = sheet.card, o = sheet.opt;
     if (!c || !o) return false;
     const id = str(c.id);
-    if (!id) return true;
+    if (!id) return false;
     const cur = currentCard(id);
     if (!cur) return false;
     if (str(cur.updatedAt) !== str(c.updatedAt) || str(cur.kind) !== str(c.kind) || str(cur.status) !== str(c.status)) return false;
@@ -1333,7 +1416,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
 
   function openSheet(c, o, lean, explicit) {
-    if (!alive || expired) return;
+    if (!alive || expired || !str(c.id)) return;
     const base = str(o.send);
     if (!base) return;
     const head = cardHead(c);
@@ -1385,10 +1468,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const optLabel = o => str(o.label) || str(o.send) || str(o.key);
 
   // The sheet closes at once; the card shows "You chose: … · sending…" and
-  // locks its options until the answer lands. An HTTP error answer restores
-  // what the card showed before. No answer at all (network error, timeout)
-  // may still have reached FLEET, so the card says delivery is not
-  // confirmed and keeps its options locked.
+  // locks its options until the answer lands. The attempt is in
+  // localStorage before the POST goes out. An HTTP error answer removes the
+  // attempt, so the card shows what it showed before. No clear answer
+  // (network error, timeout, a 2xx the page cannot read) may still have
+  // reached FLEET, so the card says delivery is not confirmed and keeps its
+  // options locked.
   async function sheetSend(btn) {
     if (sheet.busy || !sheet.card) return;
     // An explicit yes sends only from the armed approve button.
@@ -1400,25 +1485,31 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     btn.textContent = "Sending…";
     const c = sheet.card, o = sheet.opt, text = sheet.text;
     const id = str(c.id);
-    const prev = id ? pending.get(id) : undefined;
-    const entry = {at: str(c.updatedAt), key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", inflight: true, changing: false,
-      prev: prev ? {label: prev.label, state: prev.state} : null};
-    if (id) { pending.set(id, entry); guard(renderCards); }
+    const att = {key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", inflight: true, cardAt: str(c.updatedAt), ts: Date.now()};
+    let p = pending.get(id);
+    if (!p) { p = {attempts: [], changing: false, cardChanged: false}; pending.set(id, p); }
+    p.attempts.push(att);
+    p.changing = false; p.cardChanged = false;
+    savePending();
+    guard(renderCards);
     closeSheet();
-    const res = await say(text, id || null);
-    entry.inflight = false;
+    const res = await say(text, id);
+    att.inflight = false;
     if (res.ok) {
-      entry.state = "sent";
+      att.state = "sent";
       toast(res.queued ? "Sent. FLEET is busy. It reads your answer next." : "Sent to FLEET.");
       afterSend();
     } else if (res.unclear) {
-      entry.state = "unconfirmed";
+      att.state = "unconfirmed";
       toast("Delivery not confirmed. Check the chat before you send again.", true);
       afterSend();
     } else {
-      if (id && pending.get(id) === entry) { if (prev) { prev.changing = false; pending.set(id, prev); } else pending.delete(id); }
+      const i = p.attempts.indexOf(att);
+      if (i >= 0) p.attempts.splice(i, 1);
+      if (!p.attempts.length && pending.get(id) === p) pending.delete(id);
       toast(res.error, true);
     }
+    savePending();
     prunePending();
     guard(renderCards);
   }
@@ -1437,8 +1528,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   };
 
   // say answers {ok}, or {ok:false, error}, or {ok:false, unclear:true}
-  // when no HTTP answer came back (network error or the 15 s timeout): the
-  // text may have reached FLEET, so the caller must not act as if it did not.
+  // when no clear answer came back (network error, the 15 s timeout, or a
+  // 2xx body that is not JSON with a boolean ok): the text may have reached
+  // FLEET, so the caller must not act as if it did not.
   const SAY_TIMEOUT = 15000;
   async function say(text, cardId) {
     const ctl = typeof AbortController === "function" ? new AbortController() : null;
@@ -1457,6 +1549,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     clearTimeout(timer);
     try { body = obj(JSON.parse(raw)); } catch { body = null; }
     if (r.ok && body && body.ok === true) return {ok: true, queued: body.queued === true};
+    // A 2xx the page cannot read (not JSON, no boolean ok) says the request
+    // got through, not what became of the text: treat it as unknown.
+    if (r.ok && !(body && typeof body.ok === "boolean")) return unclear;
     let msg = (body && str(body.error)) || raw.trim() || r.statusText || ("HTTP " + r.status);
     msg = friendly[msg] || msg;
     msg = msg.charAt(0).toUpperCase() + msg.slice(1);
@@ -1510,6 +1605,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (!prev || prev.text !== turn.text || prev.at !== turn.at || prev.role !== turn.role) {
         chat.turns.set(turn.uuid, turn);
         changed = true;
+        if (turn.role === "user" && dropLocalMatch(turn)) changed = true;
       }
     }
     chat.pos = num(d.pos) ? d.pos : 0;
@@ -1528,6 +1624,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     // streaming reply also raises the pill while Andy reads further up.
     let rev = 0;
     for (const t of chat.turns.values()) rev += t.text.length + 1;
+    for (const m of chat.local) rev += m.text.length + 1;
     const grew = rev > chat.rev;
     const nodes = [];
     for (const t of chat.turns.values()) {
@@ -1540,10 +1637,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       wrap.dataset.uuid = t.uuid;
       nodes.push(wrap);
     }
-    if (!nodes.length) nodes.push(el("p", "chat-empty", reasonText[chat.reason] || (chat.reason ? "No chat to show (" + chat.reason + ")." : "No messages yet.")));
+    if (!nodes.length && !chat.local.length) nodes.push(el("p", "chat-empty", reasonText[chat.reason] || (chat.reason ? "No chat to show (" + chat.reason + ")." : "No messages yet.")));
+    for (const m of chat.local) nodes.push(localBubble(m));
     log.replaceChildren(...nodes);
     // Fold only turns that really overflow 12 lines.
-    for (const w of log.querySelectorAll(".turn")) {
+    for (const w of log.querySelectorAll(".turn[data-uuid]")) {
       const body = w.querySelector(".body");
       const uuid = w.dataset.uuid;
       const isOpen = chat.open.has(uuid);
@@ -1578,6 +1676,80 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     log.scrollTo({top: log.scrollHeight, behavior: "smooth"});
   });
 
+  // ---- chat messages with unknown delivery --------------------------------
+  // A message whose send got no clear answer may have reached FLEET. It
+  // stays as an outgoing bubble with an amber note until it shows in the
+  // transcript, Andy dismisses it, or "Send again" (two taps) gets it
+  // through.
+  const normText = t => t.replace(/\s+/g, " ").trim();
+  function dropLocalMatch(turn) {
+    const n = normText(turn.text), at = Date.parse(turn.at);
+    const i = chat.local.findIndex(m => normText(m.text) === n && !m.busy && (!isFinite(at) || at >= m.ts - 60000));
+    if (i < 0) return false;
+    clearTimeout(chat.local[i].timer);
+    chat.local.splice(i, 1);
+    return true;
+  }
+  function addLocal(text) {
+    chat.local.push({id: ++chat.localSeq, text, ts: Date.now(), confirm: false, timer: 0, busy: false});
+    chat.follow = true;
+    guard(renderChat);
+  }
+  function dropLocal(m) {
+    clearTimeout(m.timer);
+    chat.local = chat.local.filter(x => x !== m);
+    guard(renderChat);
+  }
+  function localBubble(m) {
+    const again = el("button", "link-btn" + (m.confirm ? " confirm" : ""), m.busy ? "Sending…" : m.confirm ? "Tap again to send" : "Send again");
+    again.type = "button";
+    again.disabled = m.busy;
+    again.addEventListener("click", () => {
+      if (m.busy) return;
+      if (!canSendNow()) { toast("FLEET is not running. You cannot send now.", true); return; }
+      clearTimeout(m.timer);
+      if (!m.confirm) {
+        m.confirm = true;
+        m.timer = setTimeout(() => { m.confirm = false; guard(renderChat); }, 4000);
+      } else {
+        m.confirm = false;
+        resendLocal(m);
+      }
+      guard(renderChat);
+    });
+    const dis = el("button", "link-btn", "Dismiss");
+    dis.type = "button";
+    dis.disabled = m.busy;
+    dis.addEventListener("click", () => dropLocal(m));
+    const w = el("div", "turn user local",
+      el("div", "who", el("b", "", "Andy"), el("span", "", clockWithDay(new Date(m.ts).toISOString()))),
+      el("div", "body", m.text),
+      el("div", "local-warn", el("span", "dot"), el("span", "", "Not confirmed — check the chat before you send it again")),
+      el("div", "local-acts", again, dis));
+    w.dataset.local = String(m.id);
+    return w;
+  }
+  async function resendLocal(m) {
+    if (chatBusy || m.busy || !canSendNow()) return;
+    chatBusy = true; m.busy = true;
+    applyEnabled();
+    const res = await say(m.text, null);
+    chatBusy = false; m.busy = false;
+    if (res.ok) {
+      toast(res.queued ? "Sent. FLEET is busy. It reads this next." : "Sent to FLEET.");
+      dropLocal(m);
+      afterSend();
+    } else if (res.unclear) {
+      m.ts = Date.now();
+      toast("Delivery not confirmed. Check the chat before you send it again.", true);
+      afterSend();
+    } else {
+      toast(res.error, true);
+    }
+    applyEnabled();
+    guard(renderChat);
+  }
+
   function prefillChat(name) {
     const ta = $("say");
     const prefix = "About " + name + ": ";
@@ -1609,6 +1781,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (ta.value.trim() === text) ta.value = "";
       grow();
       toast(res.queued ? "Sent. FLEET is busy. It reads this next." : "Sent to FLEET.");
+      afterSend();
+    } else if (res.unclear) {
+      // It may have reached FLEET: move it from the input to a marked
+      // bubble, so a plain Send cannot repeat it by accident.
+      if (ta.value.trim() === text) ta.value = "";
+      grow();
+      addLocal(text);
+      toast("Delivery not confirmed. Check the chat before you send it again.", true);
       afterSend();
     } else {
       toast(res.error, true);
