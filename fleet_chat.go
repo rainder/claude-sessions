@@ -145,12 +145,13 @@ func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 		// FLEET is down: mirror the last session read-only, so the page
 		// still shows what FLEET said last. Only for not_live: when two
 		// sessions claim the name, nothing says which one to show.
+		// The lookup is memoized (a miss for 30 s): this runs every poll.
 		l, ok := readFleetLast(s.fleetLastPath())
-		if fl.Code != "not_live" || !ok || homeErr != nil {
+		if fl.Code != "not_live" || !ok {
 			empty("", fl.Reason)
 			return
 		}
-		if path = findTranscript(home, l.SessionID); path == "" {
+		if path, _, ok = s.fleetTranscript(l.SessionID); !ok {
 			empty("", fl.Reason)
 			return
 		}

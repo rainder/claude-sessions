@@ -22,7 +22,9 @@ func fleetTestServer(t *testing.T, sessions []Session) *server {
 			// Never the real ~/.config or ~/.claude: discovery writes
 			// fleet-last.json and chat/start look up transcripts.
 			lastPath: filepath.Join(t.TempDir(), "cfg", "fleet-last.json"),
-			home:     t.TempDir()},
+			home:     t.TempDir(),
+			// Never tmux has-session: no test may shell out to tmux.
+			tmuxAlive: func(string) bool { return false }},
 	}
 }
 

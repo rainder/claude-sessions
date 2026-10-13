@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -36,9 +37,19 @@ func (s *server) fleetHome() (string, error) {
 	return os.UserHomeDir()
 }
 
+// fleetSessionIDRe is the only id shape fleet-last.json may hold: a Claude
+// Code session UUID. The resume id check alone (resumeSessionIDRe) admits
+// "--dangerously-skip-permissions", which would turn into a flag in the
+// command a start types.
+var fleetSessionIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func validFleetSessionID(id string) bool {
+	return fleetSessionIDRe.MatchString(id) && validateResumeSessionID(id) == nil
+}
+
 // readFleetLast reads fleet-last.json. Any read or parse error, or a session
-// id that fails the resume id format check, is "no last session": the id goes
-// into a shell command and a transcript glob, so it is checked before any use.
+// id that is not a UUID, is "no last session": the id goes into a shell
+// command and a transcript glob, so it is checked before any use.
 func readFleetLast(path string) (fleetLast, bool) {
 	if path == "" {
 		return fleetLast{}, false
@@ -48,19 +59,20 @@ func readFleetLast(path string) (fleetLast, bool) {
 		return fleetLast{}, false
 	}
 	var l fleetLast
-	if json.Unmarshal(data, &l) != nil || validateResumeSessionID(l.SessionID) != nil {
+	if json.Unmarshal(data, &l) != nil || !validFleetSessionID(l.SessionID) {
 		return fleetLast{}, false
 	}
 	return l, true
 }
 
-// rememberFleet writes fleet-last.json when the alive FLEET's id, cwd or tmux
-// name differ from the copy in memory. State polls run every few seconds, so
-// an unchanged FLEET must cost nothing. The first call loads the file, so a
-// server restart does not rewrite it either. A failed write is logged and not
-// retried until FLEET changes again.
+// rememberFleet writes fleet-last.json when the alive FLEET's id or cwd
+// differ from the copy in memory (a new tmux name alone is not worth a
+// write; it is stored with the next one). State polls run every few seconds,
+// so an unchanged FLEET must cost nothing. The first call loads the file, so
+// a server restart does not rewrite it either. A failed write is logged and
+// not retried until FLEET changes again.
 func (s *server) rememberFleet(sess Session) {
-	if validateResumeSessionID(sess.SessionID) != nil {
+	if !validFleetSessionID(sess.SessionID) {
 		return
 	}
 	f := &s.fleet
@@ -72,7 +84,7 @@ func (s *server) rememberFleet(sess Session) {
 		f.lastLoaded = true
 	}
 	m := f.lastMem
-	if m.SessionID == sess.SessionID && m.CWD == sess.CWD && m.Tmux == sess.Tmux {
+	if m.SessionID == sess.SessionID && m.CWD == sess.CWD {
 		return
 	}
 	l := fleetLast{SessionID: sess.SessionID, CWD: sess.CWD, Tmux: sess.Tmux,
@@ -90,19 +102,71 @@ func (s *server) rememberFleet(sess Session) {
 	}
 }
 
-// fleetResumable returns the last session when POST /fleet/start would resume
-// it: a valid id, a cwd that is still a directory, and a transcript on disk.
-func (s *server) fleetResumable() (fleetLast, bool) {
-	l, ok := readFleetLast(s.fleetLastPath())
-	if !ok {
-		return fleetLast{}, false
+// fleetScriptMissTTL: how long a "no transcript" answer is reused. While
+// FLEET is down every state and chat poll asks, and a miss is a glob over
+// every project directory.
+const fleetScriptMissTTL = 30 * time.Second
+
+// fleetScript is one memoized transcript lookup: the path and the cwd its
+// head records (the cwd the session started in), or a miss and when.
+type fleetScript struct {
+	path, cwd string
+	missAt    time.Time
+}
+
+// fleetTranscript finds sid's transcript and the cwd its head records. A hit
+// is reused until the file disappears; a miss for fleetScriptMissTTL.
+func (s *server) fleetTranscript(sid string) (path, cwd string, ok bool) {
+	f := &s.fleet
+	now := s.fleetNow()
+	f.scriptMu.Lock()
+	c, hit := f.scripts[sid]
+	f.scriptMu.Unlock()
+	if hit {
+		if c.path != "" {
+			if _, err := os.Stat(c.path); err == nil {
+				return c.path, c.cwd, true
+			}
+		} else if now.Sub(c.missAt) < fleetScriptMissTTL {
+			return "", "", false
+		}
 	}
-	if st, err := os.Stat(l.CWD); l.CWD == "" || err != nil || !st.IsDir() {
-		return fleetLast{}, false
+	c = fleetScript{missAt: now}
+	if home, err := s.fleetHome(); err == nil {
+		if p := findTranscript(home, sid); p != "" {
+			head, _ := readResumableHeadFn(p)
+			c = fleetScript{path: p, cwd: head.cwd}
+		}
 	}
-	home, err := s.fleetHome()
-	if err != nil || findTranscript(home, l.SessionID) == "" {
-		return fleetLast{}, false
+	f.scriptMu.Lock()
+	if f.scripts == nil {
+		f.scripts = map[string]fleetScript{}
 	}
-	return l, true
+	f.scripts[sid] = c
+	f.scriptMu.Unlock()
+	return c.path, c.cwd, c.path != ""
+}
+
+// fleetLastPlan is what POST /fleet/start would do with fleet-last.json.
+// valid: the file names a usable id. ok: it can be resumed — a transcript
+// exists and its folder is still a directory. cwd is the folder the session
+// started in, from the transcript head: claude keys a transcript to that
+// folder, and the session's own cwd moves when it enters a worktree.
+// fleet-last.json's cwd is only the fallback for a head that has none.
+func (s *server) fleetLastPlan() (l fleetLast, cwd string, valid, ok bool) {
+	l, valid = readFleetLast(s.fleetLastPath())
+	if !valid {
+		return fleetLast{}, "", false, false
+	}
+	_, cwd, found := s.fleetTranscript(l.SessionID)
+	if !found {
+		return l, "", true, false
+	}
+	if cwd == "" {
+		cwd = l.CWD
+	}
+	if st, err := os.Stat(cwd); cwd == "" || err != nil || !st.IsDir() {
+		return l, "", true, false
+	}
+	return l, cwd, true, true
 }

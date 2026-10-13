@@ -186,10 +186,10 @@ func TestFleetChatAliveHasNoReadOnly(t *testing.T) {
 
 func TestFleetChatReadOnlyFallback(t *testing.T) {
 	s := fleetTestServer(t, nil)
-	writeFleetLast(t, s, fleetLast{SessionID: "chat-last-1", CWD: "/no/longer/there"})
-	path := putFleetTranscript(t, s.fleet.home, "chat-last-1", fleetChatFixture(t)...)
+	writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(12), CWD: "/no/longer/there"})
+	path := putFleetTranscript(t, s.fleet.home, fleetUUID(12), fleetChatFixture(t)...)
 	out := getFleetJSON(t, s, "/fleet/chat")
-	if len(out["turns"].([]any)) != 2 || out["sessionId"] != "chat-last-1" || out["readOnly"] != true ||
+	if len(out["turns"].([]any)) != 2 || out["sessionId"] != fleetUUID(12) || out["readOnly"] != true ||
 		out["reason"] != "not running" || out["reset"] != true {
 		t.Fatalf("got %v", out)
 	}
@@ -210,9 +210,10 @@ func TestFleetChatNoFallback(t *testing.T) {
 		script   bool
 		reason   string
 	}{
-		{"ambiguous", []Session{{PID: 1, Name: "FLEET"}, {PID: 2, Name: "FLEET"}}, &fleetLast{SessionID: "chat-amb-1"}, true, "ambiguous"},
-		{"no transcript", nil, &fleetLast{SessionID: "chat-noscript-1"}, false, "not running"},
+		{"ambiguous", []Session{{PID: 1, Name: "FLEET"}, {PID: 2, Name: "FLEET"}}, &fleetLast{SessionID: fleetUUID(13)}, true, "ambiguous"},
+		{"no transcript", nil, &fleetLast{SessionID: fleetUUID(14)}, false, "not running"},
 		{"bad id", nil, &fleetLast{SessionID: "../../x"}, false, "not running"},
+		{"flag id", nil, &fleetLast{SessionID: "--dangerously-skip-permissions"}, true, "not running"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -69,6 +69,8 @@ type fleetDeps struct {
 	lastMu     sync.Mutex
 	lastLoaded bool
 	lastMem    fleetLast
+	scriptMu   sync.Mutex
+	scripts    map[string]fleetScript // session id → memoized transcript lookup
 
 	// POST /fleet/start (fleet_start.go). startMu is held across the whole
 	// handler, so two taps cannot both pass the guards; startStateMu guards
@@ -80,8 +82,10 @@ type fleetDeps struct {
 	startStateMu  sync.Mutex
 	startInFlight bool
 	lastStartAt   time.Time // last attempt that passed discovery; a failed spawn counts
-	startingAt    time.Time // zero → no start pending
+	startingAt    time.Time // zero → no start in the 90 s window
 	startingMode  string
+	startedTmux   string            // tmux name of the last web start until FLEET shows up or it is gone
+	tmuxAlive     func(string) bool // nil → spawnGroupTmuxAlive (tmux has-session)
 }
 
 func (s *server) fleetDir() string {
@@ -137,9 +141,12 @@ type fleetSession struct {
 	// HasLast: FLEET is not alive and fleet-last.json names a session that
 	// POST /fleet/start would resume.
 	HasLast bool `json:"hasLast"`
-	// CanStart: not_live, no start in flight or pending, and the start rate
-	// limit is free.
+	// CanStart: not_live, no start in flight or pending, the last session
+	// not live under another name, and the start rate limit is free.
 	CanStart bool `json:"canStart"`
+	// LastLive: not_live, but fleet-last.json's session runs under another
+	// name, so a start would make a second FLEET.
+	LastLive bool `json:"lastLive,omitempty"`
 	// Starting: a web start in the last 90 s, and FLEET not alive yet.
 	Starting *fleetStarting `json:"starting,omitempty"`
 }
@@ -334,9 +341,10 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	}
 	_, fl := s.discoverFleet()
 	if !fl.Alive {
-		_, fl.HasLast = s.fleetResumable()
+		_, _, _, fl.HasLast = s.fleetLastPlan()
 	}
-	s.fleetStartInfo(&fl)
+	sessions, _ := s.cachedSessions() // the list discovery just used
+	s.fleetStartInfo(&fl, sessions)
 	out["fleet"] = fl
 	out["stale"] = fleetStateStale(state, stateErr, s.fleetNow())
 	if stateErr != "" {

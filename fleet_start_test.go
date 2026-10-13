@@ -95,8 +95,8 @@ func TestFleetStartListFailure(t *testing.T) {
 func TestFleetStartResumesLast(t *testing.T) {
 	s, calls, _ := fleetStartServer(t, nil)
 	cwd := t.TempDir()
-	writeFleetLast(t, s, fleetLast{SessionID: "st-resume-1", CWD: cwd, Tmux: "old"})
-	putFleetTranscript(t, s.fleet.home, "st-resume-1", `{"type":"user"}`)
+	writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(7), CWD: cwd, Tmux: "old"})
+	putFleetTranscript(t, s.fleet.home, fleetUUID(7), `{"type":"user"}`)
 	w, out := postFleetStart(s, nil)
 	if w.Code != http.StatusOK || !out.OK || out.Mode != "resume" || out.Tmux != "FLEET-abc" {
 		t.Fatalf("%d %+v", w.Code, out)
@@ -105,28 +105,39 @@ func TestFleetStartResumesLast(t *testing.T) {
 		t.Fatalf("calls %v", *calls)
 	}
 	c := (*calls)[0]
-	if c.cwd != cwd || c.display != "FLEET" || c.command != "claude --model=opus --x --resume st-resume-1 -n FLEET" {
+	if c.cwd != cwd || c.display != "FLEET" || c.command != "claude --model=opus --x --resume "+fleetUUID(7)+" -n FLEET" {
 		t.Fatalf("spawn = %+v", c)
 	}
 }
 
 func TestFleetStartFresh(t *testing.T) {
 	cases := []struct {
-		name string
-		last func(t *testing.T, s *server)
+		name        string
+		lastMissing bool
+		last        func(t *testing.T, s *server)
 	}{
-		{"no last", func(*testing.T, *server) {}},
-		{"last cwd missing", func(t *testing.T, s *server) {
-			writeFleetLast(t, s, fleetLast{SessionID: "st-gone-cwd", CWD: filepath.Join(t.TempDir(), "gone")})
-			putFleetTranscript(t, s.fleet.home, "st-gone-cwd", `{"type":"user"}`)
+		{"no last", false, func(*testing.T, *server) {}},
+		{"last cwd missing", true, func(t *testing.T, s *server) {
+			writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(8), CWD: filepath.Join(t.TempDir(), "gone")})
+			putFleetTranscript(t, s.fleet.home, fleetUUID(8), `{"type":"user"}`)
 		}},
-		{"last transcript missing", func(t *testing.T, s *server) {
-			writeFleetLast(t, s, fleetLast{SessionID: "st-no-script", CWD: t.TempDir()})
+		{"last transcript missing", true, func(t *testing.T, s *server) {
+			writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(9), CWD: t.TempDir()})
 		}},
-		{"last id invalid", func(t *testing.T, s *server) {
+		{"head cwd missing", true, func(t *testing.T, s *server) {
+			// The transcript's own cwd wins over fleet-last.json's, even
+			// when only the latter still exists.
+			writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(15), CWD: t.TempDir()})
+			putFleetTranscript(t, s.fleet.home, fleetUUID(15), `{"type":"user","cwd":"`+filepath.Join(t.TempDir(), "gone")+`"}`)
+		}},
+		{"last id invalid", false, func(t *testing.T, s *server) {
 			writeFleetLast(t, s, fleetLast{SessionID: "x;touch /tmp/p", CWD: t.TempDir()})
 		}},
-		{"last unparseable", func(t *testing.T, s *server) {
+		{"last id is a flag", false, func(t *testing.T, s *server) {
+			writeFleetLast(t, s, fleetLast{SessionID: "--dangerously-skip-permissions", CWD: t.TempDir()})
+			putFleetTranscript(t, s.fleet.home, "--dangerously-skip-permissions", `{"type":"user"}`)
+		}},
+		{"last unparseable", false, func(t *testing.T, s *server) {
 			if err := os.MkdirAll(filepath.Dir(s.fleet.lastPath), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -140,8 +151,15 @@ func TestFleetStartFresh(t *testing.T) {
 			s, calls, _ := fleetStartServer(t, nil)
 			c.last(t, s)
 			w, out := postFleetStart(s, nil)
-			if w.Code != http.StatusOK || out.Mode != "fresh" || len(*calls) != 1 {
+			if w.Code != http.StatusOK || out.Mode != "fresh" || out.LastMissing != c.lastMissing || len(*calls) != 1 {
 				t.Fatalf("%d %+v %v", w.Code, out, *calls)
+			}
+			wantText := "Started a new FLEET session"
+			if c.lastMissing {
+				wantText += " (the last one could not be resumed)"
+			}
+			if e := lastFleetLogLine(t, s); e["text"] != wantText {
+				t.Fatalf("log text = %v", e["text"])
 			}
 			if got := (*calls)[0]; got.cwd != s.fleet.defaultCwd || got.command != "claude --model=opus --x -n FLEET '/fleet'" {
 				t.Fatalf("spawn = %+v", got)
@@ -160,11 +178,31 @@ func TestFleetStartFreshNeedsDefaultCwd(t *testing.T) {
 
 func TestFleetStartRefusesWhenLastIDIsLiveUnderAnotherName(t *testing.T) {
 	cwd := t.TempDir()
-	s, calls, _ := fleetStartServer(t, []Session{{PID: 3, Name: "renamed", SessionID: "st-live-other"}})
-	writeFleetLast(t, s, fleetLast{SessionID: "st-live-other", CWD: cwd})
-	putFleetTranscript(t, s.fleet.home, "st-live-other", `{"type":"user"}`)
-	if w, out := postFleetStart(s, nil); w.Code != http.StatusConflict || out.Code != "already_running" || len(*calls) != 0 {
+	s, calls, _ := fleetStartServer(t, []Session{{PID: 3, Name: "renamed", SessionID: fleetUUID(10)}})
+	writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(10), CWD: cwd})
+	putFleetTranscript(t, s.fleet.home, fleetUUID(10), `{"type":"user"}`)
+	if w, out := postFleetStart(s, nil); w.Code != http.StatusConflict || out.Code != "last_live" ||
+		out.Error != "the last FLEET session is running without the FLEET name" || len(*calls) != 0 {
 		t.Fatalf("%d %+v", w.Code, out)
+	}
+	fl := getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
+	if fl["code"] != "not_live" || fl["lastLive"] != true || fl["canStart"] != false {
+		t.Fatalf("state: %v", fl)
+	}
+}
+
+func TestFleetStartResumesInTheTranscriptCwd(t *testing.T) {
+	s, calls, _ := fleetStartServer(t, nil)
+	started, moved := t.TempDir(), t.TempDir()
+	// Session.CWD went into a worktree; the transcript is keyed to where the
+	// session started.
+	writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(16), CWD: moved})
+	putFleetTranscript(t, s.fleet.home, fleetUUID(16), `{"type":"summary","summary":"x"}`, `{"type":"user","cwd":"`+started+`"}`)
+	if w, out := postFleetStart(s, nil); w.Code != http.StatusOK || out.Mode != "resume" || out.LastMissing {
+		t.Fatalf("%d %+v", w.Code, out)
+	}
+	if got := (*calls)[0].cwd; got != started {
+		t.Fatalf("cwd = %q, want the transcript's %q", got, started)
 	}
 }
 
@@ -195,9 +233,9 @@ func TestFleetStartRateLimited(t *testing.T) {
 		w.Header().Get("Retry-After") != "50" || len(*calls) != 1 {
 		t.Fatalf("second: %d %+v %q", w.Code, out, w.Header().Get("Retry-After"))
 	}
-	*now = now.Add(50 * time.Second)
+	*now = now.Add(80 * time.Second) // past the 60 s and the 90 s pending window
 	if w, _ := postFleetStart(s, nil); w.Code != http.StatusOK || len(*calls) != 2 {
-		t.Fatalf("after 60 s: %d", w.Code)
+		t.Fatalf("after 90 s: %d", w.Code)
 	}
 }
 
@@ -223,7 +261,7 @@ func TestFleetStartAuth(t *testing.T) {
 		setup func(*http.Request)
 		code  int
 	}{
-		{"none", func(*http.Request) {}, http.StatusUnauthorized},
+		{"none", func(*http.Request) {}, http.StatusUnauthorized}, // JSON, code unauthorized
 		{"cookie, no origin", func(r *http.Request) {
 			r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
 		}, http.StatusForbidden},
@@ -262,19 +300,12 @@ func TestFleetStartBodyCap(t *testing.T) {
 func TestFleetStartWritesLogLine(t *testing.T) {
 	s, _, _ := fleetStartServer(t, nil)
 	cwd := t.TempDir()
-	writeFleetLast(t, s, fleetLast{SessionID: "st-log-1", CWD: cwd})
-	putFleetTranscript(t, s.fleet.home, "st-log-1", `{"type":"user"}`)
+	writeFleetLast(t, s, fleetLast{SessionID: fleetUUID(11), CWD: cwd})
+	putFleetTranscript(t, s.fleet.home, fleetUUID(11), `{"type":"user"}`)
 	postFleetStart(s, nil)
-	data, err := os.ReadFile(filepath.Join(s.fleet.dir, "log.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var e map[string]any
-	if err := json.Unmarshal(data, &e); err != nil {
-		t.Fatal(err)
-	}
+	e := lastFleetLogLine(t, s)
 	if e["type"] != "web-start" || e["at"] != "2026-10-13T10:00:00Z" || e["mode"] != "resume" ||
-		e["sessionId"] != "st-log-1" || e["tmux"] != "FLEET-abc" || e["text"] == "" {
+		e["sessionId"] != fleetUUID(11) || e["tmux"] != "FLEET-abc" || e["text"] == "" {
 		t.Fatalf("log line = %v", e)
 	}
 }
@@ -318,5 +349,82 @@ func TestFleetStateStartingClearsWhenAlive(t *testing.T) {
 	s.invalidateSessions()
 	if fl := getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any); fl["starting"] != nil {
 		t.Fatalf("down again: %v", fl)
+	}
+}
+
+// lastFleetLogLine is the newest line of the test server's log.jsonl.
+func lastFleetLogLine(t *testing.T, s *server) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(s.fleet.dir, "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var e map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &e); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestFleetStartUnauthorizedIsJSON(t *testing.T) {
+	s, _, _ := fleetStartServer(t, nil)
+	w, out := postFleetStart(s, func(*http.Request) {})
+	if w.Code != http.StatusUnauthorized || out.OK || out.Code != "unauthorized" || out.Error == "" ||
+		!strings.Contains(w.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("%d %q %+v", w.Code, w.Header().Get("Content-Type"), out)
+	}
+}
+
+func TestFleetStartRefusesWhileAStartIsPending(t *testing.T) {
+	s, calls, now := fleetStartServer(t, nil)
+	tmuxUp := true
+	var asked []string
+	s.fleet.tmuxAlive = func(name string) bool { asked = append(asked, name); return tmuxUp }
+	fleetBlock := func() map[string]any {
+		s.invalidateSessions()
+		return getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
+	}
+	if w, _ := postFleetStart(s, nil); w.Code != http.StatusOK {
+		t.Fatalf("first: %d", w.Code)
+	}
+	// Past the 60 s gap, inside the 90 s window.
+	*now = now.Add(70 * time.Second)
+	if w, out := postFleetStart(s, nil); w.Code != http.StatusConflict || out.Code != "starting" || len(*calls) != 1 {
+		t.Fatalf("in the window: %d %+v", w.Code, out)
+	}
+	// Past the window, but the tmux session still runs and FLEET has not
+	// shown up (a trust dialog, say): still that start.
+	*now = now.Add(30 * time.Second)
+	if w, out := postFleetStart(s, nil); w.Code != http.StatusConflict || out.Code != "starting" || len(*calls) != 1 {
+		t.Fatalf("tmux alive: %d %+v", w.Code, out)
+	}
+	if len(asked) == 0 || asked[len(asked)-1] != "FLEET-abc" {
+		t.Fatalf("has-session asked %v, want the started tmux name", asked)
+	}
+	if fl := fleetBlock(); fl["canStart"] != false || fl["starting"] != nil {
+		t.Fatalf("state, tmux alive: %v", fl)
+	}
+	// The tmux session is gone: a new start may run.
+	tmuxUp = false
+	if fl := fleetBlock(); fl["canStart"] != true {
+		t.Fatalf("state, tmux gone: %v", fl)
+	}
+	if w, _ := postFleetStart(s, nil); w.Code != http.StatusOK || len(*calls) != 2 {
+		t.Fatalf("tmux gone: %d", w.Code)
+	}
+}
+
+func TestFleetStartPendingEndsWhenFleetAppears(t *testing.T) {
+	s, _, now := fleetStartServer(t, nil)
+	s.fleet.tmuxAlive = func(string) bool { return true }
+	postFleetStart(s, nil)
+	s.collect = func() ([]Session, error) { return []Session{{PID: 9, Name: "FLEET", SessionID: fleetUUID(17)}}, nil }
+	s.invalidateSessions()
+	getFleetJSON(t, s, "/fleet/state") // sees FLEET: the start is done
+	s.collect = func() ([]Session, error) { return nil, nil }
+	*now = now.Add(61 * time.Second)
+	if w, out := postFleetStart(s, nil); w.Code != http.StatusOK {
+		t.Fatalf("FLEET came up and went down again: %d %+v", w.Code, out)
 	}
 }
