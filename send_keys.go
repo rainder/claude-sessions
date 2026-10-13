@@ -2,8 +2,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // sendKeysMaxLen bounds a single compose-box message. Kept here so both the
@@ -11,13 +13,26 @@ import (
 // validator (server.go's sendKeysBody) enforce the identical limit.
 const sendKeysMaxLen = 4096
 
+// sendKeysPaneInMode and sendKeysTmux are sendKeys' seams, so a test never
+// types into a real pane.
+var (
+	sendKeysPaneInMode = tmuxPaneInMode
+	sendKeysTmux       = func(args ...string) error { return exec.Command("tmux", args...).Run() }
+)
+
 // sendKeys injects text into s's tmux pane as literal keystrokes followed by
 // Enter — two calls, matching the existing tmuxSendLiteral (paste.go:403-405).
 // The -l flag on the first call is required: without it tmux parses text as
 // key names, so a message that happens to read "Enter" or "C-c" would trigger
-// that tmux action instead of being typed literally. Neither call goes
-// through a shell (exec.Command argument slices), so there is no
-// shell-injection surface regardless of message content.
+// that tmux action instead of being typed literally. The "--" after it ends
+// tmux's flag parsing: without it a text that starts with "-" is read as
+// flags ("-R hello" fails with "invalid flag"). Neither call goes through a
+// shell (exec.Command argument slices), so there is no shell-injection surface
+// regardless of message content.
+//
+// A pane in copy-mode is refused before anything is typed: the keys would go
+// to the copy-mode key table, a "q" in the text leaves copy-mode, and only the
+// rest would reach the session — a mangled message, then submitted by Enter.
 //
 // s.Tmux must be non-empty. tmux does not fail safely on an empty target: `tmux
 // send-keys -t "" ...` exits 0 and silently delivers to tmux's default/current
@@ -32,13 +47,35 @@ func sendKeys(s Session, text string) error {
 	if s.Tmux == "" {
 		return fmt.Errorf("PID %d has no tmux pane", s.PID)
 	}
-	if err := exec.Command("tmux", "send-keys", "-t", s.Tmux, "-l", text).Run(); err != nil {
+	inMode, err := sendKeysPaneInMode(s.Tmux)
+	if err != nil {
+		return fmt.Errorf("read pane mode: %w", err)
+	}
+	if inMode {
+		return errors.New("pane is in scroll mode; press q in the terminal, then send again")
+	}
+	if err := sendKeysTmux("send-keys", "-t", s.Tmux, "-l", "--", text); err != nil {
 		return fmt.Errorf("send text: %w", err)
 	}
-	if err := exec.Command("tmux", "send-keys", "-t", s.Tmux, "Enter").Run(); err != nil {
+	if err := sendKeysTmux("send-keys", "-t", s.Tmux, "Enter"); err != nil {
 		return fmt.Errorf("send enter: %w", err)
 	}
 	return nil
+}
+
+// tmuxPaneInMode reports whether target is in a tmux mode such as copy-mode.
+// Keys sent then go to the mode's key table, not to Claude: a "q" in the
+// text leaves copy-mode and only the rest reaches the input box. Shared by
+// sendKeys and the FLEET page's say.
+func tmuxPaneInMode(target string) (bool, error) {
+	if target == "" {
+		return false, errors.New("no tmux pane")
+	}
+	out, err := exec.Command("tmux", "display", "-p", "-t", target, "#{pane_in_mode}").Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) == "1", nil
 }
 
 // resolveLivePIDLocal is the local-TUI-process counterpart of the server's

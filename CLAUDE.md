@@ -795,7 +795,11 @@ this with `resolveLivePIDLocal` (send_keys.go), a fresh `CollectLocal()` plus
 the same `SessionID` check, since `Session.Tmux` is derived at collection
 time and never stored on disk — a plain `session_id`-only reattestation like
 `localReattest` would revalidate identity but still hand back a stale pane
-address.
+address. `sendKeys` types with `send-keys -l -- <text>` (without `--` a text
+starting with `-` is read as tmux flags) and first refuses a pane in copy-mode
+(`tmuxPaneInMode`, shared with `/fleet/say`): the keys would go to the
+copy-mode key table and a `q` would leave it, so a mangled message would reach
+the session.
 
 `POST /sessions/{pid}/resize` (`{"session_id", "cols", "rows", "revert"}`,
 resize.go/server.go) is the inspector's preview-resize feature: entering

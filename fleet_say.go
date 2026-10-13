@@ -93,20 +93,6 @@ func tmuxTypeLiteral(target, text string) error {
 	return exec.Command("tmux", "send-keys", "-t", target, "-l", "--", text).Run()
 }
 
-// tmuxPaneInMode reports whether target is in a tmux mode such as copy-mode.
-// Keys sent then go to the mode's key table, not to Claude: a "q" in the
-// text leaves copy-mode and only the rest reaches the input box.
-func tmuxPaneInMode(target string) (bool, error) {
-	if target == "" {
-		return false, errors.New("no tmux pane")
-	}
-	out, err := exec.Command("tmux", "display", "-p", "-t", target, "#{pane_in_mode}").Output()
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(string(out)) == "1", nil
-}
-
 // fleetTextLanded reports whether the input box holds what was just typed.
 // Claude may wrap a long line or still be drawing it, so the box text only
 // has to be a non-empty prefix of the sent text, whitespace ignored. A long
