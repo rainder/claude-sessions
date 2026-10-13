@@ -848,11 +848,13 @@ of the long-running Claude session named `FLEET` (spec and plan in
 `docs/superpowers/`). The server makes no decisions. It serves two files FLEET
 writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 `~/.claude/skills/fleet/scripts/fleet-state.py`) and `~/.claude/fleet/log.jsonl`
-(append-only, `fleet-log.sh`; the server appends `web-say` lines) — mirrors the
-FLEET transcript, and types text into the FLEET pane. Routes: `GET /fleet`,
+(append-only, `fleet-log.sh`; the server appends `web-say` and `web-start`
+lines) — mirrors the FLEET transcript, types text into the FLEET pane, and can
+start FLEET when it is down. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
-`POST /fleet/login`, `POST /fleet/login/arm`, `POST /fleet/login/revoke`, main mux only (never the
-loopback paste mux).
+`POST /fleet/start`, `POST /fleet/login`, `POST /fleet/login/arm`,
+`POST /fleet/login/revoke`, and the static app files (manifest, `sw.js`,
+icons), main mux only (never the loopback paste mux).
 
 **Auth.** Bearer header, or the `cs_fleet` cookie (`Path=/fleet`, `HttpOnly`,
 `SameSite=Strict`). The cookie holds a **fleet-only secret**
@@ -892,7 +894,15 @@ no `?hop=1` answers a small HTML hop (`writeFleetHop`, `location.replace`) to
 `/fleet?hop=1` — not a 303, which would still be part of the cross-site
 navigation; that same-site request
 carries the cookie, and the page then `replaceState`s back to `/fleet`. A miss
-on `?hop=1` is a real 401. The page sends `Referrer-Policy: same-origin`,
+on `?hop=1` is a real 401, and its body is a login form
+(`fleetLoginFormPage`; no script, the login page's CSP, `Referrer-Policy:
+same-origin`): paste the `fleet-url` link or code, and it posts `c` to
+`POST /fleet/login`. This is the way in for an installed home-screen app: iOS
+gives it its own cookie jar, and a link tapped in another app opens the
+browser, not the app. `POST /fleet/login` takes a bare code or a whole pasted
+link (`fleetCodeFromInput`: if the value holds `c=`, take `c` from its query;
+a base64url code never holds `c=` itself). Every other login guard is the
+same. The page sends `Referrer-Policy: same-origin`,
 **not `no-referrer`**: with `no-referrer` browsers send `Origin: null` on POST,
 and the CSRF guard would refuse every send. `/fleet/usage` exists only because
 the cookie path cannot reach `/usage/numbers`.
@@ -900,7 +910,56 @@ the cookie path cannot reach `/usage/numbers`.
 **Discovery.** Exactly one local claude row (`Tool == ""`) with a user-set
 `Name == "FLEET"` (exact match: other rows contain the word; a derived title or
 a grok row is not counted). 0 → not running, 2+ → `ambiguous`; both refuse
-sends.
+sends. `fleet.code` in `/fleet/state` is the machine form of the reason:
+`not_live`, `ambiguous`, `list_failed` (empty when alive).
+
+**fleet-last.json** (`~/.config/claude-sessions/fleet-last.json`,
+`{sessionId, cwd, tmux, seenAt}`) is the FLEET discovery last saw alive. It is
+written (temp + rename, 0600) only when the id, cwd or tmux name differ from
+the copy in memory, and the first discovery loads that copy from the file, so
+neither a state poll nor a restart rewrites an unchanged file; `seenAt` moves
+only on a write. Any read or parse error is "no last session", and the id must
+pass the resume id format check (`validateResumeSessionID`) before it is used
+anywhere — it goes into a shell command and a transcript glob.
+`fleet.hasLast` is true when FLEET is down and a start would resume it.
+
+**Start FLEET** (`POST /fleet/start`, fleet_start.go). Guards, in order, and
+why: fleet auth, cookie needs `sameOrigin` (it starts a process); one attempt
+per 60 s, with a mutex held across the whole handler so two taps cannot both
+pass — a spawned claude needs seconds to write its session file, and a second
+tap in that window would see "not running" and start a second FLEET; then a
+**fresh** `collectLocal` (not the cached list: FLEET may have been started
+from the terminal a second ago) → 409 `already_running` / `ambiguous`, 500
+`start_failed` when the list fails. Only an attempt past discovery stamps the
+60 s, and a failed spawn still counts. Mode: **resume** when fleet-last.json
+is valid, its cwd is still a directory and `findTranscript` finds the
+transcript (409 if that id is live under another name: two processes on one
+transcript), else **fresh** in `~/Developer/trecs-brain` running `/fleet`.
+The command is the `Opus` preset (`claude --model=opus` when missing) plus
+`--resume <id> -n FLEET` or `-n FLEET '/fleet'`; `-n` makes the name
+user-set, so discovery matches the new session. A success logs a `web-start`
+line, invalidates the session cache, and sets `fleet.starting` for 90 s or
+until FLEET is seen alive. `fleet.canStart` is `not_live` with no start in
+flight or pending and the 60 s free. Errors never carry paths; the spawn
+error goes to stderr.
+
+**Read-only chat.** When the code is `not_live` and fleet-last.json names a
+session whose transcript exists, `/fleet/chat` answers that transcript with
+the same cursor rules plus `readOnly: true`, so the page still shows what FLEET
+said last. `ambiguous` gets the empty answer: nothing says which one to show.
+
+**Installable app.** `/fleet/manifest.webmanifest`, `/fleet/sw.js` and the
+icons (`fleet_assets/`, embedded) need no auth: they hold nothing secret and a
+home-screen launch fetches them before any cookie. `sw.js` sends
+`Service-Worker-Allowed: /fleet` (its default scope would be `/fleet/` only)
+and `no-cache`; the rest are cached a day. The page CSP adds `manifest-src`
+and `worker-src 'self'`. The worker (`fleet_sw.js`; bump `VERSION` on every
+change) caches only the manifest, the icons, and `/fleet` itself — network
+first, stored only when the response carries `X-Fleet-App: 1`, which only the
+app page sends, and served from the cache only when the network fails. It
+never handles a non-GET, anything outside `/fleet`, any `c=` link, or
+state/chat/log/usage/say/start/login*: those are live data, actions, or
+depend on auth, and a cached answer would show an old FLEET or a stale login.
 
 **Say guards, in order, and why each exists.** Cookie auth needs `Origin` (or
 `Referer`) host == `r.Host`. Newlines flatten to spaces and other control bytes
