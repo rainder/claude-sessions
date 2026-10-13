@@ -852,7 +852,8 @@ writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 lines) — mirrors the FLEET transcript, types text into the FLEET pane, and can
 start FLEET when it is down. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
-`POST /fleet/start`, `POST /fleet/login`, `POST /fleet/login/arm`,
+`POST /fleet/start`, `/fleet/session`, `POST /fleet/session/say`,
+`POST /fleet/login`, `POST /fleet/login/arm`,
 `POST /fleet/login/revoke`, and the static app files (manifest, `sw.js`,
 icons), main mux only (never the loopback paste mux).
 
@@ -1020,6 +1021,34 @@ changes. Not `updatedAt`: `fleet-state.py` stamps `updatedAt = now` on every
 card at every write, so it changes every FLEET cycle and would bounce every
 sent card straight back. A send that is unclear or failed keeps the card in
 Decide.
+
+**Session view** (`fleet_session.go`). A card's `session` field (a tmux
+session name; a `name:0.0` form counts only before `:`) opens that session:
+`GET /fleet/session?t=` shows it, `POST /fleet/session/say` types into it.
+This types into sessions other than FLEET, so one allowlist,
+`fleetResolveSession`, gates both, in order: the name matches
+`^[A-Za-z0-9._-]{1,128}$` (400 `bad_target`; a pane address is refused, so
+the request can never pick a pane); a card in the **current** state.json names
+it (403 `not_allowed`: the page may open only what FLEET put on a card, and a
+card that left state.json closes the door); it is not FLEET's tmux session and
+no row there is named FLEET (403 `fleet_self`: FLEET has its own box with its
+own guards); exactly one live row, claude or grok, sits in it (404 `gone`,
+409 `ambiguous`), so the pane address is the resolved row's `Tmux` and never
+anything from the request. The say path resolves from a fresh `collectLocal`
+and a fresh state.json stat, then runs the same pipeline as `/fleet/say`
+(`fleetCleanSayText`, `fleetSayGateLocked`, `fleetTypeInto`): the 1 s gap is
+shared with `/fleet/say`, the 10 s double-tap key is target plus text. Grok is
+view-only (409 `send_unsupported`, `canSend: false`): the input-box parser
+knows only Claude Code's screen. The transcript filter (`fleetSessionText`)
+keeps text blocks only — never thinking or tool_use — skips any user line
+that carries a tool_result, and removes `system-reminder` and slash-command
+wrapper blocks (an unclosed one drops the rest of the turn); a turn empty
+after that is skipped. A claude row with no transcript on disk, and every
+grok row, show the pane instead (`capture-pane -J -S -200`, escapes
+stripped, last 64 KiB). Paging: the same `since` cursor as `/fleet/chat`, plus
+`before=<older>` reading backward; `older` is set on reset and `before`
+answers only. A send is logged to the say log as `sent target=<tmux>
+len=<n>`, never the text, and never to log.jsonl, which is FLEET's own record.
 
 **Say guards, in order, and why each exists.** Cookie auth needs `Origin` (or
 `Referer`) host == `r.Host`. Newlines flatten to spaces and other control bytes

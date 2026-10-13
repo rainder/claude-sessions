@@ -44,11 +44,12 @@ type fleetDeps struct {
 
 	logMu sync.Mutex // serializes this process's log.jsonl appends
 
-	typeText   func(target, text string) error   // nil → tmux send-keys -l
-	pressEnter func(target string) error         // nil → tmux send-keys Enter
-	sleep      func(time.Duration)               // nil → time.Sleep
-	paneInMode func(target string) (bool, error) // nil → tmux display #{pane_in_mode}
-	sayLogPath string                            // refusal log; "" → fleetSayLogDefault()
+	typeText    func(target, text string) error     // nil → tmux send-keys -l
+	pressEnter  func(target string) error           // nil → tmux send-keys Enter
+	sleep       func(time.Duration)                 // nil → time.Sleep
+	paneInMode  func(target string) (bool, error)   // nil → tmux display #{pane_in_mode}
+	sayLogPath  string                              // refusal log; "" → fleetSayLogDefault()
+	paneHistory func(target string) (string, error) // session view pane; nil → tmux capture-pane -J -S -200
 
 	sayMu     sync.Mutex // one send at a time, so two devices never interleave keystrokes
 	lastSayAt time.Time
@@ -238,6 +239,8 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("GET /fleet/chat", s.fleetChat)   // Task 5
 	mux.HandleFunc("POST /fleet/say", s.fleetSay)    // Task 6
 	mux.HandleFunc("POST /fleet/start", s.fleetStart)
+	mux.HandleFunc("GET /fleet/session", s.fleetSessionGet)
+	mux.HandleFunc("POST /fleet/session/say", s.fleetSessionSay)
 	mux.HandleFunc("POST /fleet/login", s.fleetLogin)
 	mux.HandleFunc("POST /fleet/login/arm", s.fleetLoginArm)
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
