@@ -6,6 +6,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -141,5 +142,32 @@ func TestFleetAppHeaderOnlyOnTheAppPage(t *testing.T) {
 		if w := get(path, false); w.Header().Get("X-Fleet-App") != "" {
 			t.Errorf("%s without auth (%d) must not carry X-Fleet-App", path, w.Code)
 		}
+	}
+}
+
+func TestFleetServiceWorkerVersionIsAnAssetHash(t *testing.T) {
+	w := httptest.NewRecorder()
+	fleetMux(fleetTestServer(t, nil)).ServeHTTP(w, httptest.NewRequest("GET", "/fleet/sw.js", nil))
+	body := w.Body.String()
+	if strings.Contains(body, "@VERSION@") {
+		t.Fatal("the version placeholder must be substituted")
+	}
+	icon, _ := fleetAssets.ReadFile("fleet_assets/icon-192.png")
+	v := fleetAssetVersion(fleetServiceWorkerJS, fleetManifest, icon)
+	if len(v) != 12 {
+		t.Fatalf("version %q", v)
+	}
+	served := regexp.MustCompile(`const VERSION = "fleet-([0-9a-f]{12})";`).FindStringSubmatch(body)
+	if served == nil {
+		t.Fatalf("no hashed VERSION in %q", body)
+	}
+	a := fleetServiceWorkerBody(fleetServiceWorkerJS, fleetManifest, icon)
+	b := fleetServiceWorkerBody(fleetServiceWorkerJS, fleetManifest, append(append([]byte{}, icon...), 0))
+	c := fleetServiceWorkerBody(fleetServiceWorkerJS, fleetManifest, icon)
+	if bytes.Equal(a, b) || !bytes.Equal(a, c) {
+		t.Fatal("the version must change with an asset and only then")
+	}
+	if !bytes.Contains(a, []byte(`"fleet-`+v+`"`)) {
+		t.Fatalf("body does not carry %s", v)
 	}
 }

@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/binary"
+	"encoding/hex"
 	"net/http"
 )
 
@@ -38,6 +42,40 @@ var fleetManifest = []byte(`{
 
 var fleetIconNames = []string{"icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"}
 
+// fleetServiceWorker is fleet_sw.js as served: its @VERSION@ (the cache
+// name) is a hash of the worker, the manifest and the icons, so a change to
+// any of them makes installed clients drop the old cache with no manual bump.
+var fleetServiceWorker = func() []byte {
+	parts := [][]byte{fleetServiceWorkerJS, fleetManifest}
+	for _, name := range fleetIconNames {
+		data, err := fleetAssets.ReadFile("fleet_assets/" + name)
+		if err != nil {
+			panic("fleet: embedded icon missing: " + name)
+		}
+		parts = append(parts, data)
+	}
+	return fleetServiceWorkerBody(parts[0], parts[1:]...)
+}()
+
+// fleetAssetVersion is a short hash over parts, each length-prefixed so two
+// different splits of the same bytes never collide.
+func fleetAssetVersion(parts ...[]byte) string {
+	h := sha256.New()
+	for _, p := range parts {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(p)))
+		h.Write(n[:])
+		h.Write(p)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// fleetServiceWorkerBody substitutes the version of sw plus assets into sw.
+func fleetServiceWorkerBody(sw []byte, assets ...[]byte) []byte {
+	v := fleetAssetVersion(append([][]byte{sw}, assets...)...)
+	return bytes.ReplaceAll(sw, []byte("@VERSION@"), []byte(v))
+}
+
 func registerFleetPWARoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /fleet/manifest.webmanifest", func(w http.ResponseWriter, r *http.Request) {
 		writeFleetStatic(w, "application/manifest+json", "public, max-age=86400", fleetManifest)
@@ -47,7 +85,7 @@ func registerFleetPWARoutes(mux *http.ServeMux) {
 		// /fleet/...; the page registers it with scope /fleet, which needs
 		// this header. no-cache so a new version is picked up at once.
 		w.Header().Set("Service-Worker-Allowed", "/fleet")
-		writeFleetStatic(w, "text/javascript; charset=utf-8", "no-cache", fleetServiceWorkerJS)
+		writeFleetStatic(w, "text/javascript; charset=utf-8", "no-cache", fleetServiceWorker)
 	})
 	for _, name := range fleetIconNames {
 		data, err := fleetAssets.ReadFile("fleet_assets/" + name)

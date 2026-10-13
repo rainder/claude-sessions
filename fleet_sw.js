@@ -1,6 +1,7 @@
 // FLEET page service worker (served at /fleet/sw.js, scope /fleet).
-// Bump VERSION whenever this file changes: activate drops every other
-// fleet-* cache.
+// The server replaces the VERSION placeholder with a hash of this file, the manifest and
+// the icons, so any change to them is a new cache: activate drops every other
+// fleet-* cache. Nothing to bump by hand.
 //
 // It caches only what is the same for every visitor: the manifest, the icons,
 // and a copy of the app page for offline start. It never touches data or
@@ -10,7 +11,7 @@
 // hop or login pages, which depend on auth.
 "use strict";
 
-const VERSION = "fleet-v1";
+const VERSION = "fleet-@VERSION@";
 const SHELL = "/fleet";
 const ASSETS = [
   "/fleet/manifest.webmanifest",
@@ -40,18 +41,22 @@ function never(path) {
 }
 
 async function appShell(request) {
+  let res;
   try {
-    const res = await fetch(request);
-    if (res.status === 200 && res.headers.get("X-Fleet-App") === "1") {
-      const cache = await caches.open(VERSION);
-      await cache.put(SHELL, res.clone());
-    }
-    return res;
+    res = await fetch(request);
   } catch (err) {
     const hit = await caches.match(SHELL);
     if (hit) return hit;
     throw err;
   }
+  if (res.status === 200 && res.headers.get("X-Fleet-App") === "1") {
+    // A failed store (quota, private mode) must never cost the page itself.
+    try {
+      const cache = await caches.open(VERSION);
+      await cache.put(SHELL, res.clone());
+    } catch (_) {}
+  }
+  return res;
 }
 
 async function asset(request, path) {
