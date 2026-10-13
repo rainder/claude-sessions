@@ -1205,8 +1205,9 @@ is an LLM and reads like a person, so the check runs on folded text
 Alphanumeric Symbols mapped to ASCII; dash, middle-dot and bracket lookalikes
 mapped; Cyrillic, Greek and other lookalikes of the tag's letters mapped
 (`fleetLookalikes`); whitespace collapsed; lowercased. It refuses the words
-`claude`, `session(s)`, `event` with up to three non-alphanumerics between
-them, after an opening `[ ( { <` and optional spaces, anywhere in the raw text
+`claude`, `session(s)`, `event` with any run of non-alphanumerics between
+them (a bounded run let `[claude----sessions event]` through), after an
+opening `[ ( { <` and any non-alphanumeric run, anywhere in the raw text
 (flattening makes a later line mid-text). Without a bracket the words are
 ordinary text, so "claude-sessions events stopped" goes through. The guard
 covers only `/fleet/say` and `/fleet/session/say`. The bearer

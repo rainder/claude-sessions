@@ -564,6 +564,12 @@ func TestFleetSendsRefuseTheReservedEventTag(t *testing.T) {
 		"[claude\u00b7sessions\u30fbevent] middle dots",
 		"[claude-sessions-event] all dashes",
 		"[CLAUDE-sessions event] upper case",
+		// Long punctuation runs: a bounded gap let these through.
+		"[-- claude-sessions event] dashes after the bracket",
+		"[** claude-sessions event] markdown bold",
+		"[claude----sessions event] long dash run",
+		"[claude-sessions ...... event] long dot run",
+		"(( claude-sessions event )) doubled brackets",
 	}
 	for _, text := range texts {
 		body, _ := json.Marshal(map[string]string{"text": text})
