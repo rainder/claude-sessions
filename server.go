@@ -763,6 +763,10 @@ type server struct {
 	// initializes it so both cmdServer and tests get a working broker.
 	pasteOnce sync.Once
 	paste     *pasteBroker
+
+	// fleet backs the /fleet routes (fleet.go): seams plus the last good
+	// state.json copy and the say rate limit.
+	fleet fleetDeps
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -2572,6 +2576,9 @@ func cmdServer(args []string) int {
 	mux.HandleFunc("GET /paste-wait", s.pasteWait)
 	mux.HandleFunc("POST /paste-request", s.pasteRequest)
 	mux.HandleFunc("POST /paste", s.pasteUpload)
+	// The FLEET page lives on this mux only, never on the loopback paste mux:
+	// it is meant for other devices on the tailnet.
+	registerFleetRoutes(mux, s)
 
 	// Publish the resolved port so SpawnNew (invoked without it) embeds the right
 	// port in the tmux paste binding. Intercept Ctrl+V in tmux so remote-image

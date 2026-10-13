@@ -104,6 +104,9 @@ claude-sessions account claude|grok remove NAME [-y]
                                             # delete a parked snapshot (never touches the live login)
 claude-sessions usage [--json] [--local]   # Claude/Grok/Codex quota numbers (asks the local
                                             # service, else builds locally; --local skips it)
+claude-sessions fleet-url [--host H] [--port N]
+                                            # one-time login URL for the /fleet web page
+                                            # (contains the server token; open once per device)
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
 claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)
@@ -451,6 +454,12 @@ usage.go             account rate-limit polling (5h/weekly bars in header)
 known_accounts.go    per-account snapshot discovery + read-only usage polling
 account_cache.go     per-account disk cache (numbers + backoff, one file each)
 usage_numbers.go     `usage` CLI + GET /usage/numbers (quota numbers, stable JSON)
+fleet.go             /fleet web page: cookie auth, state.json, log.jsonl, routes
+fleet_chat.go        /fleet/chat: FLEET transcript mirror (byte-position cursor)
+fleet_say.go         /fleet/say: type a page answer into the FLEET pane, with guards
+fleet_pane.go        Claude Code input-box parser for a tmux capture
+fleet_url.go         `fleet-url` CLI
+fleet.html           the embedded page (vanilla JS, no CDN)
 account.go           Claude account switching (credential + identity snapshots, flock)
 grok_account.go      Grok account snapshots (save/switch/list/remove)
 grok_oauth.go        Grok OIDC refresh for parked snapshots

@@ -66,6 +66,8 @@ func main() {
 		os.Exit(cmdSummary(args[1:]))
 	case "usage":
 		os.Exit(cmdUsage(args[1:]))
+	case "fleet-url":
+		os.Exit(cmdFleetURL(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -112,6 +114,9 @@ subcommands:
   usage [--json] [--local]        print Claude/Grok/Codex quota numbers (asks
                                   the local service, else builds locally;
                                   --local skips the service)
+  fleet-url [--host H] [--port N]
+                                  print the one-time FLEET page login URL
+                                  (contains the server token)
   summary [claude|codex]          print or set the ticket/conversation
                                   summary backend (default claude)
   notify-test                     send a test push to every registered device
