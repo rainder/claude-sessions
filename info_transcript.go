@@ -32,6 +32,10 @@ type transcriptLine struct {
 	Type      string `json:"type"`
 	IsMeta    bool   `json:"isMeta"`
 	RequestID string `json:"requestId"`
+	// UUID and Timestamp identify and date one line; only the FLEET chat
+	// mirror (fleet_chat.go) reads them, every other reader ignores them.
+	UUID      string `json:"uuid"`
+	Timestamp string `json:"timestamp"`
 	Message   struct {
 		ID      string          `json:"id"`
 		Role    string          `json:"role"`

@@ -472,10 +472,6 @@ func (s *server) fleetLog(w http.ResponseWriter, r *http.Request) {
 
 // Stubs until each route lands; every one is replaced in the commit that
 // adds its real handler.
-func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
-}
-
 func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not implemented", http.StatusNotImplemented)
 }
