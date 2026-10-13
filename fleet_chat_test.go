@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -161,5 +162,72 @@ func TestFleetChatBadCursor(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d", q, w.Code)
 		}
+	}
+}
+
+func fleetChatFixture(t *testing.T) []string {
+	return []string{
+		chatLine(t, "user", "u1", "2026-10-13T09:00:00Z", "hello fleet", nil),
+		chatLine(t, "assistant", "a1", "2026-10-13T09:00:01Z", chatText("all quiet"), map[string]any{"message.id": "m1", "requestId": "r1"}),
+	}
+}
+
+func TestFleetChatAliveHasNoReadOnly(t *testing.T) {
+	s := fleetTestServer(t, []Session{{PID: 1, Name: "FLEET", SessionID: "chat-alive-1"}})
+	putFleetTranscript(t, s.fleet.home, "chat-alive-1", fleetChatFixture(t)...)
+	out := getFleetJSON(t, s, "/fleet/chat")
+	if len(out["turns"].([]any)) != 2 || out["sessionId"] != "chat-alive-1" {
+		t.Fatalf("got %v", out)
+	}
+	if _, ok := out["readOnly"]; ok {
+		t.Fatalf("alive FLEET must not be read-only: %v", out)
+	}
+}
+
+func TestFleetChatReadOnlyFallback(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	writeFleetLast(t, s, fleetLast{SessionID: "chat-last-1", CWD: "/no/longer/there"})
+	path := putFleetTranscript(t, s.fleet.home, "chat-last-1", fleetChatFixture(t)...)
+	out := getFleetJSON(t, s, "/fleet/chat")
+	if len(out["turns"].([]any)) != 2 || out["sessionId"] != "chat-last-1" || out["readOnly"] != true ||
+		out["reason"] != "not running" || out["reset"] != true {
+		t.Fatalf("got %v", out)
+	}
+	// Same cursor semantics as a live FLEET.
+	pos := int64(out["pos"].(float64))
+	appendChat(t, path, chatLine(t, "user", "u2", "2026-10-13T09:01:00Z", "one more", nil))
+	out = getFleetJSON(t, s, "/fleet/chat?since="+strconv.FormatInt(pos, 10))
+	if turns := out["turns"].([]any); len(turns) != 1 || out["reset"] != false || out["readOnly"] != true {
+		t.Fatalf("since: %v", out)
+	}
+}
+
+func TestFleetChatNoFallback(t *testing.T) {
+	cases := []struct {
+		name     string
+		sessions []Session
+		last     *fleetLast
+		script   bool
+		reason   string
+	}{
+		{"ambiguous", []Session{{PID: 1, Name: "FLEET"}, {PID: 2, Name: "FLEET"}}, &fleetLast{SessionID: "chat-amb-1"}, true, "ambiguous"},
+		{"no transcript", nil, &fleetLast{SessionID: "chat-noscript-1"}, false, "not running"},
+		{"bad id", nil, &fleetLast{SessionID: "../../x"}, false, "not running"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := fleetTestServer(t, c.sessions)
+			writeFleetLast(t, s, *c.last)
+			if c.script {
+				putFleetTranscript(t, s.fleet.home, c.last.SessionID, fleetChatFixture(t)...)
+			}
+			out := getFleetJSON(t, s, "/fleet/chat")
+			if len(out["turns"].([]any)) != 0 || out["reason"] != c.reason || out["sessionId"] != "" {
+				t.Fatalf("got %v", out)
+			}
+			if _, ok := out["readOnly"]; ok {
+				t.Fatalf("no fallback must not be read-only: %v", out)
+			}
+		})
 	}
 }
