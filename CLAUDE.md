@@ -1160,37 +1160,58 @@ forgotten. Status is the row's `Status` as collected, so a claude row at a
 permission prompt (`busy` with `WaitingFor`) counts as busy, as it did in the
 script. Never reported: the target, the session `findFleet` picks, sessions
 with the flags store's disabled bit, and any session whose tmux session name or
-session id is in `ignore`. Grok rows are included.
+session id is in `ignore`. A skipped row keeps its `reported` entry (it is
+still live), so disabling and re-enabling a session does not report the same
+episode again without a busy in between; its clock stops and a queued event
+for it is withdrawn. Grok rows are included.
 
 **Batching.** The first event opens a window. After `batchSeconds` the whole
-batch goes as one line, and never more than one successful message per
-`batchSeconds`. A refused send keeps the batch and retries on every poll. The
-line is `[claude-sessions event] idle ` plus entries joined by ` ; `, each
-`idle: <pid> <status> <tmux> (<n> min) <label>`, at most 15, then
-` ; +N more`. The label is the `ticket` of a FLEET card whose `session` names
-the row's tmux session, else the user-set name, else `-`. Labels, statuses and
-tmux addresses keep only `[A-Za-z0-9 ._:/#()-]`, max 60 runes, and lose any
-spelling of the tag's words (`idleScrubTag`), per field and over the joined
-body, since a status beside a tmux name could spell it together. Never pane or
-transcript text.
+batch goes as one line, and never more than one message per `batchSeconds`.
+Each queued event carries its key and `since`. At send time an entry whose key
+is no longer reported (went busy, went away, a new episode) is dropped, keys
+are deduped (newest wins), and minutes are counted to the send. When nothing is
+left, nothing is sent. Turning the feature off clears the batch on disk. A
+refused send keeps the batch and retries on every poll, except
+`not_submitted`: the text is typed but Enter was not pressed, so the batch
+counts as delivered (`lastSent` is set). A retry would duplicate the line if
+Andy presses Enter on the leftover. A `note` goes to `log.jsonl`, as
+`/fleet/say` does.
 
-**Delivery fails closed.** Each attempt collects afresh and needs exactly one
-row whose tmux session name or session id is `target`; none or two refuse and
-nothing is typed. A grok target is refused: the input-box parser knows only
-Claude Code's screen. The send is the page pipeline: `sayMu`, the shared 1 s
-gap, then `fleetTypeInto`, so the exact `=` pane target, the dialog, copy-mode
-and empty-box checks, and Enter only once the box holds the text all apply.
+**Message.** `[claude-sessions event] idle ` plus entries joined by ` ; `, each
+`idle: <pid> <status> <tmux> (<n> min) "<label>"`, at most 15, then
+` ; +N more`. Every field a session controls is constrained: status is
+`idle`, `shell` or `waiting`, else `-`; tmux must match
+`^[A-Za-z0-9._-]{1,64}:\d+\.\d+$`, else `-`; the label is the `ticket` of a
+FLEET card whose `session` names the row's tmux session, else the user-set
+name, else `-`, scrubbed to `[A-Za-z0-9 ._:/#()-]` (no quotes, so it cannot
+leave its quotes), max 40 runes. No field, and not the joined body, may spell
+the tag's words, bracket or not (`idleScrubTag`, `fleetHasEventPhrase`): a
+status beside a tmux name could spell them together. Never pane or transcript
+text.
+
+**Delivery fails closed.** Under `sayMu`, like `/fleet/session/say`, each
+attempt collects afresh and needs exactly one row whose tmux session name or
+session id is `target`; none or two refuse and nothing is typed. A grok target
+is refused: the input-box parser knows only Claude Code's screen. Then the
+shared 1 s gap and `fleetTypeInto`: the exact `=` pane target, the dialog,
+copy-mode and empty-box checks, and Enter only once the box holds the text.
 Typing only into an empty prompt is what keeps it from answering a dialog or
 mixing into a half-typed message. It skips `fleetCleanSayText` on purpose,
 because that refuses the tag.
 
-**Spoof guard.** A page send (`/fleet/say`, `/fleet/session/say`) that holds
-the tag is a 400 `reserved_tag`. FLEET is an LLM and reads like a person, so
-the check runs on folded text (`fleetFoldText`: Cf and Mn dropped, fullwidth
-ASCII, dash and bracket lookalikes mapped, whitespace collapsed, lowercased)
-and matches the words with or without brackets and separators
-(`claude sessions event`, `claudesessions event`). It is checked on the raw
-text, anywhere: flattening makes a later line mid-text.
+**Spoof guard.** A page send that holds the tag is a 400 `reserved_tag`. FLEET
+is an LLM and reads like a person, so the check runs on folded text
+(`fleetFoldText`): Cf and Mn dropped; fullwidth ASCII and Mathematical
+Alphanumeric Symbols mapped to ASCII; dash, middle-dot and bracket lookalikes
+mapped; Cyrillic, Greek and other lookalikes of the tag's letters mapped
+(`fleetLookalikes`); whitespace collapsed; lowercased. It refuses the words
+`claude`, `session(s)`, `event` with up to three non-alphanumerics between
+them, after an opening `[ ( { <` and optional spaces, anywhere in the raw text
+(flattening makes a later line mid-text). Without a bracket the words are
+ordinary text, so "claude-sessions events stopped" goes through. The guard
+covers only `/fleet/say` and `/fleet/session/say`. The bearer
+`/sessions/{pid}/send-keys` route and the TUI inspector are Andy's own terminal
+paths and do not check it.
 
 **Files.** Config `~/.config/claude-sessions/idle-events.json`: `enabled`
 (false), `target`, `idleSeconds` (60, 10..86400), `shellSeconds` (1800,
@@ -1200,17 +1221,21 @@ enabling needs no restart; while off a poll is that one stat. A bad file
 (bad JSON, unknown key, out of range, `enabled` without `target`) logs
 `config error` once per change and the last good config stays. State
 `$XDG_STATE_HOME/claude-sessions/idle-events-state.json` (dir 0700, file 0600,
-atomic): reported keys, the pending batch, and `lastSent`. `since` is not kept,
-so a restart starts the clocks again. Log `idle-events.log` beside it (1 MiB
-rotation like `fleet-say.log`): `sent n=… target=…`, `refused code=… n=…`,
-`target missing`, `target ambiguous`, `config error`; counts only.
+atomic): reported keys, the pending batch, and `lastSent`. `since` is not kept
+per row, so a restart starts the clocks again. Log `idle-events.log` beside it
+(1 MiB rotation like `fleet-say.log`): `sent n=… target=…`,
+`not submitted n=… target=…`, `refused code=… n=…`, `target missing`,
+`target ambiguous`, `config error`; counts only. A refusal code that repeats
+is logged once per 10 minutes, in this log and in `fleet-say.log`.
 
 **Enable.** Write `{"enabled": true, "target": "<FLEET tmux session or
 session id>"}` to the config file. `claude-sessions idle-events status` prints
 the config and state. `claude-sessions idle-events test --target <T>` types
 `[claude-sessions event] test: delivery check, no action needed` into T through
-the same delivery function, in-process, and prints `sent target=…` or
-`refused code=…`; it does not need `enabled`.
+the same delivery function and prints `sent target=…` or `refused code=…`; it
+does not need `enabled`. It runs in its own process, so it shares neither
+`sayMu` nor the 1 s gap with the server: run it when nobody is typing into
+FLEET.
 
 ### Usage polling
 

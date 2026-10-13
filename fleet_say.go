@@ -129,20 +129,75 @@ func tmuxPressEnter(target string) error {
 const fleetEventTag = "[claude-sessions event]"
 
 // fleetEventPhraseRe finds the tag's words in folded text (fleetFoldText),
-// brackets or not, with any run of space, '-', '_' or '.' between them. FLEET
-// is an LLM and reads text the way a person does, so "claude sessions event"
-// or "claudesessions event" looks like the tag to it as much as the exact
-// bytes do. Anywhere in the text: flattening turns a later line into
-// mid-text, so "only at the start" would not be enough.
-var fleetEventPhraseRe = regexp.MustCompile(`claude[ ._-]*sessions?[ ._-]*event`)
+// with up to three non-alphanumeric characters between them. FLEET is an LLM
+// and reads text the way a person does, so "claude sessions event" or
+// "claudesessions event" reads as the tag's words as much as the exact bytes
+// do.
+var fleetEventPhraseRe = regexp.MustCompile(`claude[^a-z0-9]{0,3}sessions?[^a-z0-9]{0,3}event`)
+
+// fleetEventTagRe is the page-send refusal: the phrase after an opening
+// bracket of any kind (folded to [ ( { <), with optional spaces between. A
+// bare "claude-sessions events stopped" is ordinary text; the bracket is what
+// makes it read as a tag. Anywhere in the text: flattening turns a later line
+// into mid-text, so "only at the start" would not be enough.
+var fleetEventTagRe = regexp.MustCompile(`[\[({<] *claude[^a-z0-9]{0,3}sessions?[^a-z0-9]{0,3}event`)
+
+// fleetLookalikes maps Cyrillic, Greek and other letters that look like the
+// Latin letters of the tag's words (c l a u d e s i o n v t) onto them. It is
+// applied after lowercasing.
+var fleetLookalikes = map[rune]rune{
+	// Cyrillic
+	'а': 'a', 'с': 'c', 'е': 'e', 'ё': 'e', 'і': 'i', 'ї': 'i', 'о': 'o', 'р': 'p', 'ѕ': 's',
+	'у': 'y', 'х': 'x', 'ԁ': 'd', 'ӏ': 'l', 'п': 'n', 'ѵ': 'v', 'т': 't', 'ս': 'u',
+	// Greek
+	'α': 'a', 'ε': 'e', 'ι': 'i', 'ο': 'o', 'ν': 'v', 'τ': 't', 'υ': 'u', 'η': 'n',
+	'ϲ': 'c', 'ς': 's', 'ϵ': 'e',
+	// Latin and letterlike variants
+	'ı': 'i', 'ɩ': 'i', 'ℓ': 'l', 'ℯ': 'e', 'ⅽ': 'c', 'ⅾ': 'd', 'ⅰ': 'i', 'ⅴ': 'v', 'ⅼ': 'l',
+	'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ꜱ': 's', 'ᴏ': 'o', 'ᴜ': 'u', 'ᴠ': 'v', 'ᴛ': 't', 'ʟ': 'l', 'ɴ': 'n',
+	// Cherokee capitals that read as Latin
+	'Ꮯ': 'c', 'Ꮮ': 'l', 'Ꭺ': 'a', 'Ꭼ': 'e', 'Ꮪ': 's', 'Ꭰ': 'd', 'Ꮩ': 'v', 'Ꭲ': 't',
+}
+
+// fleetMathAlnum maps Mathematical Alphanumeric Symbols (U+1D400–U+1D7FF:
+// bold, italic, script, fraktur, double-struck, sans, monospace) onto the
+// ASCII letter or digit, or the Greek letter, they style. ok is false
+// outside that block or for a symbol with no plain form.
+func fleetMathAlnum(r rune) (rune, bool) {
+	switch {
+	case r >= 0x1D400 && r < 0x1D6A4: // 13 Latin styles of A–Z, a–z
+		off := (r - 0x1D400) % 52
+		if off < 26 {
+			return 'a' + off, true
+		}
+		return 'a' + off - 26, true
+	case r == 0x1D6A4:
+		return 'i', true
+	case r == 0x1D6A5:
+		return 'j', true
+	case r >= 0x1D6A8 && r < 0x1D7CA: // 5 Greek styles, 58 symbols each
+		off := (r - 0x1D6A8) % 58
+		switch {
+		case off < 25:
+			return unicode.ToLower(0x391 + off), true
+		case off >= 26 && off < 51:
+			return 0x3B1 + off - 26, true
+		}
+		return 0, false
+	case r >= 0x1D7CE && r <= 0x1D7FF: // 5 digit styles
+		return '0' + (r-0x1D7CE)%10, true
+	}
+	return 0, false
+}
 
 // fleetFoldText maps lookalikes to the ASCII they look like, for the tag
 // check only (the text that is typed is not changed). It drops format and
 // zero-width characters (category Cf, which holds U+200B–U+200F, U+2060,
-// U+FEFF and the soft hyphen) and combining marks (Mn), maps fullwidth ASCII
-// U+FF01–U+FF5E to ASCII, dash variants to '-', bracket lookalikes to '['
-// and ']', collapses every run of Unicode whitespace to one space, and
-// lowercases.
+// U+FEFF and the soft hyphen) and combining marks (Mn); maps fullwidth ASCII
+// U+FF01–U+FF5E and mathematical letters and digits to ASCII; maps dash
+// variants to '-', middle dots to '.', opening and closing bracket lookalikes
+// to '[' and ']'; collapses every run of Unicode whitespace to one space;
+// lowercases; and maps Cyrillic and Greek lookalikes of the tag's letters.
 func fleetFoldText(s string) string {
 	var b strings.Builder
 	space := false
@@ -155,13 +210,17 @@ func fleetFoldText(s string) string {
 			continue
 		case r >= 0xFF01 && r <= 0xFF5E:
 			r -= 0xFEE0
+		case r >= 0x1D400 && r <= 0x1D7FF:
+			if m, ok := fleetMathAlnum(r); ok {
+				r = m
+			}
 		case r >= 0x2010 && r <= 0x2015, r == 0x2043, r == 0x2212, r == 0xFE58, r == 0xFE63, r == 0x2E3A, r == 0x2E3B:
 			r = '-'
-		case strings.ContainsRune("⁅〈《「『【〔〖〘〚⟦⟨⟪⟬⟮⦃⦅⦇⦉⦋⦍⦏⦑⦓⦕⦗﹇﹝｢", r):
+		case strings.ContainsRune("⁅〈《「『【〔〖〘〚⟦⟨⟪⟬⟮⦃⦅⦇⦉⦋⦍⦏⦑⦓⦕⦗﹇﹝｢❨❪❬❮❰❲❴⁽₍﹙﹛﹤‹«〈", r):
 			r = '['
-		case strings.ContainsRune("⁆〉》」』】〕〗〙〛⟧⟩⟫⟭⟯⦄⦆⦈⦊⦌⦎⦐⦒⦔⦖⦘﹈﹞｣", r):
+		case strings.ContainsRune("⁆〉》」』】〕〗〙〛⟧⟩⟫⟭⟯⦄⦆⦈⦊⦌⦎⦐⦒⦔⦖⦘﹈﹞｣❩❫❭❯❱❳❵⁾₎﹚﹜﹥›»〉", r):
 			r = ']'
-		case r == 0x2024 || r == 0xFE52:
+		case r == 0x2024 || r == 0xFE52 || r == 0x00B7 || r == 0x2027 || r == 0x30FB || r == 0x2219 || r == 0x22C5:
 			r = '.'
 		case r == 0xFE4D || r == 0xFE4E || r == 0xFE4F:
 			r = '_'
@@ -170,13 +229,30 @@ func fleetFoldText(s string) string {
 			b.WriteByte(' ')
 		}
 		space = false
-		b.WriteRune(unicode.ToLower(r))
+		// Look up before and after lowercasing: a Cherokee capital lowercases
+		// to a different-looking small letter.
+		if m, ok := fleetLookalikes[r]; ok {
+			r = m
+		} else if m, ok := fleetLookalikes[unicode.ToLower(r)]; ok {
+			r = m
+		} else {
+			r = unicode.ToLower(r)
+		}
+		b.WriteRune(r)
 	}
 	return b.String()
 }
 
-// fleetHasEventTag reports whether s, once folded, contains the tag's words.
+// fleetHasEventTag reports whether s, once folded, holds the tag: the
+// phrase after an opening bracket. This is the page-send refusal.
 func fleetHasEventTag(s string) bool {
+	return fleetEventTagRe.MatchString(fleetFoldText(s))
+}
+
+// fleetHasEventPhrase reports whether s, once folded, holds the tag's words
+// with or without a bracket. The idle-event sender keeps every field free of
+// this, which is stricter than the page-send check.
+func fleetHasEventPhrase(s string) bool {
 	return fleetEventPhraseRe.MatchString(fleetFoldText(s))
 }
 
@@ -239,6 +315,10 @@ type fleetSayWho struct {
 	subject string // "FLEET"
 	pane    string // "the FLEET pane"
 	paneLog bool   // refusal log entries may hold screen lines
+	// logGate, when set, decides whether a refusal is written to the say log
+	// at all; the idle-event sender uses it to write a repeated refusal
+	// once per 10 minutes rather than on every poll.
+	logGate func(code string) bool
 }
 
 var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane", paneLog: true}
@@ -335,6 +415,9 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 func (s *server) logFleetSendRefusal(who fleetSayWho, code, target, screen, text string) {
 	if who.paneLog {
 		s.logFleetRefusal(code, target, screen)
+		return
+	}
+	if who.logGate != nil && !who.logGate(code) {
 		return
 	}
 	path := s.fleet.sayLogPath

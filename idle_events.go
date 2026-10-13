@@ -27,14 +27,16 @@ import (
 //
 // Fail closed everywhere: off by default, off on a bad config, nothing sent
 // when the target is missing or ambiguous, and a refused send keeps the batch
-// for the next poll. A message holds pids, statuses, tmux addresses, minutes
-// and card tickets or user-set names, sanitized — never pane or transcript
+// for the next poll (not_submitted excepted: see idleSendLocked). A message
+// holds pids, a known status word, a plain tmux address, minutes, and a
+// quoted card ticket or user-set name, sanitized — never pane or transcript
 // text.
 
 const (
-	idleBatchMax    = 100 // events kept in a pending batch; the rest are counted
+	idleBatchMax    = 100 // events kept in a pending batch; later ones wait for room
 	idleMessageMax  = 15  // entries in one message; the rest are "+N more"
-	idleLabelMax    = 60
+	idleLabelMax    = 40
+	idleLogEvery    = 10 * time.Minute // one log line per repeated refusal code
 	idleTestMessage = fleetEventTag + " test: delivery check, no action needed"
 )
 
@@ -99,13 +101,17 @@ func parseIdleConfig(data []byte) (idleConfig, error) {
 	return c, nil
 }
 
-// idleEvent is one reported episode, as it goes into a message.
+// idleEvent is one reported episode waiting in the batch. Key and Since
+// name the episode, so a send can drop one that ended (went busy, went away,
+// or became a new episode) while it waited, and compute minutes at send time.
+// Status, Tmux and Label are already sanitized.
 type idleEvent struct {
-	PID     int    `json:"pid"`
-	Status  string `json:"status"`
-	Tmux    string `json:"tmux"`
-	Minutes int    `json:"minutes"`
-	Label   string `json:"label"`
+	Key    string    `json:"key"`
+	PID    int       `json:"pid"`
+	Status string    `json:"status"`
+	Tmux   string    `json:"tmux"`
+	Since  time.Time `json:"since"`
+	Label  string    `json:"label"`
 }
 
 // idleStateFile is what survives a restart: the reported episodes (so a
@@ -114,7 +120,6 @@ type idleEvent struct {
 type idleStateFile struct {
 	Reported    []string    `json:"reported"`
 	Batch       []idleEvent `json:"batch"`
-	More        int         `json:"more,omitempty"`
 	BatchOpened string      `json:"batchOpened,omitempty"`
 	LastSent    string      `json:"lastSent,omitempty"`
 }
@@ -139,9 +144,10 @@ type idleDeps struct {
 	since      map[string]time.Time
 	reported   map[string]bool
 	batch      []idleEvent
-	more       int
 	opened     time.Time
 	lastSent   time.Time
+	wasOn      bool                 // the last tick saw the feature enabled
+	logAt      map[string]time.Time // last log line per refusal code
 }
 
 // claudeSessionsStateDir is $XDG_STATE_HOME/claude-sessions, or
@@ -279,7 +285,7 @@ func (d *idleDeps) loadStateLocked() {
 	for _, k := range st.Reported {
 		d.reported[k] = true
 	}
-	d.batch, d.more = st.Batch, st.More
+	d.batch = st.Batch
 	d.opened, _ = time.Parse(time.RFC3339, st.BatchOpened)
 	d.lastSent, _ = time.Parse(time.RFC3339, st.LastSent)
 }
@@ -289,7 +295,7 @@ func (d *idleDeps) saveStateLocked() {
 	if path == "" {
 		return
 	}
-	st := idleStateFile{Reported: make([]string, 0, len(d.reported)), Batch: d.batch, More: d.more}
+	st := idleStateFile{Reported: make([]string, 0, len(d.reported)), Batch: d.batch}
 	for k := range d.reported {
 		st.Reported = append(st.Reported, k)
 	}
@@ -312,12 +318,14 @@ func (d *idleDeps) saveStateLocked() {
 	}
 }
 
-// idleLabelRe is everything a label or tmux address may not hold.
+// idleLabelRe is everything a label may not hold. Quotes are not in it, so
+// a label cannot close the quotes the message puts around it.
 var idleLabelRe = regexp.MustCompile(`[^A-Za-z0-9 ._:/#()-]+`)
 
-// idleSanitize keeps [A-Za-z0-9 ._:/#()-], collapses spaces, cuts to 60
-// runes, and breaks up the tag's words: a name cannot smuggle the event tag,
-// a newline, or an escape into FLEET's prompt. "" becomes "-".
+// idleSanitize is the label scrub: it keeps [A-Za-z0-9 ._:/#()-], collapses
+// spaces, cuts to 40 runes, and breaks up the tag's words, so a name cannot
+// smuggle the event tag, a quote, a newline, or an escape into FLEET's
+// prompt. "" becomes "-".
 func idleSanitize(s string) string {
 	s = strings.Join(strings.Fields(idleLabelRe.ReplaceAllString(s, " ")), " ")
 	if utf8.RuneCountInString(s) > idleLabelMax {
@@ -331,20 +339,40 @@ func idleSanitize(s string) string {
 	return s
 }
 
+// idleStatus passes only the statuses a report can have; anything else a
+// session file says is "-".
+func idleStatus(st string) string {
+	switch st {
+	case "idle", "shell", "waiting":
+		return st
+	}
+	return "-"
+}
+
+var idleTmuxRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}:\d+\.\d+$`)
+
+// idleTmux passes a plain session:window.pane address and nothing else.
+func idleTmux(t string) string {
+	if !idleTmuxRe.MatchString(t) || fleetHasEventPhrase(t) {
+		return "-"
+	}
+	return t
+}
+
 // idlePhraseRe is fleetEventPhraseRe for text that is already sanitized
 // ASCII with single spaces, where folding is only lowercasing.
-var idlePhraseRe = regexp.MustCompile(`(?i)claude[ ._-]*sessions?[ ._-]*event`)
+var idlePhraseRe = regexp.MustCompile(`(?i)claude[^A-Za-z0-9]{0,3}sessions?[^A-Za-z0-9]{0,3}event`)
 
-// idleScrubTag replaces every run of the tag's words with "(x)". Parentheses
-// are not separators in the phrase, so a replacement can never join its
-// neighbours into a new match; the loop is belt and braces. The final check
-// is the page's own fold, so the two definitions cannot drift apart
-// silently: if they ever disagree, the text goes and "-" stays.
+// idleScrubTag replaces every run of the tag's words with "(x)". The "x" is
+// alphanumeric, so a replacement can never join its neighbours into a new
+// match, and each one shortens the text, so the loop ends. The final check is
+// the page's own fold, so the two definitions cannot drift apart silently: if
+// they ever disagree, the text goes and "-" stays.
 func idleScrubTag(s string) string {
 	for idlePhraseRe.MatchString(s) {
 		s = idlePhraseRe.ReplaceAllString(s, "(x)")
 	}
-	if fleetHasEventTag(s) {
+	if fleetHasEventPhrase(s) {
 		return "-"
 	}
 	return s
@@ -389,10 +417,17 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 	live := map[string]bool{}
 	for _, row := range sessions {
 		key := idleKey(row)
+		live[key] = true
 		if s.idleSkipped(cfg, row, fleet, reason == "") {
+			// A skipped row keeps its report, so un-skipping it does not
+			// report the same episode again without a busy in between. Its
+			// clock stops, and a queued event for it is withdrawn.
+			delete(d.since, key)
+			if d.dropFromBatchLocked(key) {
+				changed = true
+			}
 			continue
 		}
-		live[key] = true
 		if row.Status == "busy" {
 			delete(d.since, key)
 			if d.reported[key] {
@@ -419,14 +454,17 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 		if cards == nil {
 			cards = s.fleetSessionCards()
 		}
+		if !d.queueLocked(idleEvent{
+			Key:    key,
+			PID:    row.PID,
+			Status: idleStatus(row.Status),
+			Tmux:   idleTmux(row.Tmux),
+			Since:  since,
+			Label:  idleLabel(row, cards),
+		}, now) {
+			continue // the batch is full: report it once there is room
+		}
 		d.reported[key] = true
-		s.idleQueueLocked(idleEvent{
-			PID:     row.PID,
-			Status:  idleSanitize(row.Status),
-			Tmux:    idleSanitize(row.Tmux),
-			Minutes: int(now.Sub(since) / time.Minute),
-			Label:   idleLabel(row, cards),
-		}, now)
 		changed = true
 	}
 	for k := range d.since {
@@ -455,50 +493,106 @@ func idleLabel(row Session, cards map[string]fleetCardInfo) string {
 	return "-"
 }
 
-func (s *server) idleQueueLocked(e idleEvent, now time.Time) {
-	d := &s.idle
-	if len(d.batch) == 0 && d.more == 0 {
+// queueLocked adds e to the batch, replacing an older entry for the same
+// key, and opens the batch window when it was empty. It reports false when
+// the batch is full even after dropping ended episodes.
+func (d *idleDeps) queueLocked(e idleEvent, now time.Time) bool {
+	d.dropFromBatchLocked(e.Key)
+	if len(d.batch) >= idleBatchMax {
+		d.batch = d.liveBatchLocked()
+		if len(d.batch) >= idleBatchMax {
+			return false
+		}
+	}
+	if len(d.batch) == 0 {
 		d.opened = now
 	}
-	if len(d.batch) < idleBatchMax {
-		d.batch = append(d.batch, e)
-	} else {
-		d.more++
-	}
+	d.batch = append(d.batch, e)
+	return true
 }
 
-// idleMessage is the one-line message for a batch.
-func idleMessage(events []idleEvent, more int) string {
+func (d *idleDeps) dropFromBatchLocked(key string) bool {
+	for i, e := range d.batch {
+		if e.Key == key {
+			d.batch = append(d.batch[:i:i], d.batch[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// liveBatchLocked is the batch without ended episodes (key no longer
+// reported) and without duplicate keys (the newest wins).
+func (d *idleDeps) liveBatchLocked() []idleEvent {
+	out := make([]idleEvent, 0, len(d.batch))
+	at := map[string]int{}
+	for _, e := range d.batch {
+		if !d.reported[e.Key] {
+			continue
+		}
+		if i, dup := at[e.Key]; dup {
+			out[i] = e
+			continue
+		}
+		at[e.Key] = len(out)
+		out = append(out, e)
+	}
+	return out
+}
+
+// idleMessage is the one-line message for a batch; minutes are counted to
+// now.
+func idleMessage(events []idleEvent, now time.Time) string {
 	parts := make([]string, 0, min(len(events), idleMessageMax))
 	for i, e := range events {
 		if i == idleMessageMax {
 			break
 		}
-		parts = append(parts, fmt.Sprintf("idle: %d %s %s (%d min) %s", e.PID, e.Status, e.Tmux, e.Minutes, e.Label))
+		parts = append(parts, fmt.Sprintf("idle: %d %s %s (%d min) \"%s\"",
+			e.PID, e.Status, e.Tmux, int(now.Sub(e.Since)/time.Minute), e.Label))
 	}
 	body := strings.Join(parts, " ; ")
-	if extra := more + max(0, len(events)-idleMessageMax); extra > 0 {
+	if extra := len(events) - idleMessageMax; extra > 0 {
 		body += fmt.Sprintf(" ; +%d more", extra)
 	}
-	// Each field is scrubbed, but two neighbours (a status, then a tmux
-	// address) could still spell the tag's words together: scrub the whole
-	// body as well. The tag itself goes in front only after that.
+	// Each field is clean, but neighbours could still spell the tag's words
+	// together: scrub the whole body as well. The tag goes in front only
+	// after that.
 	return fleetEventTag + " idle " + idleScrubTag(body)
 }
 
 var fleetSayIdle = fleetSayWho{subject: "The idle-event target", pane: "the target pane"}
 
-// idleDeliver types text into the target through the page send pipeline:
-// a fresh collect, exactly one row whose tmux session or session id is
-// target (else target_missing / target_ambiguous, nothing typed), then
-// sayMu, the shared 1 s gap, and fleetTypeInto (exact "=" pane, dialog and
-// copy-mode refusals, an empty input box, Enter only when the box holds the
-// text). It skips fleetCleanSayText on purpose: that refuses the event tag.
-// code is "sent" or the refusal code; tmux names the target on success.
+// logGateLocked reports whether a line under key may be logged now: one per
+// key per idleLogEvery, so a target that refuses every poll for an hour
+// writes six lines, not 120. A send clears it.
+func (d *idleDeps) logGateLocked(key string) bool {
+	now := d.clock()
+	if at, ok := d.logAt[key]; ok && now.Sub(at) < idleLogEvery {
+		return false
+	}
+	if d.logAt == nil {
+		d.logAt = map[string]time.Time{}
+	}
+	d.logAt[key] = now
+	return true
+}
+
+// idleDeliver types text into the target through the page send pipeline.
+// Under sayMu, like /fleet/session/say: a fresh collect, exactly one row
+// whose tmux session or session id is target (else target_missing /
+// target_ambiguous, nothing typed), the shared 1 s gap, and fleetTypeInto
+// (exact "=" pane, dialog and copy-mode refusals, an empty input box, Enter
+// only when the box holds the text). It skips fleetCleanSayText on purpose:
+// that refuses the event tag. code is "sent" or the refusal code; tmux names
+// the target row when one was resolved.
 func (s *server) idleDeliver(target, text string) (code, tmux string) {
 	if target == "" {
 		return "target_missing", ""
 	}
+	f := &s.fleet
+	f.sayMu.Lock()
+	defer f.sayMu.Unlock()
 	sessions, err := s.collectLocal()
 	if err != nil {
 		return "list_failed", ""
@@ -516,47 +610,72 @@ func (s *server) idleDeliver(target, text string) (code, tmux string) {
 		return "target_ambiguous", ""
 	}
 	row := hits[0]
+	tmux = tmuxSessionPart(row.Tmux)
 	if row.IsGrok() { // the input-box parser knows only Claude Code's screen
-		return "send_unsupported", ""
+		return "send_unsupported", tmux
 	}
-	f := &s.fleet
-	f.sayMu.Lock()
-	defer f.sayMu.Unlock()
 	key := "\x00idle-events\x00" + text
 	if res := s.fleetSayGateLocked(key); res != nil {
-		return res.Code, ""
+		return res.Code, tmux
 	}
-	if res := s.fleetTypeInto(row, text, fleetSayIdle); !res.OK {
-		return res.Code, ""
+	who := fleetSayIdle
+	who.logGate = func(code string) bool { return s.idle.logGateLocked("say:" + code) }
+	if res := s.fleetTypeInto(row, text, who); !res.OK {
+		return res.Code, tmux
 	}
 	s.fleetSayDoneLocked(key)
-	return "sent", tmuxSessionPart(row.Tmux)
+	return "sent", tmux
 }
 
 // idleSendLocked sends the pending batch when its window has run and the last
-// message is at least batchSeconds old. A refusal keeps the batch for the
-// next poll. It reports whether the persisted state changed.
+// message is at least batchSeconds old. Ended episodes are dropped first;
+// when none is left, nothing is sent. A refusal keeps the batch for the next
+// poll, except not_submitted: the text sits typed in the box, and sending it
+// again would duplicate it if Andy presses Enter. It reports whether the
+// persisted state changed.
 func (s *server) idleSendLocked(cfg idleConfig, now time.Time) bool {
 	d := &s.idle
-	n := len(d.batch) + d.more
 	window := time.Duration(cfg.BatchSeconds) * time.Second
-	if n == 0 || now.Sub(d.opened) < window || (!d.lastSent.IsZero() && now.Sub(d.lastSent) < window) {
+	if len(d.batch) == 0 || now.Sub(d.opened) < window || (!d.lastSent.IsZero() && now.Sub(d.lastSent) < window) {
 		return false
 	}
-	code, tmux := s.idleDeliver(cfg.Target, idleMessage(d.batch, d.more))
+	live := d.liveBatchLocked()
+	if len(live) == 0 {
+		d.batch, d.opened = nil, time.Time{}
+		return true
+	}
+	changed := len(live) != len(d.batch)
+	d.batch = live
+	n := len(live)
+	code, tmux := s.idleDeliver(cfg.Target, idleMessage(live, now))
 	switch code {
-	case "sent":
-		d.idleLog("sent n=%d target=%s", n, tmux)
-		d.batch, d.more, d.opened, d.lastSent = nil, 0, time.Time{}, now
+	case "sent", "not_submitted":
+		if code == "sent" {
+			d.idleLog("sent n=%d target=%s", n, tmux)
+			d.logAt = nil
+		} else {
+			if d.logGateLocked("idle:" + code) {
+				d.idleLog("not submitted n=%d target=%s; the batch counts as delivered", n, tmux)
+			}
+			_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
+				Text: "Idle events were typed into FLEET but not submitted"})
+		}
+		d.batch, d.opened, d.lastSent = nil, time.Time{}, now
 		return true
 	case "target_missing":
-		d.idleLog("target missing n=%d", n)
+		if d.logGateLocked("idle:" + code) {
+			d.idleLog("target missing n=%d", n)
+		}
 	case "target_ambiguous":
-		d.idleLog("target ambiguous n=%d", n)
+		if d.logGateLocked("idle:" + code) {
+			d.idleLog("target ambiguous n=%d", n)
+		}
 	default:
-		d.idleLog("refused code=%s n=%d", code, n)
+		if d.logGateLocked("idle:" + code) {
+			d.idleLog("refused code=%s n=%d", code, n)
+		}
 	}
-	return false
+	return changed
 }
 
 // idleTick is one poll. While disabled it costs one stat of the config file.
@@ -567,8 +686,18 @@ func (s *server) idleTick() {
 	cfg := d.reloadConfigLocked()
 	if !cfg.Enabled {
 		d.since = nil // re-enabling starts every clock again
+		if d.wasOn {
+			// Turning it off drops what was waiting: a batch held across an
+			// off stretch would describe a world that has moved on.
+			d.wasOn = false
+			if d.loaded && len(d.batch) > 0 {
+				d.batch, d.opened = nil, time.Time{}
+				d.saveStateLocked()
+			}
+		}
 		return
 	}
+	d.wasOn = true
 	d.loadStateLocked()
 	if d.since == nil {
 		d.since = map[string]time.Time{}
@@ -695,6 +824,6 @@ func printIdleStatus(cfgPath, note string, cfg idleConfig, st idleStateFile, sta
 	fmt.Printf("thresholds: idle %ds, shell %ds, poll %ds, batch %ds\n", cfg.IdleSeconds, cfg.ShellSeconds, cfg.PollSeconds, cfg.BatchSeconds)
 	fmt.Printf("ignore:     %s\n", ignore)
 	fmt.Printf("reported:   %d%s\n", len(st.Reported), stateNote)
-	fmt.Printf("pending:    %d\n", len(st.Batch)+st.More)
+	fmt.Printf("pending:    %d\n", len(st.Batch))
 	fmt.Printf("last sent:  %s\n", last)
 }
