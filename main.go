@@ -114,10 +114,11 @@ subcommands:
   usage [--json] [--local]        print Claude/Grok/Codex quota numbers (asks
                                   the local service, else builds locally;
                                   --local skips the service)
-  fleet-url [--host H] [--port N] [--revoke]
+  fleet-url [--host H] [--port N] [--http] [--revoke]
                                   print a one-time FLEET page login link (works
-                                  once, for 10 minutes); --revoke logs every
-                                  device out
+                                  once, for 10 minutes; https when tailscale
+                                  serve routes to this server, --http forces
+                                  http); --revoke logs every device out
   summary [claude|codex]          print or set the ticket/conversation
                                   summary backend (default claude)
   notify-test                     send a test push to every registered device

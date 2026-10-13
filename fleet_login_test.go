@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -414,5 +415,36 @@ func TestFleetHopWithoutAuthShowsLoginForm(t *testing.T) {
 		strings.Contains(h.Get("Content-Security-Policy"), "script-src") ||
 		h.Get("Referrer-Policy") != "same-origin" || h.Get("Cache-Control") != "no-store" {
 		t.Fatalf("headers = %v", h)
+	}
+}
+
+func TestFleetLoginCookieSecureOverHTTPS(t *testing.T) {
+	cases := []struct {
+		name   string
+		setup  func(*http.Request)
+		secure bool
+	}{
+		{"plain http", func(*http.Request) {}, false},
+		{"tls", func(r *http.Request) { r.TLS = &tls.ConnectionState{} }, true},
+		{"tailscale serve https", func(r *http.Request) { r.Header.Set("X-Forwarded-Proto", "https") }, true},
+		{"forwarded, any case", func(r *http.Request) { r.Header.Set("X-Forwarded-Proto", "HTTPS") }, true},
+		{"forwarded http", func(r *http.Request) { r.Header.Set("X-Forwarded-Proto", "http") }, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := fleetTestServer(t, nil)
+			code := armFleetCode(t, s)
+			r := httptest.NewRequest("POST", "/fleet/login", strings.NewReader(url.Values{"c": {code}}.Encode()))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			r.Header.Set("Origin", "http://example.com")
+			c.setup(r)
+			w := httptest.NewRecorder()
+			fleetMux(s).ServeHTTP(w, r)
+			wantFleetLoginOK(t, w)
+			cookies := w.Result().Cookies()
+			if len(cookies) != 1 || cookies[0].Secure != c.secure || !cookies[0].HttpOnly {
+				t.Fatalf("cookies %+v, want Secure=%v", cookies, c.secure)
+			}
+		})
 	}
 }

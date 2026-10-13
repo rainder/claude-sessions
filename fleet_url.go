@@ -54,6 +54,85 @@ func fleetLoginURL(host string, port int, code string) string {
 	return u.String()
 }
 
+// fleetServeStatus returns `tailscale serve status --json`. A package var so
+// a test never shells out to a real tailscale CLI.
+var fleetServeStatus = func() ([]byte, error) {
+	bin := tailscaleBinary()
+	if bin == "" {
+		return nil, fmt.Errorf("no tailscale CLI")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "serve", "status", "--json")
+	cmd.Env = tailscaleCLIEnv(os.Environ())
+	return cmd.Output()
+}
+
+// fleetServeHTTPS finds a tailnet HTTPS route to this server in the serve
+// config: a Web entry "<host>:<port>" whose "/" handler proxies to port
+// (any target host: the Tailscale IP, a name, or loopback), on a TCP port
+// marked HTTPS. It returns "host" or "host:port" (port 443 left out), the
+// lowest matching port first; "" when none matches. Other routes, such as
+// :443 to another app, never match: their proxy port differs.
+func fleetServeHTTPS(status []byte, port int) string {
+	var st struct {
+		TCP map[string]struct {
+			HTTPS bool `json:"HTTPS"`
+		} `json:"TCP"`
+		Web map[string]struct {
+			Handlers map[string]struct {
+				Proxy string `json:"Proxy"`
+			} `json:"Handlers"`
+		} `json:"Web"`
+	}
+	if json.Unmarshal(status, &st) != nil {
+		return ""
+	}
+	best, bestKey, bestPort := "", "", 0
+	for hostPort, web := range st.Web {
+		host, p, err := net.SplitHostPort(hostPort)
+		n, perr := strconv.Atoi(p)
+		if err != nil || perr != nil || host == "" || !st.TCP[p].HTTPS {
+			continue
+		}
+		if fleetProxyPort(web.Handlers["/"].Proxy) != port {
+			continue
+		}
+		// Lowest port wins; the key breaks ties so map order never decides.
+		if best == "" || n < bestPort || (n == bestPort && hostPort < bestKey) {
+			best, bestKey, bestPort = hostPort, hostPort, n
+			if n == 443 {
+				best = host
+			}
+		}
+	}
+	return best
+}
+
+// fleetProxyPort is the port a serve Proxy target points at: a URL
+// ("http://100.64.0.1:8765"), a host:port, or a bare port. 0 when unknown.
+func fleetProxyPort(target string) int {
+	if n, err := strconv.Atoi(target); err == nil {
+		return n
+	}
+	if !strings.Contains(target, "://") {
+		target = "http://" + target
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(u.Port())
+	return n
+}
+
+// fleetLoginHTTPSURL is the login link through a tailscale serve https
+// route; hostPort is "host" or "host:port" from fleetServeHTTPS.
+func fleetLoginHTTPSURL(hostPort, code string) string {
+	u := url.URL{Scheme: "https", Host: hostPort, Path: "/fleet", RawQuery: url.Values{"c": {code}}.Encode()}
+	return u.String()
+}
+
 // fleetFindServer returns the base URL of this host's running server, or "".
 // Tailscale first, then loopback, like cmdPair: a --bind tailscale server is
 // not on loopback at all. A package var so a test can point the CLI at an
@@ -100,16 +179,25 @@ func cmdFleetURL(args []string) int {
 	host := fs.String("host", "", "host name or address the browser uses")
 	port := fs.Int("port", defaultServerPort, "server port")
 	revoke := fs.Bool("revoke", false, "log out every device that has opened the FLEET page")
+	plain := fs.Bool("http", false, "print the plain http link even when an https route exists")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	h := *host
+	httpsHost := ""
 	if !*revoke {
 		// Before arming: a code with no usable link would only sit there.
-		if h == "" {
+		// A tailnet https route (tailscale serve) wins, unless --http or
+		// --host asks for a plain link to a given host.
+		if !*plain && h == "" {
+			if st, err := fleetServeStatus(); err == nil {
+				httpsHost = fleetServeHTTPS(st, *port)
+			}
+		}
+		if h == "" && httpsHost == "" {
 			h = fleetTailscaleHost()
 		}
-		if h == "" {
+		if h == "" && httpsHost == "" {
 			fmt.Fprintln(os.Stderr, "fleet-url: no Tailscale address; pass --host")
 			return 1
 		}
@@ -144,7 +232,11 @@ func cmdFleetURL(args []string) int {
 		fmt.Fprintln(os.Stderr, "fleet-url: the server answered without a login code")
 		return 1
 	}
-	fmt.Println(fleetLoginURL(h, *port, out.Code))
+	if httpsHost != "" {
+		fmt.Println(fleetLoginHTTPSURL(httpsHost, out.Code))
+	} else {
+		fmt.Println(fleetLoginURL(h, *port, out.Code))
+	}
 	fmt.Fprintln(os.Stderr, "Open this link on one device within 10 minutes and press Log in. The code works one time.")
 	return 0
 }

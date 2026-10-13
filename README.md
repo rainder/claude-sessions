@@ -104,10 +104,11 @@ claude-sessions account claude|grok remove NAME [-y]
                                             # delete a parked snapshot (never touches the live login)
 claude-sessions usage [--json] [--local]   # Claude/Grok/Codex quota numbers (asks the local
                                             # service, else builds locally; --local skips it)
-claude-sessions fleet-url [--host H] [--port N] [--revoke]
+claude-sessions fleet-url [--host H] [--port N] [--http] [--revoke]
                                             # one-time login link for the /fleet web page
                                             # (works once, on one device, within 10 minutes;
-                                            # --revoke logs every device out)
+                                            # https when tailscale serve routes to this server,
+                                            # --http forces http; --revoke logs every device out)
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
 claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)

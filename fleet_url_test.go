@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,8 +40,10 @@ func fleetURLRig(t *testing.T, h http.HandlerFunc) {
 	}
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
-	origFind, origHost := fleetFindServer, fleetTailscaleHost
-	t.Cleanup(func() { fleetFindServer, fleetTailscaleHost = origFind, origHost })
+	origFind, origHost, origServe := fleetFindServer, fleetTailscaleHost, fleetServeStatus
+	t.Cleanup(func() { fleetFindServer, fleetTailscaleHost, fleetServeStatus = origFind, origHost, origServe })
+	// No serve route unless a test sets one: never the real tailscale CLI.
+	fleetServeStatus = func() ([]byte, error) { return nil, errors.New("no tailscale") }
 	fleetFindServer = func(port int, token string) string {
 		if token != "tok" {
 			t.Errorf("finder got token %q", token)
@@ -145,5 +148,70 @@ func TestCmdFleetURLNoToken(t *testing.T) {
 	code, out, errOut := runFleetURL(t)
 	if code != 1 || out != "" || !strings.Contains(errOut, "no server token") {
 		t.Fatalf("exit %d stdout %q stderr %q", code, out, errOut)
+	}
+}
+
+// fleetServeFixture is `tailscale serve status --json` shaped like a host
+// with :443 routed to another app and :8443 to this server. Invented names.
+const fleetServeFixture = `{"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},` +
+	`"Web":{"ws.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}},` +
+	`"ws.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://100.64.0.7:8765"}}}}}`
+
+func TestFleetServeHTTPS(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		port   int
+		want   string
+	}{
+		{"this server on 8443", fleetServeFixture, 8765, "ws.example.ts.net:8443"},
+		{"443 to another app never matches", fleetServeFixture, 9000, ""},
+		{"443 match drops the port", fleetServeFixture, 3000, "ws.example.ts.net"},
+		{"loopback target", `{"TCP":{"8443":{"HTTPS":true}},"Web":{"h.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8765"}}}}}`, 8765, "h.example.ts.net:8443"},
+		{"bare host:port target", `{"TCP":{"8443":{"HTTPS":true}},"Web":{"h.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"localhost:8765"}}}}}`, 8765, "h.example.ts.net:8443"},
+		{"not https", `{"TCP":{"8443":{"HTTP":true}},"Web":{"h.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8765"}}}}}`, 8765, ""},
+		{"not the root handler", `{"TCP":{"8443":{"HTTPS":true}},"Web":{"h.example.ts.net:8443":{"Handlers":{"/x":{"Proxy":"http://127.0.0.1:8765"}}}}}`, 8765, ""},
+		{"lowest port wins", `{"TCP":{"8443":{"HTTPS":true},"10000":{"HTTPS":true}},"Web":{` +
+			`"h.example.ts.net:10000":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8765"}}},` +
+			`"h.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8765"}}}}}`, 8765, "h.example.ts.net:8443"},
+		{"empty config", `{}`, 8765, ""},
+		{"not json", `nope`, 8765, ""},
+	}
+	for _, c := range cases {
+		if got := fleetServeHTTPS([]byte(c.status), c.port); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestCmdFleetURLPrefersServeHTTPS(t *testing.T) {
+	arm := func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"code": "c0de", "expiresAt": "2026-10-13T10:10:00Z"})
+	}
+	cases := []struct {
+		name  string
+		serve func() ([]byte, error)
+		args  []string
+		want  string
+	}{
+		{"https route", func() ([]byte, error) { return []byte(fleetServeFixture), nil }, nil,
+			"https://ws.example.ts.net:8443/fleet?c=c0de\n"},
+		{"--http forces http", func() ([]byte, error) { return []byte(fleetServeFixture), nil }, []string{"--http"},
+			"http://ws.example.ts.net:8765/fleet?c=c0de\n"},
+		{"--host keeps http", func() ([]byte, error) { return []byte(fleetServeFixture), nil }, []string{"--host", "10.0.0.5"},
+			"http://10.0.0.5:8765/fleet?c=c0de\n"},
+		{"serve status fails", func() ([]byte, error) { return nil, errors.New("timeout") }, nil,
+			"http://ws.example.ts.net:8765/fleet?c=c0de\n"},
+		{"no route for this port", func() ([]byte, error) { return []byte(fleetServeFixture), nil }, []string{"--port", "9000"},
+			"http://ws.example.ts.net:9000/fleet?c=c0de\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fleetURLRig(t, arm)
+			fleetServeStatus = c.serve
+			if code, out, errOut := runFleetURL(t, c.args...); code != 0 || out != c.want {
+				t.Fatalf("exit %d stdout %q stderr %q", code, out, errOut)
+			}
+		})
 	}
 }

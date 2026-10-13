@@ -263,6 +263,15 @@ func fleetCodeFromInput(v string) string {
 	return strings.TrimSpace(vals.Get("c"))
 }
 
+// fleetRequestHTTPS reports whether the browser reached the server over
+// HTTPS: TLS here, or the tailscale serve https proxy, which sets
+// X-Forwarded-Proto. The header is trusted without checking who sent it: a
+// spoofed "https" on a plain-http request only makes the browser refuse the
+// Secure cookie, which harms nobody but the sender.
+func fleetRequestHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
 // fleetLogin is POST /fleet/login (form field c): consume the code, set the
 // cookie, and 303 to /fleet. The POST comes from fleetLoginPage, a
 // same-origin page, so the redirect is a same-site navigation and the browser
@@ -289,7 +298,7 @@ func (s *server) fleetLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: fleetCookieName, Value: sec, Path: "/fleet", MaxAge: fleetCookieMaxAge,
-		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil,
+		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: fleetRequestHTTPS(r),
 	})
 	// The redirected GET needs no Referer: the page's one held the code.
 	w.Header().Set("Referrer-Policy", "no-referrer")

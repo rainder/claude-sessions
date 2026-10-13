@@ -985,6 +985,25 @@ never handles a non-GET, anything outside `/fleet`, any `c=` link, or
 state/chat/log/usage/say/start/login*: those are live data, actions, or
 depend on auth, and a cached answer would show an old FLEET or a stale login.
 
+**HTTPS.** The service worker and Android's install prompt need a secure
+context, and plain `http://` on a tailnet address is not one. So the page is
+also served through a tailnet-only `tailscale serve --https=8443` route to the
+server's Tailscale address (`sudo tailscale serve --bg --https=8443
+http://<tailscale-ip>:8765`; setting a route needs root, and never `funnel`,
+which would put the page on the internet). Other serve routes, such as `:443`
+to another app, stay as they are. The proxy keeps `Host` and passes the
+browser's `Origin` unchanged, so `sameOrigin` and the CSRF checks need no
+change; nothing trusts `RemoteAddr`. It adds `X-Forwarded-Proto: https`, and
+`fleetRequestHTTPS` (that header, or `r.TLS`) makes the `cs_fleet` cookie
+`Secure`. The header is not checked for who sent it: a spoofed `https` on a
+plain-http request only makes the browser refuse the cookie, which harms only
+the sender. `fleet-url` still arms through the server directly with the bearer
+token, then reads `tailscale serve status --json` (`fleetServeHTTPS`, 3 s
+timeout, any error → the http link): a `Web` entry whose `/` handler proxies
+to this server's port, on a TCP port marked `HTTPS`, lowest port first, gives
+`https://<host>[:<port>]/fleet?c=…`. `--http` (or `--host`) prints the old
+http link.
+
 **Say guards, in order, and why each exists.** Cookie auth needs `Origin` (or
 `Referer`) host == `r.Host`. Newlines flatten to spaces and other control bytes
 are refused: tmux types a literal newline as Enter, and ESC could drive the
