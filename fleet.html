@@ -96,30 +96,33 @@ section { min-width: 0; }
 .card.k-yes { border-color: var(--red-line); border-left-color: var(--red); }
 .card.k-needs { border-color: var(--amber-line); border-left-color: var(--amber); }
 .card-top { display: flex; align-items: flex-start; gap: 8px; }
-.card-title { flex: 1; min-width: 0; display: block; padding: 2px 0; background: none; border: 0; text-align: left; cursor: pointer; }
+.card-title { flex: 1; min-width: 0; padding: 2px 0; }
 .card-title .tk { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); }
-.card-title .tt { font-weight: 620; font-size: 15.5px; overflow-wrap: anywhere; }
-.card-title .chev { display: inline-block; margin-left: 6px; color: var(--muted); font-size: 12px; transition: transform .15s; }
-.card-title[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.card-title .tt { display: block; font-weight: 620; font-size: 15.5px; overflow-wrap: anywhere; }
+.card-meta { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
+.card-meta .sess { font-family: var(--mono); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-meta .wo { color: var(--amber); }
+.card .summary { margin: 10px 0 0; font-size: 14.5px; }
 .icon-btn { flex: none; width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface2); cursor: pointer; font-size: 17px; line-height: 1; }
 .lean-line { margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
 .lean-line b { color: var(--text); }
-.opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 8px; margin-top: 10px; }
-.opt { display: flex; align-items: center; gap: 9px; min-height: 46px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; margin-top: 12px; }
+.opt { display: flex; align-items: flex-start; gap: 9px; min-height: 46px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .opt:hover:not(:disabled) { border-color: var(--muted); }
-.opt:disabled { opacity: .45; cursor: not-allowed; }
+/* Disabled dims only the key and label: the effect line must stay readable,
+   since it is what the decision is made on. */
+.opt:disabled { cursor: not-allowed; border-style: dashed; }
+.opt:disabled .k, .opt:disabled .ol { opacity: .5; }
+.opt .ob { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-top: 2px; }
+.opt .ol { font-weight: 600; }
+.opt .oline { font-size: 12.5px; line-height: 1.35; color: var(--muted); font-weight: 400; }
 .opt .k { flex: none; display: grid; place-items: center; min-width: 24px; height: 24px; padding: 0 5px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); font-family: var(--mono); font-size: 12px; font-weight: 700; }
 .opt.is-lean { border-color: var(--accent); }
 .opt.lean-btn { background: var(--accent-tint); border-color: var(--accent); color: var(--accent); font-weight: 620; }
 .opt.lean-btn .k { border-color: var(--accent); color: var(--accent); background: transparent; }
-.card-more { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); font-size: 14px; }
 .summary { margin: 0 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.opt-lines { margin: 0 0 10px; padding: 0; list-style: none; display: grid; gap: 4px; }
-.opt-lines li { overflow-wrap: anywhere; }
-.opt-lines .k { font-family: var(--mono); font-weight: 700; margin-right: 6px; }
-.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 0; }
-.kv dt { color: var(--muted); } .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .links { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.card .links { margin-top: 10px; font-size: 13px; }
 .sent { display: flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 13px; color: var(--accent); font-weight: 550; }
 .sent .dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
 
@@ -390,7 +393,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   let expired = false;
   let state = null, stateText = "", stateDay = "";
   let alive = false;
-  const expanded = new Set();          // card ids with the detail open
+  const expanded = new Set();          // "row:<id>" for compact rows left open
   const pending = new Map();           // cardId → updatedAt at send time
   const failed = {};                   // poller name → last fetch failed
   const chat = {sid: null, pos: null, turns: new Map(), reason: "", open: new Set(), key: ""};
@@ -521,31 +524,33 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return {ticket, title, name: ticket || title};
   }
 
+  // Decision cards show everything needed to decide without a tap: the
+  // summary, every option's label and one-line effect, and the links.
   function decisionCard(c, explicit) {
     const id = str(c.id);
     const head = cardHead(c);
     const opts = optionList(c);
     const lean = str(c.lean);
     const leanOpt = lean ? opts.find(o => str(o.key) === lean) : null;
-    const open = id && expanded.has(id);
 
     const card = el("article", "card " + (explicit ? "k-yes" : "k-needs"));
-    const titleBtn = el("button", "card-title",
+    const title = el("div", "card-title",
       head.ticket ? el("span", "tk", head.ticket) : null,
-      el("span", "tt", head.title, el("span", "chev", "▸")));
-    titleBtn.type = "button";
-    titleBtn.setAttribute("aria-expanded", open ? "true" : "false");
-    titleBtn.addEventListener("click", () => {
-      if (!id) return;
-      if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
-      guard(renderCards);
-    });
+      el("span", "tt", head.title));
+    const meta = el("div", "card-meta");
+    if (str(c.session)) { const se = el("span", "sess", str(c.session)); se.title = str(c.session); meta.append(se); }
+    if (str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
+    if (str(c.updatedAt)) meta.append(relSpan(c.updatedAt));
+    if (meta.childNodes.length) title.append(meta);
     const talk = el("button", "icon-btn", "💬");
     talk.type = "button";
     talk.title = "Write about this in the chat";
     talk.setAttribute("aria-label", "Write about " + head.name + " in the chat");
     talk.addEventListener("click", () => prefillChat(head.name));
-    card.append(el("div", "card-top", titleBtn, talk));
+    card.append(el("div", "card-top", title, talk));
+
+    const sum = str(c.summary);
+    if (sum) card.append(el("p", "summary", sum));
 
     if (lean) {
       const ll = el("p", "lean-line", "Lean: ", el("b", "", lean));
@@ -557,8 +562,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (opts.length) {
       const box = el("div", "opts");
       for (const o of opts) {
-        const key = str(o.key), label = str(o.label) || str(o.send) || key;
-        const btn = el("button", "opt" + (leanOpt === o ? " is-lean" : ""), key ? el("span", "k", key) : null, el("span", "", label));
+        const key = str(o.key), label = str(o.label) || str(o.send) || key, line = str(o.line);
+        const btn = el("button", "opt" + (leanOpt === o ? " is-lean" : ""), key ? el("span", "k", key) : null,
+          el("span", "ob", el("span", "ol", label), line ? el("span", "oline", line) : null));
         btn.type = "button";
         btn.disabled = !canSend || !str(o.send);
         btn.addEventListener("click", () => openSheet(c, o, false, explicit));
@@ -567,7 +573,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       // FLEET never lets a lean stand in for an explicit-yes item, so the
       // Lean button is for needs-you cards only.
       if (!explicit && leanOpt && str(leanOpt.send)) {
-        const lb = el("button", "opt lean-btn", el("span", "k", lean), el("span", "", "Lean"));
+        const lb = el("button", "opt lean-btn", el("span", "k", lean), el("span", "ob", el("span", "ol", "Lean")));
         lb.type = "button";
         lb.disabled = !canSend;
         lb.addEventListener("click", () => openSheet(c, leanOpt, true, explicit));
@@ -576,21 +582,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       card.append(box);
     }
 
-    if (open) {
-      const more = el("div", "card-more");
-      const sum = str(c.summary);
-      if (sum) more.append(el("p", "summary", sum));
-      const lines = opts.filter(o => str(o.line));
-      if (lines.length) {
-        const ul = el("ul", "opt-lines");
-        for (const o of lines) ul.append(el("li", "", el("span", "k", str(o.key)), (str(o.label) ? str(o.label) + " — " : "") + str(o.line)));
-        more.append(ul);
-      }
-      const kv = detailList(c);
-      if (kv) more.append(kv);
-      if (!more.childNodes.length) more.append(el("p", "muted", "No more detail."));
-      card.append(more);
-    }
+    const links = linksNode(c);
+    if (links) card.append(links);
 
     if (id && pending.has(id)) card.append(el("div", "sent", el("span", "dot"), "Sent · waiting for FLEET"));
     return card;
@@ -602,17 +595,6 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const box = el("span", "links");
     for (const l of links) box.append(safeLink(str(l.url), str(l.label) || str(l.url)));
     return box;
-  }
-
-  function detailList(c) {
-    const dl = el("dl", "kv");
-    const add = (k, v) => { if (v) dl.append(el("dt", "", k), el("dd", "", v)); };
-    add("Links", linksNode(c));
-    const sess = str(c.session);
-    add("Session", sess ? el("span", "mono", sess) : null);
-    add("Waiting on", str(c.waitingOn));
-    if (str(c.updatedAt)) add("Updated", relSpan(c.updatedAt));
-    return dl.childNodes.length ? dl : null;
   }
 
   function compactRow(c) {
