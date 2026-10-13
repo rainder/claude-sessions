@@ -122,6 +122,16 @@ func TestStripPaneEscapesKeepsDimText(t *testing.T) {
 	}
 }
 
+// C1 controls (U+0080..U+009F) go too: U+009B is a one-byte CSI that some
+// terminals act on when the server runs in the foreground. A raw 0x9B byte
+// that is not valid UTF-8 already decodes to U+FFFD.
+func TestStripPaneEscapesDropsC1Controls(t *testing.T) {
+	got := stripPaneEscapes("a\u009b31mb\u0080c\u009fd\u00a0e")
+	if got != "a31mbcd\u00a0e" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestCapturePaneRefusesEmptyTarget(t *testing.T) {
 	if _, err := capturePane(""); err == nil {
 		t.Fatal("empty target must error: tmux -t \"\" hits the current session")

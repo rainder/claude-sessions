@@ -851,7 +851,7 @@ writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 (append-only, `fleet-log.sh`; the server appends `web-say` lines) — mirrors the
 FLEET transcript, and types text into the FLEET pane. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
-`POST /fleet/login/arm`, `POST /fleet/login/revoke`, main mux only (never the
+`POST /fleet/login`, `POST /fleet/login/arm`, `POST /fleet/login/revoke`, main mux only (never the
 loopback paste mux).
 
 **Auth.** Bearer header, or the `cs_fleet` cookie (`Path=/fleet`, `HttpOnly`,
@@ -870,13 +870,27 @@ revoke are bearer-only — a cookie must not mint logins for more devices.
 `fleet-url --revoke` (`POST /fleet/login/revoke`) rotates the secret
 (atomic write) and drops every code, so every device is logged out; if the
 write fails the new secret still holds in memory, and the 500 says a restart
-would bring the old logins back. `?t=` means
-nothing any more. `GET /fleet?c=<code>` consumes the code, sets the cookie and
-answers a small HTML hop that `location.replace`s to `/fleet` — **not a 303**: a link tapped in
-another app is a cross-site navigation, and the browser would not send the new
-Strict cookie on its redirect. A later plain `/fleet` link tapped in another
-app has the same problem: the cookie is not sent. So `/fleet` with no auth and
-no `?hop=1` answers the same hop, to `/fleet?hop=1`; that same-site request
+would bring the old logins back. Deleting the `fleet-secret` file while the
+server runs logs nobody out: the server keeps the old secret in memory until a
+restart. Use `claude-sessions fleet-url --revoke`. `?t=` means nothing any
+more. **The link does not use the code; only a POST does.** Link previews
+(iMessage, Slack, iOS) fetch a link with GET before anyone taps it, so a GET
+that used the code would log the preview in and the tap would get 401.
+`GET /fleet?c=<code>` (HEAD too) answers a "Log in" page with no script (its
+own CSP, `form-action 'self'`): one button that posts `c` to
+`POST /fleet/login`. GET does not check the code, so it is no oracle. The
+POST needs same-origin (`sameOrigin`, like `/fleet/say`'s cookie path; checked
+before the form is read, so a cross-site POST cannot burn a code), reads `c`
+from the form body only (4 KiB cap), consumes it, sets the cookie, and answers
+303 to `/fleet`. That redirect follows a same-origin POST, so it is a
+same-site navigation and carries the new Strict cookie. The login page sends
+`Referrer-Policy: same-origin` for the same reason as the main page below:
+with `no-referrer` the form POST would carry `Origin: null`. A later plain
+`/fleet` link tapped in another app is a cross-site navigation, so the cookie
+is not sent. So `/fleet` with no auth and
+no `?hop=1` answers a small HTML hop (`writeFleetHop`, `location.replace`) to
+`/fleet?hop=1` — not a 303, which would still be part of the cross-site
+navigation; that same-site request
 carries the cookie, and the page then `replaceState`s back to `/fleet`. A miss
 on `?hop=1` is a real 401. The page sends `Referrer-Policy: same-origin`,
 **not `no-referrer`**: with `no-referrer` browsers send `Origin: null` on POST,

@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -185,14 +186,58 @@ func (s *server) fleetLoginRevoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// fleetLogin is GET /fleet?c=<code>: consume the code, set the cookie, and
-// leave the URL by script. A 303 would not work from a link tapped in
-// another app: the redirect is part of a cross-site navigation, so the
-// browser would not send the new SameSite=Strict cookie on it.
-func (s *server) fleetLogin(w http.ResponseWriter, r *http.Request, code string) {
-	sec := s.redeemFleetCode(code)
+// fleetLoginPageCSP: the login page has no script; its one form posts to
+// this origin.
+const fleetLoginPageCSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
+// fleetLoginPage is GET (and HEAD) /fleet?c=<code>: a page with one "Log in"
+// button that posts the code to /fleet/login. It does not check or use the
+// code. Link previews (iMessage, Slack, iOS) fetch a link with GET before
+// anyone taps it; if GET used the code, the preview would log itself in and
+// the tap would get 401. Checking the code here would also make GET an
+// oracle for live codes.
+//
+// Referrer-Policy is same-origin, not no-referrer: with no-referrer the
+// browser sends Origin: null on the form POST, and /fleet/login would refuse
+// it. same-origin keeps the Referer (which holds the code) on this origin.
+func fleetLoginPage(w http.ResponseWriter, code string) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Content-Security-Policy", fleetLoginPageCSP)
+	h.Set("Referrer-Policy", "same-origin")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8">` +
+		`<meta name="viewport" content="width=device-width, initial-scale=1">` +
+		`<title>FLEET login</title>` +
+		`<style>body{font:18px system-ui,sans-serif;margin:0;padding:3em 1em;text-align:center}` +
+		`button{font:inherit;font-size:1.4em;padding:.8em 3em;border-radius:.5em}</style>` +
+		`<p>Press the button to log in to the FLEET page on this device.</p>` +
+		`<form method="POST" action="/fleet/login">` +
+		`<input type="hidden" name="c" value="` + html.EscapeString(code) + `">` +
+		`<button type="submit">Log in</button></form></html>`))
+}
+
+// fleetLogin is POST /fleet/login (form field c): consume the code, set the
+// cookie, and 303 to /fleet. The POST comes from fleetLoginPage, a
+// same-origin page, so the redirect is a same-site navigation and the browser
+// sends the new SameSite=Strict cookie on it. Same-origin is required, like
+// /fleet/say's cookie path, and is checked before the form is read: a
+// cross-site POST must not use (burn) a code.
+func (s *server) fleetLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !sameOrigin(r) {
+		http.Error(w, "origin mismatch", http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	// PostForm, not Form: the code comes from the body only, never the URL.
+	sec := s.redeemFleetCode(r.PostForm.Get("c"))
 	if sec == "" {
-		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, fleetLoginGone, http.StatusUnauthorized)
 		return
 	}
@@ -200,5 +245,8 @@ func (s *server) fleetLogin(w http.ResponseWriter, r *http.Request, code string)
 		Name: fleetCookieName, Value: sec, Path: "/fleet", MaxAge: fleetCookieMaxAge,
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil,
 	})
-	writeFleetHop(w, "/fleet")
+	// The redirected GET needs no Referer: the page's one held the code.
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Location", "/fleet")
+	w.WriteHeader(http.StatusSeeOther)
 }

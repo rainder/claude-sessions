@@ -167,16 +167,17 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("GET /fleet/log", s.fleetLog)     // Task 4
 	mux.HandleFunc("GET /fleet/chat", s.fleetChat)   // Task 5
 	mux.HandleFunc("POST /fleet/say", s.fleetSay)    // Task 6
+	mux.HandleFunc("POST /fleet/login", s.fleetLogin)
 	mux.HandleFunc("POST /fleet/login/arm", s.fleetLoginArm)
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
 }
 
-// fleetPage serves the page. With ?c=<code> it is the one-time login
-// (fleetLogin). The old ?t= parameter means nothing now: such a request is a
-// plain visit.
+// fleetPage serves the page. With ?c=<code> it is the login page
+// (fleetLoginPage), which does not use the code. The old ?t= parameter means
+// nothing now: such a request is a plain visit.
 func (s *server) fleetPage(w http.ResponseWriter, r *http.Request) {
 	if c := r.URL.Query().Get("c"); c != "" {
-		s.fleetLogin(w, r, c)
+		fleetLoginPage(w, c)
 		return
 	}
 	if s.fleetAuth(r) == fleetAuthNone {

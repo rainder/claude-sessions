@@ -81,7 +81,7 @@ func TestCmdFleetURLArmsAndPrintsCode(t *testing.T) {
 	if strings.Contains(out+errOut, "tok") {
 		t.Fatal("the server token leaked into the output")
 	}
-	if !strings.Contains(errOut, "Open this link once, on one device, within 10 minutes. It works one time.") {
+	if !strings.Contains(errOut, "Open this link on one device within 10 minutes and press Log in. The code works one time.") {
 		t.Fatalf("stderr %q", errOut)
 	}
 }

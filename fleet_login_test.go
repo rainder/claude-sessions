@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,10 +41,29 @@ func armFleetCode(t *testing.T, s *server) string {
 	return out.Code
 }
 
-func redeemFleetCode(s *server, code string) *httptest.ResponseRecorder {
+// postFleetLogin posts the login form the way the GET page's button does,
+// with origin as the Origin header ("" sends none).
+func postFleetLogin(s *server, code, origin string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("POST", "/fleet/login", strings.NewReader(url.Values{"c": {code}}.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if origin != "" {
+		r.Header.Set("Origin", origin)
+	}
 	w := httptest.NewRecorder()
-	fleetMux(s).ServeHTTP(w, httptest.NewRequest("GET", "/fleet?c="+code, nil))
+	fleetMux(s).ServeHTTP(w, r)
 	return w
+}
+
+// redeemFleetCode is a same-origin login POST (httptest's Host is example.com).
+func redeemFleetCode(s *server, code string) *httptest.ResponseRecorder {
+	return postFleetLogin(s, code, "http://example.com")
+}
+
+func wantFleetLoginOK(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/fleet" {
+		t.Fatalf("login: %d Location %q, want 303 to /fleet", w.Code, w.Header().Get("Location"))
+	}
 }
 
 func wantFleetLoginRefused(t *testing.T, w *httptest.ResponseRecorder) {
@@ -115,23 +135,115 @@ func TestFleetLoginRedeemSetsSecretCookieOnce(t *testing.T) {
 	s := fleetTestServer(t, nil)
 	code := armFleetCode(t, s)
 	w := redeemFleetCode(s, code)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code %d, want 200 (HTML hop, not a 303)", w.Code)
-	}
+	wantFleetLoginOK(t, w)
 	c := w.Result().Cookies()
 	if len(c) != 1 || c[0].Name != "cs_fleet" || c[0].Value != "sec" || c[0].Path != "/fleet" ||
 		!c[0].HttpOnly || c[0].SameSite != http.SameSiteStrictMode || c[0].Secure || c[0].MaxAge != 2592000 {
 		t.Fatalf("cookie = %+v", c)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, `location.replace("/fleet")`) ||
-		strings.Contains(body, code) || strings.Contains(body, "sec") || strings.Contains(body, "tok") {
-		t.Fatalf("login hop must redirect by script and echo no secret: %q", body)
+	if strings.Contains(body, code) || strings.Contains(body, "sec") || strings.Contains(body, "tok") {
+		t.Fatalf("login answer must echo no secret: %q", body)
 	}
-	if got := w.Header().Get("Referrer-Policy"); got != "no-referrer" {
-		t.Fatalf("login hop Referrer-Policy = %q, want no-referrer", got)
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("login Cache-Control = %q, want no-store", got)
 	}
 	wantFleetLoginRefused(t, redeemFleetCode(s, code))
+}
+
+// A link preview (iMessage, Slack, iOS) fetches the link with GET or HEAD
+// before Andy taps it. That fetch must not use the code: GET only shows a
+// form, and only its POST redeems.
+func TestFleetLoginGetShowsFormAndKeepsCode(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	code := armFleetCode(t, s)
+	for _, method := range []string{"GET", "HEAD", "GET"} {
+		w := httptest.NewRecorder()
+		fleetMux(s).ServeHTTP(w, httptest.NewRequest(method, "/fleet?c="+code, nil))
+		if w.Code != http.StatusOK || len(w.Result().Cookies()) != 0 {
+			t.Fatalf("%s ?c=: %d cookies %v, want 200 and no cookie", method, w.Code, w.Result().Cookies())
+		}
+		h := w.Header()
+		if h.Get("Content-Type") != "text/html; charset=utf-8" || h.Get("Cache-Control") != "no-store" ||
+			h.Get("Referrer-Policy") != "same-origin" || h.Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("%s ?c= headers %v", method, h)
+		}
+		if got, want := h.Get("Content-Security-Policy"),
+			"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"; got != want {
+			t.Fatalf("%s ?c= CSP = %q, want %q", method, got, want)
+		}
+		if method == "GET" {
+			body := w.Body.String()
+			for _, want := range []string{
+				"<title>FLEET login</title>",
+				"Press the button to log in to the FLEET page on this device.",
+				`<form method="POST" action="/fleet/login">`,
+				`<input type="hidden" name="c" value="` + code + `">`,
+				">Log in</button>",
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("login page lacks %q: %q", want, body)
+				}
+			}
+			rest := strings.ReplaceAll(body, code, "") // a random code may spell "sec"
+			if strings.Contains(rest, "<script") || strings.Contains(rest, "sec") || strings.Contains(rest, "tok") {
+				t.Fatalf("login page must have no script and no secret: %q", body)
+			}
+		}
+	}
+	wantFleetLoginOK(t, redeemFleetCode(s, code))
+}
+
+// GET does not check the code: an unknown one gets the same page (no oracle),
+// HTML-escaped, since it is request data.
+func TestFleetLoginGetEscapesAndDoesNotCheckCode(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	w := httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, httptest.NewRequest("GET", "/fleet?c="+url.QueryEscape(`"><b>x`), nil))
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, `value="&#34;&gt;&lt;b&gt;x"`) || strings.Contains(body, "<b>") {
+		t.Fatalf("unknown code page: %d %q", w.Code, body)
+	}
+}
+
+func TestFleetLoginPostNeedsSameOrigin(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	code := armFleetCode(t, s)
+	for _, origin := range []string{"", "null", "http://evil.example", "http://example.com.evil.example"} {
+		w := postFleetLogin(s, code, origin)
+		if w.Code != http.StatusForbidden || len(w.Result().Cookies()) != 0 {
+			t.Fatalf("Origin %q: %d cookies %v, want 403 and no cookie", origin, w.Code, w.Result().Cookies())
+		}
+	}
+	// A refused POST did not use the code.
+	wantFleetLoginOK(t, redeemFleetCode(s, code))
+}
+
+func TestFleetLoginPostRejectsLargeBody(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	code := armFleetCode(t, s)
+	r := httptest.NewRequest("POST", "/fleet/login",
+		strings.NewReader("c="+code+"&pad="+strings.Repeat("x", 5000)))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Origin", "http://example.com")
+	w := httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("oversized form: %d %v, want 400 and no cookie", w.Code, w.Result().Cookies())
+	}
+	wantFleetLoginOK(t, redeemFleetCode(s, code))
+}
+
+// Only the form body carries the code: a ?c= on the POST URL is ignored.
+func TestFleetLoginPostIgnoresQueryCode(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	code := armFleetCode(t, s)
+	r := httptest.NewRequest("POST", "/fleet/login?c="+code, nil)
+	r.Header.Set("Origin", "http://example.com")
+	w := httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, r)
+	wantFleetLoginRefused(t, w)
+	wantFleetLoginOK(t, redeemFleetCode(s, code))
 }
 
 func TestFleetLoginUnknownCode(t *testing.T) {
@@ -146,9 +258,7 @@ func TestFleetLoginExpiredCode(t *testing.T) {
 	s.fleet.now = func() time.Time { return now }
 	early, late := armFleetCode(t, s), armFleetCode(t, s)
 	now = now.Add(10*time.Minute - time.Second)
-	if w := redeemFleetCode(s, early); w.Code != http.StatusOK {
-		t.Fatalf("inside the TTL: %d", w.Code)
-	}
+	wantFleetLoginOK(t, redeemFleetCode(s, early))
 	now = now.Add(2 * time.Second)
 	wantFleetLoginRefused(t, redeemFleetCode(s, late))
 }
@@ -161,9 +271,7 @@ func TestFleetLoginKeepsNewestFourCodes(t *testing.T) {
 	}
 	wantFleetLoginRefused(t, redeemFleetCode(s, codes[0]))
 	for _, c := range codes[1:] {
-		if w := redeemFleetCode(s, c); w.Code != http.StatusOK {
-			t.Fatalf("newer code refused: %d", w.Code)
-		}
+		wantFleetLoginOK(t, redeemFleetCode(s, c))
 	}
 }
 
@@ -227,7 +335,7 @@ func TestFleetLoginRevokeRotatesSecretAndDropsCodes(t *testing.T) {
 	wantFleetLoginRefused(t, redeemFleetCode(s, pending))
 
 	w = redeemFleetCode(s, armFleetCode(t, s))
-	if c := w.Result().Cookies(); w.Code != http.StatusOK || len(c) != 1 || c[0].Value != fresh {
+	if c := w.Result().Cookies(); w.Code != http.StatusSeeOther || len(c) != 1 || c[0].Value != fresh {
 		t.Fatalf("login after revoke: %d %v", w.Code, c)
 	}
 }

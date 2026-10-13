@@ -103,10 +103,12 @@ func visibleText(line string) string { return paneLineText(line, true) }
 
 // stripPaneEscapes strips CSI escape sequences and other control bytes from
 // one captured line but keeps dim text: for a log a person reads, where the
-// placeholder is part of what the screen showed.
+// placeholder is part of what the screen showed. C1 controls (U+0080..U+009F)
+// go too: U+009B is a one-byte CSI that some terminals act on when the
+// server runs in the foreground.
 func stripPaneEscapes(line string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			return -1
 		}
 		return r

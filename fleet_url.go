@@ -45,8 +45,9 @@ func defaultFleetTailscaleHost() string {
 	return tailscaleIPv4()
 }
 
-// fleetLoginURL builds the one-time GET /fleet?c=<code> login link. The code
-// is query-escaped even though base64url never needs it.
+// fleetLoginURL builds the /fleet?c=<code> login link. Opening it shows a
+// "Log in" page; only that page's POST uses the code. The code is
+// query-escaped even though base64url never needs it.
 func fleetLoginURL(host string, port int, code string) string {
 	u := url.URL{Scheme: "http", Host: net.JoinHostPort(host, strconv.Itoa(port)), Path: "/fleet",
 		RawQuery: url.Values{"c": {code}}.Encode()}
@@ -144,6 +145,6 @@ func cmdFleetURL(args []string) int {
 		return 1
 	}
 	fmt.Println(fleetLoginURL(h, *port, out.Code))
-	fmt.Fprintln(os.Stderr, "Open this link once, on one device, within 10 minutes. It works one time.")
+	fmt.Fprintln(os.Stderr, "Open this link on one device within 10 minutes and press Log in. The code works one time.")
 	return 0
 }
