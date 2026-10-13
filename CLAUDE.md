@@ -1001,8 +1001,25 @@ the sender. `fleet-url` still arms through the server directly with the bearer
 token, then reads `tailscale serve status --json` (`fleetServeHTTPS`, 3 s
 timeout, any error → the http link): a `Web` entry whose `/` handler proxies
 to this server's port, on a TCP port marked `HTTPS`, lowest port first, gives
-`https://<host>[:<port>]/fleet?c=…`. `--http` (or `--host`) prints the old
-http link.
+`https://<host>[:<port>]/fleet?c=…`. The proxy target must be the server
+`fleet-url` just reached (`fleetRouteTargets`): its Tailscale address or
+MagicDNS name, and loopback only when it was reached on loopback — a route to
+another machine's `:8765` is another server. A matching route open to Funnel
+(`AllowFunnel`) is skipped with a warning. `--http` (or `--host`) prints the
+old http link. When the lookup finds no route, the http link comes with a
+note: http and https logins on one device share one cookie jar (cookies
+ignore the port), so the Secure cookie from an https login blocks an http
+login there, and that device must log in over https again.
+
+**Sent strip** (page only). A confirmed card answer moves the card from
+Decide into "Sent - waiting for FLEET", kept in localStorage
+`fleet.pending.v1`. It leaves the strip when its card id is gone or is no
+longer a decision, and comes back to Decide as a normal card when its
+**content** signature (kind, status, title, ticket, summary, lean, options)
+changes. Not `updatedAt`: `fleet-state.py` stamps `updatedAt = now` on every
+card at every write, so it changes every FLEET cycle and would bounce every
+sent card straight back. A send that is unclear or failed keeps the card in
+Decide.
 
 **Say guards, in order, and why each exists.** Cookie auth needs `Origin` (or
 `Referer`) host == `r.Host`. Newlines flatten to spaces and other control bytes
