@@ -68,6 +68,19 @@ type fleetDeps struct {
 	lastMu     sync.Mutex
 	lastLoaded bool
 	lastMem    fleetLast
+
+	// POST /fleet/start (fleet_start.go). startMu is held across the whole
+	// handler, so two taps cannot both pass the guards; startStateMu guards
+	// the fields /fleet/state reads, so a poll never waits on a spawn.
+	defaultCwd    string                                             // "" → ~/Developer/trecs-brain
+	spawn         func(cwd, display, command string) (string, error) // nil → SpawnNew
+	presets       func() ([]CommandPreset, error)                    // nil → LoadCommandPresets
+	startMu       sync.Mutex
+	startStateMu  sync.Mutex
+	startInFlight bool
+	lastStartAt   time.Time // last attempt that passed discovery; a failed spawn counts
+	startingAt    time.Time // zero → no start pending
+	startingMode  string
 }
 
 func (s *server) fleetDir() string {
@@ -123,6 +136,11 @@ type fleetSession struct {
 	// HasLast: FLEET is not alive and fleet-last.json names a session that
 	// POST /fleet/start would resume.
 	HasLast bool `json:"hasLast"`
+	// CanStart: not_live, no start in flight or pending, and the start rate
+	// limit is free.
+	CanStart bool `json:"canStart"`
+	// Starting: a web start in the last 90 s, and FLEET not alive yet.
+	Starting *fleetStarting `json:"starting,omitempty"`
 }
 
 // fleetReasonCodes maps discovery's human reason text onto its code.
@@ -194,6 +212,7 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("GET /fleet/log", s.fleetLog)     // Task 4
 	mux.HandleFunc("GET /fleet/chat", s.fleetChat)   // Task 5
 	mux.HandleFunc("POST /fleet/say", s.fleetSay)    // Task 6
+	mux.HandleFunc("POST /fleet/start", s.fleetStart)
 	mux.HandleFunc("POST /fleet/login", s.fleetLogin)
 	mux.HandleFunc("POST /fleet/login/arm", s.fleetLoginArm)
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
@@ -310,6 +329,7 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	if !fl.Alive {
 		_, fl.HasLast = s.fleetResumable()
 	}
+	s.fleetStartInfo(&fl)
 	out["fleet"] = fl
 	out["stale"] = fleetStateStale(state, stateErr, s.fleetNow())
 	if stateErr != "" {
@@ -350,6 +370,10 @@ type fleetLogEntry struct {
 	Text   string `json:"text,omitempty"`
 	URL    string `json:"url,omitempty"`
 	CardID string `json:"cardId,omitempty"`
+	// web-start lines only.
+	Mode      string `json:"mode,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+	Tmux      string `json:"tmux,omitempty"`
 }
 
 func (s *server) appendFleetLog(e fleetLogEntry) error {

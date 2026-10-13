@@ -112,7 +112,7 @@ func TestFleetLastSkipsInvalidLiveID(t *testing.T) {
 	}
 }
 
-func TestFleetStateCodeAndHasLast(t *testing.T) {
+func TestFleetStateCodeHasLastCanStart(t *testing.T) {
 	cwd := t.TempDir()
 	cases := []struct {
 		name     string
@@ -142,7 +142,9 @@ func TestFleetStateCodeAndHasLast(t *testing.T) {
 			}
 			fl := getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any)
 			code, _ := fl["code"].(string)
-			if fl["alive"] != c.alive || code != c.code || fl["hasLast"] != c.hasLast {
+			// Nothing is starting here, so canStart is exactly "not_live".
+			if fl["alive"] != c.alive || code != c.code || fl["hasLast"] != c.hasLast ||
+				fl["canStart"] != (c.code == "not_live") {
 				t.Fatalf("fleet = %v", fl)
 			}
 		})
