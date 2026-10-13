@@ -2292,7 +2292,15 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const svName = h => { try { return decodeURIComponent(h.slice("session/".length)); } catch { return ""; } };
   window.addEventListener("hashchange", () => {
     const h = location.hash.slice(1);
-    if (h.startsWith("session/")) { viewChosen = true; openSession(svName(h), true); return; }
+    if (h.startsWith("session/")) {
+      const st = obj(history.state);
+      if (st && num(st.svDepth)) svDepth = st.svDepth;
+      else { svDepth = (sv.open ? svDepth : 0) + 1; history.replaceState({svDepth}, "", location.hash); }
+      viewChosen = true;
+      openSession(svName(h));
+      return;
+    }
+    svDepth = 0;
     closeSessionView();
     if (VIEWS.indexOf(h) >= 0) setView(h, true);
   });
@@ -2344,7 +2352,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // transcript (or its terminal pane, for grok or when no transcript is
   // found) and a box that types into it. The server decides which sessions
   // may open: only ones a current card names, never FLEET itself.
-  const sv = {open: false, tmux: "", gen: 0, timer: 0, busy: false, fromPage: false, target: null, source: "", turns: new Map(),
+  // gen counts opens: an answer for an older gen is dropped. busyGen is the
+  // gen whose poll is in flight (-1: none), so a slow answer for a closed
+  // view never blocks the next view's polls.
+  const sv = {open: false, tmux: "", gen: 0, timer: 0, busyGen: -1, target: null, source: "", turns: new Map(),
     pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", sumKey: "", follow: true, unseen: false, rev: 0,
     foldOpen: new Set(), loadingOlder: false, confirm: false, confirmTimer: 0, sending: false};
   const SV_POLL = 3000;
@@ -2370,10 +2381,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     origin: "The server refused the request. Reload the page.",
   };
 
-  function openSession(t, fromPage) {
-    if (sv.open && sv.tmux === t) { sv.fromPage = sv.fromPage || fromPage; return; }
+  // svDepth: how many session entries this page pushed on history since
+  // the last view entry. Each session entry keeps its own depth in
+  // history.state, so back and forward restore it.
+  let svDepth = 0;
+  function openSession(t) {
+    if (sv.open && sv.tmux === t) return;
     closeSessionView();
-    Object.assign(sv, {open: true, tmux: t, fromPage, target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
+    Object.assign(sv, {open: true, tmux: t, target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
       key: "", sumKey: "", follow: true, unseen: false, rev: 0, loadingOlder: false, confirm: false, sending: false});
     sv.turns = new Map(); sv.foldOpen = new Set();
     sv.gen++;
@@ -2401,11 +2416,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     measure();
   }
 
-  // Back: return to the Fleet tab. A view opened from the page goes back
-  // in history, so the browser back button and this arrow agree.
+  // Back: return to the Fleet tab. Session views opened from the page go
+  // back past every session entry they pushed (A, then B: both), so the
+  // browser history and this arrow agree.
   function leaveSession(toView) {
     if (!sv.open) return;
-    if (!toView && sv.fromPage) { history.back(); return; }
+    if (!toView && svDepth > 0) { history.go(-svDepth); return; }
+    svDepth = 0;
     history.replaceState(null, "", "#" + (toView || "fleet"));
     closeSessionView();
     setView(toView || "fleet", true);
@@ -2427,17 +2444,21 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
 
   // svPoll asks for what is new every 3 s while the view is open and the
-  // page is visible. A 4xx ends the view with its message.
+  // page is visible. A 4xx ends the view with its message. One poll is in
+  // flight per open view at most, and only the poll that lands arms the
+  // next timer, so an open view has exactly one timer or one request.
   async function svPoll() {
     clearTimeout(sv.timer);
-    if (!sv.open || sv.error || expired || document.hidden || sv.busy) return;
-    sv.busy = true;
+    if (!sv.open || sv.error || expired || document.hidden || sv.busyGen === sv.gen) return;
     const gen = sv.gen;
+    sv.busyGen = gen;
     let url = "/fleet/session?t=" + encodeURIComponent(sv.tmux);
     if (sv.source === "transcript" && sv.pos !== null) url += "&since=" + sv.pos;
     const r = await svFetch(url);
-    sv.busy = false;
-    if (gen !== sv.gen || r.auth) return;
+    if (sv.busyGen === gen) sv.busyGen = -1;
+    if (r.auth) return;
+    // The view changed while this was out: make sure the current one polls.
+    if (gen !== sv.gen) { if (sv.open) svPoll(); return; }
     if (r.err) { sv.error = r.err; guard(svRender); svApplySend(); return; }
     if (r.body) { sv.loadFail = false; guard(() => applySession(r.body, false)); }
     else if (!sv.source) { sv.loadFail = true; guard(svRender); }
@@ -2677,7 +2698,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   {
     const h = location.hash.slice(1);
     if (VIEWS.indexOf(h) >= 0) { viewChosen = true; setView(h, false); } else setView("decide", false);
-    if (h.startsWith("session/")) { viewChosen = true; openSession(svName(h), false); }
+    if (h.startsWith("session/")) {
+      // A reload keeps history.state, so a pushed entry still knows its depth.
+      const st = obj(history.state);
+      svDepth = st && num(st.svDepth) ? st.svDepth : 0;
+      viewChosen = true;
+      openSession(svName(h));
+    }
   }
   measure();
   renderFilters();
