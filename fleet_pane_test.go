@@ -63,6 +63,75 @@ func TestPaneInputTextBoxWithoutPromptGlyphIsNotFound(t *testing.T) {
 	}
 }
 
+// TestPaneInputTextFixtures runs every captured or synthetic pane state. The
+// non-synth ones are real `capture-pane -p -e` dumps of a live Claude Code
+// pane; pane-synth-* copy their escape style for states that could not be
+// produced on demand (a panel under the box, a notice above the prompt, a
+// wrapped rule in a narrow pane, a permission dialog).
+func TestPaneInputTextFixtures(t *testing.T) {
+	cases := []struct {
+		file  string
+		text  string
+		found bool
+	}{
+		{"pane-empty-placeholder.ansi", "", true},
+		{"pane-typed.ansi", "hello there", true},
+		{"pane-idle-empty.ansi", "", true},
+		// The slash menu draws above the box with its own "❯" cursor row;
+		// the box's prompt is the last ❯ line.
+		{"pane-slash-menu.ansi", "/", true},
+		{"pane-at-menu.ansi", "@", true},
+		{"pane-shortcuts-below.ansi", "", true},
+		{"pane-synth-task-panel-below.ansi", "", true},
+		{"pane-synth-notice-above-prompt.ansi", "", true},
+		{"pane-synth-queued-preview.ansi", "", true},
+		{"pane-synth-clear-hint.ansi", "", true},
+		{"pane-synth-narrow-double-rule.ansi", "", true},
+	}
+	for _, c := range cases {
+		text, found := paneInputText(readFixture(t, c.file))
+		if text != c.text || found != c.found {
+			t.Errorf("%s: got (%q, %v), want (%q, %v)", c.file, text, found, c.text, c.found)
+		}
+	}
+}
+
+// A permission dialog drawn between two rules has a "❯ 1. Yes" line. It must
+// never read as an empty box: either not found or non-empty, both refuse.
+func TestPaneInputTextPermissionDialogRefuses(t *testing.T) {
+	text, found := paneInputText(readFixture(t, "pane-synth-permission-dialog.ansi"))
+	if found && text == "" {
+		t.Fatal("a permission dialog read as an empty input box")
+	}
+}
+
+func TestPaneInputTextPromptWithoutRuleBelowIsNotFound(t *testing.T) {
+	rule := repeatRune('─', 40) + "\n"
+	if _, found := paneInputText(rule + "❯ \n status\n"); found {
+		t.Fatal("a prompt line with no rule below is not a closed box")
+	}
+	if _, found := paneInputText("❯ \n" + rule); found {
+		t.Fatal("a prompt line with no rule above is not a closed box")
+	}
+}
+
+func TestStripPaneEscapesKeepsDimText(t *testing.T) {
+	got := stripPaneEscapes("\x1b[39m❯ \x1b[2mTry \"x\"\x1b[0m\x07end")
+	if got != "❯ Try \"x\"end" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// C1 controls (U+0080..U+009F) go too: U+009B is a one-byte CSI that some
+// terminals act on when the server runs in the foreground. A raw 0x9B byte
+// that is not valid UTF-8 already decodes to U+FFFD.
+func TestStripPaneEscapesDropsC1Controls(t *testing.T) {
+	got := stripPaneEscapes("a\u009b31mb\u0080c\u009fd\u00a0e")
+	if got != "a31mbcd\u00a0e" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestCapturePaneRefusesEmptyTarget(t *testing.T) {
 	if _, err := capturePane(""); err == nil {
 		t.Fatal("empty target must error: tmux -t \"\" hits the current session")

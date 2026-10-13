@@ -795,7 +795,11 @@ this with `resolveLivePIDLocal` (send_keys.go), a fresh `CollectLocal()` plus
 the same `SessionID` check, since `Session.Tmux` is derived at collection
 time and never stored on disk — a plain `session_id`-only reattestation like
 `localReattest` would revalidate identity but still hand back a stale pane
-address.
+address. `sendKeys` types with `send-keys -l -- <text>` (without `--` a text
+starting with `-` is read as tmux flags) and first refuses a pane in copy-mode
+(`tmuxPaneInMode`, shared with `/fleet/say`): the keys would go to the
+copy-mode key table and a `q` would leave it, so a mangled message would reach
+the session.
 
 `POST /sessions/{pid}/resize` (`{"session_id", "cols", "rows", "revert"}`,
 resize.go/server.go) is the inspector's preview-resize feature: entering
@@ -847,17 +851,46 @@ writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 (append-only, `fleet-log.sh`; the server appends `web-say` lines) — mirrors the
 FLEET transcript, and types text into the FLEET pane. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
-main mux only (never the loopback paste mux).
+`POST /fleet/login`, `POST /fleet/login/arm`, `POST /fleet/login/revoke`, main mux only (never the
+loopback paste mux).
 
-**Auth.** Bearer header, or the `cs_fleet` cookie (the token itself;
-`Path=/fleet`, `HttpOnly`, `SameSite=Strict`). Only `fleetAuth` reads the
-cookie, so it opens nothing outside `/fleet*`. `claude-sessions fleet-url`
-prints `/fleet?t=<token>`; that request sets the cookie and answers a small
-HTML hop that `location.replace`s to `/fleet` — **not a 303**: a link tapped in
-another app is a cross-site navigation, and the browser would not send the new
-Strict cookie on its redirect. A later plain `/fleet` link tapped in another
-app has the same problem: the cookie is not sent. So `/fleet` with no auth and
-no `?hop=1` answers the same hop, to `/fleet?hop=1`; that same-site request
+**Auth.** Bearer header, or the `cs_fleet` cookie (`Path=/fleet`, `HttpOnly`,
+`SameSite=Strict`). The cookie holds a **fleet-only secret**
+(`~/.config/claude-sessions/fleet-secret`, 32 random bytes, 0600, created at
+server start), never the server token: the token must not sit in a URL (shell
+scrollback, browser history and sync) or in a cookie, and a cookie that held
+the token would be the token. Only `fleetAuth` reads the cookie, so the secret
+opens nothing outside `/fleet*`. If the secret cannot be loaded, cookie login
+is off and only the bearer header works. Login is a one-time code:
+`claude-sessions fleet-url` finds the running server (Tailscale address, then
+loopback, like `pair`), calls `POST /fleet/login/arm` with the bearer token, and
+prints `/fleet?c=<code>`. Codes are 16 random bytes, live 10 minutes, work
+once, at most 4 live (a 5th arm drops the oldest), in memory only. Arm and
+revoke are bearer-only — a cookie must not mint logins for more devices.
+`fleet-url --revoke` (`POST /fleet/login/revoke`) rotates the secret
+(atomic write) and drops every code, so every device is logged out; if the
+write fails the new secret still holds in memory, and the 500 says a restart
+would bring the old logins back. Deleting the `fleet-secret` file while the
+server runs logs nobody out: the server keeps the old secret in memory until a
+restart. Use `claude-sessions fleet-url --revoke`. `?t=` means nothing any
+more. **The link does not use the code; only a POST does.** Link previews
+(iMessage, Slack, iOS) fetch a link with GET before anyone taps it, so a GET
+that used the code would log the preview in and the tap would get 401.
+`GET /fleet?c=<code>` (HEAD too) answers a "Log in" page with no script (its
+own CSP, `form-action 'self'`): one button that posts `c` to
+`POST /fleet/login`. GET does not check the code, so it is no oracle. The
+POST needs same-origin (`sameOrigin`, like `/fleet/say`'s cookie path; checked
+before the form is read, so a cross-site POST cannot burn a code), reads `c`
+from the form body only (4 KiB cap), consumes it, sets the cookie, and answers
+303 to `/fleet`. That redirect follows a same-origin POST, so it is a
+same-site navigation and carries the new Strict cookie. The login page sends
+`Referrer-Policy: same-origin` for the same reason as the main page below:
+with `no-referrer` the form POST would carry `Origin: null`. A later plain
+`/fleet` link tapped in another app is a cross-site navigation, so the cookie
+is not sent. So `/fleet` with no auth and
+no `?hop=1` answers a small HTML hop (`writeFleetHop`, `location.replace`) to
+`/fleet?hop=1` — not a 303, which would still be part of the cross-site
+navigation; that same-site request
 carries the cookie, and the page then `replaceState`s back to `/fleet`. A miss
 on `?hop=1` is a real 401. The page sends `Referrer-Policy: same-origin`,
 **not `no-referrer`**: with `no-referrer` browsers send `Origin: null` on POST,
@@ -894,11 +927,25 @@ capture and typing, or between the second capture and Enter, still takes the
 keys — and typing alone can answer it, since digit keys select options.
 Nothing outside Claude Code can lock its state.
 
-**Input-box parser** (`paneInputText`, `capture-pane -p -e`): the region
-between the last two `─` rule lines whose first line starts with `❯`; dim text
-(SGR 2) is Claude Code's placeholder and is dropped. If Claude Code changes how
-it draws the prompt, the parser finds no box and every send is refused (fails
-closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens.
+**Input-box parser** (`paneInputText`, `capture-pane -p -e`): anchored on the
+**last** line starting with `❯`, closed by the nearest `─` rule line above and
+below it. Box text is the rest of that line plus the lines down to the bottom
+rule; lines between the top rule and `❯` (notices, a queued message) and
+everything below the bottom rule (status, a task panel with its own rule,
+menus) are ignored. Dim text (SGR 2) is Claude Code's placeholder and is
+dropped. It used to take "the last two rule lines", and a rule drawn under the
+status lines, a notice above the prompt, or a rule wrapped into two lines in a
+narrow pane made a normal idle box read as not visible. The slash and `@` menus
+draw above the box with their own `❯` row, which is why the anchor is the
+*last* `❯` line. A dialog with a `❯ 1. Yes` row between two rules reads as
+non-empty text and refuses as `input_busy`. If Claude Code changes how it
+draws the prompt, the parser finds no box and every send is refused (fails
+closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens;
+`pane-synth-*` are hand-built in the same escape style for states that cannot
+be produced on demand. A `dialog`, `input_busy` or `not_submitted` refusal
+that read the pane logs its last 15 lines (escapes stripped, dim text kept)
+to the server's stderr only — never to the response — so a refusal that
+cannot be reproduced later still leaves the screen behind.
 
 **Cursors.** Chat: `since=<byte position>` in the transcript; the server
 returns every turn that changed after it (a later line of the same assistant

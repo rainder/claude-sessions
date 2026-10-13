@@ -93,20 +93,6 @@ func tmuxTypeLiteral(target, text string) error {
 	return exec.Command("tmux", "send-keys", "-t", target, "-l", "--", text).Run()
 }
 
-// tmuxPaneInMode reports whether target is in a tmux mode such as copy-mode.
-// Keys sent then go to the mode's key table, not to Claude: a "q" in the
-// text leaves copy-mode and only the rest reaches the input box.
-func tmuxPaneInMode(target string) (bool, error) {
-	if target == "" {
-		return false, errors.New("no tmux pane")
-	}
-	out, err := exec.Command("tmux", "display", "-p", "-t", target, "#{pane_in_mode}").Output()
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(string(out)) == "1", nil
-}
-
 // fleetTextLanded reports whether the input box holds what was just typed.
 // Claude may wrap a long line or still be drawing it, so the box text only
 // has to be a non-empty prefix of the sent text, whitespace ignored. A long
@@ -227,9 +213,11 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if typed, found := paneInputText(screen); !found {
+		s.logFleetRefusal("dialog", screen)
 		refuse("dialog", "FLEET input box is not visible")
 		return
 	} else if typed != "" {
+		s.logFleetRefusal("input_busy", screen)
 		refuse("input_busy", "input box not empty")
 		return
 	}
@@ -264,6 +252,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	// is still there and holds what was just typed (it was empty before).
 	// Other text in the box is not ours: keep polling, then give up.
 	landed := false
+	lastScreen := ""
 	for i := 0; i < fleetLandPolls && !landed; i++ {
 		if i > 0 {
 			sleep(fleetLandEvery)
@@ -272,6 +261,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+		lastScreen = screen
 		typed, found := paneInputText(screen)
 		if !found {
 			break
@@ -281,6 +271,7 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	if !landed {
 		_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
 			Text: "web-say typed but not submitted", CardID: cardID})
+		s.logFleetRefusal("not_submitted", lastScreen)
 		refuse("not_submitted", "Text was typed but not sent. FLEET changed state. Check the terminal.")
 		return
 	}
@@ -298,4 +289,30 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "fleet: web-say log append failed: %v\n", err)
 	}
 	writeJSON(w, http.StatusOK, fleetSayResult{OK: true, Queued: fresh.Status == "busy"})
+}
+
+// fleetRefusalLogLines is how much of the screen a refused say logs.
+const fleetRefusalLogLines = 15
+
+// logFleetRefusal writes the bottom of the pane that made a say refuse to the
+// server's stderr, so a refusal nobody can reproduce later ("the box is not
+// visible", but it looks fine now) still leaves the screen behind. Stderr
+// only, never the HTTP response: the pane can hold anything. Escapes are
+// stripped but dim text is kept — the placeholder is part of what was shown.
+func (s *server) logFleetRefusal(code, screen string) {
+	logf := s.fleet.logf
+	if logf == nil {
+		logf = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format, args...) }
+	}
+	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
+	if len(lines) > fleetRefusalLogLines {
+		lines = lines[len(lines)-fleetRefusalLogLines:]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "fleet: say refused (%s); last %d pane lines:\n", code, fleetRefusalLogLines)
+	for _, l := range lines {
+		l = strings.ReplaceAll(stripPaneEscapes(l), "\u00a0", " ")
+		b.WriteString("  | " + strings.TrimRight(l, " ") + "\n")
+	}
+	logf("%s", b.String())
 }
