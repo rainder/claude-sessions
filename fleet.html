@@ -749,7 +749,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // cardId → {attempts, changing, cardChanged, inStrip}. attempts: every
   // answer sent for the card, oldest first: the first answer, then each
   // correction, as {key, label, lean, state, inflight, cardAt (card
-  // updatedAt at send), sig (optionSig at send), title, ts}. inStrip: the
+  // updatedAt at send), csig (cardSig at send), title, ts}. inStrip: the
   // last answer was confirmed, so the card left Decide for the "Sent"
   // strip until FLEET rewrites or drops it.
   // state: "sending" | "sent" | "unconfirmed" (no clear HTTP answer: it may
@@ -765,7 +765,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     for (const [id, p] of pending) {
       const a = lastAttempt(p);
       if (!a || now - a.ts > PEND_MAX) continue;
-      out[id] = {cardId: id, updatedAt: a.cardAt, key: a.key, label: a.label, lean: a.lean, sig: a.sig, title: a.title,
+      out[id] = {cardId: id, updatedAt: a.cardAt, key: a.key, label: a.label, lean: a.lean, csig: a.csig, title: a.title,
         at: new Date(a.ts).toISOString(), status: a.state};
     }
     try {
@@ -788,7 +788,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (st !== "sending" && st !== "sent" && st !== "unconfirmed") continue;
       pending.set(id, {changing: false, cardChanged: false, inStrip: st === "sent", attempts: [{key: str(o.key), label: str(o.label) || str(o.key),
         lean: o.lean === true, state: st === "sent" ? "sent" : "unconfirmed", inflight: false, cardAt: str(o.updatedAt),
-        sig: typeof o.sig === "string" ? o.sig : null, title: str(o.title), ts}]});
+        csig: str(o.csig) || null, title: str(o.title), ts}]});
     }
     savePending();
   }
@@ -1353,9 +1353,20 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return row;
   }
 
-  // optionSig: what FLEET offered on a card. A change means FLEET asks
-  // again, even with the same updatedAt.
-  const optionSig = c => optionList(c).map(o => str(o.key) + "\u0001" + str(o.send)).join("\u0002");
+  // cardSig: a short hash of what FLEET shows and asks on a card: kind,
+  // status, title, ticket, summary, lean and every option's key, label,
+  // line and send text. A change means FLEET asks again. Two 32-bit FNV-1a
+  // passes with different seeds keep it small for storage.
+  function cardSig(c) {
+    const j = JSON.stringify([str(c.kind), str(c.status), str(c.title), str(c.ticket), str(c.summary), str(c.lean),
+      optionList(c).map(o => [str(o.key), str(o.label), str(o.line), str(o.send)])]);
+    const fnv = seed => {
+      let h = seed >>> 0;
+      for (let i = 0; i < j.length; i++) { h ^= j.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+      return h.toString(36);
+    };
+    return "c1:" + fnv(2166136261) + "." + fnv(374761393) + "." + j.length.toString(36);
+  }
   const cardTitle = c => { const h = cardHead(c); return h.ticket ? h.ticket + " · " + h.title : h.title; };
   function inStrip(c) {
     const p = pending.get(str(c.id));
@@ -1463,24 +1474,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
   }
 
-  // A card's answers go once FLEET drops the card. A rewrite of the card
-  // clears a sent answer, but an unconfirmed one stays (flagged
-  // cardChanged): only Dismiss or a confirmed correction clears it. An entry
-  // with a request still in flight is kept; it is checked once it settles.
   // Runs on every state answer. An answer goes once its card is gone or no
   // longer a decision (needs-you / explicit-yes). A sent answer also goes
-  // when FLEET asks again: a newer updatedAt or other options; the card
-  // then shows as a normal card. An unconfirmed answer stays through a
+  // when FLEET asks again: the card's content signature differs from the
+  // one taken at send time; the card then shows as a normal card.
+  // updatedAt is not used: fleet-state.py stamps it on every card at every
+  // write, so it moves on every FLEET cycle. An entry with no signature
+  // (an older page wrote it) counts as moved, so the card shows. An unconfirmed answer stays through a
   // rewrite (flagged cardChanged): only Dismiss or a confirmed correction
   // clears it. An entry with a request still in flight is kept; it is
   // checked once it settles.
-  function cardMoved(cur, a) {
-    if (a.sig !== null && a.sig !== undefined && optionSig(cur) !== a.sig) return true;
-    const was = str(a.cardAt), now = str(cur.updatedAt);
-    if (was === now) return false;
-    const t0 = Date.parse(was), t1 = Date.parse(now);
-    return isFinite(t0) && isFinite(t1) ? t1 > t0 : true;
-  }
+  const cardMoved = (cur, a) => !a.csig || cardSig(cur) !== a.csig;
   function prunePending() {
     if (!pending.size) return;
     const now = new Map(arr(state && state.cards).map(obj)
@@ -1504,9 +1508,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const currentCard = id => arr(state && state.cards).map(obj).find(c => c && str(c.id) === id) || null;
 
   // sheetValid: the card behind the open sheet is still the same in the
-  // current state: present, same updatedAt, kind and status, the option with
-  // the same key still sends the same text, and (for FLEET's pick) the lean
-  // is the same. A card with no id cannot be tracked and never sends here.
+  // current state: present with the same content signature (kind, status,
+  // text, lean, options). Not updatedAt: it moves on every FLEET write. A
+  // card with no id cannot be tracked and never sends here.
   function sheetValid() {
     const c = sheet.card, o = sheet.opt;
     if (!c || !o) return false;
@@ -1514,11 +1518,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!id) return false;
     const cur = currentCard(id);
     if (!cur) return false;
-    if (str(cur.updatedAt) !== str(c.updatedAt) || str(cur.kind) !== str(c.kind) || str(cur.status) !== str(c.status)) return false;
-    const co = optionList(cur).find(x => str(x.key) === str(o.key));
-    if (!co || str(co.send) !== str(o.send)) return false;
-    if (sheet.lean && str(cur.lean) !== str(c.lean)) return false;
-    return true;
+    return cardSig(cur) === cardSig(c);
   }
 
   function openSheet(c, o, lean, explicit) {
@@ -1594,7 +1594,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const c = sheet.card, o = sheet.opt, text = sheet.text;
     const id = str(c.id);
     const att = {key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", inflight: true, cardAt: str(c.updatedAt),
-      sig: optionSig(c), title: cardTitle(c), ts: Date.now()};
+      csig: cardSig(c), title: cardTitle(c), ts: Date.now()};
     let p = pending.get(id);
     if (!p) { p = {attempts: [], changing: false, cardChanged: false, inStrip: false}; pending.set(id, p); }
     p.attempts.push(att);
