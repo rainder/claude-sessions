@@ -36,11 +36,22 @@
 
 Spec deviations (deliberate, called out for review):
 
-- `GET /fleet/log?before=` takes an opaque cursor (`next` from the previous page, a line index), not an `at` timestamp. Two entries with the same second would otherwise be skipped or repeated.
-- `GET /fleet/chat?after=<uuid>` is **inclusive** of the cursor turn and the page upserts by `uuid`. Claude Code re-emits an assistant message (same `message.id`) as later lines; an exclusive cursor would miss the final text of the turn the cursor points at.
+- `GET /fleet/log?before=` takes an opaque cursor (`next` from the previous page: an absolute byte offset), not an `at` timestamp. Two entries with the same second would otherwise be skipped or repeated, and an offset stays valid while FLEET appends.
+- `GET /fleet/chat?since=<pos>` replaces `after=<uuid>`. `pos` is a byte position in the transcript; the server returns every turn that changed after it and the page upserts by `uuid`. Claude Code writes later lines for the same assistant message, and a uuid cursor cannot see an earlier turn that such a line updates.
+- `POST /fleet/say` types the text, captures the pane again, and presses Enter only if the input box still holds text. It uses its own `typeText`/`pressEnter` seams, not `sendKeysFn`.
 - `GET /fleet/usage` is added (Review Focus 5). `/sessions` is not used by the page.
 - FLEET discovery uses `cachedSessions()` only. The flags overlay holds group/disabled bits, not the name, so it adds nothing here.
 - Status mapping: `waiting` when `WaitingFor != ""`, `busy` when `Status == "busy"`, else `idle` (FLEET is usually `shell` because its Monitor runs; its turn is free, so `idle`). `queued: true` only when the fresh status is `busy`.
+
+
+Codex review (2026-10-13, verdict DISAGREE, 7 findings; all 7 held after a check against the code and are fixed in this plan):
+1. `writeTranscript` already exists (model_test.go:88) → the chat tests use `writeChatTranscript`.
+2. Say trusted the cached FLEET pick → re-run `findFleet` on the fresh list and refuse an empty session id.
+3. Double tap remembered one text and stamped before the send → a 10 s text map, stamped after Enter.
+4. Log cursor was a window-relative line index → absolute byte offset, backward chunked read.
+5. Uuid chat cursor missed updates to earlier turns → byte-position cursor that returns changed turns.
+6. Usage keys were wrong (`email`, `percent`) → real tags `account`, `pct`, `windows`.
+7. Dialog check was a snapshot → type, capture again, Enter only if the box holds text; residual race documented.
 
 ---
 
@@ -349,7 +360,7 @@ git commit -m "feat(fleet): parse the Claude input box from a pane capture"
 **Interfaces:**
 - Consumes: `s.authed`, `s.cachedSessions`, `s.numbers`.
 - Produces:
-  - `type fleetDeps struct` with fields `dir string` ("" → `~/.claude/fleet`), `now func() time.Time`, `capture func(string) (string, error)` (nil → `capturePane`), plus unexported state used by Tasks 3–6: `mu sync.Mutex`, `good map[string]json.RawMessage`, `goodMod time.Time`, `goodSize int64`, `sayMu sync.Mutex`, `lastSayAt time.Time`, `lastSayText string`, `logMu sync.Mutex`.
+  - `type fleetDeps struct` with fields `dir string` ("" → `~/.claude/fleet`), `now func() time.Time`, `capture func(string) (string, error)` (nil → `capturePane`), plus unexported state used by Tasks 3–4: `mu sync.Mutex`, `good map[string]json.RawMessage`, `goodMod time.Time`, `goodSize int64`, `logMu sync.Mutex`. Task 6 adds the say seams and state (`typeText`, `pressEnter`, `sleep`, `sayMu`, `lastSayAt`, `saidAt`).
   - `func (s *server) fleetDir() string`, `func (s *server) fleetNow() time.Time`.
   - `type fleetAuthKind int` with `fleetAuthNone`, `fleetAuthBearer`, `fleetAuthCookie`; `func (s *server) fleetAuth(r *http.Request) fleetAuthKind`.
   - `type fleetSession struct { Alive bool; SessionID string; PID int; Status string; Reason string }` with JSON tags `alive, sessionId, pid, status, reason` (reason `omitempty`).
@@ -577,10 +588,6 @@ type fleetDeps struct {
 	good     map[string]json.RawMessage
 	goodMod  time.Time
 	goodSize int64
-
-	sayMu       sync.Mutex // one send at a time, so two devices never interleave keystrokes
-	lastSayAt   time.Time
-	lastSayText string
 
 	logMu sync.Mutex // serializes this process's log.jsonl appends
 }
@@ -1033,43 +1040,87 @@ git commit -m "feat(fleet): serve state.json with liveness, stale flag and last 
 ### Task 4: `GET /fleet/log` and the log append helper
 
 **Files:**
-- Modify: `fleet.go` (replace the `fleetLog` stub; add `appendFleetLog`)
+- Modify: `fleet.go` (replace the `fleetLog` stub; add `appendFleetLog`, `readFleetLogPage`)
 - Test: `fleet_test.go`
 
 **Interfaces:**
 - Produces:
   - `type fleetLogEntry struct { At string; Type string; Ticket string; Text string; URL string; CardID string }` with JSON tags `at, type, ticket, text, url, cardId` (all but `at`/`type` `omitempty`).
   - `func (s *server) appendFleetLog(e fleetLogEntry) error` — creates the dir (0700) and file (0600), one `json.Marshal` line + `\n` in one `Write` with `O_APPEND`.
-  - `GET /fleet/log?before=<cursor>&n=<1..200, default 50>` → `{"entries":[…newest first…],"next":<int>|null}`. Cursor = number of valid lines (oldest first, 0-based) that are still older than the page just returned; `before=K` returns valid lines with index < K. `next` is null when nothing older remains. Bad `before`/`n` → 400.
-- Invalid lines (not JSON, or no `at`/`type`) are skipped and do not count toward the index. Missing file → `{"entries":[],"next":null}`. Read at most the last 8 MiB of the file (seek, discard the partial first line).
+  - `func (s *server) readFleetLogPage(before int64, n int) (entries []json.RawMessage, next *int64, err error)` — newest first.
+  - `GET /fleet/log?before=<cursor>&n=<1..200, default 50>` → `{"entries":[…newest first…],"next":<int>|null}`.
+
+Cursor (Codex review, finding 4): the cursor is an **absolute byte offset** into the append-only file — the offset where the oldest returned line starts. `before=K` returns the newest `n` valid lines that start before byte `K`. Absent `before` means "from the end". An absolute offset never shifts when FLEET appends, so pages never repeat or skip, and old history stays reachable. A line index relative to a tail window would drift.
+
+Read strategy: read backward from `before` in chunks of `fleetLogChunk = 256 KiB`. A chunk that does not start at byte 0 drops its partial first line (the next older chunk ends at that line's start, so the line is read whole there). Stop when `n` valid lines are collected, byte 0 is reached, or `fleetLogMaxScan = 8 MiB` has been read in this request (then `next` = the start of the oldest line read, so the next request continues there). Lines longer than one chunk: grow the chunk (double, cap 8 MiB) until one complete line fits.
+
+Invalid lines (not JSON, or no `at`/`type`) are skipped. A trailing line with no `\n` (a writer mid-append) is ignored. Missing file → `{"entries":[],"next":null}`. `before` < 0 or not an integer → 400; `before` > file size → treat as file size.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```go
+func fleetLogLines(from, to int) string {
+	var b strings.Builder
+	for i := from; i < to; i++ {
+		fmt.Fprintf(&b, `{"at":"2026-10-13T09:00:%02dZ","type":"merge","text":"m%d"}`+"\n", i, i)
+	}
+	return b.String()
+}
+
+func logTexts(out map[string]any) []string {
+	var got []string
+	for _, e := range out["entries"].([]any) {
+		got = append(got, e.(map[string]any)["text"].(string))
+	}
+	return got
+}
+
 func TestFleetLogPagesNewestFirst(t *testing.T) {
 	s := fleetTestServer(t, nil)
-	var lines []string
-	for i := 0; i < 5; i++ {
-		lines = append(lines, fmt.Sprintf(`{"at":"2026-10-13T09:00:0%dZ","type":"merge","text":"m%d"}`, i, i))
-	}
-	lines = append(lines[:2], append([]string{"not json", `{"text":"no at"}`}, lines[2:]...)...)
-	writeFleetFile(t, s, "log.jsonl", strings.Join(lines, "\n")+"\n")
+	body := fleetLogLines(0, 2) + "not json\n" + `{"text":"no at"}` + "\n" + fleetLogLines(2, 5) + `{"at":"partial`
+	writeFleetFile(t, s, "log.jsonl", body)
 
 	out := getFleetJSON(t, s, "/fleet/log?n=2")
-	got := out["entries"].([]any)
-	if len(got) != 2 || got[0].(map[string]any)["text"] != "m4" || got[1].(map[string]any)["text"] != "m3" {
+	if got := logTexts(out); strings.Join(got, ",") != "m4,m3" {
 		t.Fatalf("page 1 = %v", got)
 	}
-	next := int(out["next"].(float64))
+	next := int64(out["next"].(float64))
 	out = getFleetJSON(t, s, fmt.Sprintf("/fleet/log?n=2&before=%d", next))
-	got = out["entries"].([]any)
-	if len(got) != 2 || got[0].(map[string]any)["text"] != "m2" || got[1].(map[string]any)["text"] != "m1" {
+	if got := logTexts(out); strings.Join(got, ",") != "m2,m1" {
 		t.Fatalf("page 2 = %v", got)
 	}
-	next = int(out["next"].(float64))
+	next = int64(out["next"].(float64))
 	out = getFleetJSON(t, s, fmt.Sprintf("/fleet/log?n=2&before=%d", next))
-	if got = out["entries"].([]any); len(got) != 1 || out["next"] != nil {
+	if got := logTexts(out); strings.Join(got, ",") != "m0" || out["next"] != nil {
 		t.Fatalf("page 3 = %v next %v", got, out["next"])
+	}
+}
+
+func TestFleetLogCursorSurvivesAppends(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	writeFleetFile(t, s, "log.jsonl", fleetLogLines(0, 5))
+	out := getFleetJSON(t, s, "/fleet/log?n=2")
+	next := int64(out["next"].(float64))
+	f, err := os.OpenFile(filepath.Join(s.fleet.dir, "log.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(fleetLogLines(5, 40))
+	f.Close()
+	out = getFleetJSON(t, s, fmt.Sprintf("/fleet/log?n=2&before=%d", next))
+	if got := logTexts(out); strings.Join(got, ",") != "m2,m1" {
+		t.Fatalf("after appends page 2 = %v", got)
+	}
+}
+
+func TestFleetLogSpansChunks(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	pad := strings.Repeat("x", 300*1024) // one line bigger than a chunk
+	body := fleetLogLines(0, 1) + `{"at":"2026-10-13T09:00:01Z","type":"note","text":"` + pad + `"}` + "\n" + fleetLogLines(2, 3)
+	writeFleetFile(t, s, "log.jsonl", body)
+	out := getFleetJSON(t, s, "/fleet/log?n=3")
+	if got := out["entries"].([]any); len(got) != 3 {
+		t.Fatalf("want 3 entries across chunks, got %d", len(got))
 	}
 }
 
@@ -1124,7 +1175,10 @@ Expected: FAIL.
 - [ ] **Step 3: Write the implementation**
 
 ```go
-const fleetLogTailBytes = 8 << 20
+const (
+	fleetLogChunk   = 256 << 10
+	fleetLogMaxScan = 8 << 20
+)
 
 type fleetLogEntry struct {
 	At     string `json:"at"`
@@ -1158,40 +1212,122 @@ func (s *server) appendFleetLog(e fleetLogEntry) error {
 	return err
 }
 
-// readFleetLog returns the valid entries, oldest first.
-func (s *server) readFleetLog() ([]json.RawMessage, error) {
+func validFleetLogLine(b []byte) bool {
+	var probe struct {
+		At   string `json:"at"`
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(b, &probe) == nil && probe.At != "" && probe.Type != ""
+}
+
+// readFleetLogPage reads backward from byte offset before (-1 = end of file)
+// and returns up to n valid entries, newest first. next is the absolute
+// offset where the oldest returned line starts, or nil when nothing older
+// remains. Offsets are absolute in an append-only file, so a cursor stays
+// valid however much FLEET appends after it was issued.
+func (s *server) readFleetLogPage(before int64, n int) ([]json.RawMessage, *int64, error) {
 	f, err := os.Open(filepath.Join(s.fleetDir(), "log.jsonl"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
-	seeked := false
-	if st, err := f.Stat(); err == nil && st.Size() > fleetLogTailBytes {
-		if _, err := f.Seek(st.Size()-fleetLogTailBytes, io.SeekStart); err == nil {
-			seeked = true
+	st, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	end := st.Size()
+	if before >= 0 && before < end {
+		end = before
+	}
+	// A trailing line without '\n' is a writer mid-append: end the read at
+	// the last newline.
+	if end == st.Size() && end > 0 {
+		end, err = lastNewlineEnd(f, end)
+		if err != nil {
+			return nil, nil, err
 		}
 	}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 1<<20)
-	if seeked {
-		sc.Scan()
+	type line struct {
+		off int64
+		raw []byte
 	}
-	var out []json.RawMessage
-	for sc.Scan() {
-		var probe struct {
-			At   string `json:"at"`
-			Type string `json:"type"`
+	var found []line // newest first
+	scanned := int64(0)
+	chunk := int64(fleetLogChunk)
+	for end > 0 && len(found) < n && scanned < fleetLogMaxScan {
+		start := max(0, end-chunk)
+		buf := make([]byte, end-start)
+		if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+			return nil, nil, err
 		}
-		b := sc.Bytes()
-		if json.Unmarshal(b, &probe) != nil || probe.At == "" || probe.Type == "" {
-			continue
+		cut := 0
+		if start > 0 {
+			// buf ends on a line boundary, so its last byte is that line's
+			// '\n'; the partial first line ends at the first '\n' before it.
+			i := bytes.IndexByte(buf[:len(buf)-1], '\n')
+			if i < 0 { // one line longer than the chunk: grow and retry
+				if chunk >= fleetLogMaxScan {
+					return nil, nil, fmt.Errorf("log line too long")
+				}
+				chunk *= 2
+				continue
+			}
+			cut = i + 1
 		}
-		out = append(out, json.RawMessage(append([]byte(nil), b...)))
+		body := buf[cut:]
+		var lines []line
+		off := start + int64(cut)
+		for len(body) > 0 {
+			i := bytes.IndexByte(body, '\n')
+			if i < 0 {
+				break
+			}
+			lines = append(lines, line{off: off, raw: body[:i]})
+			off += int64(i + 1)
+			body = body[i+1:]
+		}
+		for i := len(lines) - 1; i >= 0 && len(found) < n; i-- {
+			if validFleetLogLine(lines[i].raw) {
+				found = append(found, lines[i])
+			}
+		}
+		scanned += end - (start + int64(cut))
+		end = start + int64(cut)
+		chunk = fleetLogChunk
 	}
-	return out, sc.Err()
+	out := make([]json.RawMessage, len(found))
+	for i, l := range found {
+		out[i] = json.RawMessage(l.raw)
+	}
+	var next *int64
+	switch {
+	case len(found) == n && found[len(found)-1].off > 0:
+		o := found[len(found)-1].off
+		next = &o
+	case len(found) < n && end > 0: // scan budget ran out before byte 0
+		o := end
+		next = &o
+	}
+	return out, next, nil
+}
+
+// lastNewlineEnd returns the offset just past the last '\n' at or before end.
+func lastNewlineEnd(f *os.File, end int64) (int64, error) {
+	for pos := end; pos > 0; {
+		start := max(0, pos-4096)
+		buf := make([]byte, pos-start)
+		if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+			return 0, err
+		}
+		if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
+			return start + int64(i) + 1, nil
+		}
+		pos = start
+	}
+	return 0, nil
 }
 
 func (s *server) fleetLog(w http.ResponseWriter, r *http.Request) {
@@ -1209,35 +1345,31 @@ func (s *server) fleetLog(w http.ResponseWriter, r *http.Request) {
 		}
 		n = p
 	}
-	entries, err := s.readFleetLog()
-	if err != nil {
-		http.Error(w, "cannot read log", http.StatusInternalServerError)
-		return
-	}
-	end := len(entries)
+	before := int64(-1)
 	if v := q.Get("before"); v != "" {
-		p, err := strconv.Atoi(v)
+		p, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || p < 0 {
 			http.Error(w, "bad before", http.StatusBadRequest)
 			return
 		}
-		end = min(p, len(entries))
+		before = p
 	}
-	start := max(0, end-n)
-	page := make([]json.RawMessage, 0, end-start)
-	for i := end - 1; i >= start; i-- {
-		page = append(page, entries[i])
+	entries, next, err := s.readFleetLogPage(before, n)
+	if err != nil {
+		http.Error(w, "cannot read log", http.StatusInternalServerError)
+		return
 	}
-	var next any
-	if start > 0 {
-		next = start
+	if entries == nil {
+		entries = []json.RawMessage{}
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"entries": page, "next": next})
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "next": next})
 }
 ```
 
-(Imports: `bufio`, `fmt`, `io`, `strconv`. `min`/`max` are Go 1.21 builtins; check `go.mod` `go` line ≥ 1.21.)
+(Imports: `bytes`, `fmt`, `io`, `strconv`. `min`/`max` are builtins; `go.mod` says go 1.26.)
+
+Check on `next` when the page ends exactly at the oldest valid line but invalid lines sit before it: `next` is non-nil and the following request returns `[]` with `next: null`. That is acceptable (the page hides "Load more" on an empty page).
 
 - [ ] **Step 4: Run tests**
 
@@ -1248,7 +1380,7 @@ Expected: PASS.
 
 ```bash
 git add fleet.go fleet_test.go
-git commit -m "feat(fleet): page log.jsonl newest first and append web-say entries"
+git commit -m "feat(fleet): page log.jsonl by byte offset and append web-say entries"
 ```
 
 ---
@@ -1264,22 +1396,28 @@ git commit -m "feat(fleet): page log.jsonl newest first and append web-say entri
 - Consumes: `findTranscript(home, sid)` (model.go:22), `extractTurnText`, `transcriptLine`, `discoverFleet`.
 - Produces:
   - `type fleetChatTurn struct { UUID string; Role string; At string; Text string }` JSON `uuid, role, at, text`.
-  - `func extractChatTurns(path, after string, n int, tailBytes int64) (turns []fleetChatTurn, reset bool, err error)`.
-  - `GET /fleet/chat?after=<uuid>&n=<1..200, default 50>` → `{"turns":[…],"reset":bool,"sessionId":"…","reason":"…"}`.
+  - `func extractChatTurns(path string, since int64, n int, tailBytes int64) (turns []fleetChatTurn, pos int64, reset bool, err error)`.
+  - `GET /fleet/chat?since=<pos>&n=<1..200, default 50>` → `{"turns":[…],"pos":<int>,"reset":bool,"sessionId":"…","reason":"…"}`.
+
+Cursor (Codex review, finding 5): the cursor is a **byte position** in the append-only transcript, not a turn uuid. The server returns every turn that **changed** at or after `since` — new turns and turns whose text a later line replaced — and `pos` for the next poll. The page upserts by `uuid`. A uuid cursor cannot see an earlier turn that a later line updates (assistant A, queued user B, then a re-emission of A).
 
 Rules:
 - Same filter as `extractConversationTail` (isMeta out; only user/assistant; `extractTurnText` must succeed; a user text starting with `<` after trim is out).
-- A turn's `uuid` and `at` come from its **first** line (stable); assistant re-emissions with the same `message.id + "\x00" + requestId` replace the text in place (last wins), like `turnBuilder`.
-- `after` set and found: return turns from the cursor turn **inclusive** onward (page upserts by uuid), at most `n` (if more, keep the newest `n` and set `reset: true`).
-- `after` set but not found in the scanned window, or `after` empty: newest `n`, `reset: true`.
-- `after` must match `^[0-9a-fA-F-]{8,64}$` when present, else 400.
+- A turn's `uuid` and `at` come from its **first** line (stable). An assistant re-emission with the same `message.id + "\x00" + requestId` replaces the text in place (last wins) and moves the turn's `changedAt` offset to that line.
+- `pos` = offset just past the last complete line (a trailing line with no `\n` is Claude Code mid-write; it is re-read next poll).
+- `since > 0 && since == pos` → `turns: []`, `reset: false`, **no scan** (idle FLEET costs one `stat`).
+- `since` absent/0, `since > file size` (new transcript), or `since` older than the scanned window start → newest `n` turns, `reset: true`.
+- Else → turns with `changedAt >= since`, oldest first; if more than `n`, keep the newest `n` and set `reset: true`.
+- `since` must parse as a non-negative int64, else 400.
 - Tail budget for this route: `fleetChatTailBytes = 4 << 20` (FLEET transcripts carry large tool results; 256 KiB holds too few turns).
-- No FLEET session: 200 with `turns: []`, `reset: true`, `reason`. Transcript not found: same with `reason: "transcript not found"`.
+- No FLEET session: 200 with `turns: []`, `reset: true`, `pos: 0`, `reason`. Transcript not found: same with `reason: "transcript not found"`.
 - Texts are not capped.
 
 `transcriptLine` gains `UUID string \`json:"uuid"\`` and `Timestamp string \`json:"timestamp"\``. Existing users ignore them.
 
 - [ ] **Step 1: Write the failing tests**
+
+Note: `writeTranscript` already exists in `model_test.go:88`. Do not redefine it; this file uses `writeChatTranscript`.
 
 ```go
 // fleet_chat_test.go
@@ -1287,6 +1425,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1311,7 +1451,9 @@ func chatLine(t *testing.T, typ, uuid, ts string, content any, extra map[string]
 	return string(b)
 }
 
-func writeTranscript(t *testing.T, lines ...string) string {
+func chatText(s string) []map[string]any { return []map[string]any{{"type": "text", "text": s}} }
+
+func writeChatTranscript(t *testing.T, lines ...string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
@@ -1320,13 +1462,24 @@ func writeTranscript(t *testing.T, lines ...string) string {
 	return p
 }
 
+func appendChat(t *testing.T, path string, lines ...string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func sampleTranscript(t *testing.T) string {
-	text := func(s string) []map[string]any { return []map[string]any{{"type": "text", "text": s}} }
-	return writeTranscript(t,
+	return writeChatTranscript(t,
 		chatLine(t, "user", "u1", "2026-10-13T09:00:00Z", "hello fleet", nil),
-		chatLine(t, "assistant", "a1", "2026-10-13T09:00:01Z", text("draft"), map[string]any{"message.id": "m1", "requestId": "r1"}),
+		chatLine(t, "assistant", "a1", "2026-10-13T09:00:01Z", chatText("draft"), map[string]any{"message.id": "m1", "requestId": "r1"}),
 		chatLine(t, "user", "u2", "2026-10-13T09:00:02Z", []map[string]any{{"type": "tool_result", "content": "x"}}, nil),
-		chatLine(t, "assistant", "a1b", "2026-10-13T09:00:03Z", text("final answer"), map[string]any{"message.id": "m1", "requestId": "r1"}),
+		chatLine(t, "assistant", "a1b", "2026-10-13T09:00:03Z", chatText("final answer"), map[string]any{"message.id": "m1", "requestId": "r1"}),
 		chatLine(t, "user", "u3", "2026-10-13T09:00:04Z", "<task-notification>done</task-notification>", nil),
 		chatLine(t, "user", "u4", "2026-10-13T09:00:05Z", "meta", map[string]any{"isMeta": true}),
 		chatLine(t, "user", "u5", "2026-10-13T09:00:06Z", "Andy decides: yes", nil),
@@ -1334,9 +1487,13 @@ func sampleTranscript(t *testing.T) string {
 }
 
 func TestExtractChatTurnsFiltersAndDedupes(t *testing.T) {
-	turns, reset, err := extractChatTurns(sampleTranscript(t), "", 50, 1<<20)
+	path := sampleTranscript(t)
+	turns, pos, reset, err := extractChatTurns(path, 0, 50, 1<<20)
 	if err != nil || !reset {
 		t.Fatalf("err %v reset %v", err, reset)
+	}
+	if st, _ := os.Stat(path); pos != st.Size() {
+		t.Fatalf("pos %d, size %d", pos, st.Size())
 	}
 	want := []fleetChatTurn{
 		{UUID: "u1", Role: "user", At: "2026-10-13T09:00:00Z", Text: "hello fleet"},
@@ -1353,26 +1510,58 @@ func TestExtractChatTurnsFiltersAndDedupes(t *testing.T) {
 	}
 }
 
-func TestExtractChatTurnsCursorIsInclusive(t *testing.T) {
-	turns, reset, err := extractChatTurns(sampleTranscript(t), "a1", 50, 1<<20)
-	if err != nil || reset {
-		t.Fatalf("err %v reset %v", err, reset)
-	}
-	if len(turns) != 2 || turns[0].UUID != "a1" || turns[0].Text != "final answer" || turns[1].UUID != "u5" {
-		t.Fatalf("turns = %+v", turns)
+func TestExtractChatTurnsNoChangeSkipsScan(t *testing.T) {
+	path := sampleTranscript(t)
+	_, pos, _, _ := extractChatTurns(path, 0, 50, 1<<20)
+	turns, pos2, reset, err := extractChatTurns(path, pos, 50, 1<<20)
+	if err != nil || reset || len(turns) != 0 || pos2 != pos {
+		t.Fatalf("turns %+v pos %d reset %v err %v", turns, pos2, reset, err)
 	}
 }
 
-func TestExtractChatTurnsUnknownCursorResets(t *testing.T) {
-	turns, reset, _ := extractChatTurns(sampleTranscript(t), "deadbeef", 2, 1<<20)
-	if !reset || len(turns) != 2 || turns[1].UUID != "u5" {
+func TestExtractChatTurnsReturnsNewAndUpdatedTurns(t *testing.T) {
+	// Assistant A (draft), then a queued user message B, then a later line
+	// of A's same message. A uuid cursor at B would never resend A.
+	path := writeChatTranscript(t,
+		chatLine(t, "assistant", "a1", "2026-10-13T09:00:01Z", chatText("draft"), map[string]any{"message.id": "m1", "requestId": "r1"}),
+		chatLine(t, "user", "b1", "2026-10-13T09:00:02Z", "queued question", nil),
+	)
+	_, pos, _, _ := extractChatTurns(path, 0, 50, 1<<20)
+	appendChat(t, path,
+		chatLine(t, "assistant", "a1x", "2026-10-13T09:00:03Z", chatText("final"), map[string]any{"message.id": "m1", "requestId": "r1"}),
+		chatLine(t, "user", "c1", "2026-10-13T09:00:04Z", "next", nil),
+	)
+	turns, _, reset, err := extractChatTurns(path, pos, 50, 1<<20)
+	if err != nil || reset {
+		t.Fatalf("err %v reset %v", err, reset)
+	}
+	if len(turns) != 2 || turns[0].UUID != "a1" || turns[0].Text != "final" || turns[1].UUID != "c1" {
+		t.Fatalf("turns = %+v (want updated a1, then c1; not b1)", turns)
+	}
+}
+
+func TestExtractChatTurnsIgnoresPartialLastLine(t *testing.T) {
+	path := sampleTranscript(t)
+	st, _ := os.Stat(path)
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.WriteString(`{"type":"user","uuid":"half"`)
+	f.Close()
+	turns, pos, _, _ := extractChatTurns(path, 0, 50, 1<<20)
+	if pos != st.Size() || turns[len(turns)-1].UUID != "u5" {
+		t.Fatalf("pos %d want %d, last %+v", pos, st.Size(), turns[len(turns)-1])
+	}
+}
+
+func TestExtractChatTurnsTooManyKeepsNewestAndResets(t *testing.T) {
+	turns, _, reset, _ := extractChatTurns(sampleTranscript(t), 0, 2, 1<<20)
+	if !reset || len(turns) != 2 || turns[0].UUID != "a1" || turns[1].UUID != "u5" {
 		t.Fatalf("reset %v turns %+v", reset, turns)
 	}
 }
 
-func TestExtractChatTurnsTooManyNewKeepsNewestAndResets(t *testing.T) {
-	turns, reset, _ := extractChatTurns(sampleTranscript(t), "u1", 2, 1<<20)
-	if !reset || len(turns) != 2 || turns[0].UUID != "a1" {
+func TestExtractChatTurnsSinceBeyondFileResets(t *testing.T) {
+	turns, _, reset, _ := extractChatTurns(sampleTranscript(t), 1<<40, 50, 1<<20)
+	if !reset || len(turns) != 3 {
 		t.Fatalf("reset %v turns %+v", reset, turns)
 	}
 }
@@ -1380,24 +1569,24 @@ func TestExtractChatTurnsTooManyNewKeepsNewestAndResets(t *testing.T) {
 func TestFleetChatNoFleet(t *testing.T) {
 	s := fleetTestServer(t, nil)
 	out := getFleetJSON(t, s, "/fleet/chat")
-	if len(out["turns"].([]any)) != 0 || out["reason"] != "not running" {
+	if len(out["turns"].([]any)) != 0 || out["reason"] != "not running" || out["reset"] != true {
 		t.Fatalf("got %v", out)
 	}
 }
 
 func TestFleetChatBadCursor(t *testing.T) {
 	s := fleetTestServer(t, nil)
-	r := httptest.NewRequest("GET", "/fleet/chat?after=../../x", nil)
-	r.Header.Set("Authorization", "Bearer tok")
-	w := httptest.NewRecorder()
-	fleetMux(s).ServeHTTP(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("code %d", w.Code)
+	for _, q := range []string{"?since=x", "?since=-1", "?n=0", "?n=201"} {
+		r := httptest.NewRequest("GET", "/fleet/chat"+q, nil)
+		r.Header.Set("Authorization", "Bearer tok")
+		w := httptest.NewRecorder()
+		fleetMux(s).ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", q, w.Code)
+		}
 	}
 }
 ```
-
-(Add `net/http`, `net/http/httptest` imports.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1416,14 +1605,11 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 )
 
 const fleetChatTailBytes = 4 << 20
-
-var fleetChatCursorRe = regexp.MustCompile(`^[0-9a-fA-F-]{8,64}$`)
 
 type fleetChatTurn struct {
 	UUID string `json:"uuid"`
@@ -1432,33 +1618,60 @@ type fleetChatTurn struct {
 	Text string `json:"text"`
 }
 
-// extractChatTurns reads the transcript tail and returns text turns with a
-// stable uuid (the turn's first line). With a cursor it returns the cursor
-// turn itself onward, because a later line of the same assistant message can
-// still change that turn's text; the page upserts by uuid. reset tells the
-// page to replace its list instead of merging.
-func extractChatTurns(path, after string, n int, tailBytes int64) ([]fleetChatTurn, bool, error) {
+// extractChatTurns reads the transcript tail and returns the turns that
+// changed at or after byte offset since — new turns, and turns whose text a
+// later line of the same assistant message replaced — plus pos, the offset
+// for the next call. A turn keeps the uuid of its first line, so the page can
+// upsert. reset tells the page to replace its list instead of merging.
+func extractChatTurns(path string, since int64, n int, tailBytes int64) ([]fleetChatTurn, int64, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, true, err
+		return nil, 0, true, err
 	}
 	defer f.Close()
-	seeked := false
-	if st, err := f.Stat(); err == nil && st.Size() > tailBytes {
-		if _, err := f.Seek(st.Size()-tailBytes, io.SeekStart); err == nil {
-			seeked = true
+	st, err := f.Stat()
+	if err != nil {
+		return nil, 0, true, err
+	}
+	size := st.Size()
+	if since > 0 && since == size {
+		return nil, size, false, nil
+	}
+	start := int64(0)
+	if size > tailBytes {
+		start = size - tailBytes
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return nil, 0, true, err
+	}
+	rd := bufio.NewReaderSize(f, 64*1024)
+	off := start
+	if start > 0 { // drop the partial first line
+		skipped, err := rd.ReadBytes('\n')
+		off += int64(len(skipped))
+		if err != nil {
+			return nil, off, true, nil
 		}
 	}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	if seeked {
-		sc.Scan()
+	windowStart := off
+
+	type turn struct {
+		fleetChatTurn
+		changedAt int64
 	}
-	var turns []fleetChatTurn
+	var turns []turn
 	idx := map[string]int{}
-	for sc.Scan() {
+	pos := off
+	for {
+		line, err := rd.ReadBytes('\n')
+		if err != nil { // EOF: a line without '\n' is mid-write; leave it for the next poll
+			break
+		}
+		lineOff := off
+		off += int64(len(line))
+		pos = off
 		var e transcriptLine
-		if json.Unmarshal(sc.Bytes(), &e) != nil || e.IsMeta {
+		if json.Unmarshal(line, &e) != nil || e.IsMeta {
 			continue
 		}
 		if e.Type != "user" && e.Type != "assistant" {
@@ -1475,31 +1688,25 @@ func extractChatTurns(path, after string, n int, tailBytes int64) ([]fleetChatTu
 			key := e.Message.ID + "\x00" + e.RequestID
 			if i, ok := idx[key]; ok {
 				turns[i].Text = text
+				turns[i].changedAt = lineOff
 				continue
 			}
 			idx[key] = len(turns)
 		}
-		turns = append(turns, fleetChatTurn{UUID: e.UUID, Role: e.Type, At: e.Timestamp, Text: text})
+		turns = append(turns, turn{fleetChatTurn{UUID: e.UUID, Role: e.Type, At: e.Timestamp, Text: text}, lineOff})
 	}
-	if err := sc.Err(); err != nil {
-		return nil, true, err
-	}
-	from, reset := -1, true
-	if after != "" {
-		for i, t := range turns {
-			if t.UUID == after {
-				from, reset = i, false
-				break
-			}
+
+	reset := since <= 0 || since > size || since < windowStart
+	var out []fleetChatTurn
+	for _, t := range turns {
+		if reset || t.changedAt >= since {
+			out = append(out, t.fleetChatTurn)
 		}
 	}
-	if from >= 0 {
-		turns = turns[from:]
+	if len(out) > n {
+		out, reset = out[len(out)-n:], true
 	}
-	if len(turns) > n {
-		turns, reset = turns[len(turns)-n:], true
-	}
-	return turns, reset, nil
+	return out, pos, reset, nil
 }
 
 func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
@@ -1508,10 +1715,14 @@ func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	after := q.Get("after")
-	if after != "" && !fleetChatCursorRe.MatchString(after) {
-		http.Error(w, "bad after", http.StatusBadRequest)
-		return
+	since := int64(0)
+	if v := q.Get("since"); v != "" {
+		p, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || p < 0 {
+			http.Error(w, "bad since", http.StatusBadRequest)
+			return
+		}
+		since = p
 	}
 	n := 50
 	if v := q.Get("n"); v != "" {
@@ -1524,7 +1735,7 @@ func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	empty := func(sid, reason string) {
-		writeJSON(w, http.StatusOK, map[string]any{"turns": []fleetChatTurn{}, "reset": true, "sessionId": sid, "reason": reason})
+		writeJSON(w, http.StatusOK, map[string]any{"turns": []fleetChatTurn{}, "pos": 0, "reset": true, "sessionId": sid, "reason": reason})
 	}
 	_, fl := s.discoverFleet()
 	if !fl.Alive {
@@ -1541,7 +1752,7 @@ func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 		empty(fl.SessionID, "transcript not found")
 		return
 	}
-	turns, reset, err := extractChatTurns(path, after, n, fleetChatTailBytes)
+	turns, pos, reset, err := extractChatTurns(path, since, n, fleetChatTailBytes)
 	if err != nil {
 		empty(fl.SessionID, "transcript unreadable")
 		return
@@ -1549,11 +1760,11 @@ func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 	if turns == nil {
 		turns = []fleetChatTurn{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"turns": turns, "reset": reset, "sessionId": fl.SessionID})
+	writeJSON(w, http.StatusOK, map[string]any{"turns": turns, "pos": pos, "reset": reset, "sessionId": fl.SessionID})
 }
 ```
 
-Note the cursor regex accepts the test cursors `a1`? No: `a1` is 2 chars. The handler test only checks a bad cursor; `extractChatTurns` tests call the function directly, so short test uuids are fine there. Real Claude Code uuids are 36-char UUIDs.
+Page note: when `sessionId` in the response differs from the one the page holds (FLEET restarted), the page clears its list and sends `since=0` next time. A transcript of a new session can be shorter than the old `pos`; the server then sees `since > size` and resets on its own, but a longer one would not, so the page check is required.
 
 - [ ] **Step 4: Run tests**
 
@@ -1564,7 +1775,7 @@ Expected: PASS (existing info_transcript tests still pass).
 
 ```bash
 git add fleet_chat.go fleet_chat_test.go fleet.go info_transcript.go
-git commit -m "feat(fleet): mirror the FLEET transcript with an inclusive uuid cursor"
+git commit -m "feat(fleet): mirror the FLEET transcript with a byte-position cursor"
 ```
 
 ---
@@ -1573,31 +1784,39 @@ git commit -m "feat(fleet): mirror the FLEET transcript with an inclusive uuid c
 
 **Files:**
 - Create: `fleet_say.go` (move the `fleetSay` stub out of `fleet.go`)
+- Modify: `fleet.go` (`fleetDeps` seams listed below)
 - Test: `fleet_say_test.go`
 
 **Interfaces:**
-- Consumes: `fleetAuth`, `discoverFleet`, `s.resolveLivePID(pid, sid)` (fresh collect), `s.sendKeysFn` (nil → `sendKeys`), `s.fleet.capture` (nil → `capturePane`), `paneInputText`, `appendFleetLog`, `fleetNow`, `sendKeysMaxLen`.
-- Produces: `type fleetSayResult struct { OK bool; Queued bool; Error string; Code string }` JSON `ok, queued, error, code` (`queued`, `error`, `code` omitempty). `func sanitizeFleetText(s string) (string, error)`.
+- Consumes: `fleetAuth`, `discoverFleet`, `findFleet`, `s.resolveLivePID(pid, sid)` (fresh collect; returns the fresh list too), `s.fleet.capture` (nil → `capturePane`), `paneInputText`, `appendFleetLog`, `fleetNow`, `sendKeysMaxLen`.
+- Produces:
+  - `type fleetSayResult struct { OK bool; Queued bool; Error string; Code string }` JSON `ok, queued, error, code` (`queued`, `error`, `code` omitempty).
+  - `func sanitizeFleetText(s string) (string, error)`, `func sameOrigin(r *http.Request) bool`.
+  - `fleetDeps` seams (added in this task): `typeText func(target, text string) error` (nil → `tmux send-keys -t <target> -l <text>`), `pressEnter func(target string) error` (nil → `tmux send-keys -t <target> Enter`), `sleep func(time.Duration)` (nil → `time.Sleep`). State: `saidAt map[string]time.Time` (text → completion time, pruned to the last 10 s), `lastSayAt time.Time`.
 
-Order (each refusal returns at once; nothing is typed):
+Why typing and Enter are split (Codex review, finding 7): the pane check is a snapshot. A permission dialog can open between the capture and the Enter key, and Enter would then pick the dialog's highlighted "Yes". So the handler types the text, then captures again and presses Enter only if the input box is still visible and now holds text. This narrows the race to the few milliseconds between that second capture and Enter; it cannot close it, because nothing locks Claude Code's own state. The residual window is documented in CLAUDE.md (Task 10).
+
+Order (each refusal returns at once):
 1. `fleetAuth == none` → 401.
-2. Auth by cookie → `Origin` must be present and its host (`url.Parse(origin).Host`) must equal `r.Host`; if `Origin` is absent, `Referer`'s host must equal `r.Host`; else 403 `{"error":"origin mismatch"}`. Bearer auth skips this check (not a browser; no ambient credential).
-3. Body: `http.MaxBytesReader(w, r.Body, 16<<10)`, `DisallowUnknownFields`, decode into `*struct{Text string; CardID *string}` (JSON `text`, `cardId`), then `dec.Token()` must return `io.EOF` (same strictness as `sessionIDPrecondition`). Fail → 400 `bad json`.
-4. `sanitizeFleetText`: replace `\r\n`, `\r`, `\n` with a space; any other rune < 0x20 except `\t`, or 0x7f, or invalid UTF-8 → 400 `bad text`; `\t` → space; trim; empty or > `sendKeysMaxLen` bytes → 400 `bad text`.
-5. Take `s.fleet.sayMu` for the rest of the handler.
-6. Rate limit: `now - lastSayAt < 1s` → `{error:"too fast", code:"rate_limited"}`; same text as `lastSayText` and `now - lastSayAt < 10s` → `{error:"same text sent less than 10 s ago", code:"double_tap"}`.
-7. `discoverFleet()` not alive → `{error:"FLEET is not running", code:"not_live"}` or reason `ambiguous` → `{error:"two sessions are named FLEET", code:"ambiguous"}`.
-8. `s.resolveLivePID(row.PID, row.SessionID)` refusal → `{error: refusal.Error, code: refusal.Code}`.
-9. Fresh row `Waiting()` → `{error:"FLEET shows a dialog. Answer it in the terminal.", code:"dialog"}`.
-10. Fresh row `Tmux == ""` → `{error:"FLEET has no tmux pane", code:"no_pane"}`.
-11. Capture pane; error → `{error:"cannot read the FLEET pane", code:"no_pane"}`. `paneInputText` not found → `{error:"FLEET input box is not visible", code:"dialog"}`; found with non-empty text → `{error:"input box not empty", code:"input_busy"}`.
-12. Send with `sendKeysFn`; error → `{error: err.Error(), code:"send_failed"}`.
-13. Record `lastSayAt = now`, `lastSayText = text`.
-14. `appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "web-say", Text: text, CardID: cardID})`; a log error does **not** fail the response (the text is already typed) — print one line to stderr without the text.
-15. `s.invalidateSessions()` is not needed (no session change).
-16. Respond 200 `{ok:true, queued: fresh.Status == "busy"}`.
+2. Auth by cookie → `Origin` must be present and its host (`url.Parse(origin).Host`) must equal `r.Host`; if `Origin` is absent, `Referer`'s host must equal `r.Host`; `null` or absent both → 403 `{"error":"origin mismatch","code":"origin"}`. Bearer auth skips this check (not a browser; no ambient credential).
+3. Body: `http.MaxBytesReader(w, r.Body, 16<<10)`, `DisallowUnknownFields`, decode into a pointer to `struct{Text string; CardID *string}` (JSON `text`, `cardId`), then `dec.Token()` must return `io.EOF` (same strictness as `sessionIDPrecondition`). Fail → 400 `bad json`. `cardId` over 200 bytes → 400.
+4. `sanitizeFleetText`: replace `\r\n`, `\r`, `\n`, `\t` with a space; any other rune < 0x20, or 0x7f, or invalid UTF-8 → 400 `bad text`; trim; empty or > `sendKeysMaxLen` bytes → 400 `bad text`.
+5. Take `s.fleet.sayMu` for the rest of the handler (two devices never interleave keystrokes).
+6. Prune `saidAt` entries older than 10 s. `now - lastSayAt < 1s` → `{code:"rate_limited", error:"too fast"}`. `saidAt[text]` within 10 s → `{code:"double_tap", error:"same text sent less than 10 s ago"}`. (Codex finding 3: a map, so A, B, A within 10 s refuses the second A.)
+7. `discoverFleet()` not alive → `not_live` "FLEET is not running", or `ambiguous` "two sessions are named FLEET". Row with empty `SessionID` → `not_live` "FLEET has no session id" (an empty id would switch off `resolveLivePID`'s identity check).
+8. `fresh, all, refusal := s.resolveLivePID(row.PID, row.SessionID)`; refusal → `{code: refusal.Code, error: refusal.Error}`.
+9. Re-run discovery on the fresh list (Codex finding 2): `again, reason := findFleet(all)`; `reason != ""` or `again.PID != row.PID` or `again.SessionID != row.SessionID` → `{code:"fleet_changed", error:"FLEET changed. Try again."}`.
+10. `fresh.Waiting()` → `{code:"dialog", error:"FLEET shows a dialog. Answer it in the terminal."}`.
+11. `fresh.Tmux == ""` → `{code:"no_pane", error:"FLEET has no tmux pane"}`.
+12. Capture; error → `no_pane` "cannot read the FLEET pane". `paneInputText` not found → `dialog` "FLEET input box is not visible"; found with text → `input_busy` "input box not empty".
+13. `typeText(fresh.Tmux, text)`; error → `send_failed`.
+14. Verify before Enter: up to 15 times, every 100 ms (`sleep`), capture and run `paneInputText`. Box found with non-empty text → landed, stop. Box not found → stop at once (a dialog). Capture error → keep polling. Not landed → `{code:"not_submitted", error:"Text was typed but not sent. FLEET changed state. Check the terminal."}` and append a log line `{type:"note", text:"web-say typed but not submitted", cardId}` (no user text in it). Do not compare the box text with the sent text: Claude Code may show a long typed text as `[Pasted text #1 +N lines]`. The box was empty at step 12, so text in it now is ours.
+15. `pressEnter(fresh.Tmux)`; error → `send_failed`.
+16. Stamp `lastSayAt = fleetNow()` and `saidAt[text] = fleetNow()` **after** Enter (Codex finding 3: a slow send must not shorten the next request's 1 s gap).
+17. `appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "web-say", Text: text, CardID: cardID})`; an error does not fail the response (the text is already sent) — print one stderr line without the text.
+18. 200 `{ok:true, queued: fresh.Status == "busy"}`.
 
-All refusals in steps 6–12 are HTTP 200 with `ok:false` (the `actionResult` envelope convention).
+All refusals in steps 6–15 are HTTP 200 with `ok:false` (the `actionResult` envelope convention). Spec deviation: the spec names the `sendKeysFn` seam; this route uses its own `typeText` / `pressEnter` seams because it must capture between the two keystroke calls. `sendKeys` and `sendKeysFn` stay unchanged for `/sessions/{pid}/send-keys`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1607,6 +1826,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1616,20 +1836,41 @@ import (
 	"time"
 )
 
-const emptyBoxCapture = "out\n────────────────────\n❯ \n────────────────────\n status\n"
+const (
+	emptyBoxCapture = "out\n────────────────────\n❯ \n────────────────────\n status\n"
+	typedBoxCapture = "out\n────────────────────\n❯ hi\n────────────────────\n status\n"
+	dialogCapture   = "────────────────────\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n"
+)
 
 type sayRig struct {
-	s    *server
-	sent []string
-	now  time.Time
+	s        *server
+	typed    []string
+	enters   int
+	now      time.Time
+	captures []string // consumed in order; the last one repeats
 }
 
 func newSayRig(t *testing.T, sessions []Session) *sayRig {
 	rig := &sayRig{now: time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)}
 	rig.s = fleetTestServer(t, sessions)
 	rig.s.fleet.now = func() time.Time { return rig.now }
-	rig.s.fleet.capture = func(string) (string, error) { return emptyBoxCapture, nil }
-	rig.s.sendKeysFn = func(_ Session, text string) error { rig.sent = append(rig.sent, text); return nil }
+	rig.s.fleet.sleep = func(time.Duration) {}
+	rig.s.fleet.capture = func(string) (string, error) {
+		// Before typing: empty box. After typing: the box holds text.
+		if len(rig.captures) > 0 {
+			c := rig.captures[0]
+			if len(rig.captures) > 1 {
+				rig.captures = rig.captures[1:]
+			}
+			return c, nil
+		}
+		if len(rig.typed) > rig.enters {
+			return typedBoxCapture, nil
+		}
+		return emptyBoxCapture, nil
+	}
+	rig.s.fleet.typeText = func(_ string, text string) error { rig.typed = append(rig.typed, text); return nil }
+	rig.s.fleet.pressEnter = func(string) error { rig.enters++; return nil }
 	return rig
 }
 
@@ -1658,8 +1899,8 @@ func TestFleetSaySendsExactTextAndLogs(t *testing.T) {
 	if code != 200 || !res.OK || res.Queued {
 		t.Fatalf("%d %+v", code, res)
 	}
-	if len(rig.sent) != 1 || rig.sent[0] != "Andy decides: DR-1 — yes (explicit)." {
-		t.Fatalf("sent %q", rig.sent)
+	if len(rig.typed) != 1 || rig.typed[0] != "Andy decides: DR-1 — yes (explicit)." || rig.enters != 1 {
+		t.Fatalf("typed %q enters %d", rig.typed, rig.enters)
 	}
 	data, _ := os.ReadFile(filepath.Join(rig.s.fleet.dir, "log.jsonl"))
 	if !strings.Contains(string(data), `"type":"web-say"`) || !strings.Contains(string(data), `"cardId":"dr-1"`) {
@@ -1681,8 +1922,8 @@ func TestFleetSayFlattensNewlinesAndRefusesControl(t *testing.T) {
 	if _, res := rig.post(t, `{"text":"line one\r\nline two\nthree"}`, nil); !res.OK {
 		t.Fatalf("%+v", res)
 	}
-	if rig.sent[0] != "line one line two three" {
-		t.Fatalf("sent %q", rig.sent[0])
+	if rig.typed[0] != "line one line two three" {
+		t.Fatalf("typed %q", rig.typed[0])
 	}
 	rig.now = rig.now.Add(time.Minute)
 	if code, _ := rig.post(t, `{"text":"esc \u001b[2J"}`, nil); code != http.StatusBadRequest {
@@ -1694,21 +1935,21 @@ func TestFleetSayFlattensNewlinesAndRefusesControl(t *testing.T) {
 	if code, _ := rig.post(t, `{"text":"`+strings.Repeat("a", 4097)+`"}`, nil); code != http.StatusBadRequest {
 		t.Fatalf("4097 bytes must be 400, got %d", code)
 	}
-	if len(rig.sent) != 1 {
-		t.Fatalf("nothing else may be typed: %q", rig.sent)
+	if len(rig.typed) != 1 {
+		t.Fatalf("nothing else may be typed: %q", rig.typed)
 	}
 }
 
 func TestFleetSayStrictBody(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
-	for _, b := range []string{`{"text":"a","extra":1}`, `{"text":"a"} x`, `null`, `{"Text":"a","cardID":"x","x":1}`} {
+	for _, b := range []string{`{"text":"a","extra":1}`, `{"text":"a"} x`, `null`, `[]`} {
 		if code, _ := rig.post(t, b, nil); code != http.StatusBadRequest {
 			t.Errorf("%s: %d", b, code)
 		}
 	}
 }
 
-func TestFleetSayNotAliveAndAmbiguous(t *testing.T) {
+func TestFleetSayNotAliveAmbiguousAndNoSessionID(t *testing.T) {
 	rig := newSayRig(t, nil)
 	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "not_live" {
 		t.Fatalf("%+v", res)
@@ -1717,27 +1958,58 @@ func TestFleetSayNotAliveAndAmbiguous(t *testing.T) {
 	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "ambiguous" {
 		t.Fatalf("%+v", res)
 	}
-	if len(rig.sent) != 0 {
+	row := fleetRow()
+	row.SessionID = ""
+	rig = newSayRig(t, []Session{row})
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "not_live" {
+		t.Fatalf("%+v", res)
+	}
+	if len(rig.typed) != 0 {
 		t.Fatal("nothing may be typed")
 	}
 }
 
-func TestFleetSayRefusesRecycledPid(t *testing.T) {
-	rig := newSayRig(t, []Session{fleetRow()})
+// collectPhases returns the cached-discovery list on the first collect and
+// the fresh list on every later one (resolveLivePID collects directly).
+func collectPhases(first, fresh []Session) func() ([]Session, error) {
 	calls := 0
-	rig.s.collect = func() ([]Session, error) {
+	return func() ([]Session, error) {
 		calls++
-		if calls == 1 { // cachedSessions: discovery sees FLEET
-			return []Session{fleetRow()}, nil
+		if calls == 1 {
+			return first, nil
 		}
-		// resolveLivePID's fresh collect: the pid now holds someone else.
-		return []Session{{PID: 7, Name: "other", SessionID: "new", Tmux: "x:0.0"}}, nil
+		return fresh, nil
 	}
+}
+
+func TestFleetSayRefusesRecycledPid(t *testing.T) {
+	rig := newSayRig(t, nil)
+	rig.s.collect = collectPhases([]Session{fleetRow()},
+		[]Session{{PID: 7, Name: "other", SessionID: "new", Tmux: "x:0.0"}})
 	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != codeSessionMismatch {
 		t.Fatalf("%+v", res)
 	}
-	if len(rig.sent) != 0 {
+	if len(rig.typed) != 0 {
 		t.Fatal("nothing may be typed into a recycled pid")
+	}
+}
+
+func TestFleetSayRefusesWhenFreshListDisagrees(t *testing.T) {
+	second := Session{PID: 9, Name: "FLEET", SessionID: "other", Tmux: "y:0.0"}
+	renamed := fleetRow()
+	renamed.Name = "not fleet any more"
+	for name, fresh := range map[string][]Session{
+		"second FLEET appeared": {fleetRow(), second},
+		"renamed":               {renamed},
+	} {
+		rig := newSayRig(t, nil)
+		rig.s.collect = collectPhases([]Session{fleetRow()}, fresh)
+		if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "fleet_changed" {
+			t.Errorf("%s: %+v", name, res)
+		}
+		if len(rig.typed) != 0 {
+			t.Errorf("%s: typed %q", name, rig.typed)
+		}
 	}
 }
 
@@ -1749,41 +2021,87 @@ func TestFleetSayRefusesDialog(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 	rig = newSayRig(t, []Session{fleetRow()})
-	rig.s.fleet.capture = func(string) (string, error) {
-		return "────────────────────\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n", nil
-	}
+	rig.captures = []string{dialogCapture}
 	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "dialog" {
 		t.Fatalf("%+v", res)
 	}
-	if len(rig.sent) != 0 {
+	if len(rig.typed) != 0 {
 		t.Fatal("nothing may be typed into a dialog")
+	}
+}
+
+func TestFleetSayNoEnterWhenDialogOpensAfterTyping(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	rig.captures = []string{emptyBoxCapture, dialogCapture}
+	_, res := rig.post(t, `{"text":"hi"}`, nil)
+	if res.OK || res.Code != "not_submitted" {
+		t.Fatalf("%+v", res)
+	}
+	if len(rig.typed) != 1 || rig.enters != 0 {
+		t.Fatalf("typed %q enters %d: Enter must not be pressed into a dialog", rig.typed, rig.enters)
+	}
+	data, _ := os.ReadFile(filepath.Join(rig.s.fleet.dir, "log.jsonl"))
+	if !strings.Contains(string(data), "not submitted") || strings.Contains(string(data), `"text":"hi"`) {
+		t.Fatalf("log %q", data)
+	}
+}
+
+func TestFleetSayNoEnterWhenTextNeverLands(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	rig.captures = []string{emptyBoxCapture} // repeats: the box stays empty
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.Code != "not_submitted" || rig.enters != 0 {
+		t.Fatalf("%+v enters %d", res, rig.enters)
 	}
 }
 
 func TestFleetSayRefusesNonEmptyInput(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
-	rig.s.fleet.capture = func(string) (string, error) {
-		return "────────────────────\n❯ half typed\n────────────────────\n", nil
-	}
+	rig.captures = []string{"────────────────────\n❯ half typed\n────────────────────\n"}
 	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "input_busy" || res.Error != "input box not empty" {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestFleetSaySendFailure(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	rig.s.fleet.typeText = func(string, string) error { return errors.New("tmux gone") }
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "send_failed" {
 		t.Fatalf("%+v", res)
 	}
 }
 
 func TestFleetSayRateLimitAndDoubleTap(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
+	rig.post(t, `{"text":"A"}`, nil)
+	rig.now = rig.now.Add(500 * time.Millisecond)
+	if _, res := rig.post(t, `{"text":"B"}`, nil); res.Code != "rate_limited" {
+		t.Fatalf("%+v", res)
+	}
+	rig.now = rig.now.Add(1500 * time.Millisecond) // t=2s
+	if _, res := rig.post(t, `{"text":"B"}`, nil); !res.OK {
+		t.Fatalf("B at 2s: %+v", res)
+	}
+	rig.now = rig.now.Add(2 * time.Second) // t=4s: A, B, A
+	if _, res := rig.post(t, `{"text":"A"}`, nil); res.Code != "double_tap" {
+		t.Fatalf("A again at 4s must be a double tap: %+v", res)
+	}
+	rig.now = rig.now.Add(7 * time.Second) // t=11s
+	if _, res := rig.post(t, `{"text":"A"}`, nil); !res.OK {
+		t.Fatalf("after 10 s the same text is allowed: %+v", res)
+	}
+}
+
+func TestFleetSayStampsAtCompletion(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	rig.s.fleet.pressEnter = func(string) error {
+		rig.enters++
+		rig.now = rig.now.Add(3 * time.Second) // slow send
+		return nil
+	}
 	rig.post(t, `{"text":"one"}`, nil)
 	rig.now = rig.now.Add(500 * time.Millisecond)
 	if _, res := rig.post(t, `{"text":"two"}`, nil); res.Code != "rate_limited" {
-		t.Fatalf("%+v", res)
-	}
-	rig.now = rig.now.Add(2 * time.Second)
-	if _, res := rig.post(t, `{"text":"one"}`, nil); res.Code != "double_tap" {
-		t.Fatalf("%+v", res)
-	}
-	rig.now = rig.now.Add(10 * time.Second)
-	if _, res := rig.post(t, `{"text":"one"}`, nil); !res.OK {
-		t.Fatalf("after 10 s the same text is allowed: %+v", res)
+		t.Fatalf("0.5 s after a slow send finished must still be rate limited: %+v", res)
 	}
 }
 
@@ -1805,8 +2123,8 @@ func TestFleetSayOriginGuard(t *testing.T) {
 	if code != 200 || !res.OK {
 		t.Fatalf("matching referer: %d %+v", code, res)
 	}
-	if len(rig.sent) != 1 {
-		t.Fatalf("sent %q", rig.sent)
+	if len(rig.typed) != 1 {
+		t.Fatalf("typed %q", rig.typed)
 	}
 }
 
@@ -1816,8 +2134,8 @@ func TestFleetSayBearerSkipsOrigin(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
 	fleetMux(rig.s).ServeHTTP(w, r)
-	if w.Code != 200 || len(rig.sent) != 1 {
-		t.Fatalf("%d %q", w.Code, rig.sent)
+	if w.Code != 200 || len(rig.typed) != 1 {
+		t.Fatalf("%d %q", w.Code, rig.typed)
 	}
 }
 
@@ -1826,13 +2144,13 @@ func TestFleetSayUnauthorized(t *testing.T) {
 	r := httptest.NewRequest("POST", "/fleet/say", strings.NewReader(`{"text":"hi"}`))
 	w := httptest.NewRecorder()
 	fleetMux(rig.s).ServeHTTP(w, r)
-	if w.Code != http.StatusUnauthorized || len(rig.sent) != 0 {
+	if w.Code != http.StatusUnauthorized || len(rig.typed) != 0 {
 		t.Fatalf("%d", w.Code)
 	}
 }
 ```
 
-Note on `TestFleetSayRefusesRecycledPid`: `cachedSessions` calls `collectLocal` once (first call) and `resolveLivePID` calls it again; the sessionCache's 1 s validity does not apply to `resolveLivePID` because it calls `collectLocal` directly. If the cache's own internals call `collect` twice, adjust the counter so "discovery" means every call before the handler reaches `resolveLivePID` — e.g. return the FLEET row while a `phase` flag is false and flip it inside a wrapped `sendKeysFn`-independent hook. Keep the test's intent: discovery sees FLEET, the fresh resolve sees a different session at the same pid.
+Seam note: `cachedSessions` (server.go:795) calls `collectLocal` once per cache fill, and `resolveLivePID` (server.go:1018) calls `collectLocal` directly, so `collectPhases` maps call 1 to discovery and every later call to the fresh resolve. If `cachedSessions` turns out to collect more than once per fill, make `collectPhases` switch on a flag set from inside the first `capture` call instead; keep the intent (discovery sees the first list, the fresh resolve sees the second).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1840,6 +2158,18 @@ Run: `go test -run TestFleetSay ./...`
 Expected: FAIL.
 
 - [ ] **Step 3: Write the implementation**
+
+Add to `fleetDeps` in `fleet.go` (after the `logMu` field from Task 2):
+
+```go
+	typeText   func(target, text string) error // nil → tmux send-keys -l
+	pressEnter func(target string) error       // nil → tmux send-keys Enter
+	sleep      func(time.Duration)             // nil → time.Sleep
+
+	sayMu     sync.Mutex // one send at a time, so two devices never interleave keystrokes
+	lastSayAt time.Time
+	saidAt    map[string]time.Time // text → completion time, last 10 s only
+```
 
 ```go
 // fleet_say.go
@@ -1853,9 +2183,17 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 	"unicode/utf8"
+)
+
+const (
+	fleetSayGap       = time.Second
+	fleetSayDoubleTap = 10 * time.Second
+	fleetLandPolls    = 15
+	fleetLandEvery    = 100 * time.Millisecond
 )
 
 type fleetSayResult struct {
@@ -1899,7 +2237,7 @@ func sameOrigin(r *http.Request) bool {
 	return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host)
 }
 
-func decodeFleetSayBody(w http.ResponseWriter, r *http.Request) (text string, cardID string, err error) {
+func decodeFleetSayBody(w http.ResponseWriter, r *http.Request) (text, cardID string, err error) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
 	dec.DisallowUnknownFields()
 	var body *struct {
@@ -1918,6 +2256,20 @@ func decodeFleetSayBody(w http.ResponseWriter, r *http.Request) (text string, ca
 	return body.Text, cardID, nil
 }
 
+func tmuxTypeLiteral(target, text string) error {
+	if target == "" {
+		return errors.New("no tmux pane")
+	}
+	return exec.Command("tmux", "send-keys", "-t", target, "-l", text).Run()
+}
+
+func tmuxPressEnter(target string) error {
+	if target == "" {
+		return errors.New("no tmux pane")
+	}
+	return exec.Command("tmux", "send-keys", "-t", target, "Enter").Run()
+}
+
 func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	kind := s.fleetAuth(r)
 	if kind == fleetAuthNone {
@@ -1933,13 +2285,13 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
+	if len(cardID) > 200 {
+		http.Error(w, "bad cardId", http.StatusBadRequest)
+		return
+	}
 	text, err := sanitizeFleetText(raw)
 	if err != nil {
 		http.Error(w, "bad text", http.StatusBadRequest)
-		return
-	}
-	if len(cardID) > 200 {
-		http.Error(w, "bad cardId", http.StatusBadRequest)
 		return
 	}
 
@@ -1949,17 +2301,20 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	refuse := func(code, msg string) { writeJSON(w, http.StatusOK, fleetSayResult{Error: msg, Code: code}) }
 
 	now := s.fleetNow()
-	if !f.lastSayAt.IsZero() {
-		since := now.Sub(f.lastSayAt)
-		if since < time.Second {
-			refuse("rate_limited", "too fast")
-			return
-		}
-		if text == f.lastSayText && since < 10*time.Second {
-			refuse("double_tap", "same text sent less than 10 s ago")
-			return
+	for t, at := range f.saidAt {
+		if now.Sub(at) >= fleetSayDoubleTap {
+			delete(f.saidAt, t)
 		}
 	}
+	if !f.lastSayAt.IsZero() && now.Sub(f.lastSayAt) < fleetSayGap {
+		refuse("rate_limited", "too fast")
+		return
+	}
+	if _, dup := f.saidAt[text]; dup {
+		refuse("double_tap", "same text sent less than 10 s ago")
+		return
+	}
+
 	row, fl := s.discoverFleet()
 	if !fl.Alive {
 		if fl.Reason == "ambiguous" {
@@ -1969,9 +2324,17 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	fresh, _, refusal := s.resolveLivePID(row.PID, row.SessionID)
+	if row.SessionID == "" {
+		refuse("not_live", "FLEET has no session id")
+		return
+	}
+	fresh, all, refusal := s.resolveLivePID(row.PID, row.SessionID)
 	if refusal != nil {
 		refuse(refusal.Code, refusal.Error)
+		return
+	}
+	if again, reason := findFleet(all); reason != "" || again.PID != row.PID || again.SessionID != row.SessionID {
+		refuse("fleet_changed", "FLEET changed. Try again.")
 		return
 	}
 	if fresh.Waiting() {
@@ -1991,25 +2354,63 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		refuse("no_pane", "cannot read the FLEET pane")
 		return
 	}
-	typed, found := paneInputText(screen)
-	if !found {
+	if typed, found := paneInputText(screen); !found {
 		refuse("dialog", "FLEET input box is not visible")
 		return
-	}
-	if typed != "" {
+	} else if typed != "" {
 		refuse("input_busy", "input box not empty")
 		return
 	}
-	send := s.sendKeysFn
-	if send == nil {
-		send = sendKeys
+
+	typeText, pressEnter, sleep := f.typeText, f.pressEnter, f.sleep
+	if typeText == nil {
+		typeText = tmuxTypeLiteral
 	}
-	if err := send(*fresh, text); err != nil {
-		refuse("send_failed", err.Error())
+	if pressEnter == nil {
+		pressEnter = tmuxPressEnter
+	}
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	if err := typeText(fresh.Tmux, text); err != nil {
+		refuse("send_failed", "send text: "+err.Error())
 		return
 	}
-	f.lastSayAt, f.lastSayText = now, text
-	if err := s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "web-say", Text: text, CardID: cardID}); err != nil {
+	// The first capture is a snapshot: a dialog may have opened since, and
+	// Enter would pick its highlighted option. Press Enter only once the box
+	// is still there and holds what was just typed (it was empty before).
+	landed := false
+	for i := 0; i < fleetLandPolls && !landed; i++ {
+		if i > 0 {
+			sleep(fleetLandEvery)
+		}
+		screen, err := capture(fresh.Tmux)
+		if err != nil {
+			continue
+		}
+		typed, found := paneInputText(screen)
+		if !found {
+			break
+		}
+		landed = typed != ""
+	}
+	if !landed {
+		_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
+			Text: "web-say typed but not submitted", CardID: cardID})
+		refuse("not_submitted", "Text was typed but not sent. FLEET changed state. Check the terminal.")
+		return
+	}
+	if err := pressEnter(fresh.Tmux); err != nil {
+		refuse("send_failed", "send enter: "+err.Error())
+		return
+	}
+	done := s.fleetNow()
+	f.lastSayAt = done
+	if f.saidAt == nil {
+		f.saidAt = map[string]time.Time{}
+	}
+	f.saidAt[text] = done
+	if err := s.appendFleetLog(fleetLogEntry{At: done.UTC().Format(time.RFC3339), Type: "web-say", Text: text, CardID: cardID}); err != nil {
 		fmt.Fprintf(os.Stderr, "fleet: web-say log append failed: %v\n", err)
 	}
 	writeJSON(w, http.StatusOK, fleetSayResult{OK: true, Queued: fresh.Status == "busy"})
@@ -2039,8 +2440,8 @@ git commit -m "feat(fleet): type page answers into the FLEET pane with guards"
 This task is user-facing UI. Implement with an opus-tier agent. All UI copy in ASD-STE100 (short, active, simple words).
 
 **Interfaces:**
-- Consumes: `GET /fleet/state`, `GET /fleet/chat?after=&n=`, `GET /fleet/log?before=&n=`, `GET /fleet/usage`, `POST /fleet/say` (all same-origin, cookie sent automatically; use `fetch(url, {credentials: "same-origin"})`).
-- `/fleet/usage` shape (`usageNumbersResponse`, usage_numbers.go): `{generatedAt, source, claude:[{name, email, active, fiveHour:{percent, resetsAt}, sevenDay:{…}, stale, reason}], grok:[…], codex:[…]}`. Read the json tags in usage_numbers.go before coding the header; show Claude 5h and 7d of the `active` entry, and Grok's first entry.
+- Consumes: `GET /fleet/state`, `GET /fleet/chat?since=&n=`, `GET /fleet/log?before=&n=`, `GET /fleet/usage`, `POST /fleet/say` (all same-origin, cookie sent automatically; use `fetch(url, {credentials: "same-origin"})`).
+- `/fleet/usage` shape (`usageNumbersResponse`, usage_numbers.go:50-95, json tags verified): `{generatedAt, source, claude:[{name, account, active, fiveHour:{label, pct, resetsAt}, sevenDay:{…}, weeklyScoped:{…}, credits, fetchedAt, stale, expired, reason}], grok:[{account, windows:[{label, pct, resetsAt}], credits, plan, fetchedAt, stale}], codex:[same as grok]}`. Window objects can be absent. Header: Claude 5h and 7d `pct` of the `active` entry; Grok: the highest `pct` in the first entry's `windows`, labelled with that window's `label`. Add a Go test that serializes a real `usageNumbersResponse` and checks that `fleet.html` reads the keys `account`, `pct`, `windows` (static `strings.Contains` checks are enough).
 
 Required behaviour (spec "Page" + "Decision flow"):
 1. One file, inline `<style>` and one inline `<script>`. No external URL anywhere (no fonts, no CDN). Mobile first: one column under 900 px; at ≥ 900 px the card sections sit in two columns beside the chat.
@@ -2057,7 +2458,7 @@ Required behaviour (spec "Page" + "Decision flow"):
    const isToday = iso => { const d = new Date(iso); return !isNaN(d) && vilniusDay(d) === vilniusDay(new Date()); };
    ```
 10. History: newest first, filter chips per `type` (merge, kill, spawn, ticket, decision, ruling, relay, web-say, note), "Load more" uses `next`. Each entry: time, type, ticket, text, link.
-11. Polling: state every 5 s, chat every 3 s (`after=<last uuid>`; first call without `after`, `n=50`), usage every 60 s, history on load and after each successful send. Stop all timers on `visibilitychange` to hidden; on visible, fetch everything at once and restart. On a failed fetch, back off (double the interval, cap 60 s) and show the offline dot; reset on success. A 401 shows "Session expired. Run claude-sessions fleet-url on the host." and stops polling.
+11. Polling: state every 5 s, chat every 3 s (`since=<pos from the last response>`; first call without `since`, `n=50`; when the response `sessionId` differs from the held one, clear the list and use `since=0`), usage every 60 s, history on load and after each successful send. Stop all timers on `visibilitychange` to hidden; on visible, fetch everything at once and restart. On a failed fetch, back off (double the interval, cap 60 s) and show the offline dot; reset on success. A 401 shows "Session expired. Run claude-sessions fleet-url on the host." and stops polling.
 12. Safety: build every node with `document.createElement` + `textContent`. Never use `innerHTML`, `outerHTML`, `insertAdjacentHTML` or `document.write`. Links:
     ```js
     function safeLink(url, label) {
@@ -2083,7 +2484,8 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		}
 	}
 	for _, need := range []string{"/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say",
-		"Europe/Vilnius", "noopener noreferrer", "visibilitychange", "Yes, I approve this write"} {
+		"Europe/Vilnius", "noopener noreferrer", "visibilitychange", "Yes, I approve this write",
+		"since=", ".pct", ".account", ".windows"} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}
@@ -2310,8 +2712,10 @@ CLAUDE.md section content (keep it to what a later change needs to know):
 - `/fleet/usage` exists because the cookie path is `/fleet`.
 - Say guards, in order, and why: newline flatten (a literal newline is Enter), `WaitingFor` + pane input-box check (typed Enter would answer a permission dialog), input box not empty (another device or Andy mid-typing), rate limit and double tap, fresh `resolveLivePID` (recycled pid).
 - Input-box parser: the box is the region between the last two `─` rules starting with `❯`; dim text (SGR 2) is Claude Code's placeholder. If Claude Code changes its prompt rendering, `paneInputText` refuses every send (fails closed) — refresh `testdata/fleet/*.ansi` with `tmux capture-pane -p -e`.
-- Chat cursor is inclusive and the page upserts by uuid (assistant re-emissions).
-- Log cursor is a line index, not a timestamp.
+- Say presses Enter only after a second capture shows the input box still there and holding text. Residual race, accepted: a dialog that opens in the milliseconds between that capture and Enter still takes the Enter. Nothing can lock Claude Code's own state; the `WaitingFor` check and both captures narrow the window.
+- Say identity: discovery from the cached list, then `resolveLivePID` (fresh), then `findFleet` again on the fresh list; an empty session id is refused (it would switch off `resolveLivePID`'s check).
+- Chat cursor is a transcript byte position; the server returns changed turns and the page upserts by uuid (assistant re-emissions can update an earlier turn).
+- Log cursor is an absolute byte offset, not a timestamp or a line index (both drift or collide).
 
 - [ ] **Step 1: Write both edits.**
 - [ ] **Step 2: Run** `go build ./... && go vet ./... && go test ./...` (no code change; confirms the tree).
