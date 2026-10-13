@@ -91,7 +91,7 @@ func tmuxTypeLiteral(target, text string) error {
 	if target == "" {
 		return errors.New("no tmux pane")
 	}
-	return exec.Command("tmux", "send-keys", "-t", target, "-l", "--", text).Run()
+	return exec.Command("tmux", "send-keys", "-t", tmuxExactTarget(target), "-l", "--", text).Run()
 }
 
 // fleetTextLanded reports whether the input box holds what was just typed.
@@ -119,7 +119,7 @@ func tmuxPressEnter(target string) error {
 	if target == "" {
 		return errors.New("no tmux pane")
 	}
-	return exec.Command("tmux", "send-keys", "-t", target, "Enter").Run()
+	return exec.Command("tmux", "send-keys", "-t", tmuxExactTarget(target), "Enter").Run()
 }
 
 // fleetCleanSayText makes raw safe to type as one prompt; msg is the 400
@@ -174,9 +174,10 @@ func (s *server) fleetSayDoneLocked(key string) time.Time {
 type fleetSayWho struct {
 	subject string // "FLEET"
 	pane    string // "the FLEET pane"
+	paneLog bool   // refusal log entries may hold screen lines
 }
 
-var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane"}
+var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane", paneLog: true}
 
 // fleetTypeInto is the pane half of every page send: refuse a session that
 // waits on a dialog, has no pane, shows no empty input box, or is in copy
@@ -193,26 +194,27 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 	if row.Tmux == "" {
 		return refuse("no_pane", who.subject+" has no tmux pane")
 	}
+	pane := tmuxExactTarget(row.Tmux) // "=" so a gone session never prefix-matches another
 	capture := f.capture
 	if capture == nil {
 		capture = capturePane
 	}
-	screen, err := capture(row.Tmux)
+	screen, err := capture(pane)
 	if err != nil {
 		return refuse("no_pane", "cannot read "+who.pane)
 	}
 	if typed, found := paneInputText(screen); !found {
-		s.logFleetRefusal("dialog", row.Tmux, screen)
+		s.logFleetSendRefusal(who, "dialog", row.Tmux, screen, text)
 		return refuse("dialog", who.subject+" input box is not visible")
 	} else if typed != "" {
-		s.logFleetRefusal("input_busy", row.Tmux, screen)
+		s.logFleetSendRefusal(who, "input_busy", row.Tmux, screen, text)
 		return refuse("input_busy", "input box not empty")
 	}
 	inMode := f.paneInMode
 	if inMode == nil {
 		inMode = tmuxPaneInMode
 	}
-	if mode, err := inMode(row.Tmux); err != nil {
+	if mode, err := inMode(pane); err != nil {
 		return refuse("no_pane", "cannot read "+who.pane)
 	} else if mode {
 		return refuse("pane_mode", strings.ToUpper(who.pane[:1])+who.pane[1:]+" is in scroll mode. Press q in the terminal, then try again.")
@@ -228,7 +230,7 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 	if sleep == nil {
 		sleep = time.Sleep
 	}
-	if err := typeText(row.Tmux, text); err != nil {
+	if err := typeText(pane, text); err != nil {
 		return refuse("send_failed", "send text: "+err.Error())
 	}
 	// The first capture is a snapshot: a dialog may have opened since, and
@@ -241,7 +243,7 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 		if i > 0 {
 			sleep(fleetLandEvery)
 		}
-		screen, err := capture(row.Tmux)
+		screen, err := capture(pane)
 		if err != nil {
 			continue
 		}
@@ -253,13 +255,33 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 		landed = fleetTextLanded(typed, text)
 	}
 	if !landed {
-		s.logFleetRefusal("not_submitted", row.Tmux, lastScreen)
+		s.logFleetSendRefusal(who, "not_submitted", row.Tmux, lastScreen, text)
 		return refuse("not_submitted", "Text was typed but not sent. "+who.subject+" changed state. Check the terminal.")
 	}
-	if err := pressEnter(row.Tmux); err != nil {
+	if err := pressEnter(pane); err != nil {
 		return refuse("send_failed", "send enter: "+err.Error())
 	}
 	return fleetSayResult{OK: true, Queued: row.Status == "busy"}
+}
+
+// logFleetSendRefusal logs a pane refusal. FLEET's own entries keep the
+// screen lines (logFleetRefusal). Any other session's entry is the header
+// line only, with the text length: its pane can hold the typed text, and
+// the say log must never hold what was sent to a session.
+func (s *server) logFleetSendRefusal(who fleetSayWho, code, target, screen, text string) {
+	if who.paneLog {
+		s.logFleetRefusal(code, target, screen)
+		return
+	}
+	path := s.fleet.sayLogPath
+	if path == "" {
+		path = fleetSayLogDefault()
+	}
+	if path == "" {
+		return
+	}
+	appendFleetSayLog(path, fmt.Sprintf("%s refused code=%s target=%s len=%d\n",
+		s.fleetNow().UTC().Format(time.RFC3339), code, tmuxSessionPart(target), utf8.RuneCountInString(text)))
 }
 
 func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {

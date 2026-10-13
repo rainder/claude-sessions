@@ -121,20 +121,28 @@ func (s *server) fleetResolveSession(name string, sessions []Session) (Session, 
 	}
 }
 
-// fleetSessionTagRe matches the wrapper blocks Claude Code puts inside
-// turns: reminders and slash-command plumbing, not words anyone typed.
-var fleetSessionTagRe = regexp.MustCompile(`(?s)<(?:system-reminder|command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat)>.*?</(?:system-reminder|command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat)>`)
+// fleetSessionTags are the wrapper blocks Claude Code puts inside turns:
+// reminders, slash-command and ! bash plumbing, hook output and task
+// notifications, not words anyone typed.
+var fleetSessionTags = []string{"system-reminder", "command-name", "command-message", "command-args",
+	"local-command-stdout", "local-command-stderr", "local-command-caveat",
+	"bash-input", "bash-stdout", "bash-stderr", "task-notification", "user-prompt-submit-hook"}
 
-var fleetSessionOpenTags = []string{"<system-reminder>", "<command-name>", "<command-message>", "<command-args>",
-	"<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"}
+var fleetSessionTagRe = func() *regexp.Regexp {
+	alt := strings.Join(fleetSessionTags, "|")
+	return regexp.MustCompile(`(?s)<(?:` + alt + `)>.*?</(?:` + alt + `)>`)
+}()
 
-// stripSessionTags removes every wrapper block; an opening tag with no close
-// drops everything after it, so a cut-off reminder never leaks.
-func stripSessionTags(text string) string {
+// stripSessionTags removes every wrapper block. With cutUnclosed (user
+// text), an opening tag with no close drops everything after it, so a
+// cut-off reminder never leaks; assistant text keeps a tag it only quotes.
+func stripSessionTags(text string, cutUnclosed bool) string {
 	text = fleetSessionTagRe.ReplaceAllString(text, "")
-	for _, tag := range fleetSessionOpenTags {
-		if i := strings.Index(text, tag); i >= 0 {
-			text = text[:i]
+	if cutUnclosed {
+		for _, tag := range fleetSessionTags {
+			if i := strings.Index(text, "<"+tag+">"); i >= 0 {
+				text = text[:i]
+			}
 		}
 	}
 	return strings.TrimSpace(text)
@@ -158,19 +166,26 @@ func contentHasBlock(raw json.RawMessage, typ string) bool {
 }
 
 // fleetSessionText is the session view's filter: text blocks only (never
-// thinking or tool_use); no user line carrying a tool_result; wrapper blocks
-// removed; a turn empty after that is skipped. isMeta lines are skipped by
+// thinking or tool_use); no compact summary and no user line carrying a
+// tool_result; wrapper blocks removed; a turn empty after that, or a user
+// turn still starting with "<", is skipped. isMeta lines are skipped by
 // scanFleetTurns.
 func fleetSessionText(e *transcriptLine) (string, bool) {
-	if e.Type == "user" && contentHasBlock(e.Message.Content, "tool_result") {
+	user := e.Type == "user"
+	if e.IsCompactSummary || (user && contentHasBlock(e.Message.Content, "tool_result")) {
 		return "", false
 	}
 	text, ok := extractTurnText(e.Message.Content)
 	if !ok {
 		return "", false
 	}
-	text = stripSessionTags(text)
-	return text, text != ""
+	text = stripSessionTags(text, user)
+	// A user line that still opens with a tag is plumbing this list does not
+	// know yet (the FLEET chat's rule).
+	if text == "" || (user && strings.HasPrefix(text, "<")) {
+		return "", false
+	}
+	return text, true
 }
 
 // tmuxPaneHistory captures the last fleetSessionPaneLines lines of a pane,
@@ -179,7 +194,7 @@ func tmuxPaneHistory(target string) (string, error) {
 	if target == "" {
 		return "", errors.New("no tmux pane")
 	}
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-J", "-S", "-"+strconv.Itoa(fleetSessionPaneLines), "-t", target).Output()
+	out, err := exec.Command("tmux", "capture-pane", "-p", "-J", "-S", "-"+strconv.Itoa(fleetSessionPaneLines), "-t", tmuxExactTarget(target)).Output()
 	if err != nil {
 		return "", fmt.Errorf("capture pane: %w", err)
 	}
@@ -194,7 +209,7 @@ func (s *server) fleetSessionPane(target string) string {
 	if hist == nil {
 		hist = tmuxPaneHistory
 	}
-	raw, err := hist(target)
+	raw, err := hist(tmuxExactTarget(target))
 	if err != nil {
 		return ""
 	}

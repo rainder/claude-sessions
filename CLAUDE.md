@@ -1034,21 +1034,29 @@ card that left state.json closes the door); it is not FLEET's tmux session and
 no row there is named FLEET (403 `fleet_self`: FLEET has its own box with its
 own guards); exactly one live row, claude or grok, sits in it (404 `gone`,
 409 `ambiguous`), so the pane address is the resolved row's `Tmux` and never
-anything from the request. The say path resolves from a fresh `collectLocal`
+anything from the request. Every `-t` built from a row's `Tmux` in the send
+and capture pipeline (and the inspector's `sendKeys`) goes through
+`tmuxExactTarget`, which adds `=`: a plain `-t name:0.0` falls back to a
+**prefix** match when `name` is gone (tmux 3.4 sends it to `name-retry`), so
+keys for an ended session would land in another; `=` errors instead. The say path resolves from a fresh `collectLocal`
 and a fresh state.json stat, then runs the same pipeline as `/fleet/say`
 (`fleetCleanSayText`, `fleetSayGateLocked`, `fleetTypeInto`): the 1 s gap is
 shared with `/fleet/say`, the 10 s double-tap key is target plus text. Grok is
 view-only (409 `send_unsupported`, `canSend: false`): the input-box parser
 knows only Claude Code's screen. The transcript filter (`fleetSessionText`)
-keeps text blocks only — never thinking or tool_use — skips any user line
-that carries a tool_result, and removes `system-reminder` and slash-command
-wrapper blocks (an unclosed one drops the rest of the turn); a turn empty
-after that is skipped. A claude row with no transcript on disk, and every
+keeps text blocks only — never thinking or tool_use — skips compact summaries
+and any user line that carries a tool_result, and removes the wrapper blocks
+in `fleetSessionTags` (reminders, slash-command, `!` bash, hook and
+task-notification plumbing). In user text an unclosed one drops the rest of
+the turn; assistant text keeps a tag it only quotes. A turn empty after that,
+or a user turn still starting with `<`, is skipped. A claude row with no transcript on disk, and every
 grok row, show the pane instead (`capture-pane -J -S -200`, escapes
 stripped, last 64 KiB). Paging: the same `since` cursor as `/fleet/chat`, plus
 `before=<older>` reading backward; `older` is set on reset and `before`
 answers only. A send is logged to the say log as `sent target=<tmux>
 len=<n>`, never the text, and never to log.jsonl, which is FLEET's own record.
+A refusal there is the header line only (`refused code=… target=<tmux>
+len=<n>`): the pane lines FLEET's own refusals keep can hold the typed text.
 
 **Say guards, in order, and why each exists.** Cookie auth needs `Origin` (or
 `Referer`) host == `r.Host`. Newlines flatten to spaces and other control bytes

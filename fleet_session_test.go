@@ -218,7 +218,7 @@ func TestFleetSessionPaneSource(t *testing.T) {
 	if code != 200 || out["source"] != "pane" || out["pane"] != "grok says hi red\nsecond line" || len(out["turns"].([]any)) != 0 {
 		t.Fatalf("%d %v", code, out)
 	}
-	if len(asked) != 1 || asked[0] != "grok-dr-2:0.0" {
+	if len(asked) != 1 || asked[0] != "=grok-dr-2:0.0" {
 		t.Fatalf("captured %v, want the resolved row's pane", asked)
 	}
 	tg := out["target"].(map[string]any)
@@ -281,7 +281,7 @@ func TestFleetSessionSayTypesIntoTheResolvedPane(t *testing.T) {
 	if len(rig.typed) != 1 || rig.typed[0] != "please rebase on main" || rig.enters != 1 {
 		t.Fatalf("typed %q enters %d", rig.typed, rig.enters)
 	}
-	if strings.Join(*targets, ",") != "spawn-dr-1-fix:0.0,spawn-dr-1-fix:0.0" {
+	if strings.Join(*targets, ",") != "=spawn-dr-1-fix:0.0,=spawn-dr-1-fix:0.0" {
 		t.Fatalf("keys went to %v", *targets)
 	}
 	data, _ := os.ReadFile(rig.s.fleet.sayLogPath)
@@ -346,8 +346,8 @@ func TestFleetSessionSayRefusesADialog(t *testing.T) {
 		t.Fatalf("%d %v", code, out)
 	}
 	data, _ := os.ReadFile(rig.s.fleet.sayLogPath)
-	if !strings.Contains(string(data), "refused code=dialog target=spawn-dr-1-fix:0.0") {
-		t.Fatalf("say log %q", data)
+	if string(data) != "2026-10-13T10:00:00Z refused code=dialog target=spawn-dr-1-fix len=2\n" {
+		t.Fatalf("say log %q, want the header line only", data)
 	}
 }
 
@@ -378,5 +378,100 @@ func TestFleetSessionSaySharesTheGapWithFleetSay(t *testing.T) {
 	rig.now = rig.now.Add(2 * time.Second)
 	if _, out := rig.postSession(t, `{"target":"spawn-dr-1-fix","text":"to worker"}`, nil); out["code"] != "double_tap" {
 		t.Fatalf("same text to the same session within 10 s: %v", out)
+	}
+}
+
+func TestTmuxExactTarget(t *testing.T) {
+	for in, want := range map[string]string{
+		"":             "",
+		"spawn-x:0.0":  "=spawn-x:0.0",
+		"=spawn-x:0.0": "=spawn-x:0.0",
+		"%12":          "%12",
+		"fleet":        "=fleet",
+	} {
+		if got := tmuxExactTarget(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFleetSaySeamsGetTheExactPane(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	var seen []string
+	capture := rig.s.fleet.capture
+	rig.s.fleet.capture = func(p string) (string, error) { seen = append(seen, "capture "+p); return capture(p) }
+	rig.s.fleet.paneInMode = func(p string) (bool, error) { seen = append(seen, "mode "+p); return false, nil }
+	rig.s.fleet.typeText = func(p, text string) error {
+		seen = append(seen, "type "+p)
+		rig.typed = append(rig.typed, text)
+		return nil
+	}
+	rig.s.fleet.pressEnter = func(p string) error { seen = append(seen, "enter "+p); rig.enters++; return nil }
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	for _, c := range seen {
+		if !strings.HasSuffix(c, " =fleet:0.0") {
+			t.Fatalf("seam calls %v, want every one on =fleet:0.0", seen)
+		}
+	}
+	if len(seen) < 4 {
+		t.Fatalf("seam calls %v", seen)
+	}
+}
+
+func TestFleetSessionRefusalLogNeverHoldsTheText(t *testing.T) {
+	rig, _ := sessionSayRig(t)
+	// The box shows other text after typing: not submitted. The pane holds
+	// the typed words, so none of it may reach the log.
+	rig.captures = []string{emptyBoxCapture, boxCapture("secret words typed here, then more")}
+	_, out := rig.postSession(t, `{"target":"spawn-dr-1-fix","text":"secret words typed here"}`, nil)
+	if out["code"] != "not_submitted" {
+		t.Fatalf("%v", out)
+	}
+	data, _ := os.ReadFile(rig.s.fleet.sayLogPath)
+	if string(data) != "2026-10-13T10:00:00Z refused code=not_submitted target=spawn-dr-1-fix len=23\n" {
+		t.Fatalf("say log %q", data)
+	}
+}
+
+func TestFleetSayRefusalLogKeepsFleetPaneLines(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	rig.captures = []string{dialogCapture}
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.Code != "dialog" {
+		t.Fatalf("%+v", res)
+	}
+	data, _ := os.ReadFile(rig.s.fleet.sayLogPath)
+	if !strings.Contains(string(data), "refused code=dialog target=fleet:0.0\n") || !strings.Contains(string(data), "Do you want to proceed?") {
+		t.Fatalf("say log %q", data)
+	}
+}
+
+func TestFleetSessionFilterPlumbing(t *testing.T) {
+	sid := fleetUUID(110)
+	s := fleetSessionServer(t, sid)
+	putFleetTranscript(t, s.fleet.home, sid,
+		chatLine(t, "user", "u1", "2026-10-13T09:00:00Z", "<bash-input>secret-cmd</bash-input>", nil),
+		chatLine(t, "user", "u2", "2026-10-13T09:00:01Z", "<bash-stdout>secret-stdout</bash-stdout><bash-stderr>secret-stderr</bash-stderr>", nil),
+		chatLine(t, "user", "u3", "2026-10-13T09:00:02Z", "<task-notification>secret-task</task-notification>", nil),
+		chatLine(t, "user", "u4", "2026-10-13T09:00:03Z", "<user-prompt-submit-hook>secret-hook</user-prompt-submit-hook>real ask", nil),
+		chatLine(t, "user", "u5", "2026-10-13T09:00:04Z", "This session is being continued. secret-compact", map[string]any{"isCompactSummary": true}),
+		chatLine(t, "user", "u6", "2026-10-13T09:00:05Z", "<unknown-wrapper>secret-unknown</unknown-wrapper>", nil),
+		chatLine(t, "assistant", "a1", "2026-10-13T09:00:06Z", chatText("Use the <command-name> tag to name it"),
+			map[string]any{"message.id": "m1", "requestId": "r1"}),
+	)
+	_, out := getFleetSession(t, s, "t=spawn-dr-1-fix")
+	b, _ := json.Marshal(out["turns"])
+	if strings.Contains(string(b), "secret") {
+		t.Fatalf("leak: %s", b)
+	}
+	var got []string
+	for _, tr := range out["turns"].([]any) {
+		m := tr.(map[string]any)
+		got = append(got, m["role"].(string)+":"+m["text"].(string))
+	}
+	want := "user:real ask|assistant:Use the <command-name> tag to name it"
+	if strings.Join(got, "|") != want {
+		t.Fatalf("turns %q, want %q", got, want)
 	}
 }

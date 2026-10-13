@@ -85,9 +85,10 @@ func TestSendKeysTypesLiteralWithDashDashThenEnter(t *testing.T) {
 	if err := sendKeys(Session{PID: 1, Tmux: "work:0.1"}, "-R hello"); err != nil {
 		t.Fatal(err)
 	}
+	// "=": an exact session match, never tmux's prefix fallback.
 	want := [][]string{
-		{"send-keys", "-t", "work:0.1", "-l", "--", "-R hello"},
-		{"send-keys", "-t", "work:0.1", "Enter"},
+		{"send-keys", "-t", "=work:0.1", "-l", "--", "-R hello"},
+		{"send-keys", "-t", "=work:0.1", "Enter"},
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("calls = %q, want %q", *calls, want)
