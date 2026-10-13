@@ -2546,6 +2546,15 @@ func cmdServer(args []string) int {
 		fmt.Fprintf(os.Stderr, "push notifications enabled (%s, %d device(s))\n",
 			cfg.Environment, len(devices.List()))
 	}
+	// The FLEET page cookie holds its own secret, never the server token.
+	// Without one, cookie login is off and the page needs the bearer header;
+	// the error never carries the value. revoke rewrites the same path.
+	s.fleet.secretPath = fleetSecretPath()
+	if sec, err := loadOrCreateFleetSecret(s.fleet.secretPath); err != nil {
+		fmt.Fprintf(os.Stderr, "FLEET page cookie login disabled (%v)\n", err)
+	} else {
+		s.fleet.secret = sec
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("GET /usage", s.usage)

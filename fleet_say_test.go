@@ -61,7 +61,7 @@ func fleetRow() Session {
 func (rig *sayRig) post(t *testing.T, body string, mod func(*http.Request)) (int, fleetSayResult) {
 	t.Helper()
 	r := httptest.NewRequest("POST", "http://ws.ts.net:8765/fleet/say", strings.NewReader(body))
-	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "tok"})
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
 	r.Header.Set("Origin", "http://ws.ts.net:8765")
 	if mod != nil {
 		mod(r)

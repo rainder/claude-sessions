@@ -847,13 +847,28 @@ writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 (append-only, `fleet-log.sh`; the server appends `web-say` lines) — mirrors the
 FLEET transcript, and types text into the FLEET pane. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
-main mux only (never the loopback paste mux).
+`POST /fleet/login/arm`, `POST /fleet/login/revoke`, main mux only (never the
+loopback paste mux).
 
-**Auth.** Bearer header, or the `cs_fleet` cookie (the token itself;
-`Path=/fleet`, `HttpOnly`, `SameSite=Strict`). Only `fleetAuth` reads the
-cookie, so it opens nothing outside `/fleet*`. `claude-sessions fleet-url`
-prints `/fleet?t=<token>`; that request sets the cookie and answers a small
-HTML hop that `location.replace`s to `/fleet` — **not a 303**: a link tapped in
+**Auth.** Bearer header, or the `cs_fleet` cookie (`Path=/fleet`, `HttpOnly`,
+`SameSite=Strict`). The cookie holds a **fleet-only secret**
+(`~/.config/claude-sessions/fleet-secret`, 32 random bytes, 0600, created at
+server start), never the server token: the token must not sit in a URL (shell
+scrollback, browser history and sync) or in a cookie, and a cookie that held
+the token would be the token. Only `fleetAuth` reads the cookie, so the secret
+opens nothing outside `/fleet*`. If the secret cannot be loaded, cookie login
+is off and only the bearer header works. Login is a one-time code:
+`claude-sessions fleet-url` finds the running server (Tailscale address, then
+loopback, like `pair`), calls `POST /fleet/login/arm` with the bearer token, and
+prints `/fleet?c=<code>`. Codes are 16 random bytes, live 10 minutes, work
+once, at most 4 live (a 5th arm drops the oldest), in memory only. Arm and
+revoke are bearer-only — a cookie must not mint logins for more devices.
+`fleet-url --revoke` (`POST /fleet/login/revoke`) rotates the secret
+(atomic write) and drops every code, so every device is logged out; if the
+write fails the new secret still holds in memory, and the 500 says a restart
+would bring the old logins back. `?t=` means
+nothing any more. `GET /fleet?c=<code>` consumes the code, sets the cookie and
+answers a small HTML hop that `location.replace`s to `/fleet` — **not a 303**: a link tapped in
 another app is a cross-site navigation, and the browser would not send the new
 Strict cookie on its redirect. A later plain `/fleet` link tapped in another
 app has the same problem: the cookie is not sent. So `/fleet` with no auth and

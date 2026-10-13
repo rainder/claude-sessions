@@ -17,7 +17,7 @@ func fleetTestServer(t *testing.T, sessions []Session) *server {
 	return &server{
 		token:   "tok",
 		collect: func() ([]Session, error) { return sessions, nil },
-		fleet:   fleetDeps{dir: t.TempDir()},
+		fleet:   fleetDeps{dir: t.TempDir(), secret: "sec"},
 	}
 }
 
@@ -39,7 +39,7 @@ func TestFleetAuthBearerAndCookie(t *testing.T) {
 		t.Fatal("bearer header")
 	}
 	r = httptest.NewRequest("GET", "/fleet/state", nil)
-	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "tok"})
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
 	if s.fleetAuth(r) != fleetAuthCookie {
 		t.Fatal("cookie")
 	}
@@ -48,46 +48,30 @@ func TestFleetAuthBearerAndCookie(t *testing.T) {
 	if s.fleetAuth(r) != fleetAuthNone {
 		t.Fatal("wrong cookie must be none")
 	}
+	// The server token is no longer a cookie value: an old cs_fleet=<token>
+	// cookie must stop working.
+	r = httptest.NewRequest("GET", "/fleet/state", nil)
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "tok"})
+	if s.fleetAuth(r) != fleetAuthNone {
+		t.Fatal("cookie holding the server token must be none")
+	}
+	// No secret loaded: cookie auth is off, even for an empty cookie.
+	s.fleet.secret = ""
+	r = httptest.NewRequest("GET", "/fleet/state", nil)
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: ""})
+	if s.fleetAuth(r) != fleetAuthNone {
+		t.Fatal("empty secret must disable cookie auth")
+	}
 }
 
 func TestFleetCookieRejectedOnSessions(t *testing.T) {
 	s := fleetTestServer(t, nil)
 	r := httptest.NewRequest("GET", "/sessions", nil)
-	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "tok"})
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
 	w := httptest.NewRecorder()
 	fleetMux(s).ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("GET /sessions with only the fleet cookie: %d, want 401", w.Code)
-	}
-}
-
-func TestFleetLoginSetsCookieAndLeavesURL(t *testing.T) {
-	s := fleetTestServer(t, nil)
-	w := httptest.NewRecorder()
-	fleetMux(s).ServeHTTP(w, httptest.NewRequest("GET", "/fleet?t=tok", nil))
-	if w.Code != http.StatusOK {
-		t.Fatalf("code %d, want 200 (HTML hop, not a 303: see Review Focus 3)", w.Code)
-	}
-	c := w.Result().Cookies()
-	if len(c) != 1 || c[0].Name != "cs_fleet" || c[0].Value != "tok" || c[0].Path != "/fleet" ||
-		!c[0].HttpOnly || c[0].SameSite != http.SameSiteStrictMode || c[0].Secure || c[0].MaxAge != 2592000 {
-		t.Fatalf("cookie = %+v", c)
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, `location.replace("/fleet")`) || strings.Contains(body, "tok") {
-		t.Fatalf("login hop must redirect by script and never echo the token: %q", body)
-	}
-	if got := w.Header().Get("Referrer-Policy"); got != "no-referrer" {
-		t.Fatalf("login hop Referrer-Policy = %q, want no-referrer", got)
-	}
-}
-
-func TestFleetLoginWrongToken(t *testing.T) {
-	s := fleetTestServer(t, nil)
-	w := httptest.NewRecorder()
-	fleetMux(s).ServeHTTP(w, httptest.NewRequest("GET", "/fleet?t=nope", nil))
-	if w.Code != http.StatusUnauthorized || len(w.Result().Cookies()) != 0 {
-		t.Fatalf("code %d cookies %v", w.Code, w.Result().Cookies())
 	}
 }
 
@@ -113,7 +97,7 @@ func TestFleetPageNoAuthHopsOnce(t *testing.T) {
 		t.Fatalf("no auth after the hop: %d, want 401", w.Code)
 	}
 	r := httptest.NewRequest("GET", "/fleet?hop=1", nil)
-	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "tok"})
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
 	w = httptest.NewRecorder()
 	fleetMux(s).ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/fleet/state") {
@@ -129,7 +113,7 @@ func TestFleetPageNeedsAuthAndSetsHeaders(t *testing.T) {
 		t.Fatalf("no auth: %d", w.Code)
 	}
 	r := httptest.NewRequest("GET", "/fleet", nil)
-	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "tok"})
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
 	w = httptest.NewRecorder()
 	fleetMux(s).ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
@@ -197,7 +181,7 @@ func TestFleetUsageAliasUsesFleetAuth(t *testing.T) {
 		t.Fatalf("no auth: %d", w.Code)
 	}
 	r := httptest.NewRequest("GET", "/fleet/usage", nil)
-	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "tok"})
+	r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
 	w = httptest.NewRecorder()
 	fleetMux(s).ServeHTTP(w, r)
 	if w.Code != http.StatusServiceUnavailable {

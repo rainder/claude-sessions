@@ -51,6 +51,13 @@ type fleetDeps struct {
 	sayMu     sync.Mutex // one send at a time, so two devices never interleave keystrokes
 	lastSayAt time.Time
 	saidAt    map[string]time.Time // text → completion time, last 10 s only
+
+	// Login (fleet_login.go). secretMu guards all three: revoke rotates the
+	// secret and drops the codes in one step.
+	secretMu   sync.Mutex
+	secret     string           // cookie value; "" → cookie auth off
+	secretPath string           // where revoke saves a new secret; "" → memory only
+	codes      []fleetLoginCode // live one-time codes, oldest first
 }
 
 func (s *server) fleetDir() string {
@@ -79,16 +86,18 @@ const (
 	fleetAuthCookie
 )
 
-// fleetAuth accepts the bearer header or the cs_fleet cookie. Only /fleet*
-// handlers call it; every other route keeps s.authed, so the cookie opens
-// nothing else.
+// fleetAuth accepts the bearer header or the cs_fleet cookie, which holds the
+// fleet-only secret, never the server token. Only /fleet* handlers call it;
+// every other route keeps s.authed, so the cookie opens nothing else.
 func (s *server) fleetAuth(r *http.Request) fleetAuthKind {
 	if s.authed(r) {
 		return fleetAuthBearer
 	}
-	if c, err := r.Cookie(fleetCookieName); err == nil &&
-		subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.token)) == 1 {
-		return fleetAuthCookie
+	if sec := s.fleetSecret(); sec != "" {
+		if c, err := r.Cookie(fleetCookieName); err == nil &&
+			subtle.ConstantTimeCompare([]byte(c.Value), []byte(sec)) == 1 {
+			return fleetAuthCookie
+		}
 	}
 	return fleetAuthNone
 }
@@ -157,23 +166,16 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("GET /fleet/log", s.fleetLog)     // Task 4
 	mux.HandleFunc("GET /fleet/chat", s.fleetChat)   // Task 5
 	mux.HandleFunc("POST /fleet/say", s.fleetSay)    // Task 6
+	mux.HandleFunc("POST /fleet/login/arm", s.fleetLoginArm)
+	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
 }
 
-// fleetPage serves the page. With ?t=<token> it is the one-time login: set
-// the cookie and leave the URL by script. A 303 would not work from a link
-// tapped in another app: the redirect is part of a cross-site navigation, so
-// the browser would not send the new SameSite=Strict cookie on it.
+// fleetPage serves the page. With ?c=<code> it is the one-time login
+// (fleetLogin). The old ?t= parameter means nothing now: such a request is a
+// plain visit.
 func (s *server) fleetPage(w http.ResponseWriter, r *http.Request) {
-	if t := r.URL.Query().Get("t"); t != "" {
-		if subtle.ConstantTimeCompare([]byte(t), []byte(s.token)) != 1 {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		http.SetCookie(w, &http.Cookie{
-			Name: fleetCookieName, Value: s.token, Path: "/fleet", MaxAge: fleetCookieMaxAge,
-			HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil,
-		})
-		writeFleetHop(w, "/fleet")
+	if c := r.URL.Query().Get("c"); c != "" {
+		s.fleetLogin(w, r, c)
 		return
 	}
 	if s.fleetAuth(r) == fleetAuthNone {
