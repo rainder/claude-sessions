@@ -458,6 +458,9 @@ usage_numbers.go     `usage` CLI + GET /usage/numbers (quota numbers, stable JSO
 fleet.go             /fleet web page: cookie auth, state.json, log.jsonl, routes
 fleet_chat.go        /fleet/chat: FLEET transcript mirror (byte-position cursor)
 fleet_say.go         /fleet/say: type a page answer into the FLEET pane, with guards
+fleet_start.go       /fleet/start: resume or start FLEET when it is down
+fleet_last.go        fleet-last.json: the last FLEET session seen alive
+fleet_pwa.go         /fleet manifest, service worker (fleet_sw.js) and icons (fleet_assets/)
 fleet_pane.go        Claude Code input-box parser for a tmux capture
 fleet_login.go       /fleet login: one-time codes, fleet-only cookie secret, revoke
 fleet_url.go         `fleet-url` CLI

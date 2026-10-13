@@ -18,7 +18,13 @@ func fleetTestServer(t *testing.T, sessions []Session) *server {
 		token:   "tok",
 		collect: func() ([]Session, error) { return sessions, nil },
 		fleet: fleetDeps{dir: t.TempDir(), secret: "sec",
-			sayLogPath: filepath.Join(t.TempDir(), "state", "fleet-say.log")},
+			sayLogPath: filepath.Join(t.TempDir(), "state", "fleet-say.log"),
+			// Never the real ~/.config or ~/.claude: discovery writes
+			// fleet-last.json and chat/start look up transcripts.
+			lastPath: filepath.Join(t.TempDir(), "cfg", "fleet-last.json"),
+			home:     t.TempDir(),
+			// No test may shell out to tmux: every started session is gone.
+			paneCommand: func(string) (string, bool) { return "", false }},
 	}
 }
 

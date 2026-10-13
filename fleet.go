@@ -26,7 +26,8 @@ const (
 	// healthy FLEET writes state.json at least that often.
 	fleetStaleAfter = 40 * time.Minute
 	fleetPageCSP    = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
-		"connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		"connect-src 'self'; img-src 'self' data:; manifest-src 'self'; worker-src 'self'; " +
+		"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
 // fleetDeps holds the /fleet routes' seams and their small in-memory state.
@@ -59,6 +60,34 @@ type fleetDeps struct {
 	secret     string           // cookie value; "" → cookie auth off
 	secretPath string           // where revoke saves a new secret; "" → memory only
 	codes      []fleetLoginCode // live one-time codes, oldest first
+
+	// The last FLEET session seen alive (fleet_last.go). lastMu guards
+	// lastMem, the copy last written to (or first read from) lastPath, so an
+	// unchanged FLEET costs no write per state poll.
+	lastPath   string // "" → ~/.config/claude-sessions/fleet-last.json
+	home       string // "" → os.UserHomeDir(); transcripts and the default cwd
+	lastMu     sync.Mutex
+	lastLoaded bool
+	lastMem    fleetLast
+	scriptMu   sync.Mutex
+	scripts    map[string]fleetScript // session id → memoized transcript lookup
+
+	// POST /fleet/start (fleet_start.go). startMu is held across the whole
+	// handler, so two taps cannot both pass the guards; startStateMu guards
+	// the fields /fleet/state reads, so a poll never waits on a spawn.
+	defaultCwd    string                                             // "" → ~/Developer/trecs-brain
+	spawn         func(cwd, display, command string) (string, error) // nil → SpawnNew
+	presets       func() ([]CommandPreset, error)                    // nil → LoadCommandPresets
+	startMu       sync.Mutex
+	startStateMu  sync.Mutex
+	startInFlight bool
+	lastStartAt   time.Time // last attempt that passed discovery; a failed spawn counts
+	startingAt    time.Time // zero → no start in the 90 s window
+	startingMode  string
+	startedTmux   string // tmux name of the last web start until FLEET shows up or it is gone
+	// paneCommand reports a tmux session's pane command; ok false when the
+	// session is gone. nil → tmux display-message #{pane_current_command}.
+	paneCommand func(name string) (cmd string, ok bool)
 }
 
 func (s *server) fleetDir() string {
@@ -109,6 +138,34 @@ type fleetSession struct {
 	PID       int    `json:"pid"`
 	Status    string `json:"status"`
 	Reason    string `json:"reason,omitempty"`
+	// Code is the machine form of Reason; empty when alive.
+	Code string `json:"code,omitempty"`
+	// HasLast: FLEET is not alive and fleet-last.json names a session that
+	// POST /fleet/start would resume.
+	HasLast bool `json:"hasLast"`
+	// CanStart: not_live, no start in flight or pending, the last session
+	// not live under another name, and the start rate limit is free.
+	CanStart bool `json:"canStart"`
+	// LastLive: not_live, but fleet-last.json's session runs under another
+	// name, so a start would make a second FLEET.
+	LastLive bool `json:"lastLive,omitempty"`
+	// Starting: a web start in the last 90 s, and FLEET not alive yet.
+	Starting *fleetStarting `json:"starting,omitempty"`
+	// Pending: the last web start may still become FLEET — inside the 90 s
+	// window, or its tmux pane still runs something other than a shell.
+	// PendingTmux names that tmux session.
+	Pending     bool   `json:"pending"`
+	PendingTmux string `json:"pendingTmux,omitempty"`
+	// RetryAfter: seconds until the 60 s start gap is free, set only when
+	// that gap is the one thing keeping canStart false.
+	RetryAfter int `json:"retryAfter,omitempty"`
+}
+
+// fleetReasonCodes maps discovery's human reason text onto its code.
+var fleetReasonCodes = map[string]string{
+	"not running":         "not_live",
+	"ambiguous":           "ambiguous",
+	"session list failed": "list_failed",
 }
 
 // findFleet picks the one local claude session the user named exactly FLEET.
@@ -147,17 +204,30 @@ func fleetStatus(sess Session) string {
 	}
 }
 
-// discoverFleet resolves FLEET from the cached session list.
+// discoverFleet resolves FLEET from the cached session list. An alive FLEET
+// is remembered in fleet-last.json (written only when it changed).
 func (s *server) discoverFleet() (Session, fleetSession) {
+	sess, fl, _ := s.discoverFleetList()
+	return sess, fl
+}
+
+// discoverFleetList is discoverFleet plus the session list it used (nil
+// when listing failed), so later checks agree with discovery.
+func (s *server) discoverFleetList() (Session, fleetSession, []Session) {
 	sessions, err := s.cachedSessions()
 	if err != nil {
-		return Session{}, fleetSession{Reason: "session list failed"}
+		return Session{}, fleetSessionDown("session list failed"), nil
 	}
 	sess, reason := findFleet(sessions)
 	if reason != "" {
-		return Session{}, fleetSession{Reason: reason}
+		return Session{}, fleetSessionDown(reason), sessions
 	}
-	return sess, fleetSession{Alive: true, SessionID: sess.SessionID, PID: sess.PID, Status: fleetStatus(sess)}
+	s.rememberFleet(sess)
+	return sess, fleetSession{Alive: true, SessionID: sess.SessionID, PID: sess.PID, Status: fleetStatus(sess)}, sessions
+}
+
+func fleetSessionDown(reason string) fleetSession {
+	return fleetSession{Reason: reason, Code: fleetReasonCodes[reason]}
 }
 
 func registerFleetRoutes(mux *http.ServeMux, s *server) {
@@ -167,9 +237,11 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("GET /fleet/log", s.fleetLog)     // Task 4
 	mux.HandleFunc("GET /fleet/chat", s.fleetChat)   // Task 5
 	mux.HandleFunc("POST /fleet/say", s.fleetSay)    // Task 6
+	mux.HandleFunc("POST /fleet/start", s.fleetStart)
 	mux.HandleFunc("POST /fleet/login", s.fleetLogin)
 	mux.HandleFunc("POST /fleet/login/arm", s.fleetLoginArm)
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
+	registerFleetPWARoutes(mux)
 }
 
 // fleetPage serves the page. With ?c=<code> it is the login page
@@ -188,7 +260,9 @@ func (s *server) fleetPage(w http.ResponseWriter, r *http.Request) {
 			writeFleetHop(w, "/fleet?hop=1")
 			return
 		}
-		http.Error(w, "Unauthorized. Run `claude-sessions fleet-url` on the host and open that URL.", http.StatusUnauthorized)
+		// An installed home-screen app keeps its own cookie jar, so it can
+		// land here with no cookie and no way to open a link: ask for one.
+		fleetLoginFormPage(w)
 		return
 	}
 	h := w.Header()
@@ -197,6 +271,9 @@ func (s *server) fleetPage(w http.ResponseWriter, r *http.Request) {
 	h.Set("Referrer-Policy", "same-origin")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
+	// Marks the app page for the service worker, which caches /fleet for
+	// offline start only when this is set: never the hop or login pages.
+	h.Set("X-Fleet-App", "1")
 	_, _ = w.Write(fleetPageHTML)
 }
 
@@ -279,7 +356,11 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	for k, v := range state {
 		out[k] = v
 	}
-	_, fl := s.discoverFleet()
+	_, fl, sessions := s.discoverFleetList()
+	if !fl.Alive {
+		_, _, _, fl.HasLast = s.fleetLastPlan()
+	}
+	s.fleetStartInfo(&fl, sessions)
 	out["fleet"] = fl
 	out["stale"] = fleetStateStale(state, stateErr, s.fleetNow())
 	if stateErr != "" {
@@ -320,6 +401,10 @@ type fleetLogEntry struct {
 	Text   string `json:"text,omitempty"`
 	URL    string `json:"url,omitempty"`
 	CardID string `json:"cardId,omitempty"`
+	// web-start lines only.
+	Mode      string `json:"mode,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+	Tmux      string `json:"tmux,omitempty"`
 }
 
 func (s *server) appendFleetLog(e fleetLogEntry) error {

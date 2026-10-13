@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,6 +219,50 @@ func fleetLoginPage(w http.ResponseWriter, code string) {
 		`<button type="submit">Log in</button></form></html>`))
 }
 
+// fleetLoginFormPage is the 401 for /fleet?hop=1 with no auth: a form to
+// paste a fleet-url link or code. An installed home-screen app (iOS keeps a
+// separate cookie jar for it) starts here with no cookie, and a link opened
+// from another app goes to the browser, not to the installed app.
+func fleetLoginFormPage(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Content-Security-Policy", fleetLoginPageCSP)
+	h.Set("Referrer-Policy", "same-origin")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8">` +
+		`<meta name="viewport" content="width=device-width, initial-scale=1">` +
+		`<title>Log in to FLEET</title>` +
+		`<style>body{font:18px system-ui,sans-serif;padding:3em 1em;max-width:32em;margin:auto}` +
+		`input,button{font:inherit;box-sizing:border-box;width:100%;padding:.7em;border-radius:.5em}` +
+		`button{margin-top:.8em;font-size:1.2em}</style>` +
+		`<h1>Log in to FLEET</h1>` +
+		`<p>On the workstation run <code>claude-sessions fleet-url</code>. Paste the link or the code here.</p>` +
+		`<form method="POST" action="/fleet/login">` +
+		`<input name="c" type="text" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Link or code">` +
+		`<button type="submit">Log in</button></form></html>`))
+}
+
+// fleetCodeFromInput takes the code from a pasted value: a bare code, or a
+// whole fleet-url link (or its query) holding c=. A code is base64url, so it
+// never contains "c=" itself.
+func fleetCodeFromInput(v string) string {
+	v = strings.TrimSpace(v)
+	if !strings.Contains(v, "c=") {
+		return v
+	}
+	q := v
+	if i := strings.IndexByte(q, '?'); i >= 0 {
+		q = q[i+1:]
+	}
+	if i := strings.IndexByte(q, '#'); i >= 0 {
+		q = q[:i]
+	}
+	vals, _ := url.ParseQuery(q)
+	return strings.TrimSpace(vals.Get("c"))
+}
+
 // fleetLogin is POST /fleet/login (form field c): consume the code, set the
 // cookie, and 303 to /fleet. The POST comes from fleetLoginPage, a
 // same-origin page, so the redirect is a same-site navigation and the browser
@@ -236,7 +281,8 @@ func (s *server) fleetLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// PostForm, not Form: the code comes from the body only, never the URL.
-	sec := s.redeemFleetCode(r.PostForm.Get("c"))
+	// The field holds a bare code, or a link pasted into fleetLoginFormPage.
+	sec := s.redeemFleetCode(fleetCodeFromInput(r.PostForm.Get("c")))
 	if sec == "" {
 		http.Error(w, fleetLoginGone, http.StatusUnauthorized)
 		return

@@ -139,27 +139,45 @@ func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"turns": []fleetChatTurn{}, "pos": 0, "reset": true, "sessionId": sid, "reason": reason})
 	}
 	_, fl := s.discoverFleet()
+	home, homeErr := s.fleetHome()
+	sid, readOnly, path := fl.SessionID, false, ""
 	if !fl.Alive {
-		empty("", fl.Reason)
-		return
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		empty(fl.SessionID, "no home dir")
-		return
-	}
-	path := findTranscript(home, fl.SessionID)
-	if path == "" {
-		empty(fl.SessionID, "transcript not found")
-		return
+		// FLEET is down: mirror the last session read-only, so the page
+		// still shows what FLEET said last. Only for not_live: when two
+		// sessions claim the name, nothing says which one to show.
+		// The lookup is memoized (a miss for 30 s): this runs every poll.
+		l, ok := readFleetLast(s.fleetLastPath())
+		if fl.Code != "not_live" || !ok {
+			empty("", fl.Reason)
+			return
+		}
+		if path, _, ok = s.fleetTranscript(l.SessionID); !ok {
+			empty("", fl.Reason)
+			return
+		}
+		sid, readOnly = l.SessionID, true
+	} else {
+		if homeErr != nil {
+			empty(sid, "no home dir")
+			return
+		}
+		if path = findTranscript(home, sid); path == "" {
+			empty(sid, "transcript not found")
+			return
+		}
 	}
 	turns, pos, reset, err := extractChatTurns(path, since, n, fleetChatTailBytes)
 	if err != nil {
-		empty(fl.SessionID, "transcript unreadable")
+		empty(sid, "transcript unreadable")
 		return
 	}
 	if turns == nil {
 		turns = []fleetChatTurn{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"turns": turns, "pos": pos, "reset": reset, "sessionId": fl.SessionID})
+	out := map[string]any{"turns": turns, "pos": pos, "reset": reset, "sessionId": sid}
+	if readOnly {
+		out["readOnly"] = true
+		out["reason"] = fl.Reason
+	}
+	writeJSON(w, http.StatusOK, out)
 }
