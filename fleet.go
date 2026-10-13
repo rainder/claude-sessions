@@ -26,7 +26,8 @@ const (
 	// healthy FLEET writes state.json at least that often.
 	fleetStaleAfter = 40 * time.Minute
 	fleetPageCSP    = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
-		"connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		"connect-src 'self'; img-src 'self' data:; manifest-src 'self'; worker-src 'self'; " +
+		"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
 // fleetDeps holds the /fleet routes' seams and their small in-memory state.
@@ -216,6 +217,7 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("POST /fleet/login", s.fleetLogin)
 	mux.HandleFunc("POST /fleet/login/arm", s.fleetLoginArm)
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
+	registerFleetPWARoutes(mux)
 }
 
 // fleetPage serves the page. With ?c=<code> it is the login page
@@ -243,6 +245,9 @@ func (s *server) fleetPage(w http.ResponseWriter, r *http.Request) {
 	h.Set("Referrer-Policy", "same-origin")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
+	// Marks the app page for the service worker, which caches /fleet for
+	// offline start only when this is set: never the hop or login pages.
+	h.Set("X-Fleet-App", "1")
 	_, _ = w.Write(fleetPageHTML)
 }
 
