@@ -837,6 +837,67 @@ trusting a client-supplied pane address on the wire, and it only bites a
 hand-managed window that outlives its claude process (a window this tool
 spawned dies with the session).
 
+### FLEET web page
+
+`fleet*.go` + the embedded `fleet.html` serve `/fleet`: a phone-friendly view
+of the long-running Claude session named `FLEET` (spec and plan in
+`docs/superpowers/`). The server makes no decisions. It serves two files FLEET
+writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
+`~/.claude/skills/fleet/scripts/fleet-state.py`) and `~/.claude/fleet/log.jsonl`
+(append-only, `fleet-log.sh`; the server appends `web-say` lines) — mirrors the
+FLEET transcript, and types text into the FLEET pane. Routes: `GET /fleet`,
+`/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
+main mux only (never the loopback paste mux).
+
+**Auth.** Bearer header, or the `cs_fleet` cookie (the token itself;
+`Path=/fleet`, `HttpOnly`, `SameSite=Strict`). Only `fleetAuth` reads the
+cookie, so it opens nothing outside `/fleet*`. `claude-sessions fleet-url`
+prints `/fleet?t=<token>`; that request sets the cookie and answers a small
+HTML hop that `location.replace`s to `/fleet` — **not a 303**: a link tapped in
+another app is a cross-site navigation, and the browser would not send the new
+Strict cookie on its redirect. The page sends `Referrer-Policy: same-origin`,
+**not `no-referrer`**: with `no-referrer` browsers send `Origin: null` on POST,
+and the CSRF guard would refuse every send. `/fleet/usage` exists only because
+the cookie path cannot reach `/usage/numbers`.
+
+**Discovery.** Exactly one local row with `Name == "FLEET"` (exact match: other
+rows contain the word). 0 → not running, 2+ → `ambiguous`; both refuse sends.
+
+**Say guards, in order, and why each exists.** Cookie auth needs `Origin` (or
+`Referer`) host == `r.Host`. Newlines flatten to spaces and other control bytes
+are refused: tmux types a literal newline as Enter, and ESC could drive the
+TUI. `send-keys -l --`: without `--` a text starting with `-` is read as tmux
+flags. 1 s gap and a 10 s per-text double-tap map, stamped after Enter.
+Identity: cached discovery, then a fresh `resolveLivePID`, then `findFleet`
+again on that fresh list; an empty session id is refused because it would
+switch off `resolveLivePID`'s check. `WaitingFor != ""` refuses, and so does a
+pane whose input box is not visible: typed text plus Enter would answer a
+permission dialog. A box that already holds text refuses (another device, or
+Andy at the terminal). Then the text is typed, the pane is captured **again**,
+and Enter is pressed only if the box is still there and now holds text — the
+box was empty before, so that text is ours (it is not compared: Claude Code may
+show a long text as `[Pasted text #1]`). **Residual race, accepted:** a dialog
+that opens in the milliseconds between that capture and Enter still takes the
+Enter. Nothing outside Claude Code can lock its state.
+
+**Input-box parser** (`paneInputText`, `capture-pane -p -e`): the region
+between the last two `─` rule lines whose first line starts with `❯`; dim text
+(SGR 2) is Claude Code's placeholder and is dropped. If Claude Code changes how
+it draws the prompt, the parser finds no box and every send is refused (fails
+closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens.
+
+**Cursors.** Chat: `since=<byte position>` in the transcript; the server
+returns every turn that changed after it (a later line of the same assistant
+message can update an earlier turn, which a uuid cursor misses) and the page
+upserts by uuid; an unchanged file costs one `stat`. Log: `before=<absolute
+byte offset>` read backward in chunks — a line index or a timestamp would
+drift or collide as FLEET appends.
+
+**state.json.** Re-read only when (mtime, size) changes; a bad file never
+replaces the last good copy and never causes a 500 (`stateError` says why).
+`stale` when `writtenAt` is missing, unparseable, or older than 40 minutes.
+"Done today" is computed in the page at local midnight Europe/Vilnius.
+
 ### Usage polling
 
 Two different things live here and they cost wildly different amounts, which is
