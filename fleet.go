@@ -42,6 +42,14 @@ type fleetDeps struct {
 	goodSize int64
 
 	logMu sync.Mutex // serializes this process's log.jsonl appends
+
+	typeText   func(target, text string) error // nil → tmux send-keys -l
+	pressEnter func(target string) error       // nil → tmux send-keys Enter
+	sleep      func(time.Duration)             // nil → time.Sleep
+
+	sayMu     sync.Mutex // one send at a time, so two devices never interleave keystrokes
+	lastSayAt time.Time
+	saidAt    map[string]time.Time // text → completion time, last 10 s only
 }
 
 func (s *server) fleetDir() string {
@@ -468,10 +476,4 @@ func (s *server) fleetLog(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "next": next})
-}
-
-// Stubs until each route lands; every one is replaced in the commit that
-// adds its real handler.
-func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
 }
