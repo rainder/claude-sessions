@@ -230,6 +230,11 @@ section { min-width: 0; }
 .row-l2 .sess { font-family: var(--mono); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-l2 .wo { color: var(--amber); }
 .row-body { padding: 0 12px 10px; font-size: 14px; }
+.sec-sent { margin-top: 18px; }
+.sent-row .row-l1 .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.sent-row .row-l2 .pick { color: var(--accent); }
+.sent-row .row-body { padding: 0 8px 8px; }
+.sent-row .card { margin-bottom: 0; }
 
 /* Chat */
 .chat { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); min-width: 0; }
@@ -433,6 +438,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         <div id="list-needs"></div>
       </section>
       <p class="empty" id="no-decisions" hidden>Nothing needs you now.</p>
+      <section class="sec-sent" id="sec-sent" aria-labelledby="h-sent" hidden>
+        <h2 class="sec-h" id="h-sent">Sent - waiting for FLEET <span class="n" id="n-sent">0</span></h2>
+        <div class="rows" id="list-sent"></div>
+      </section>
     </div>
 
     <section class="chat" id="chat" aria-labelledby="h-chat">
@@ -737,9 +746,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   let state = null, stateText = "", stateDay = "";
   let alive = false;
   const expanded = new Set();          // "row:<id>" for compact rows left open
-  // cardId → {attempts, changing, cardChanged}. attempts: every answer sent
-  // for the card, oldest first: the first answer, then each correction, as
-  // {key, label, lean, state, inflight, cardAt (card updatedAt at send), ts}.
+  // cardId → {attempts, changing, cardChanged, inStrip}. attempts: every
+  // answer sent for the card, oldest first: the first answer, then each
+  // correction, as {key, label, lean, state, inflight, cardAt (card
+  // updatedAt at send), csig (cardSig at send), title, ts}. inStrip: the
+  // last answer was confirmed, so the card left Decide for the "Sent"
+  // strip until FLEET rewrites or drops it.
   // state: "sending" | "sent" | "unconfirmed" (no clear HTTP answer: it may
   // have reached FLEET). cardChanged: the last attempt is unconfirmed and the
   // card was rewritten after it.
@@ -753,7 +765,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     for (const [id, p] of pending) {
       const a = lastAttempt(p);
       if (!a || now - a.ts > PEND_MAX) continue;
-      out[id] = {cardId: id, updatedAt: a.cardAt, key: a.key, label: a.label, at: new Date(a.ts).toISOString(), status: a.state};
+      out[id] = {cardId: id, updatedAt: a.cardAt, key: a.key, label: a.label, lean: a.lean, csig: a.csig, title: a.title,
+        at: new Date(a.ts).toISOString(), status: a.state};
     }
     try {
       if (Object.keys(out).length) localStorage.setItem(PEND_KEY, JSON.stringify(out));
@@ -773,8 +786,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       const ts = Date.parse(str(o.at)), st = str(o.status);
       if (!isFinite(ts) || now - ts > PEND_MAX || now - ts < -PEND_MAX) continue;
       if (st !== "sending" && st !== "sent" && st !== "unconfirmed") continue;
-      pending.set(id, {changing: false, cardChanged: false, attempts: [{key: str(o.key), label: str(o.label) || str(o.key),
-        lean: false, state: st === "sent" ? "sent" : "unconfirmed", inflight: false, cardAt: str(o.updatedAt), ts}]});
+      pending.set(id, {changing: false, cardChanged: false, inStrip: st === "sent", attempts: [{key: str(o.key), label: str(o.label) || str(o.key),
+        lean: o.lean === true, state: st === "sent" ? "sent" : "unconfirmed", inflight: false, cardAt: str(o.updatedAt),
+        csig: str(o.csig) || null, title: str(o.title), ts}]});
     }
     savePending();
   }
@@ -1339,12 +1353,56 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return row;
   }
 
+  // cardSig: a short hash of what FLEET shows and asks on a card: kind,
+  // status, title, ticket, summary, lean and every option's key, label,
+  // line and send text. A change means FLEET asks again. Two 32-bit FNV-1a
+  // passes with different seeds keep it small for storage.
+  function cardSig(c) {
+    const j = JSON.stringify([str(c.kind), str(c.status), str(c.title), str(c.ticket), str(c.summary), str(c.lean),
+      optionList(c).map(o => [str(o.key), str(o.label), str(o.line), str(o.send)])]);
+    const fnv = seed => {
+      let h = seed >>> 0;
+      for (let i = 0; i < j.length; i++) { h ^= j.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+      return h.toString(36);
+    };
+    return "c1:" + fnv(2166136261) + "." + fnv(374761393) + "." + j.length.toString(36);
+  }
+  const cardTitle = c => { const h = cardHead(c); return h.ticket ? h.ticket + " · " + h.title : h.title; };
+  function inStrip(c) {
+    const p = pending.get(str(c.id));
+    return !!(p && p.inStrip && lastAttempt(p));
+  }
+
+  // One compact row per answered card in the "Sent" strip: title, the
+  // option sent and when. Tapping it opens the full card in its sent
+  // state, where "Send a correction" still works.
+  function sentRow(c) {
+    const id = str(c.id), explicit = str(c.kind) === "explicit-yes";
+    const a = lastAttempt(pending.get(id));
+    const head = cardHead(c);
+    const row = el("details", "row sent-row");
+    if (expanded.has("sent:" + id)) row.open = true;
+    row.addEventListener("toggle", () => {
+      if (row.open) { expanded.add("sent:" + id); markCode(row); } else expanded.delete("sent:" + id);
+    });
+    const l1 = el("div", "row-l1", head.ticket ? el("span", "tk", head.ticket) : null, el("span", "tt", head.title));
+    l1.title = cardTitle(c);
+    const l2 = el("div", "row-l2",
+      el("span", "", a.state === "sending" ? "Sending: " : "Sent: ", el("b", "", a.label)),
+      a.lean ? el("span", "pick", "FLEET's pick") : null,
+      relSpan(new Date(a.ts).toISOString()));
+    row.append(el("summary", "", el("div", "row-main", l1, l2), el("span", "chev")));
+    row.append(el("div", "row-body", decisionCard(c, explicit)));
+    return row;
+  }
+
   function renderCards() {
     const cards = arr(state && state.cards).map(obj).filter(Boolean);
-    const g = {yes: [], needs: [], working: [], waiting: [], done: []};
+    const g = {yes: [], needs: [], working: [], waiting: [], done: [], sent: []};
     for (const c of cards) {
       const k = str(c.kind);
-      if (k === "explicit-yes") g.yes.push(c);
+      if ((k === "explicit-yes" || k === "needs-you") && inStrip(c)) g.sent.push(c);
+      else if (k === "explicit-yes") g.yes.push(c);
       else if (k === "needs-you") g.needs.push(c);
       else if (k === "waiting") g.waiting.push(c);
       else if (k === "done") { if (isToday(str(c.updatedAt))) g.done.push(c); }
@@ -1355,6 +1413,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("sec-yes").hidden = !g.yes.length;
     $("sec-needs").hidden = !g.needs.length;
     $("no-decisions").hidden = !!(g.yes.length || g.needs.length) || !state;
+    $("list-sent").replaceChildren(...g.sent.map(sentRow));
+    $("sec-sent").hidden = !g.sent.length;
+    $("n-sent").textContent = g.sent.length;
     const openYes = g.yes.filter(c => !answered(c)).length, openNeeds = g.needs.filter(c => !answered(c)).length;
     $("n-yes").textContent = openYes;
     $("n-needs").textContent = openNeeds;
@@ -1413,19 +1474,27 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
   }
 
-  // A card's answers go once FLEET drops the card. A rewrite of the card
-  // clears a sent answer, but an unconfirmed one stays (flagged
-  // cardChanged): only Dismiss or a confirmed correction clears it. An entry
-  // with a request still in flight is kept; it is checked once it settles.
+  // Runs on every state answer. An answer goes once its card is gone or no
+  // longer a decision (needs-you / explicit-yes). A sent answer also goes
+  // when FLEET asks again: the card's content signature differs from the
+  // one taken at send time; the card then shows as a normal card.
+  // updatedAt is not used: fleet-state.py stamps it on every card at every
+  // write, so it moves on every FLEET cycle. An entry with no signature
+  // (an older page wrote it) counts as moved, so the card shows. An unconfirmed answer stays through a
+  // rewrite (flagged cardChanged): only Dismiss or a confirmed correction
+  // clears it. An entry with a request still in flight is kept; it is
+  // checked once it settles.
+  const cardMoved = (cur, a) => !a.csig || cardSig(cur) !== a.csig;
   function prunePending() {
     if (!pending.size) return;
-    const now = new Map(arr(state && state.cards).map(obj).filter(c => c && str(c.id)).map(c => [str(c.id), str(c.updatedAt)]));
+    const now = new Map(arr(state && state.cards).map(obj)
+      .filter(c => c && str(c.id) && (str(c.kind) === "needs-you" || str(c.kind) === "explicit-yes")).map(c => [str(c.id), c]));
     let dirty = false;
     for (const [id, p] of pending) {
       const a = lastAttempt(p);
       if (a && p.attempts.some(x => x.inflight)) continue;
       if (!a || !now.has(id)) { pending.delete(id); dirty = true; continue; }
-      const moved = now.get(id) !== a.cardAt;
+      const moved = cardMoved(now.get(id), a);
       if (moved && a.state !== "unconfirmed") { pending.delete(id); dirty = true; continue; }
       p.cardChanged = moved;
     }
@@ -1439,9 +1508,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const currentCard = id => arr(state && state.cards).map(obj).find(c => c && str(c.id) === id) || null;
 
   // sheetValid: the card behind the open sheet is still the same in the
-  // current state: present, same updatedAt, kind and status, the option with
-  // the same key still sends the same text, and (for FLEET's pick) the lean
-  // is the same. A card with no id cannot be tracked and never sends here.
+  // current state: present with the same content signature (kind, status,
+  // text, lean, options). Not updatedAt: it moves on every FLEET write. A
+  // card with no id cannot be tracked and never sends here.
   function sheetValid() {
     const c = sheet.card, o = sheet.opt;
     if (!c || !o) return false;
@@ -1449,11 +1518,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!id) return false;
     const cur = currentCard(id);
     if (!cur) return false;
-    if (str(cur.updatedAt) !== str(c.updatedAt) || str(cur.kind) !== str(c.kind) || str(cur.status) !== str(c.status)) return false;
-    const co = optionList(cur).find(x => str(x.key) === str(o.key));
-    if (!co || str(co.send) !== str(o.send)) return false;
-    if (sheet.lean && str(cur.lean) !== str(c.lean)) return false;
-    return true;
+    return cardSig(cur) === cardSig(c);
   }
 
   function openSheet(c, o, lean, explicit) {
@@ -1528,9 +1593,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     btn.textContent = "Sending…";
     const c = sheet.card, o = sheet.opt, text = sheet.text;
     const id = str(c.id);
-    const att = {key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", inflight: true, cardAt: str(c.updatedAt), ts: Date.now()};
+    const att = {key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", inflight: true, cardAt: str(c.updatedAt),
+      csig: cardSig(c), title: cardTitle(c), ts: Date.now()};
     let p = pending.get(id);
-    if (!p) { p = {attempts: [], changing: false, cardChanged: false}; pending.set(id, p); }
+    if (!p) { p = {attempts: [], changing: false, cardChanged: false, inStrip: false}; pending.set(id, p); }
     p.attempts.push(att);
     p.changing = false; p.cardChanged = false;
     savePending();
@@ -1539,11 +1605,15 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const res = await say(text, id);
     att.inflight = false;
     if (res.ok) {
+      // Confirmed: the card leaves Decide for the "Sent" strip.
       att.state = "sent";
+      p.inStrip = true;
       toast(res.queued ? "Sent. FLEET is busy. It reads your answer next." : "Sent to FLEET.");
       afterSend();
     } else if (res.unclear) {
+      // Unknown: back in Decide, so Andy checks it.
       att.state = "unconfirmed";
+      p.inStrip = false;
       toast("Delivery not confirmed. Check the chat before you send again.", true);
       afterSend();
     } else {
