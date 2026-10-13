@@ -72,7 +72,7 @@ header.top {
 .refresh:hover span { color: var(--text); }
 .refresh svg { width: 17px; height: 17px; }
 .refresh.spinning svg { animation: rot .8s linear infinite; }
-.chips { display: flex; align-items: stretch; gap: 6px; width: 100%; margin: 8px 0 0; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; overflow-x: auto; scrollbar-width: none; font: inherit; color: inherit; }
+.chips { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 44px; margin: 4px 0 0; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; overflow-x: auto; scrollbar-width: none; font: inherit; color: inherit; }
 .chips[hidden] { display: none; }
 .chip { display: block; }
 .chip .lbl, .chip .val { display: inline; }
@@ -177,6 +177,11 @@ section { min-width: 0; }
 .chosen-line b { font-weight: 650; overflow-wrap: anywhere; }
 .chosen-line .cl-t { flex: 1 1 160px; min-width: 0; display: flex; align-items: center; gap: 8px; }
 .chosen-line .link-btn { margin-left: auto; }
+.chosen-line.warn { background: var(--amber-tint); color: var(--amber); }
+.chosen-line.warn .dot { background: var(--amber); }
+.chosen-line + .chosen-line { margin-top: 6px; }
+.chosen-note { display: flex; align-items: center; gap: 8px; margin: 4px 0 0 10px; font-size: 13px; color: var(--muted); }
+.chosen-note .link-btn { margin-left: auto; }
 .summary { margin: 0 0 10px; overflow-wrap: anywhere; }
 .links { display: flex; flex-wrap: wrap; gap: 0 16px; }
 .links a { display: inline-flex; align-items: center; min-height: 44px; }
@@ -227,7 +232,8 @@ section { min-width: 0; }
 /* Chat */
 .chat { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); min-width: 0; }
 .log-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.ro-top { flex: none; margin: 6px 12px 0; padding: 5px 10px; border-radius: 8px; background: var(--surface2); color: var(--muted); font-size: 12.5px; text-align: center; }
+/* Read-only chat: full-contrast turns on a slightly muted log. */
+.chat-log.ro { background: color-mix(in srgb, var(--line) 30%, transparent); }
 .newmsg { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 2; min-height: 36px; padding: 0 14px; border: 0; border-radius: 99px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 650; box-shadow: var(--shadow); cursor: pointer; white-space: nowrap; }
 .newmsg::before { content: ""; position: absolute; inset: -4px; }
 .chat .sec-h { margin: 0; padding: 10px 12px 0; }
@@ -425,7 +431,6 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     <section class="chat" id="chat" aria-labelledby="h-chat">
       <h2 class="sec-h" id="h-chat">Chat</h2>
       <div class="log-wrap">
-        <p class="ro-top" id="ro-top" hidden>The last FLEET session. Read only.</p>
         <div class="chat-log" id="chat-log" aria-live="polite"></div>
         <button class="newmsg" id="newmsg" type="button" hidden>New messages ↓</button>
       </div>
@@ -725,7 +730,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   let state = null, stateText = "", stateDay = "";
   let alive = false;
   const expanded = new Set();          // "row:<id>" for compact rows left open
-  const pending = new Map();           // cardId → {at: updatedAt at send, key, label, lean, sent, changing}
+  // cardId → {at: updatedAt at send, key, label, lean, state, inflight, changing, prev}
+  // state: "sending" | "sent" | "unconfirmed" (no HTTP answer: it may have
+  // reached FLEET). prev: {label, state} of the answer a correction replaced.
+  const pending = new Map();
   const failed = {};                   // poller name → last fetch failed
   // readOnly: the turns are the last FLEET session's, FLEET is not running.
   // stale: a render was skipped while the chat was hidden (phone view).
@@ -733,7 +741,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // view; else they raise the "New messages" pill (unseen). savedTop: the
   // log's scroll offset when the phone Chat view was left.
   const chat = {sid: null, pos: null, turns: new Map(), reason: "", open: new Set(), key: "", readOnly: false, stale: false,
-    follow: true, unseen: false, rendered: 0, savedTop: null};
+    follow: true, unseen: false, rev: 0, savedTop: null};
   const hist = {entries: [], next: null, filter: "", loading: false, loaded: false};
   // Start FLEET: flight = the POST is out; watch = a start is under way (ours
   // or another device's) and the page polls state fast until FLEET is alive;
@@ -1103,21 +1111,26 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     card.append(el("div", "card-top", title, talk));
 
     // Andy's answer, once sent: shown by the title until FLEET drops or
-    // rewrites the card. The options lock while it stands; "Change" unlocks
-    // them, and a new send replaces the answer (the old flow allowed a
-    // second send too).
+    // rewrites the card. The options lock while it stands. "Send a
+    // correction" unlocks them; the first answer stays in view above the
+    // correction (the old flow allowed a second send too).
     const pend = id ? pending.get(id) : null;
     const locked = !!(pend && !pend.changing);
     if (pend) {
-      const line = el("div", "chosen-line" + (pend.sent ? "" : " sending"),
-        el("span", "cl-t", el("span", "dot"), el("span", "", "You chose: ", el("b", "", pend.label), pend.sent ? " · sent, waiting for FLEET" : " · sending…")));
-      if (pend.sent && !pend.changing) {
-        const ch = el("button", "link-btn", "Change");
+      if (pend.prev) card.append(chosenLine("You chose: ", pend.prev.label, pend.prev.state));
+      const line = chosenLine(pend.prev ? "Correction: " : "You chose: ", pend.label, pend.state);
+      card.append(line);
+      if (pend.state !== "sending" && !pend.changing) {
+        const ch = el("button", "link-btn", "Send a correction");
         ch.type = "button";
         ch.addEventListener("click", () => { pend.changing = true; guard(renderCards); });
         line.append(ch);
+      } else if (pend.changing) {
+        const cancel = el("button", "link-btn", "Cancel");
+        cancel.type = "button";
+        cancel.addEventListener("click", () => { pend.changing = false; guard(renderCards); });
+        card.append(el("div", "chosen-note", el("span", "", "Pick the correction below."), cancel));
       }
-      card.append(line);
     }
 
     const sum = str(c.summary);
@@ -1158,6 +1171,23 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const links = linksNode(c);
     if (links) card.append(links);
     return card;
+  }
+
+  const chosenState = {
+    sending: " · sending…",
+    sent: " · sent, waiting for FLEET",
+    unconfirmed: " · delivery not confirmed — check the chat before you send again",
+  };
+  function chosenLine(prefix, label, st) {
+    return el("div", "chosen-line" + (st === "sending" ? " sending" : st === "unconfirmed" ? " warn" : ""),
+      el("span", "cl-t", el("span", "dot"), el("span", "", prefix, el("b", "", label), chosenState[st] || "")));
+  }
+
+  // answered: a card with an answer sent or on its way. It leaves the counts.
+  // An unconfirmed answer still counts as open: Andy must check it.
+  function answered(c) {
+    const p = pending.get(str(c.id));
+    return !!(p && (p.state === "sending" || p.state === "sent"));
   }
 
   function linksNode(c) {
@@ -1213,21 +1243,22 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("sec-yes").hidden = !g.yes.length;
     $("sec-needs").hidden = !g.needs.length;
     $("no-decisions").hidden = !!(g.yes.length || g.needs.length) || !state;
-    $("n-yes").textContent = g.yes.length;
-    $("n-needs").textContent = g.needs.length;
+    const openYes = g.yes.filter(c => !answered(c)).length, openNeeds = g.needs.filter(c => !answered(c)).length;
+    $("n-yes").textContent = openYes;
+    $("n-needs").textContent = openNeeds;
     for (const k of ["working", "waiting", "done"]) {
       $("n-" + k).textContent = g[k].length;
       const box = $("list-" + k);
       if (!g[k].length) box.replaceChildren(el("p", "empty", k === "done" ? "Nothing done today." : "None."));
       else box.replaceChildren(el("div", "rows", ...g[k].map(compactRow)));
     }
-    const n = g.yes.length + g.needs.length;
+    const n = openYes + openNeeds;
     decideN = n;
     document.title = n ? "(" + n + ") FLEET" : "FLEET";
     const badge = $("badge-decide");
     badge.hidden = !n;
     badge.textContent = n > 99 ? "99+" : String(n);
-    badge.classList.toggle("red", g.yes.length > 0);
+    badge.classList.toggle("red", openYes > 0);
     badge.parentNode.parentNode.setAttribute("aria-label", n ? "Decide, " + n + " need you" : "Decide");
     markCode();
   }
@@ -1250,10 +1281,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const fl = obj(st.fleet);
     alive = !!(fl && fl.alive === true);
 
-    // A card leaves "sent" once FLEET drops it or rewrites it.
-    if (pending.size) {
-      const now = new Map(arr(st.cards).map(obj).filter(c => c && str(c.id)).map(c => [str(c.id), str(c.updatedAt)]));
-      for (const [id, p] of pending) if (!now.has(id) || now.get(id) !== p.at) pending.delete(id);
+    prunePending();
+    // An open sheet must not send an answer to a card that has moved on.
+    if (sheet.card && !sheet.busy && $("sheet").open && !sheetValid()) {
+      closeSheet();
+      toast("The card changed. Check it again.", true);
     }
     if (changed) {
       guard(renderStatus);
@@ -1268,15 +1300,44 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
   }
 
+  // A card leaves "sent" once FLEET drops it or rewrites it. An entry whose
+  // request is still in flight is kept; it is checked once it settles.
+  function prunePending() {
+    if (!pending.size) return;
+    const now = new Map(arr(state && state.cards).map(obj).filter(c => c && str(c.id)).map(c => [str(c.id), str(c.updatedAt)]));
+    for (const [id, p] of pending) if (!p.inflight && (!now.has(id) || now.get(id) !== p.at)) pending.delete(id);
+  }
+
   // ---- confirm sheet -----------------------------------------------------
-  const sheet = {card: null, opt: null, lean: false, text: "", explicit: false, busy: false, armTimer: 0};
+  // armed: an explicit yes had its "I read this" tap and the 600 ms wait.
+  const sheet = {card: null, opt: null, lean: false, text: "", explicit: false, busy: false, armed: false, armTimer: 0};
+
+  const currentCard = id => arr(state && state.cards).map(obj).find(c => c && str(c.id) === id) || null;
+
+  // sheetValid: the card behind the open sheet is still the same in the
+  // current state: present, same updatedAt, kind and status, the option with
+  // the same key still sends the same text, and (for FLEET's pick) the lean
+  // is the same. A card with no id cannot be tracked and passes.
+  function sheetValid() {
+    const c = sheet.card, o = sheet.opt;
+    if (!c || !o) return false;
+    const id = str(c.id);
+    if (!id) return true;
+    const cur = currentCard(id);
+    if (!cur) return false;
+    if (str(cur.updatedAt) !== str(c.updatedAt) || str(cur.kind) !== str(c.kind) || str(cur.status) !== str(c.status)) return false;
+    const co = optionList(cur).find(x => str(x.key) === str(o.key));
+    if (!co || str(co.send) !== str(o.send)) return false;
+    if (sheet.lean && str(cur.lean) !== str(c.lean)) return false;
+    return true;
+  }
 
   function openSheet(c, o, lean, explicit) {
     if (!alive || expired) return;
     const base = str(o.send);
     if (!base) return;
     const head = cardHead(c);
-    sheet.card = c; sheet.opt = o; sheet.lean = lean; sheet.explicit = explicit; sheet.busy = false;
+    sheet.card = c; sheet.opt = o; sheet.lean = lean; sheet.explicit = explicit; sheet.busy = false; sheet.armed = false;
     sheet.text = lean ? base + " (lean)" : base;
     const label = optLabel(o);
     const d = $("sheet");
@@ -1306,7 +1367,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     clearTimeout(sheet.armTimer);
     const d = $("sheet");
     if (d.open) { if (typeof d.close === "function") d.close(); else d.removeAttribute("open"); }
-    sheet.card = null; sheet.busy = false;
+    sheet.card = null; sheet.busy = false; sheet.armed = false;
   }
 
   // First tap of an explicit yes. The approve button shows in a new place and
@@ -1318,36 +1379,48 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     ap.hidden = false;
     ap.disabled = true;
     clearTimeout(sheet.armTimer);
-    sheet.armTimer = setTimeout(() => { if (!sheet.busy) { ap.disabled = false; ap.focus(); } }, 600);
+    sheet.armTimer = setTimeout(() => { if (!sheet.busy) { sheet.armed = true; ap.disabled = false; ap.focus(); } }, 600);
   });
 
   const optLabel = o => str(o.label) || str(o.send) || str(o.key);
 
   // The sheet closes at once; the card shows "You chose: … · sending…" and
-  // locks its options until the answer lands. A failed send restores what
-  // the card showed before.
+  // locks its options until the answer lands. An HTTP error answer restores
+  // what the card showed before. No answer at all (network error, timeout)
+  // may still have reached FLEET, so the card says delivery is not
+  // confirmed and keeps its options locked.
   async function sheetSend(btn) {
     if (sheet.busy || !sheet.card) return;
+    // An explicit yes sends only from the armed approve button.
+    if (sheet.explicit && (!sheet.armed || btn !== $("sheet-approve"))) return;
+    if (!alive || expired) { closeSheet(); toast("FLEET is not running. You cannot send now.", true); return; }
+    if (!sheetValid()) { closeSheet(); toast("The card changed. Check it again.", true); return; }
     sheet.busy = true;
     for (const b of ["sheet-approve", "sheet-send", "sheet-cancel"]) $(b).disabled = true;
     btn.textContent = "Sending…";
     const c = sheet.card, o = sheet.opt, text = sheet.text;
     const id = str(c.id);
     const prev = id ? pending.get(id) : undefined;
-    const entry = {at: str(c.updatedAt), key: str(o.key), label: optLabel(o), lean: sheet.lean, sent: false, changing: false};
+    const entry = {at: str(c.updatedAt), key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", inflight: true, changing: false,
+      prev: prev ? {label: prev.label, state: prev.state} : null};
     if (id) { pending.set(id, entry); guard(renderCards); }
     closeSheet();
     const res = await say(text, id || null);
+    entry.inflight = false;
     if (res.ok) {
-      entry.sent = true;
-      guard(renderCards);
+      entry.state = "sent";
       toast(res.queued ? "Sent. FLEET is busy. It reads your answer next." : "Sent to FLEET.");
+      afterSend();
+    } else if (res.unclear) {
+      entry.state = "unconfirmed";
+      toast("Delivery not confirmed. Check the chat before you send again.", true);
       afterSend();
     } else {
       if (id && pending.get(id) === entry) { if (prev) { prev.changing = false; pending.set(id, prev); } else pending.delete(id); }
-      guard(renderCards);
       toast(res.error, true);
     }
+    prunePending();
+    guard(renderCards);
   }
   $("sheet-approve").addEventListener("click", e => sheetSend(e.currentTarget));
   $("sheet-send").addEventListener("click", e => sheetSend(e.currentTarget));
@@ -1363,16 +1436,25 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     "bad text": "The server refused the text. Remove special characters and try again.",
   };
 
+  // say answers {ok}, or {ok:false, error}, or {ok:false, unclear:true}
+  // when no HTTP answer came back (network error or the 15 s timeout): the
+  // text may have reached FLEET, so the caller must not act as if it did not.
+  const SAY_TIMEOUT = 15000;
   async function say(text, cardId) {
+    const ctl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), SAY_TIMEOUT) : 0;
+    const unclear = {ok: false, unclear: true, error: "The page did not get an answer. Check the chat before you send again."};
     let r;
     try {
-      r = await fetch("/fleet/say", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text, cardId})});
+      r = await fetch("/fleet/say", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text, cardId}), signal: ctl ? ctl.signal : undefined});
     } catch {
-      return {ok: false, error: "The page cannot reach the server. Try again."};
+      clearTimeout(timer);
+      return unclear;
     }
-    if (r.status === 401) { expire(); return {ok: false, error: "Session expired. Run claude-sessions fleet-url on the host."}; }
+    if (r.status === 401) { clearTimeout(timer); expire(); return {ok: false, error: "Session expired. Run claude-sessions fleet-url on the host."}; }
     let raw = "", body = null;
-    try { raw = await r.text(); } catch { raw = ""; }
+    try { raw = await r.text(); } catch { clearTimeout(timer); if (r.ok) return unclear; raw = ""; }
+    clearTimeout(timer);
     try { body = obj(JSON.parse(raw)); } catch { body = null; }
     if (r.ok && body && body.ok === true) return {ok: true, queued: body.queued === true};
     let msg = (body && str(body.error)) || raw.trim() || r.statusText || ("HTTP " + r.status);
@@ -1412,7 +1494,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (sid && chat.sid !== null && sid !== chat.sid) {
       // Another FLEET session: start over from the top of its transcript.
       chat.sid = sid; chat.pos = 0; chat.turns.clear(); chat.reason = str(d.reason);
-      chat.follow = true; chat.unseen = false; chat.rendered = 0; chat.savedTop = null;
+      chat.follow = true; chat.unseen = false; chat.rev = 0; chat.savedTop = null;
       guard(renderChat);
       return "again";
     }
@@ -1442,7 +1524,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!log.getClientRects().length) { chat.stale = true; return; }
     chat.stale = false;
     const first = !log.querySelector(".turn");
-    const before = chat.rendered;
+    // rev grows with every new turn and every turn whose text grows, so a
+    // streaming reply also raises the pill while Andy reads further up.
+    let rev = 0;
+    for (const t of chat.turns.values()) rev += t.text.length + 1;
+    const grew = rev > chat.rev;
     const nodes = [];
     for (const t of chat.turns.values()) {
       const user = t.role === "user";
@@ -1472,9 +1558,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       });
       w.append(t);
     }
-    chat.rendered = chat.turns.size;
+    chat.rev = rev;
     if (first || chat.follow) { log.scrollTop = log.scrollHeight; chat.unseen = false; }
-    else if (chat.turns.size > before) chat.unseen = true;
+    else if (grew) chat.unseen = true;
     $("newmsg").hidden = !chat.unseen;
     markCode(log);
   }
@@ -1552,7 +1638,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("ro-strip").hidden = !strip;
     $("composer-row").hidden = strip;
     $("say-hint").hidden = strip;
-    $("ro-top").hidden = !ro;
+    $("chat-log").classList.toggle("ro", ro);
     $("ro-text").textContent = ph === "starting" ? "FLEET is starting…" : ph === "still" ? "FLEET is still starting…"
       : ph === "lastlive" ? LAST_LIVE : ro ? "Read only — FLEET is not running" : "FLEET is not running";
     $("ro-start").hidden = ph !== "can";
