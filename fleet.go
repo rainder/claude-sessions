@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -275,12 +279,199 @@ func fleetStateStale(state map[string]json.RawMessage, stateErr string, now time
 	return now.Sub(t) > fleetStaleAfter
 }
 
-// Stubs until each route lands; every one is replaced in the commit that
-// adds its real handler.
-func (s *server) fleetLog(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+const (
+	fleetLogChunk   = 256 << 10
+	fleetLogMaxScan = 8 << 20
+)
+
+type fleetLogEntry struct {
+	At     string `json:"at"`
+	Type   string `json:"type"`
+	Ticket string `json:"ticket,omitempty"`
+	Text   string `json:"text,omitempty"`
+	URL    string `json:"url,omitempty"`
+	CardID string `json:"cardId,omitempty"`
 }
 
+func (s *server) appendFleetLog(e fleetLogEntry) error {
+	dir := s.fleetDir()
+	if dir == "" {
+		return fmt.Errorf("no home directory")
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	s.fleet.logMu.Lock()
+	defer s.fleet.logMu.Unlock()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "log.jsonl"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(line, '\n'))
+	return err
+}
+
+func validFleetLogLine(b []byte) bool {
+	var probe struct {
+		At   string `json:"at"`
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(b, &probe) == nil && probe.At != "" && probe.Type != ""
+}
+
+// readFleetLogPage reads backward from byte offset before (-1 = end of file)
+// and returns up to n valid entries, newest first. next is the absolute
+// offset where the oldest returned line starts, or nil when nothing older
+// remains. Offsets are absolute in an append-only file, so a cursor stays
+// valid however much FLEET appends after it was issued.
+func (s *server) readFleetLogPage(before int64, n int) ([]json.RawMessage, *int64, error) {
+	f, err := os.Open(filepath.Join(s.fleetDir(), "log.jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	end := st.Size()
+	if before >= 0 && before < end {
+		end = before
+	}
+	// A trailing line without '\n' is a writer mid-append: end the read at
+	// the last newline.
+	if end == st.Size() && end > 0 {
+		end, err = lastNewlineEnd(f, end)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	type line struct {
+		off int64
+		raw []byte
+	}
+	var found []line // newest first
+	scanned := int64(0)
+	chunk := int64(fleetLogChunk)
+	for end > 0 && len(found) < n && scanned < fleetLogMaxScan {
+		start := max(0, end-chunk)
+		buf := make([]byte, end-start)
+		if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+			return nil, nil, err
+		}
+		cut := 0
+		if start > 0 {
+			// buf ends on a line boundary, so its last byte is that line's
+			// '\n'; the partial first line ends at the first '\n' before it.
+			i := bytes.IndexByte(buf[:len(buf)-1], '\n')
+			if i < 0 { // one line longer than the chunk: grow and retry
+				if chunk >= fleetLogMaxScan {
+					return nil, nil, fmt.Errorf("log line too long")
+				}
+				chunk *= 2
+				continue
+			}
+			cut = i + 1
+		}
+		body := buf[cut:]
+		var lines []line
+		off := start + int64(cut)
+		for len(body) > 0 {
+			i := bytes.IndexByte(body, '\n')
+			if i < 0 {
+				break
+			}
+			lines = append(lines, line{off: off, raw: body[:i]})
+			off += int64(i + 1)
+			body = body[i+1:]
+		}
+		for i := len(lines) - 1; i >= 0 && len(found) < n; i-- {
+			if validFleetLogLine(lines[i].raw) {
+				found = append(found, lines[i])
+			}
+		}
+		scanned += end - (start + int64(cut))
+		end = start + int64(cut)
+		chunk = fleetLogChunk
+	}
+	out := make([]json.RawMessage, len(found))
+	for i, l := range found {
+		out[i] = json.RawMessage(l.raw)
+	}
+	var next *int64
+	switch {
+	case len(found) == n && found[len(found)-1].off > 0:
+		o := found[len(found)-1].off
+		next = &o
+	case len(found) < n && end > 0: // scan budget ran out before byte 0
+		o := end
+		next = &o
+	}
+	return out, next, nil
+}
+
+// lastNewlineEnd returns the offset just past the last '\n' at or before end.
+func lastNewlineEnd(f *os.File, end int64) (int64, error) {
+	for pos := end; pos > 0; {
+		start := max(0, pos-4096)
+		buf := make([]byte, pos-start)
+		if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+			return 0, err
+		}
+		if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
+			return start + int64(i) + 1, nil
+		}
+		pos = start
+	}
+	return 0, nil
+}
+
+func (s *server) fleetLog(w http.ResponseWriter, r *http.Request) {
+	if s.fleetAuth(r) == fleetAuthNone {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	q := r.URL.Query()
+	n := 50
+	if v := q.Get("n"); v != "" {
+		p, err := strconv.Atoi(v)
+		if err != nil || p < 1 || p > 200 {
+			http.Error(w, "bad n", http.StatusBadRequest)
+			return
+		}
+		n = p
+	}
+	before := int64(-1)
+	if v := q.Get("before"); v != "" {
+		p, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || p < 0 {
+			http.Error(w, "bad before", http.StatusBadRequest)
+			return
+		}
+		before = p
+	}
+	entries, next, err := s.readFleetLogPage(before, n)
+	if err != nil {
+		http.Error(w, "cannot read log", http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []json.RawMessage{}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "next": next})
+}
+
+// Stubs until each route lands; every one is replaced in the commit that
+// adds its real handler.
 func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not implemented", http.StatusNotImplemented)
 }

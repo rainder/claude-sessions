@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -268,5 +269,110 @@ func TestFleetStateAmbiguous(t *testing.T) {
 	out := getFleetJSON(t, s, "/fleet/state")
 	if fl := out["fleet"].(map[string]any); fl["alive"] != false || fl["reason"] != "ambiguous" {
 		t.Fatalf("fleet = %v", fl)
+	}
+}
+
+func fleetLogLines(from, to int) string {
+	var b strings.Builder
+	for i := from; i < to; i++ {
+		fmt.Fprintf(&b, `{"at":"2026-10-13T09:00:%02dZ","type":"merge","text":"m%d"}`+"\n", i, i)
+	}
+	return b.String()
+}
+
+func logTexts(out map[string]any) []string {
+	var got []string
+	for _, e := range out["entries"].([]any) {
+		got = append(got, e.(map[string]any)["text"].(string))
+	}
+	return got
+}
+
+func TestFleetLogPagesNewestFirst(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	body := fleetLogLines(0, 2) + "not json\n" + `{"text":"no at"}` + "\n" + fleetLogLines(2, 5) + `{"at":"partial`
+	writeFleetFile(t, s, "log.jsonl", body)
+
+	out := getFleetJSON(t, s, "/fleet/log?n=2")
+	if got := logTexts(out); strings.Join(got, ",") != "m4,m3" {
+		t.Fatalf("page 1 = %v", got)
+	}
+	next := int64(out["next"].(float64))
+	out = getFleetJSON(t, s, fmt.Sprintf("/fleet/log?n=2&before=%d", next))
+	if got := logTexts(out); strings.Join(got, ",") != "m2,m1" {
+		t.Fatalf("page 2 = %v", got)
+	}
+	next = int64(out["next"].(float64))
+	out = getFleetJSON(t, s, fmt.Sprintf("/fleet/log?n=2&before=%d", next))
+	if got := logTexts(out); strings.Join(got, ",") != "m0" || out["next"] != nil {
+		t.Fatalf("page 3 = %v next %v", got, out["next"])
+	}
+}
+
+func TestFleetLogCursorSurvivesAppends(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	writeFleetFile(t, s, "log.jsonl", fleetLogLines(0, 5))
+	out := getFleetJSON(t, s, "/fleet/log?n=2")
+	next := int64(out["next"].(float64))
+	f, err := os.OpenFile(filepath.Join(s.fleet.dir, "log.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(fleetLogLines(5, 40))
+	f.Close()
+	out = getFleetJSON(t, s, fmt.Sprintf("/fleet/log?n=2&before=%d", next))
+	if got := logTexts(out); strings.Join(got, ",") != "m2,m1" {
+		t.Fatalf("after appends page 2 = %v", got)
+	}
+}
+
+func TestFleetLogSpansChunks(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	pad := strings.Repeat("x", 300*1024) // one line bigger than a chunk
+	body := fleetLogLines(0, 1) + `{"at":"2026-10-13T09:00:01Z","type":"note","text":"` + pad + `"}` + "\n" + fleetLogLines(2, 3)
+	writeFleetFile(t, s, "log.jsonl", body)
+	out := getFleetJSON(t, s, "/fleet/log?n=3")
+	if got := out["entries"].([]any); len(got) != 3 {
+		t.Fatalf("want 3 entries across chunks, got %d", len(got))
+	}
+}
+
+func TestFleetLogMissingFile(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	out := getFleetJSON(t, s, "/fleet/log")
+	if len(out["entries"].([]any)) != 0 || out["next"] != nil {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestFleetLogBadParams(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	for _, q := range []string{"?n=0", "?n=201", "?before=-1", "?before=x"} {
+		r := httptest.NewRequest("GET", "/fleet/log"+q, nil)
+		r.Header.Set("Authorization", "Bearer tok")
+		w := httptest.NewRecorder()
+		fleetMux(s).ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", q, w.Code)
+		}
+	}
+}
+
+func TestAppendFleetLogCreatesDirAndAppends(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	s.fleet.dir = filepath.Join(t.TempDir(), "fleet") // does not exist yet
+	if err := s.appendFleetLog(fleetLogEntry{At: "2026-10-13T09:00:00Z", Type: "web-say", Text: "a\nb"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.appendFleetLog(fleetLogEntry{At: "2026-10-13T09:00:01Z", Type: "web-say", Text: "c", CardID: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(s.fleet.dir, "log.jsonl"))
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[1], `"cardId":"x"`) {
+		t.Fatalf("log = %q", data)
+	}
+	if st, _ := os.Stat(filepath.Join(s.fleet.dir, "log.jsonl")); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode().Perm())
 	}
 }
