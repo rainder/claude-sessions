@@ -788,12 +788,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // attempts whose delivery is not known yet (see "chat messages with
   // unknown delivery").
   const chat = {sid: null, pos: null, turns: new Map(), reason: "", open: new Set(), key: "", readOnly: false, stale: false,
-    follow: true, unseen: false, rev: 0, savedTop: null, local: []};
+    follow: true, unseen: false, rev: 0, dropRev: 0, savedTop: null, local: []};
+  const CHAT_TURNS_MAX = 300;
   const hist = {entries: [], next: null, filter: "", loading: false, loaded: false};
   // Start FLEET: flight = the POST is out; watch = a start is under way (ours
   // or another device's) and the page polls state fast until FLEET is alive;
   // at = the last time a start was seen under way.
-  const start = {flight: false, watch: false, at: 0};
+  // gen counts watched starts; failGen is the gen whose failure was already
+  // reported, so one start gives at most one "did not start" toast.
+  // retryUntil: when the server's 60 s gap between starts ends (from
+  // fleet.retryAfter); waitTimer counts it down.
+  const start = {flight: false, watch: false, at: 0, gen: 0, failGen: -1, retryUntil: 0, waitTimer: 0};
 
   class AuthError extends Error {}
 
@@ -836,9 +841,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   //   "starting"  a start is under way (our POST, or fleet.starting);
   //   "lastlive"  the last FLEET session runs without the FLEET name;
   //   "can"       Start is allowed;
-  //   "still"     not_live, no start allowed, not lastLive: the 90 s
-  //               starting window ran out but the start's tmux session is
-  //               still there, so FLEET is most likely still coming up.
+  //   "still"     fleet.pending: the starting window ran out but the
+  //               start's tmux session (fleet.pendingTmux) is still there,
+  //               so FLEET is most likely still coming up;
+  //   "wait"      Start is not allowed yet: the 60 s gap since the last
+  //               start has retryLeft() seconds to go.
   // lastLive and canStart are checked before hasLast is used anywhere.
   function startPhase() {
     const fl = fleetInfo();
@@ -847,7 +854,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (str(fl.code) !== "not_live") return "";
     if (fl.lastLive === true) return "lastlive";
     if (fl.canStart === true) return "can";
-    return "still";
+    if (fl.pending === true) return "still";
+    if (retryLeft() > 0) return "wait";
+    return "";
+  }
+  const retryLeft = () => Math.max(0, Math.ceil((start.retryUntil - Date.now()) / 1000));
+  const waitText = () => "You can start again in " + retryLeft() + " s.";
+  function stillHint() {
+    const fl = fleetInfo();
+    const t = fl ? str(fl.pendingTmux) : "";
+    return t ? "If nothing happens, check tmux session " + t + " on the workstation." : "";
   }
   const LAST_LIVE = "The last FLEET session runs without the FLEET name.";
 
@@ -970,9 +986,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (ph === "starting") {
         out.push(startingBanner(fl));
       } else if (ph === "still") {
+        const hint = stillHint();
         out.push(el("div", "banner blue act", el("div", "bt", el("span", "spin"),
-          el("span", "", el("span", "b-title", "FLEET is still starting…"), el("span", "b-note", "The page shows it when it runs.")))));
-      } else if (ph === "lastlive" || ph === "can") {
+          el("span", "", el("span", "b-title", "FLEET is still starting…"), el("span", "b-note", "The page shows it when it runs." + (hint ? " " + hint : ""))))));
+      } else if (ph === "lastlive" || ph === "can" || ph === "wait") {
         out.push(notRunningBanner(ph));
       } else if (!fl || fl.alive !== true) {
         const reason = fl ? str(fl.reason) : "";
@@ -1005,11 +1022,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
   function notRunningBanner(ph) {
     const head = el("div", "bt", el("span", "", el("span", "b-title", "FLEET is not running"),
-      el("span", "b-note", ph === "lastlive" ? LAST_LIVE + " Rename it at the terminal." : "You cannot send now.")));
-    if (ph !== "can") return el("div", "banner red act nr", head);
+      el("span", "b-note" + (ph === "wait" ? " wait-left" : ""),
+        ph === "lastlive" ? LAST_LIVE + " Rename it at the terminal." : ph === "wait" ? waitText() : "You cannot send now.")));
+    if (ph !== "can" && ph !== "wait") return el("div", "banner red act nr", head);
     const btn = el("button", "btn btn-primary", "Start FLEET");
     btn.type = "button";
-    btn.disabled = expired;
+    btn.disabled = expired || ph === "wait";
     btn.addEventListener("click", openStartSheet);
     return el("div", "banner red act nr", head, btn);
   }
@@ -1033,7 +1051,6 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const startErrors = {
     already_running: "FLEET is already running.",
     ambiguous: "Two sessions are named FLEET. The page cannot start one.",
-    starting: "FLEET is still starting. Wait a moment.",
     last_live: LAST_LIVE + " Rename it at the terminal.",
   };
 
@@ -1051,7 +1068,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     start.flight = false;
     if (r && r.status === 401) { expire(); toast("Session expired. Run claude-sessions fleet-url on the host.", true); return; }
     if (r && r.ok && body && body.ok === true) {
-      start.watch = true; start.at = Date.now();
+      start.watch = true; start.at = Date.now(); start.gen++;
       if (body.lastMissing === true) toast("The last session could not be resumed. Started a new one.");
     } else if (!r) {
       toast("The page cannot reach the server. Try again.", true);
@@ -1061,10 +1078,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (code === "rate_limited") {
         const n = body && num(body.retryAfter) ? Math.max(1, Math.ceil(body.retryAfter)) : 60;
         msg = "Wait " + n + (n === 1 ? " second" : " seconds") + ", then start FLEET again.";
+      } else if (code === "starting") {
+        // Another start is under way: watch it like our own. The server's
+        // text names the tmux session to check.
+        const e = body ? str(body.error) : "";
+        msg = "FLEET is still starting. " + (e ? sentence(e) : "Wait a moment.");
+        start.watch = true; start.at = Date.now(); start.gen++;
       } else if (startErrors[code]) {
         msg = startErrors[code];
-        // Another start is under way: watch it like our own.
-        if (code === "starting") { start.watch = true; start.at = Date.now(); }
       } else {
         msg = sentence((body && str(body.error)) || ("HTTP " + r.status));
         msg = code === "start_failed" ? "FLEET did not start. " + msg : msg;
@@ -1087,12 +1108,24 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (p.cur > base || fast) { p.cur = base; if (!p.busy && !expired && !document.hidden) { clearTimeout(p.timer); p.timer = setTimeout(() => run(p), base); } }
     }
     // Redraw only on a change: a banner rebuilt under a finger loses the tap.
-    const k = startPhase() + "|" + start.flight;
+    const ph = startPhase();
+    // "wait" counts down each second and asks for state again at zero.
+    if (ph === "wait" && !start.waitTimer) start.waitTimer = setInterval(waitTick, 1000);
+    else if (ph !== "wait" && start.waitTimer) { clearInterval(start.waitTimer); start.waitTimer = 0; }
+    const k = ph + "|" + start.flight + "|" + stillHint();
     if (k === startKey) return;
     startKey = k;
     guard(renderStatus);
     guard(renderBanners);
     guard(applyEnabled);
+  }
+
+  function waitTick() {
+    for (const n of document.querySelectorAll(".wait-left")) n.textContent = waitText();
+    guard(applyEnabled);
+    if (retryLeft() > 0) return;
+    clearInterval(start.waitTimer); start.waitTimer = 0;
+    runNow("state");
   }
 
   // watchStart runs on each state answer: it ends the watch with a toast when
@@ -1108,10 +1141,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       runNow("chat");
     } else if (start.watch && !start.flight && Date.now() - start.at > 4000) {
       start.watch = false;
-      if (ph === "can") toast("FLEET did not start. Check the workstation.", true);
+      if ((ph === "can" || ph === "wait") && start.failGen !== start.gen) {
+        start.failGen = start.gen;
+        toast("FLEET did not start. Check the workstation.", true);
+      }
     }
     renderStart();
   }
+
+  // A held key repeats: the Enter that opened a sheet must not go on to
+  // press the button that gets the focus in it.
+  for (const id of ["sheet", "start-sheet"]) $(id).addEventListener("keydown", e => { if (e.repeat) { e.preventDefault(); e.stopPropagation(); } }, true);
 
   $("start-go").addEventListener("click", () => { $("start-go").disabled = true; closeStartSheet(); startFleet(); });
   $("start-cancel").addEventListener("click", closeStartSheet);
@@ -1352,6 +1392,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     state = st; stateText = text; stateDay = day;
     const fl = obj(st.fleet);
     alive = !!(fl && fl.alive === true);
+    start.retryUntil = fl && num(fl.retryAfter) && fl.retryAfter > 0 ? Date.now() + fl.retryAfter * 1000 : 0;
 
     prunePending();
     // An open sheet must not send an answer to a card that has moved on.
@@ -1462,7 +1503,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     ap.hidden = false;
     ap.disabled = true;
     clearTimeout(sheet.armTimer);
-    sheet.armTimer = setTimeout(() => { if (!sheet.busy) { sheet.armed = true; ap.disabled = false; ap.focus(); } }, 600);
+    // No focus move: a key still held from the first tap must not land on
+    // the approve button.
+    sheet.armTimer = setTimeout(() => { if (!sheet.busy) { sheet.armed = true; ap.disabled = false; } }, 600);
   });
 
   const optLabel = o => str(o.label) || str(o.send) || str(o.key);
@@ -1589,14 +1632,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (sid && chat.sid !== null && sid !== chat.sid) {
       // Another FLEET session: start over from the top of its transcript.
       chat.sid = sid; chat.pos = 0; chat.turns.clear(); chat.reason = str(d.reason);
-      chat.follow = true; chat.unseen = false; chat.rev = 0; chat.savedTop = null;
+      chat.follow = true; chat.unseen = false; chat.rev = 0; chat.dropRev = 0; chat.savedTop = null;
       guard(renderChat);
       return "again";
     }
     chat.sid = sid;
     chat.reason = str(d.reason);
     let changed = false;
-    if (d.reset === true && chat.turns.size) { chat.turns.clear(); changed = true; }
+    if (d.reset === true && chat.turns.size) { chat.turns.clear(); chat.dropRev = 0; changed = true; }
     for (const t of arr(d.turns)) {
       const o = obj(t);
       if (!o || !str(o.uuid)) continue;
@@ -1608,6 +1651,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       }
     }
     chat.pos = num(d.pos) ? d.pos : 0;
+    // Keep the last CHAT_TURNS_MAX turns in memory and in the DOM. dropRev
+    // keeps rev growing, so the dropped text cannot hide a new turn from
+    // the "New messages" pill.
+    for (const [uuid, t] of chat.turns) {
+      if (chat.turns.size <= CHAT_TURNS_MAX) break;
+      chat.turns.delete(uuid); chat.open.delete(uuid);
+      chat.dropRev += t.text.length + 1;
+    }
     if (changed && reconcileLocal()) changed = true;
     const key = chat.reason + "|" + chat.turns.size + "|" + ro;
     if (changed || key !== chat.key) { chat.key = key; guard(renderChat); }
@@ -1622,7 +1673,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const first = !log.querySelector(".turn");
     // rev grows with every new turn and every turn whose text grows, so a
     // streaming reply also raises the pill while Andy reads further up.
-    let rev = 0;
+    let rev = chat.dropRev;
     for (const t of chat.turns.values()) rev += t.text.length + 1;
     const shown = chat.local.filter(m => !m.hidden);
     for (const m of shown) rev += m.text.length + 1;
@@ -1718,14 +1769,19 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
   loadChatStore();
   const newLocalID = () => Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
-  // reconcileLocal drops every shown bubble whose text is already a user
-  // turn in the transcript, sent at or after the attempt (60 s allowed for
-  // clock skew). It checks all loaded turns, not only new ones.
+  // reconcileLocal drops every shown bubble whose text is a user turn the
+  // attempt itself may have made. It checks all loaded turns, not only new
+  // ones. An attempt from this page load keeps the user-turn uuids known
+  // when it started (m.known): only a turn outside that set counts, so an
+  // older turn with the same short text ("ok") cannot confirm it. An
+  // attempt restored after a reload has no set: only a turn at or after
+  // the attempt time counts.
+  const userTurnIDs = () => new Set([...chat.turns.values()].filter(t => t.role === "user").map(t => t.uuid));
   function reconcileLocal() {
     if (!chat.local.length) return false;
-    const users = [...chat.turns.values()].filter(t => t.role === "user").map(t => ({n: normText(t.text), at: Date.parse(t.at)}));
-    const keep = chat.local.filter(m => m.busy || m.hidden ||
-      !users.some(u => u.n === normText(m.text) && (!isFinite(u.at) || u.at >= m.ts - 60000)));
+    const users = [...chat.turns.values()].filter(t => t.role === "user").map(t => ({id: t.uuid, n: normText(t.text), at: Date.parse(t.at)}));
+    const confirms = (m, u) => u.n === normText(m.text) && (m.known ? !m.known.has(u.id) : isFinite(u.at) && u.at >= m.ts);
+    const keep = chat.local.filter(m => m.busy || m.hidden || !users.some(u => confirms(m, u)));
     if (keep.length === chat.local.length) return false;
     for (const m of chat.local) if (!keep.includes(m)) clearTimeout(m.timer);
     chat.local = keep;
@@ -1779,8 +1835,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // an HTTP error restores what was there before (a first send: no entry,
   // so the draft stays the only copy).
   async function sendAttempt(m) {
-    const before = {ts: m.ts, sid: m.sid, status: m.status};
-    m.ts = Date.now(); m.sid = chat.sid || ""; m.status = "sending";
+    const before = {ts: m.ts, sid: m.sid, status: m.status, known: m.known};
+    m.ts = Date.now(); m.sid = chat.sid || ""; m.status = "sending"; m.known = userTurnIDs();
     if (!chat.local.includes(m)) chat.local.push(m);
     saveChatStore();
     const res = await say(m.text, null);
@@ -1890,9 +1946,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("composer-row").hidden = strip;
     $("say-hint").hidden = strip;
     $("chat-log").classList.toggle("ro", ro);
-    $("ro-text").textContent = ph === "starting" ? "FLEET is starting…" : ph === "still" ? "FLEET is still starting…"
-      : ph === "lastlive" ? LAST_LIVE : ro ? "Read only — FLEET is not running" : "FLEET is not running";
-    $("ro-start").hidden = ph !== "can";
+    const hint = ph === "still" ? stillHint() : "";
+    $("ro-text").textContent = ph === "starting" ? "FLEET is starting…" : ph === "still" ? "FLEET is still starting…" + (hint ? " " + hint : "")
+      : ph === "lastlive" ? LAST_LIVE : ph === "wait" ? "FLEET is not running. " + waitText()
+      : ro ? "Read only — FLEET is not running" : "FLEET is not running";
+    $("ro-start").hidden = ph !== "can" && ph !== "wait";
+    $("ro-start").disabled = ph === "wait";
   }
   $("ro-start").addEventListener("click", openStartSheet);
 
