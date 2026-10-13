@@ -2,10 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f5f5f2" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0f1012" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="FLEET">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="/fleet/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/fleet/apple-touch-icon.png">
 <link rel="icon" href="data:,">
 <title>FLEET</title>
 <style>
@@ -16,7 +22,7 @@
   --red: #c0302a; --red-tint: #fcecea; --red-line: #efc3bf;
   --amber: #a25a00; --amber-tint: #fdf3e2; --amber-line: #ecd3a5;
   --green: #2d8649; --shadow: 0 10px 30px rgba(20, 20, 30, .18);
-  --hdr: 84px; --r: 12px;
+  --hdr: 84px; --navh: 0px; --r: 12px;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -58,19 +64,33 @@ header.top {
 .st-waiting { color: var(--amber); } .st-waiting .dot { background: var(--amber); }
 .st-down { color: var(--red); } .st-down .dot { background: var(--red); }
 .offline { color: var(--muted); } .offline .dot { background: var(--muted); }
-.hdr-ago { margin-left: auto; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.hdr-ago { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.st-starting { color: var(--accent); } .st-starting .dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+/* The refresh control: a 44px target around a smaller visible circle. */
+.refresh { flex: none; display: grid; place-items: center; width: 44px; height: 44px; margin: -6px -10px -6px -4px; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 50%; }
+.refresh span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); }
+.refresh:hover span { color: var(--text); }
+.refresh svg { width: 17px; height: 17px; }
+.refresh.spinning svg { animation: rot .8s linear infinite; }
 .chips { display: flex; gap: 6px; margin-top: 8px; overflow-x: auto; scrollbar-width: none; }
+.chips:empty { display: none; }
 .chips::-webkit-scrollbar { display: none; }
 .chip { flex: none; padding: 4px 9px 5px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 12px; line-height: 1.25; min-width: 82px; }
 .chip .lbl { color: var(--muted); margin-right: 5px; }
 .chip .val { font-weight: 650; font-variant-numeric: tabular-nums; }
 .chip .bar { height: 3px; border-radius: 2px; background: var(--line); margin-top: 4px; overflow: hidden; }
 .chip .bar i { display: block; height: 100%; width: 0; background: var(--muted); border-radius: 2px; }
+.chip.ok .val { color: var(--green); } .chip.ok .bar i { background: var(--green); }
 .chip.warn .val { color: var(--amber); } .chip.warn .bar i { background: var(--amber); }
 .chip.high .val { color: var(--red); } .chip.high .bar i { background: var(--red); }
 .chip.old { opacity: .6; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .st-busy .dot, .sent .dot { animation: none; } }
+@keyframes rot { to { transform: rotate(360deg); } }
+.spin { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: rot .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .st-busy .dot, .st-starting .dot, .sent .dot { animation: none; }
+  .spin, .refresh.spinning svg { animation-duration: 2.4s; }
+}
 
 /* Page */
 main { max-width: 1600px; margin: 0 auto; padding: 12px max(env(safe-area-inset-right), 16px) calc(96px + env(safe-area-inset-bottom)) max(env(safe-area-inset-left), 16px); }
@@ -79,6 +99,15 @@ main { max-width: 1600px; margin: 0 auto; padding: 12px max(env(safe-area-inset-
 .banner { padding: 10px 12px; border-radius: 10px; border: 1px solid; font-size: 14px; font-weight: 550; }
 .banner.red { background: var(--red-tint); border-color: var(--red-line); color: var(--red); }
 .banner.amber { background: var(--amber-tint); border-color: var(--amber-line); color: var(--amber); }
+.banner.blue { background: var(--accent-tint); border-color: var(--accent); color: var(--accent); }
+/* A banner with an action: title and note on the left, button on the right.
+   It wraps to two rows on a narrow phone. */
+.banner.act { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 12px; }
+.banner.act .bt { flex: 1 1 180px; min-width: 0; display: flex; align-items: center; gap: 10px; }
+.banner.act .bt > span { min-width: 0; }
+.banner .b-title { display: block; font-weight: 650; }
+.banner .b-note { display: block; margin-top: 1px; font-size: 13px; font-weight: 450; color: var(--muted); }
+.banner.act .btn { flex: none; min-height: 44px; }
 .now { margin: 0 0 14px; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
 .now b { color: var(--text); font-weight: 600; margin-right: 4px; }
 .layout { display: flex; flex-direction: column; gap: 22px; }
@@ -174,6 +203,11 @@ section { min-width: 0; }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .composer textarea { flex: 1; min-width: 0; min-height: 46px; max-height: 200px; resize: none; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: 16px/1.35 var(--sans); }
 .composer textarea:disabled { opacity: .6; }
+.ro-note { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--red); }
+.ro-note .dot { background: var(--red); }
+.ro-note span:last-child { color: var(--muted); font-weight: 450; }
+/* Read-only chat: the last FLEET session's turns, greyed. */
+.chat-log.ro .turn { opacity: .55; }
 .hint { margin: 6px 2px 0; font-size: 12px; color: var(--muted); }
 .kbd-hint { display: none; }
 @media (hover: hover) and (pointer: fine) { .kbd-hint { display: inline; } }
@@ -214,7 +248,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 .sheet-actions { display: grid; gap: 8px; margin-top: 4px; }
 .sheet-actions .btn { width: 100%; min-height: 50px; }
 .readok { margin: 0; padding: 12px; text-align: center; font-size: 14px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   dialog.sheet { width: 100%; max-width: 100%; margin: auto 0 0; border-radius: 18px 18px 0 0; }
   .sheet-in { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
 }
@@ -224,6 +258,61 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   max-width: min(92vw, 480px); padding: 11px 15px; border-radius: 11px; background: var(--text); color: var(--bg); font-size: 14px; box-shadow: var(--shadow); transition: opacity .18s, transform .18s; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.err { border-left: 4px solid var(--red); }
+
+/* Phone: four views and a fixed bottom nav. The body class v-<view> picks
+   which parts show. The nav and the view rules apply only up to 760px. */
+.tabbar { display: none; }
+@media (max-width: 760px) {
+  .tabbar {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    padding: 4px max(env(safe-area-inset-right), 6px) max(env(safe-area-inset-bottom), 4px) max(env(safe-area-inset-left), 6px);
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    -webkit-backdrop-filter: saturate(1.4) blur(14px); backdrop-filter: saturate(1.4) blur(14px);
+    border-top: 1px solid var(--line);
+  }
+  .tab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0; min-height: 50px; padding: 4px 2px; border: 0; background: none; color: var(--muted); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .tab[aria-current="page"] { color: var(--accent); }
+  .tab-ic { position: relative; display: grid; place-items: center; width: 44px; height: 26px; border-radius: 13px; }
+  .tab[aria-current="page"] .tab-ic { background: var(--accent-tint); }
+  .tab svg { width: 22px; height: 22px; }
+  .tab-l { font-size: 11px; font-weight: 600; letter-spacing: .01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .badge { position: absolute; top: -5px; left: 28px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; border: 2px solid var(--bg); box-sizing: content-box;
+    background: var(--amber); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
+  .badge.red { background: var(--red); }
+  @media (prefers-color-scheme: dark) { .badge { color: #16110a; } }
+  body.kb .tabbar { display: none; }
+
+  /* Quota chips share the row in equal columns, label above value. */
+  .chips { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); overflow: visible; }
+  .chip { min-width: 0; padding: 5px 6px 6px 7px; }
+  .ago-pre { display: none; }
+  .chip .lbl { display: block; margin: 0; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip .val { display: block; font-size: 14px; line-height: 1.2; }
+
+  main { padding-bottom: calc(var(--navh) + 20px); }
+  .layout { gap: 0; }
+  .col { gap: 22px; }
+  body.v-decide .chat, body.v-decide .col-lists,
+  body.v-chat .col-decide, body.v-chat .col-lists, body.v-chat .now,
+  body.v-fleet .col-decide, body.v-fleet .chat, body.v-fleet .sec-history,
+  body.v-history .col-decide, body.v-history .chat, body.v-history .sec-fleet, body.v-history .now { display: none !important; }
+
+  /* Chat is an app shell: the page does not scroll, the log does, and the
+     composer sits on the nav (or on the keyboard while it is open). */
+  body.v-chat { overscroll-behavior: none; }
+  body.v-chat main { display: flex; flex-direction: column; height: calc(var(--vvh, 100dvh) - var(--hdr) - var(--navh)); padding: 10px 0 0; overflow: hidden; }
+  body.v-chat .banners { margin: 0 max(env(safe-area-inset-right), 16px) 10px max(env(safe-area-inset-left), 16px); }
+  body.v-chat .layout { flex: 1; min-height: 0; display: flex; }
+  body.v-chat .chat { flex: 1; min-height: 0; border: 0; border-radius: 0; background: transparent; }
+  body.v-chat .chat > .sec-h { display: none; }
+  body.v-chat .chat-log { max-height: none; min-height: 0; padding: 0 max(env(safe-area-inset-right), 16px) 8px max(env(safe-area-inset-left), 16px); }
+  body.v-chat .composer { padding: 8px max(env(safe-area-inset-right), 12px) 8px max(env(safe-area-inset-left), 12px); background: var(--surface); }
+  body.v-chat .hint { display: none; }
+  .turn { max-width: 90%; }
+
+  .toast { top: calc(var(--hdr) + 10px); bottom: auto; transform: translate(-50%, -12px); }
+}
 
 /* Wide screens: card sections in two columns beside the chat. */
 @media (min-width: 900px) {
@@ -246,6 +335,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <span class="pill" id="status"><span class="dot"></span><span id="status-t">loading</span></span>
       <span class="pill offline" id="offline" hidden title="The last request failed. The page tries again."><span class="dot"></span>offline</span>
       <span class="hdr-ago" id="ago"></span>
+      <button class="refresh" id="refresh" type="button" title="Refresh now" aria-label="Refresh now"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></span></button>
     </div>
     <div class="chips" id="chips" aria-label="Quota"></div>
   </div>
@@ -272,6 +362,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <h2 class="sec-h" id="h-chat">Chat</h2>
       <div class="chat-log" id="chat-log" aria-live="polite"></div>
       <div class="composer">
+        <p class="ro-note" id="ro-note" hidden><span class="dot"></span><span>FLEET is not running.</span><span>Read only.</span></p>
         <div class="composer-row">
           <textarea id="say" rows="1" maxlength="4096" placeholder="Write to FLEET" aria-label="Message to FLEET"></textarea>
           <button class="btn btn-primary" id="say-send" type="button">Send</button>
@@ -281,19 +372,19 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     </section>
 
     <div class="col col-lists">
-      <section aria-labelledby="h-working">
+      <section class="sec-fleet" aria-labelledby="h-working">
         <h2 class="sec-h" id="h-working">Working <span class="n" id="n-working">0</span></h2>
         <div id="list-working"></div>
       </section>
-      <section aria-labelledby="h-waiting">
+      <section class="sec-fleet" aria-labelledby="h-waiting">
         <h2 class="sec-h" id="h-waiting">Waiting <span class="n" id="n-waiting">0</span></h2>
         <div id="list-waiting"></div>
       </section>
-      <section aria-labelledby="h-done">
+      <section class="sec-fleet" aria-labelledby="h-done">
         <h2 class="sec-h" id="h-done">Done today <span class="n" id="n-done">0</span></h2>
         <div id="list-done"></div>
       </section>
-      <section aria-labelledby="h-history">
+      <section class="sec-history" aria-labelledby="h-history">
         <h2 class="sec-h" id="h-history">History</h2>
         <div class="filters" id="filters" role="group" aria-label="Filter history"></div>
         <div class="hist" id="hist"></div>
@@ -318,6 +409,25 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     </div>
   </div>
 </dialog>
+
+<dialog class="sheet" id="start-sheet" aria-labelledby="start-title">
+  <div class="sheet-in">
+    <p class="kicker">FLEET is not running</p>
+    <h2 id="start-title">Start FLEET?</h2>
+    <p class="sheet-text" id="start-text"></p>
+    <div class="sheet-actions">
+      <button class="btn btn-primary" id="start-go" type="button">Start</button>
+      <button class="btn" id="start-cancel" type="button">Cancel</button>
+    </div>
+  </div>
+</dialog>
+
+<nav class="tabbar" id="tabbar" aria-label="Views">
+  <button class="tab" type="button" data-view="decide"><span class="tab-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4.5"/><path d="M4 13.5 6.4 5.4A2 2 0 0 1 8.3 4h7.4a2 2 0 0 1 1.9 1.4L20 13.5"/><path d="M4 13.5h4.5l1.2 2.5h4.6l1.2-2.5H20"/></svg><span class="badge" id="badge-decide" hidden></span></span><span class="tab-l">Decide</span></button>
+  <button class="tab" type="button" data-view="chat"><span class="tab-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12.5a7.5 7.5 0 0 1-10.9 6.7L4 20.5l1.3-4.6A7.5 7.5 0 1 1 20 12.5Z"/></svg></span><span class="tab-l">Chat</span></button>
+  <button class="tab" type="button" data-view="fleet"><span class="tab-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6"/></svg></span><span class="tab-l">Fleet</span></button>
+  <button class="tab" type="button" data-view="history"><span class="tab-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></span><span class="tab-l">History</span></button>
+</nav>
 
 <div class="toast" id="toast" role="status" aria-live="assertive"></div>
 
@@ -500,8 +610,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const expanded = new Set();          // "row:<id>" for compact rows left open
   const pending = new Map();           // cardId → updatedAt at send time
   const failed = {};                   // poller name → last fetch failed
-  const chat = {sid: null, pos: null, turns: new Map(), reason: "", open: new Set(), key: ""};
+  // readOnly: the turns are the last FLEET session's, FLEET is not running.
+  // stale: a render was skipped while the chat was hidden (phone view).
+  const chat = {sid: null, pos: null, turns: new Map(), reason: "", open: new Set(), key: "", readOnly: false, stale: false};
   const hist = {entries: [], next: null, filter: "", loading: false, loaded: false};
+  // Start FLEET: flight = the POST is out; watch = a start is under way (ours
+  // or another device's) and the page polls state fast until FLEET is alive;
+  // at = the last time a start was seen under way.
+  const start = {flight: false, watch: false, at: 0};
 
   class AuthError extends Error {}
 
@@ -528,14 +644,24 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   function renderAgo() {
     const at = state && state.writtenAt;
     const a = ago(at);
-    $("ago").textContent = a ? "State written " + a : "";
+    $("ago").replaceChildren(...(a ? [el("span", "ago-pre", "State written "), a] : []));
+    $("ago").title = a ? "State written " + a : "";
+  }
+
+  const fleetInfo = () => obj(state && state.fleet);
+  // startingNow: a start is under way and FLEET is not alive yet.
+  function startingNow() {
+    const fl = fleetInfo();
+    if (alive) return false;
+    return start.flight || !!(fl && obj(fl.starting));
   }
 
   function renderStatus() {
     const pill = $("status");
-    const fl = obj(state && state.fleet);
+    const fl = fleetInfo();
     let cls = "st-down", text = "not running";
-    if (fl && fl.alive === true) {
+    if (startingNow()) { cls = "st-starting"; text = "starting"; }
+    else if (fl && fl.alive === true) {
       const s = str(fl.status);
       if (s === "busy") { cls = "st-busy"; text = "busy"; }
       else if (s === "waiting") { cls = "st-waiting"; text = "waiting"; }
@@ -549,16 +675,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("offline").hidden = expired || !Object.values(failed).some(Boolean);
   }
 
+  // usageChip returns null when the window has no number: a missing chip
+  // is honest, a "0%" chip is not. Green below 60%, amber to 84%, red from 85%.
   function usageChip(label, w, stale, title) {
-    const c = el("div", "chip");
     const pct = w && num(w.pct) ? w.pct : null;
-    const val = el("span", "val", pct === null ? "–" : Math.round(pct) + "%");
+    if (pct === null) return null;
+    const c = el("div", "chip");
+    const val = el("span", "val", Math.round(pct) + "%");
     const fill = el("i");
-    if (pct !== null) {
-      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
-      if (pct >= 95) c.classList.add("high");
-      else if (pct >= 80) c.classList.add("warn");
-    }
+    fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+    c.classList.add(pct >= 85 ? "high" : pct >= 60 ? "warn" : "ok");
     if (stale) c.classList.add("old");
     const tips = [];
     if (title) tips.push(title);
@@ -574,9 +700,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const claude = arr(u.claude).map(obj).filter(Boolean);
     const act = claude.find(c => c.active === true) || null;
     const who = act ? str(act.account) : "";
+    const old = !!(act && act.stale === true);
+    const ws = act && obj(act.weeklyScoped);
     const chips = [
-      usageChip("Claude 5h", act && obj(act.fiveHour), act && act.stale === true, who),
-      usageChip("Claude 7d", act && obj(act.sevenDay), act && act.stale === true, who),
+      usageChip("Claude 5h", act && obj(act.fiveHour), old, who),
+      usageChip("Claude 7d", act && obj(act.sevenDay), old, who),
+      usageChip((ws && str(ws.label) ? str(ws.label) : "Scoped") + " wk", ws, old, who),
     ];
     const g = obj(arr(u.grok)[0]);
     let best = null;
@@ -586,7 +715,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     }
     const glabel = best && str(best.label) ? "Grok " + str(best.label) : "Grok";
     chips.push(usageChip(glabel, best, g && g.stale === true, g ? str(g.account) : ""));
-    $("chips").replaceChildren(...chips);
+    $("chips").replaceChildren(...chips.filter(Boolean));
   }
 
   // ---- banners -----------------------------------------------------------
@@ -597,7 +726,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       b("red", "Session expired. Run claude-sessions fleet-url on the host.");
     } else if (state) {
       const fl = obj(state.fleet);
-      if (!fl || fl.alive !== true) {
+      if (startingNow()) {
+        out.push(startingBanner(fl));
+      } else if (fl && fl.alive !== true && str(fl.code) === "not_live") {
+        out.push(notRunningBanner(fl));
+      } else if (!fl || fl.alive !== true) {
         const reason = fl ? str(fl.reason) : "";
         if (reason === "ambiguous") b("red", "Two sessions are named FLEET. The page cannot send.");
         else if (reason === "" || reason === "not running") b("red", "FLEET is not running. You cannot send now.");
@@ -616,6 +749,124 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       }
     }
     $("banners").replaceChildren(...out);
+  }
+
+  function startingBanner(fl) {
+    const st = fl && obj(fl.starting);
+    const mode = st ? str(st.mode) : "";
+    const note = mode === "resume" ? "The last FLEET session resumes." : mode === "fresh" ? "A new FLEET session starts in trecs-brain." : "This takes a few seconds.";
+    return el("div", "banner blue act", el("div", "bt", el("span", "spin"),
+      el("span", "", el("span", "b-title", "Starting FLEET…"), el("span", "b-note", note))));
+  }
+
+  function notRunningBanner(fl) {
+    const can = fl.canStart === true;
+    const btn = el("button", "btn btn-primary", "Start FLEET");
+    btn.type = "button";
+    btn.disabled = !can || expired;
+    btn.addEventListener("click", openStartSheet);
+    const note = can ? "You cannot send now." : "You cannot start it now. Wait a minute, then try again.";
+    return el("div", "banner red act", el("div", "bt",
+      el("span", "", el("span", "b-title", "FLEET is not running"), el("span", "b-note", note))), btn);
+  }
+
+  // ---- start FLEET -------------------------------------------------------
+  function openStartSheet() {
+    const fl = fleetInfo();
+    if (!fl || expired || start.flight || alive) return;
+    $("start-text").textContent = fl.hasLast === true ? "Resume the last FLEET session." : "Start a new FLEET session in trecs-brain.";
+    $("start-go").disabled = false;
+    const d = $("start-sheet");
+    if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
+    $("start-go").focus();
+  }
+
+  function closeStartSheet() {
+    const d = $("start-sheet");
+    if (d.open) { if (typeof d.close === "function") d.close(); else d.removeAttribute("open"); }
+  }
+
+  const startErrors = {
+    already_running: "FLEET is already running.",
+    ambiguous: "Two sessions are named FLEET. The page cannot start one.",
+  };
+
+  async function startFleet() {
+    if (start.flight || expired) return;
+    start.flight = true;
+    renderStart();
+    let r = null, body = null;
+    try {
+      r = await fetch("/fleet/start", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: "{}"});
+      try { body = obj(JSON.parse(await r.text())); } catch { body = null; }
+    } catch {
+      r = null;
+    }
+    start.flight = false;
+    if (r && r.status === 401) { expire(); toast("Session expired. Run claude-sessions fleet-url on the host.", true); return; }
+    if (r && r.ok && body && body.ok === true) {
+      start.watch = true; start.at = Date.now();
+    } else if (!r) {
+      toast("The page cannot reach the server. Try again.", true);
+    } else {
+      const code = body ? str(body.code) : "";
+      let msg;
+      if (code === "rate_limited") {
+        const n = body && num(body.retryAfter) ? Math.max(1, Math.ceil(body.retryAfter)) : 60;
+        msg = "Wait " + n + (n === 1 ? " second" : " seconds") + ", then start FLEET again.";
+      } else if (startErrors[code]) {
+        msg = startErrors[code];
+      } else {
+        msg = sentence((body && str(body.error)) || ("HTTP " + r.status));
+        msg = code === "start_failed" ? "FLEET did not start. " + msg : msg;
+      }
+      toast(msg, true);
+    }
+    renderStart();
+    runNow("state");
+  }
+
+  // renderStart redraws what depends on a start and sets the state poll rate:
+  // 2 s while a start is under way, else the normal 5 s.
+  let startKey = "";
+  function renderStart() {
+    const fast = start.flight || start.watch || startingNow();
+    const p = pollers.state;
+    const base = fast ? 2000 : 5000;
+    if (p.base !== base) {
+      p.base = base;
+      if (p.cur > base || fast) { p.cur = base; if (!p.busy && !expired && !document.hidden) { clearTimeout(p.timer); p.timer = setTimeout(() => run(p), base); } }
+    }
+    // Redraw only on a change: a banner rebuilt under a finger loses the tap.
+    const k = startingNow() + "|" + start.flight;
+    if (k === startKey) return;
+    startKey = k;
+    guard(renderStatus);
+    guard(renderBanners);
+  }
+
+  // watchStart runs on each state answer: it ends the watch with a toast when
+  // FLEET is alive, or when the start went away without it.
+  function watchStart() {
+    if (startingNow()) { start.watch = true; start.at = Date.now(); }
+    else if (start.watch && alive) {
+      start.watch = false;
+      toast("FLEET is running.");
+      runNow("chat");
+    } else if (start.watch && !start.flight && Date.now() - start.at > 10000) {
+      start.watch = false;
+      toast("FLEET did not start. Check the workstation.", true);
+    }
+    renderStart();
+  }
+
+  $("start-go").addEventListener("click", () => { $("start-go").disabled = true; closeStartSheet(); startFleet(); });
+  $("start-cancel").addEventListener("click", closeStartSheet);
+  $("start-sheet").addEventListener("click", e => { if (e.target === $("start-sheet")) closeStartSheet(); });
+
+  function sentence(t) {
+    t = t.charAt(0).toUpperCase() + t.slice(1);
+    return /[.!?]$/.test(t) ? t : t + ".";
   }
 
   // ---- cards -------------------------------------------------------------
@@ -751,7 +1002,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       else box.replaceChildren(el("div", "rows", ...g[k].map(compactRow)));
     }
     const n = g.yes.length + g.needs.length;
+    decideN = n;
     document.title = n ? "(" + n + ") FLEET" : "FLEET";
+    const badge = $("badge-decide");
+    badge.hidden = !n;
+    badge.textContent = n > 99 ? "99+" : String(n);
+    badge.classList.toggle("red", g.yes.length > 0);
+    badge.parentNode.parentNode.setAttribute("aria-label", n ? "Decide, " + n + " need you" : "Decide");
   }
 
   function renderNow() {
@@ -784,7 +1041,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       guard(renderCards);
       guard(applyEnabled);
     }
+    guard(watchStart);
     guard(updateRel);
+    if (!viewChosen) { viewChosen = true; setView(decideCount() ? "decide" : "chat", false); }
     if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
   }
 
@@ -904,10 +1163,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const d = obj(JSON.parse(text));
     if (!d) throw new Error("bad chat body");
     const sid = str(d.sessionId);
+    const ro = d.readOnly === true;
+    if (ro !== chat.readOnly) { chat.readOnly = ro; guard(applyEnabled); }
     if (!sid && chat.sid) {
       // A brief discovery failure, not a new session: keep the chat.
       chat.reason = str(d.reason);
-      const key = chat.reason + "|" + chat.turns.size;
+      const key = chat.reason + "|" + chat.turns.size + "|" + ro;
       if (key !== chat.key) { chat.key = key; guard(renderChat); }
       return;
     }
@@ -932,12 +1193,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       }
     }
     chat.pos = num(d.pos) ? d.pos : 0;
-    const key = chat.reason + "|" + chat.turns.size;
+    const key = chat.reason + "|" + chat.turns.size + "|" + ro;
     if (changed || key !== chat.key) { chat.key = key; guard(renderChat); }
   }
 
   function renderChat() {
     const log = $("chat-log");
+    // A hidden log measures as zero height, which would unfold every turn.
+    // Render when the Chat view opens instead.
+    if (!log.getClientRects().length) { chat.stale = true; return; }
+    chat.stale = false;
+    log.classList.toggle("ro", chat.readOnly);
     const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
     const first = !log.childNodes.length || !log.querySelector(".turn");
     const nodes = [];
@@ -977,7 +1243,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const prefix = "About " + name + ": ";
     if (!ta.value.startsWith(prefix)) ta.value = prefix + ta.value.replace(/^\s+/, "");
     grow();
-    $("chat").scrollIntoView({behavior: "smooth", block: "nearest"});
+    if (isPhone()) setView("chat", true);
+    else $("chat").scrollIntoView({behavior: "smooth", block: "nearest"});
     if (!ta.disabled) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
   }
 
@@ -1016,10 +1283,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   $("say-send").addEventListener("click", sendChat);
 
   function applyEnabled() {
+    // State can see FLEET alive a moment before the chat poll does.
+    const ro = chat.readOnly && !alive && !expired;
     const can = alive && !expired;
-    $("say").disabled = expired;
-    $("say").placeholder = expired ? "Session expired." : (can ? "Write to FLEET" : "FLEET is not running.");
+    $("say").disabled = expired || ro;
+    $("say").placeholder = expired ? "Session expired." : ro ? "You cannot send now." : (can ? "Write to FLEET" : "FLEET is not running.");
     $("say-send").disabled = !can || chatBusy;
+    $("ro-note").hidden = !ro;
   }
 
   // ---- history -----------------------------------------------------------
@@ -1142,7 +1412,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     p.cur = ok ? p.base : Math.min(p.cur * 2, BACKOFF_CAP);
     if (!expired && !document.hidden) p.timer = setTimeout(() => run(p), again ? 0 : p.cur);
   }
-  function runNow(name) { const p = pollers[name]; if (p) run(p); }
+  function runNow(name) { const p = pollers[name]; return p ? run(p) : Promise.resolve(); }
   function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); }
   function startAll() {
     if (expired) return;
@@ -1154,19 +1424,113 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (document.hidden) stopAll(); else startAll();
   });
 
-  // Keep the sticky chat column under the header on wide screens.
-  function measureHeader() { document.documentElement.style.setProperty("--hdr", $("top").offsetHeight + "px"); }
-  window.addEventListener("resize", measureHeader);
+  // ---- phone views -------------------------------------------------------
+  // Up to 760px the page shows one view at a time: decide, chat, fleet or
+  // history. The choice lives in location.hash so a reload keeps it. With no
+  // hash, the first state answer picks Decide when cards need Andy, else Chat.
+  const VIEWS = ["decide", "chat", "fleet", "history"];
+  const phoneMQ = window.matchMedia("(max-width: 760px)");
+  const isPhone = () => phoneMQ.matches;
+  let view = "", viewChosen = false, decideN = 0;
+  const viewScroll = {};
+  const decideCount = () => decideN;
+
+  function setView(v, user) {
+    if (VIEWS.indexOf(v) < 0) v = "decide";
+    if (user) viewChosen = true;
+    if (user && location.hash !== "#" + v) history.replaceState(null, "", "#" + v);
+    if (v === view) return;
+    if (view) viewScroll[view] = window.scrollY;
+    for (const x of VIEWS) document.body.classList.toggle("v-" + x, x === v);
+    view = v;
+    for (const b of document.querySelectorAll(".tab")) {
+      if (b.dataset.view === v) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+    }
+    measure();
+    if (!isPhone()) return;
+    window.scrollTo(0, v === "chat" ? 0 : (viewScroll[v] || 0));
+    if (v === "chat") {
+      if (chat.stale) guard(renderChat);
+      const log = $("chat-log");
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+
+  for (const b of document.querySelectorAll(".tab")) {
+    b.addEventListener("click", () => {
+      if (b.dataset.view === view && isPhone()) { window.scrollTo({top: 0, behavior: "smooth"}); return; }
+      setView(b.dataset.view, true);
+    });
+  }
+  window.addEventListener("hashchange", () => {
+    const h = location.hash.slice(1);
+    if (VIEWS.indexOf(h) >= 0) setView(h, true);
+  });
+  // Leaving the phone layout shows every part again; render a chat that was
+  // skipped while it was hidden.
+  phoneMQ.addEventListener("change", () => { measure(); if (chat.stale) guard(renderChat); });
+
+  // ---- layout measures ---------------------------------------------------
+  // --hdr keeps the sticky chat column under the header on wide screens and
+  // sizes the phone chat. --navh is the nav height (0 when it is hidden).
+  // --vvh is the visible height: on iOS the on-screen keyboard shrinks the
+  // visual viewport only, so the chat shell follows visualViewport. Android
+  // resizes the page itself (interactive-widget=resizes-content).
+  const coarse = window.matchMedia("(pointer: coarse)");
+  function measure() {
+    const root = document.documentElement.style;
+    const vv = window.visualViewport;
+    // Keyboard open = the chat input has focus on a touch phone. A pinch
+    // zoom also shrinks visualViewport, so that alone does not count.
+    const kb = isPhone() && document.activeElement === $("say") && (coarse.matches || (!!vv && window.innerHeight - vv.height > 120));
+    const vh = kb && vv ? vv.height : window.innerHeight;
+    document.body.classList.toggle("kb", !!kb);
+    root.setProperty("--hdr", $("top").offsetHeight + "px");
+    root.setProperty("--navh", $("tabbar").offsetHeight + "px");
+    root.setProperty("--vvh", Math.round(vh) + "px");
+    // iOS pans the page to show the focused input; the shell already fits.
+    if (kb && view === "chat" && vv && vv.offsetTop > 0) window.scrollTo(0, 0);
+  }
+  window.addEventListener("resize", measure);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", measure);
+    window.visualViewport.addEventListener("scroll", measure);
+  }
+  $("say").addEventListener("focus", () => setTimeout(measure, 50));
+  $("say").addEventListener("blur", () => setTimeout(measure, 50));
+  if (window.ResizeObserver) new ResizeObserver(measure).observe($("top"));
+
+  // ---- refresh -----------------------------------------------------------
+  $("refresh").addEventListener("click", async () => {
+    const btn = $("refresh");
+    // A dead session cannot poll: reload, so the server shows its login page.
+    if (expired) { location.reload(); return; }
+    if (btn.classList.contains("spinning")) return;
+    btn.classList.add("spinning");
+    const t0 = Date.now();
+    await Promise.allSettled([...Object.keys(pollers).map(runNow), loadHistory(false)]);
+    setTimeout(() => btn.classList.remove("spinning"), Math.max(0, 600 - (Date.now() - t0)));
+  });
 
   // ---- boot --------------------------------------------------------------
   // The cross-site hop lands on /fleet?hop=1; tidy the address bar.
-  if (new URLSearchParams(location.search).get("hop") === "1") history.replaceState(null, "", "/fleet");
-  measureHeader();
+  if (new URLSearchParams(location.search).get("hop") === "1") history.replaceState(null, "", "/fleet" + location.hash);
+  {
+    const h = location.hash.slice(1);
+    if (VIEWS.indexOf(h) >= 0) { viewChosen = true; setView(h, false); } else setView("decide", false);
+  }
+  measure();
   renderFilters();
   renderUsage(null);
   renderHistory();
   applyEnabled();
   startAll();
+
+  // The service worker makes the page installable and serves the shell when
+  // offline. It never caches data; see fleet_sw.js.
+  if ("serviceWorker" in navigator) {
+    try { navigator.serviceWorker.register("/fleet/sw.js", {scope: "/fleet"}).catch(() => {}); } catch { /* not allowed here */ }
+  }
 })();
 </script>
 </body>
