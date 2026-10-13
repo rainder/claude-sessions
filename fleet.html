@@ -236,6 +236,48 @@ section { min-width: 0; }
 .sent-row .row-body { padding: 0 8px 8px; }
 .sent-row .card { margin-bottom: 0; }
 
+/* Fleet rows that open a session view */
+a.row-link { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 9px 12px; color: inherit; text-decoration: none; cursor: pointer; }
+a.row-link:hover { background: var(--surface2); }
+
+/* Session view: a tmux session's transcript (or pane) and a send box.
+   Phone: fills the space between the header and the nav. Wide: a panel. */
+body.sv-open { overflow: hidden; }
+.sv { position: fixed; z-index: 35; left: 0; right: 0; top: var(--hdr); height: calc(var(--vvh, 100dvh) - var(--hdr) - var(--navh, 0px)); display: flex; flex-direction: column; background: var(--bg); }
+.sv[hidden] { display: none; }
+.sv-head { flex: none; max-height: 45%; overflow-y: auto; padding: 4px max(env(safe-area-inset-right), 12px) 4px max(env(safe-area-inset-left), 6px); border-bottom: 1px solid var(--line); background: var(--surface); }
+.sv-bar { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.sv-back { flex: none; display: grid; place-items: center; width: 44px; height: 44px; border: 0; border-radius: 10px; background: none; color: var(--accent); cursor: pointer; }
+.sv-back svg { width: 22px; height: 22px; }
+.sv-ttl { flex: 1; min-width: 0; }
+.sv-ttl .tk { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.sv-ttl h2 { margin: 0; font-size: 16px; line-height: 1.3; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0 4px 4px 48px; font-size: 12.5px; color: var(--muted); min-width: 0; }
+.sv-meta .mono { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; min-width: 0; }
+.sv-meta .pill { font-size: 12px; padding: 1px 8px; }
+.sv-tool { margin: 0 4px 4px 48px; font-size: 12.5px; color: var(--muted); }
+.sv-sum { margin: 0 4px 0 48px; }
+.sv-sum > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; list-style: none; cursor: pointer; color: var(--accent); font-size: 13px; font-weight: 600; }
+.sv-sum > summary::-webkit-details-marker { display: none; }
+.sv-sum > summary .chev { transform: rotate(45deg); border-color: var(--accent); }
+.sv-sum[open] > summary .chev { transform: rotate(-135deg); }
+.sv-sum .summary { font-size: 14px; padding-bottom: 8px; }
+.sv .log-wrap { flex: 1; min-height: 0; }
+.sv-log { padding: 4px max(env(safe-area-inset-right), 14px) 8px max(env(safe-area-inset-left), 14px); }
+.sv-pane { margin: 8px 0; padding: 10px 12px; border-radius: 10px; background: var(--surface2); font: 12px/1.45 var(--mono); white-space: pre; overflow-x: auto; }
+.sv-error { margin: 36px 8px; text-align: center; font-size: 15px; }
+.sv-error .btn { margin-top: 14px; }
+.sv-more { border-top: 0; padding: 6px 0 2px; }
+.sv-comp { background: var(--surface); padding: 8px max(env(safe-area-inset-right), 12px) 8px max(env(safe-area-inset-left), 12px); }
+.sv-comp[hidden] { display: none; }
+.sv-comp .composer-row { flex-wrap: wrap; }
+.sv-comp .btn.confirm { flex: 1 1 100%; background: var(--amber-tint); border-color: var(--amber); color: var(--amber); white-space: normal; overflow-wrap: anywhere; padding: 8px 12px; }
+.sv-warn { justify-content: flex-start; text-align: left; margin: 0 2px 8px; }
+.sv-note { margin: 6px 2px 0; }
+@media (min-width: 1100px) {
+  .sv { left: auto; bottom: 0; height: auto; width: min(760px, 62vw); border-left: 1px solid var(--line); box-shadow: var(--shadow); }
+}
+
 /* Chat */
 .chat { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); min-width: 0; }
 .log-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -484,6 +526,30 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     </div>
   </div>
 </main>
+
+<section class="sv" id="sv" aria-labelledby="sv-title" hidden>
+  <div class="sv-head">
+    <div class="sv-bar">
+      <button class="sv-back" id="sv-back" type="button" aria-label="Back to Fleet" title="Back to Fleet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <div class="sv-ttl"><span class="tk" id="sv-ticket" hidden></span><h2 id="sv-title"></h2></div>
+    </div>
+    <div class="sv-meta" id="sv-meta"></div>
+    <p class="sv-tool" id="sv-tool" hidden></p>
+    <details class="sv-sum" id="sv-sum" hidden><summary><span class="chev"></span>Card summary</summary><div id="sv-sum-body"></div></details>
+  </div>
+  <div class="log-wrap">
+    <div class="chat-log sv-log" id="sv-log" aria-live="polite"></div>
+    <button class="newmsg" id="sv-newmsg" type="button" hidden>New messages ↓</button>
+  </div>
+  <div class="composer sv-comp" id="sv-comp" hidden>
+    <p class="local-warn sv-warn" id="sv-warn" hidden><span class="dot"></span><span>Not confirmed — check the transcript before you send again</span></p>
+    <div class="composer-row">
+      <textarea id="sv-say" rows="1" maxlength="4096" aria-label="Message to this session"></textarea>
+      <button class="btn btn-primary" id="sv-send" type="button">Send</button>
+    </div>
+    <p class="hint sv-note" id="sv-note" hidden></p>
+  </div>
+</section>
 
 <dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
   <div class="sheet-in">
@@ -1324,6 +1390,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return box;
   }
 
+  // A working or waiting card with a session opens the session view; its
+  // summary and links show there. Other rows expand in place when they
+  // have details.
+  const SV_NAME = /^[A-Za-z0-9._-]{1,128}$/;
+  const sessOf = v => str(v).split(":")[0].trim();
   function compactRow(c) {
     const head = cardHead(c);
     const l1 = el("div", "row-l1", head.ticket ? el("span", "tk", head.ticket) : null, el("span", "tt", head.title));
@@ -1331,6 +1402,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (str(c.session)) { const s = el("span", "sess", str(c.session)); s.title = str(c.session); l2.append(s); }
     if (str(c.waitingOn)) l2.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
     if (str(c.updatedAt)) l2.append(relSpan(c.updatedAt));
+    const tm = sessOf(c.session);
+    if (tm && SV_NAME.test(tm) && str(c.kind) !== "done") {
+      const a = el("a", "row row-link", el("div", "row-main", l1, l2.childNodes.length ? l2 : null), el("span", "chev"));
+      a.href = "#session/" + encodeURIComponent(tm);
+      a.title = "Open session " + tm;
+      return a;
+    }
     const sum = str(c.summary), links = linksNode(c);
     if (!sum && !links) {
       const row = el("div", "row");
@@ -1645,13 +1723,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // 2xx body that is not JSON with a boolean ok): the text may have reached
   // FLEET, so the caller must not act as if it did not.
   const SAY_TIMEOUT = 15000;
-  async function say(text, cardId) {
+  const say = (text, cardId) => postSay("/fleet/say", {text, cardId}, null);
+  // postSay is say for any send endpoint with the /fleet/say envelope.
+  // codeText maps a refusal code to Andy's words before the server text.
+  async function postSay(url, payload, codeText) {
     const ctl = typeof AbortController === "function" ? new AbortController() : null;
     const timer = ctl ? setTimeout(() => ctl.abort(), SAY_TIMEOUT) : 0;
     const unclear = {ok: false, unclear: true, error: "The page did not get an answer. Check the chat before you send again."};
     let r;
     try {
-      r = await fetch("/fleet/say", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text, cardId}), signal: ctl ? ctl.signal : undefined});
+      r = await fetch(url, {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload), signal: ctl ? ctl.signal : undefined});
     } catch {
       clearTimeout(timer);
       return unclear;
@@ -1665,11 +1746,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     // A 2xx the page cannot read (not JSON, no boolean ok) says the request
     // got through, not what became of the text: treat it as unknown.
     if (r.ok && !(body && typeof body.ok === "boolean")) return unclear;
+    const code = body ? str(body.code) : "";
+    if (codeText && codeText[code]) return {ok: false, code, error: codeText[code]};
     let msg = (body && str(body.error)) || raw.trim() || r.statusText || ("HTTP " + r.status);
     msg = friendly[msg] || msg;
     msg = msg.charAt(0).toUpperCase() + msg.slice(1);
     if (!/[.!?]$/.test(msg)) msg += ".";
-    return {ok: false, error: msg};
+    return {ok: false, code, error: msg};
   }
 
   function afterSend() {
@@ -1762,27 +1845,32 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!nodes.length && !shown.length) nodes.push(el("p", "chat-empty", reasonText[chat.reason] || (chat.reason ? "No chat to show (" + chat.reason + ")." : "No messages yet.")));
     for (const m of shown) nodes.push(localBubble(m));
     log.replaceChildren(...nodes);
-    // Fold only turns that really overflow 12 lines.
-    for (const w of log.querySelectorAll(".turn[data-uuid]")) {
-      const body = w.querySelector(".body");
-      const uuid = w.dataset.uuid;
-      const isOpen = chat.open.has(uuid);
-      if (!isOpen && body.scrollHeight <= body.clientHeight + 4) { body.classList.remove("fold"); continue; }
-      const t = el("button", "link-btn", isOpen ? "Show less" : "Show all");
-      t.type = "button";
-      t.addEventListener("click", () => {
-        if (chat.open.has(uuid)) chat.open.delete(uuid); else chat.open.add(uuid);
-        const keep = log.scrollTop;
-        guard(renderChat);
-        log.scrollTop = keep;
-      });
-      w.append(t);
-    }
+    addFolds(log, chat.open, () => guard(renderChat));
     chat.rev = rev;
     if (first || chat.follow) { log.scrollTop = log.scrollHeight; chat.unseen = false; }
     else if (grew) chat.unseen = true;
     $("newmsg").hidden = !chat.unseen;
     markCode(log);
+  }
+
+  // addFolds folds only turns that really overflow 12 lines, with a
+  // "Show all" / "Show less" button. openSet holds the unfolded uuids.
+  function addFolds(log, openSet, rerender) {
+    for (const w of log.querySelectorAll(".turn[data-uuid]")) {
+      const body = w.querySelector(".body");
+      const uuid = w.dataset.uuid;
+      const isOpen = openSet.has(uuid);
+      if (!isOpen && body.scrollHeight <= body.clientHeight + 4) { body.classList.remove("fold"); continue; }
+      const t = el("button", "link-btn", isOpen ? "Show less" : "Show all");
+      t.type = "button";
+      t.addEventListener("click", () => {
+        if (openSet.has(uuid)) openSet.delete(uuid); else openSet.add(uuid);
+        const keep = log.scrollTop;
+        rerender();
+        log.scrollTop = keep;
+      });
+      w.append(t);
+    }
   }
 
   $("chat-log").addEventListener("scroll", () => {
@@ -2146,11 +2234,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!expired && !document.hidden) p.timer = setTimeout(() => run(p), again ? 0 : p.cur);
   }
   function runNow(name) { const p = pollers[name]; return p ? run(p) : Promise.resolve(); }
-  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); }
+  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); clearTimeout(sv.timer); }
   function startAll() {
     if (expired) return;
     for (const p of Object.values(pollers)) { clearTimeout(p.timer); p.cur = p.base; run(p); }
     loadHistory(false);
+    if (sv.open) svPoll();
   }
 
   document.addEventListener("visibilitychange", () => {
@@ -2195,12 +2284,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
   for (const b of document.querySelectorAll(".tab")) {
     b.addEventListener("click", () => {
+      if (sv.open) { leaveSession(b.dataset.view); return; }
       if (b.dataset.view === view && isPhone()) { window.scrollTo({top: 0, behavior: "smooth"}); return; }
       setView(b.dataset.view, true);
     });
   }
+  const svName = h => { try { return decodeURIComponent(h.slice("session/".length)); } catch { return ""; } };
   window.addEventListener("hashchange", () => {
     const h = location.hash.slice(1);
+    if (h.startsWith("session/")) { viewChosen = true; openSession(svName(h), true); return; }
+    closeSessionView();
     if (VIEWS.indexOf(h) >= 0) setView(h, true);
   });
   // Leaving the phone layout shows every part again; render a chat that was
@@ -2219,7 +2312,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const vv = window.visualViewport;
     // Keyboard open = the chat input has focus on a touch phone. A pinch
     // zoom also shrinks visualViewport, so that alone does not count.
-    const kb = isPhone() && document.activeElement === $("say") && (coarse.matches || (!!vv && window.innerHeight - vv.height > 120));
+    const typing = document.activeElement === $("say") || document.activeElement === $("sv-say");
+    const kb = isPhone() && typing && (coarse.matches || (!!vv && window.innerHeight - vv.height > 120));
     const vh = kb && vv ? vv.height : window.innerHeight;
     document.body.classList.toggle("kb", !!kb);
     root.setProperty("--hdr", $("top").offsetHeight + "px");
@@ -2227,7 +2321,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     root.setProperty("--vvh", Math.round(vh) + "px");
     markCode();
     // iOS pans the page to show the focused input; the shell already fits.
-    if (kb && view === "chat" && window.scrollY !== 0) window.scrollTo(0, 0);
+    if (kb && (view === "chat" || sv.open) && window.scrollY !== 0) window.scrollTo(0, 0);
   }
   // Viewport events fire many times a frame on iOS: measure once per frame.
   let measureQueued = false;
@@ -2244,6 +2338,326 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   $("say").addEventListener("focus", () => setTimeout(measure, 50));
   $("say").addEventListener("blur", () => setTimeout(measure, 50));
   if (window.ResizeObserver) new ResizeObserver(queueMeasure).observe($("top"));
+
+  // ---- session view ------------------------------------------------------
+  // #session/<tmux> opens one tmux session from a Fleet card: its
+  // transcript (or its terminal pane, for grok or when no transcript is
+  // found) and a box that types into it. The server decides which sessions
+  // may open: only ones a current card names, never FLEET itself.
+  const sv = {open: false, tmux: "", gen: 0, timer: 0, busy: false, fromPage: false, target: null, source: "", turns: new Map(),
+    pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", sumKey: "", follow: true, unseen: false, rev: 0,
+    foldOpen: new Set(), loadingOlder: false, confirm: false, confirmTimer: 0, sending: false};
+  const SV_POLL = 3000;
+  const svCard = t => arr(state && state.cards).map(obj).find(c => c && sessOf(c.session) === t) || null;
+  const svOpenErrors = {
+    bad_target: "This is not a valid session name.",
+    not_allowed: "This session is not on a FLEET card.",
+    fleet_self: "This is FLEET's own session. Use the Chat tab.",
+    gone: "This session has ended.",
+    ambiguous: "Two sessions share this tmux name. The page cannot pick one.",
+  };
+  const svSendErrors = {
+    bad_target: svOpenErrors.bad_target,
+    not_allowed: "This session is not on a FLEET card any more.",
+    fleet_self: svOpenErrors.fleet_self,
+    gone: svOpenErrors.gone,
+    ambiguous: svOpenErrors.ambiguous,
+    send_unsupported: "Send is not available for Grok sessions.",
+    dialog: "The session shows a dialog. Answer it in the terminal.",
+    input_busy: "The session's input box has text in it. Clear it in the terminal, then send again.",
+    not_submitted: "The text was typed but not sent. Check the terminal.",
+    rate_limited: "Wait a moment, then send again.",
+    origin: "The server refused the request. Reload the page.",
+  };
+
+  function openSession(t, fromPage) {
+    if (sv.open && sv.tmux === t) { sv.fromPage = sv.fromPage || fromPage; return; }
+    closeSessionView();
+    Object.assign(sv, {open: true, tmux: t, fromPage, target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
+      key: "", sumKey: "", follow: true, unseen: false, rev: 0, loadingOlder: false, confirm: false, sending: false});
+    sv.turns = new Map(); sv.foldOpen = new Set();
+    sv.gen++;
+    setView("fleet", false);
+    document.body.classList.add("sv-open");
+    $("sv").hidden = false;
+    $("sv-say").value = "";
+    $("sv-warn").hidden = true;
+    $("sv-sum").open = false;
+    if (!SV_NAME.test(t)) sv.error = svOpenErrors.bad_target;
+    guard(renderSvHead);
+    guard(svRender);
+    svApplySend();
+    measure();
+    svPoll();
+  }
+
+  function closeSessionView() {
+    if (!sv.open) return;
+    sv.open = false; sv.gen++;
+    clearTimeout(sv.timer); clearTimeout(sv.confirmTimer);
+    sv.confirm = false;
+    $("sv").hidden = true;
+    document.body.classList.remove("sv-open");
+    measure();
+  }
+
+  // Back: return to the Fleet tab. A view opened from the page goes back
+  // in history, so the browser back button and this arrow agree.
+  function leaveSession(toView) {
+    if (!sv.open) return;
+    if (!toView && sv.fromPage) { history.back(); return; }
+    history.replaceState(null, "", "#" + (toView || "fleet"));
+    closeSessionView();
+    setView(toView || "fleet", true);
+  }
+  $("sv-back").addEventListener("click", () => leaveSession(""));
+
+  async function svFetch(url) {
+    let r;
+    try { r = await fetch(url, {credentials: "same-origin", cache: "no-store"}); } catch { return {}; }
+    if (r.status === 401) { expire(); return {auth: true}; }
+    let body = null;
+    try { body = obj(JSON.parse(await r.text())); } catch { body = null; }
+    if (r.ok) return {body};
+    if (r.status >= 400 && r.status < 500) {
+      const code = body ? str(body.code) : "";
+      return {err: svOpenErrors[code] || sentence((body && str(body.error)) || ("HTTP " + r.status))};
+    }
+    return {};
+  }
+
+  // svPoll asks for what is new every 3 s while the view is open and the
+  // page is visible. A 4xx ends the view with its message.
+  async function svPoll() {
+    clearTimeout(sv.timer);
+    if (!sv.open || sv.error || expired || document.hidden || sv.busy) return;
+    sv.busy = true;
+    const gen = sv.gen;
+    let url = "/fleet/session?t=" + encodeURIComponent(sv.tmux);
+    if (sv.source === "transcript" && sv.pos !== null) url += "&since=" + sv.pos;
+    const r = await svFetch(url);
+    sv.busy = false;
+    if (gen !== sv.gen || r.auth) return;
+    if (r.err) { sv.error = r.err; guard(svRender); svApplySend(); return; }
+    if (r.body) { sv.loadFail = false; guard(() => applySession(r.body, false)); }
+    else if (!sv.source) { sv.loadFail = true; guard(svRender); }
+    if (sv.open && !document.hidden && !expired) sv.timer = setTimeout(svPoll, SV_POLL);
+  }
+
+  async function svLoadOlder() {
+    if (sv.loadingOlder || !sv.older || sv.source !== "transcript") return;
+    sv.loadingOlder = true;
+    guard(() => svRender(true));
+    const gen = sv.gen;
+    const r = await svFetch("/fleet/session?t=" + encodeURIComponent(sv.tmux) + "&before=" + sv.older + "&n=100");
+    if (gen !== sv.gen) return;
+    sv.loadingOlder = false;
+    if (r.err) { toast(r.err, true); guard(() => svRender(true)); return; }
+    if (!r.body) { toast("The page cannot load older turns. Try again.", true); guard(() => svRender(true)); return; }
+    guard(() => applySession(r.body, true));
+  }
+
+  function applySession(d, older) {
+    const t = obj(d.target);
+    if (t) sv.target = t;
+    const src = str(d.source) === "pane" ? "pane" : "transcript";
+    let prepend = false;
+    if (older) {
+      if (src !== "transcript" || sv.source !== "transcript") return;
+      const merged = new Map();
+      for (const x of arr(d.turns)) { const o = svTurn(x); if (o && !sv.turns.has(o.uuid)) merged.set(o.uuid, o); }
+      for (const [k, v] of sv.turns) merged.set(k, v);
+      sv.turns = merged;
+      sv.older = num(d.older) && d.older > 0 ? d.older : 0;
+      prepend = true;
+    } else if (src === "pane") {
+      sv.pane = str(d.pane); sv.turns.clear(); sv.pos = null; sv.older = 0;
+    } else {
+      const full = sv.pos === null || d.reset === true || sv.source !== "transcript";
+      if (full) sv.turns.clear();
+      for (const x of arr(d.turns)) { const o = svTurn(x); if (o) sv.turns.set(o.uuid, o); }
+      if (num(d.pos)) sv.pos = d.pos;
+      if (full) sv.older = num(d.older) && d.older > 0 ? d.older : 0;
+    }
+    sv.source = src;
+    guard(renderSvHead);
+    svApplySend();
+    guard(() => svRender(prepend, prepend));
+  }
+  function svTurn(x) {
+    const o = obj(x);
+    if (!o || !str(o.uuid)) return null;
+    return {uuid: str(o.uuid), role: str(o.role) === "user" ? "user" : "assistant", at: str(o.at), text: str(o.text)};
+  }
+
+  function renderSvHead() {
+    const t = sv.target || {}, c = svCard(sv.tmux);
+    const ticket = str(t.ticket) || (c ? str(c.ticket) : "");
+    $("sv-ticket").textContent = ticket;
+    $("sv-ticket").hidden = !ticket;
+    $("sv-title").textContent = str(t.title) || (c ? cardHead(c).title : "") || sv.tmux;
+    const meta = [el("span", "mono", sv.tmux)];
+    if (str(t.model)) meta.push(el("span", "", str(t.model)));
+    const st = str(t.status);
+    if (st === "idle" || st === "busy" || st === "waiting") meta.push(el("span", "pill st-" + st, el("span", "dot"), st));
+    if (str(t.tool) === "grok") meta.push(el("span", "", "Grok"));
+    $("sv-meta").replaceChildren(...meta);
+    const tool = sv.source !== "pane" ? "" : str(t.tool) === "grok"
+      ? "Grok session: the page shows its terminal pane, not a transcript."
+      : "No transcript found: the page shows the terminal pane.";
+    $("sv-tool").textContent = tool;
+    $("sv-tool").hidden = !tool;
+    // The summary comes from the card; rebuild it only when it changes, so
+    // an open summary stays open through polls.
+    const sum = c ? str(c.summary) : "", links = c ? linksNode(c) : null;
+    const k = sum + "|" + (links ? links.textContent : "");
+    if (k !== sv.sumKey) {
+      sv.sumKey = k;
+      const body = [];
+      if (sum) body.push(el("div", "summary rich", renderRich(sum)));
+      if (links) body.push(links);
+      $("sv-sum-body").replaceChildren(...body);
+      $("sv-sum").hidden = !body.length;
+      markCode($("sv-sum"));
+    }
+  }
+
+  // svRender rebuilds the log only when its content changed. prepend keeps
+  // the view on the turn Andy was reading after "Load older".
+  function svRender(force, prepend) {
+    const log = $("sv-log");
+    let rev = 0, tk = "";
+    for (const t of sv.turns.values()) { rev += t.text.length + 1; tk += t.uuid + ":" + t.text.length + ","; }
+    const key = [sv.error, sv.source, sv.older, sv.loadFail, sv.loadingOlder, tk, sv.source === "pane" ? sv.pane : "", [...sv.foldOpen].join(",")].join("|");
+    if (!force && key === sv.key) return;
+    sv.key = key;
+    const fromBottom = log.scrollHeight - log.scrollTop;
+    const first = !log.querySelector(".turn, .sv-pane");
+    const nodes = [];
+    if (sv.error) {
+      const back = el("button", "btn", "Back to Fleet");
+      back.type = "button";
+      back.addEventListener("click", () => leaveSession(""));
+      nodes.push(el("div", "sv-error", el("p", "", sv.error), back));
+    } else if (sv.source === "pane") {
+      nodes.push(el("pre", "sv-pane", sv.pane || "The pane is empty."));
+    } else if (!sv.source) {
+      nodes.push(el("p", "chat-empty", sv.loadFail ? "The page cannot load this session. It tries again." : "Loading…"));
+    } else {
+      if (sv.older > 0) {
+        const b = el("button", "btn", sv.loadingOlder ? "Loading…" : "Load older");
+        b.type = "button";
+        b.disabled = sv.loadingOlder;
+        b.addEventListener("click", svLoadOlder);
+        nodes.push(el("div", "more-row sv-more", b));
+      }
+      const bot = str(sv.target && sv.target.tool) === "grok" ? "Grok" : "Claude";
+      for (const t of sv.turns.values()) {
+        const user = t.role === "user";
+        const body = el("div", "body rich", renderRich(t.text));
+        if (!sv.foldOpen.has(t.uuid)) body.classList.add("fold");
+        const w = el("div", "turn " + (user ? "user" : "fleet"), el("div", "who", el("b", "", user ? "User" : bot), el("span", "", clockWithDay(t.at))), body);
+        w.dataset.uuid = t.uuid;
+        nodes.push(w);
+      }
+      if (!sv.turns.size) nodes.push(el("p", "chat-empty", "No messages yet."));
+    }
+    log.replaceChildren(...nodes);
+    addFolds(log, sv.foldOpen, () => guard(() => svRender(true)));
+    markCode(log);
+    const grew = rev > sv.rev || (sv.source === "pane" && !first);
+    sv.rev = rev;
+    if (prepend) log.scrollTop = log.scrollHeight - fromBottom;
+    else if (first || sv.follow) { log.scrollTop = log.scrollHeight; sv.unseen = false; }
+    else if (grew) sv.unseen = true;
+    $("sv-newmsg").hidden = !sv.unseen;
+  }
+  $("sv-log").addEventListener("scroll", () => {
+    const log = $("sv-log");
+    if (!log.clientHeight) return;
+    sv.follow = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    if (sv.follow && sv.unseen) { sv.unseen = false; $("sv-newmsg").hidden = true; }
+  }, {passive: true});
+  // The header, the send box or the keyboard can shrink the log: stay at
+  // the bottom while Andy follows it.
+  if (window.ResizeObserver) new ResizeObserver(() => { const log = $("sv-log"); if (sv.open && sv.follow) log.scrollTop = log.scrollHeight; }).observe($("sv-log"));
+  $("sv-newmsg").addEventListener("click", () => {
+    const log = $("sv-log");
+    sv.unseen = false; sv.follow = true;
+    $("sv-newmsg").hidden = true;
+    log.scrollTo({top: log.scrollHeight, behavior: "smooth"});
+  });
+
+  // ---- session send ------------------------------------------------------
+  // Two taps: the first turns Send into "Tap again to send to <tmux>" for
+  // 4 s, the second sends. No answer (network, timeout, a 2xx the page
+  // cannot read) keeps the text with an amber note: it may have arrived.
+  function svCanSend() {
+    const t = sv.target;
+    return sv.open && !sv.error && !expired && !!t && t.canSend === true;
+  }
+  function svApplySend() {
+    const can = svCanSend(), t = sv.target;
+    $("sv-comp").hidden = !sv.open || !!sv.error || !t;
+    const ta = $("sv-say"), btn = $("sv-send");
+    ta.disabled = !can;
+    ta.placeholder = can ? "Write to " + sv.tmux : "Send is not available.";
+    btn.disabled = !can || sv.sending || !ta.value.trim();
+    btn.classList.toggle("confirm", sv.confirm && !sv.sending);
+    btn.textContent = sv.sending ? "Sending…" : sv.confirm ? "Tap again to send to " + sv.tmux : "Send";
+    const note = !t ? "" : !can ? (str(t.sendNote) || "Send is not available for this session.") : "";
+    $("sv-note").textContent = note;
+    $("sv-note").hidden = !note;
+  }
+  function svSendTap() {
+    const text = $("sv-say").value.trim();
+    if (sv.sending || !text || !svCanSend()) return;
+    clearTimeout(sv.confirmTimer);
+    if (!sv.confirm) {
+      sv.confirm = true;
+      sv.confirmTimer = setTimeout(() => { sv.confirm = false; svApplySend(); }, 4000);
+      svApplySend();
+      return;
+    }
+    sv.confirm = false;
+    svSend(text);
+  }
+  async function svSend(text) {
+    const tmux = sv.tmux, gen = sv.gen;
+    sv.sending = true;
+    svApplySend();
+    const res = await postSay("/fleet/session/say", {target: tmux, text}, svSendErrors);
+    sv.sending = false;
+    const here = gen === sv.gen;
+    if (res.ok) {
+      if (here && $("sv-say").value.trim() === text) { $("sv-say").value = ""; svGrow(); }
+      if (here) $("sv-warn").hidden = true;
+      toast("Sent to " + tmux + "." + (res.queued ? " It is busy and reads this next." : ""));
+      if (here) setTimeout(() => { if (gen === sv.gen) svPoll(); }, 600);
+    } else if (res.unclear) {
+      if (here) $("sv-warn").hidden = false;
+      toast("Delivery not confirmed. Check the transcript before you send again.", true);
+    } else {
+      toast(res.error, true);
+    }
+    if (here) svApplySend();
+  }
+  function svGrow() {
+    const ta = $("sv-say");
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight + 2, 160) + "px";
+  }
+  $("sv-send").addEventListener("click", svSendTap);
+  $("sv-say").addEventListener("input", () => {
+    svGrow();
+    if (!$("sv-say").value.trim()) $("sv-warn").hidden = true;
+    svApplySend();
+  });
+  $("sv-say").addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!e.repeat) svSendTap(); }
+  });
+  $("sv-say").addEventListener("focus", () => setTimeout(measure, 50));
+  $("sv-say").addEventListener("blur", () => setTimeout(measure, 50));
 
   // ---- refresh -----------------------------------------------------------
   $("refresh").addEventListener("click", async () => {
@@ -2263,6 +2677,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   {
     const h = location.hash.slice(1);
     if (VIEWS.indexOf(h) >= 0) { viewChosen = true; setView(h, false); } else setView("decide", false);
+    if (h.startsWith("session/")) { viewChosen = true; openSession(svName(h), false); }
   }
   measure();
   renderFilters();
