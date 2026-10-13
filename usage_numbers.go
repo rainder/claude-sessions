@@ -486,6 +486,13 @@ func (s *server) usageNumbers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	s.serveUsageNumbers(w)
+}
+
+// serveUsageNumbers writes the /usage/numbers body once a caller is authed.
+// Split from the handler so GET /fleet/usage can serve the same body under
+// fleet auth: the page's cookie has Path=/fleet and never reaches this route.
+func (s *server) serveUsageNumbers(w http.ResponseWriter) {
 	if s.numbers == nil {
 		http.Error(w, "usage numbers unavailable", http.StatusServiceUnavailable)
 		return
