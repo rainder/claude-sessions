@@ -1216,7 +1216,8 @@ paths and do not check it.
 **Files.** Config `~/.config/claude-sessions/idle-events.json`: `enabled`
 (false), `target`, `idleSeconds` (60, 10..86400), `shellSeconds` (1800,
 10..86400), `pollSeconds` (30, 5..600), `batchSeconds` (60, 30..3600),
-`ignore`. Missing means off. It is re-read when (mtime, size) changes, so
+`ignore` (default `trecs-brain-1ac893`, `trecs-brain-bac5ac` when the key is
+absent; `[]` clears it). Missing means off. It is re-read when (mtime, size) changes, so
 enabling needs no restart; while off a poll is that one stat. A bad file
 (bad JSON, unknown key, out of range, `enabled` without `target`) logs
 `config error` once per change and the last good config stays. State

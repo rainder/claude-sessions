@@ -50,8 +50,14 @@ type idleConfig struct {
 	Ignore       []string `json:"ignore"`
 }
 
+// idleDefaultIgnore is the ignore list a config without an "ignore" key gets:
+// the long-lived sessions Andy asked to keep out of FLEET's idle events. An
+// explicit "ignore": [] clears it.
+var idleDefaultIgnore = []string{"trecs-brain-1ac893", "trecs-brain-bac5ac"}
+
 func defaultIdleConfig() idleConfig {
-	return idleConfig{IdleSeconds: 60, ShellSeconds: 1800, PollSeconds: 30, BatchSeconds: 60}
+	return idleConfig{IdleSeconds: 60, ShellSeconds: 1800, PollSeconds: 30, BatchSeconds: 60,
+		Ignore: append([]string(nil), idleDefaultIgnore...)}
 }
 
 // idleNameRe is the shape of a target or ignore entry: a tmux session name or

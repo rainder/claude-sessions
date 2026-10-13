@@ -666,3 +666,23 @@ func TestIdleEventsSkippedRowsKeepTheirReport(t *testing.T) {
 		t.Fatalf("typed %q batch %+v", rig.typed, rig.s.idle.batch)
 	}
 }
+
+func TestIdleConfigDefaultIgnoreList(t *testing.T) {
+	c, err := parseIdleConfig([]byte(`{"enabled": true, "target": "fleet"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(c.Ignore, ",") != "trecs-brain-1ac893,trecs-brain-bac5ac" {
+		t.Errorf("no ignore key: Ignore = %v, want the default list", c.Ignore)
+	}
+	c, err = parseIdleConfig([]byte(`{"ignore": []}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Ignore) != 0 {
+		t.Errorf(`"ignore": []: Ignore = %v, want empty`, c.Ignore)
+	}
+	if d := defaultIdleConfig(); &d.Ignore[0] == &idleDefaultIgnore[0] {
+		t.Error("defaultIdleConfig shares the package slice")
+	}
+}
