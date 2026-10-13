@@ -378,9 +378,9 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: "bad_json", Error: "bad json"})
 		return
 	}
-	text, msg := fleetCleanSayText(raw)
+	text, code, msg := fleetCleanSayText(raw)
 	if msg != "" {
-		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: "bad_text", Error: msg})
+		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: code, Error: msg})
 		return
 	}
 	if !fleetSessionNameRe.MatchString(name) {

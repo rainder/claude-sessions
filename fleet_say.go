@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -122,20 +123,36 @@ func tmuxPressEnter(target string) error {
 	return exec.Command("tmux", "send-keys", "-t", tmuxExactTarget(target), "Enter").Run()
 }
 
-// fleetCleanSayText makes raw safe to type as one prompt; msg is the 400
-// reason when it is not.
-func fleetCleanSayText(raw string) (text, msg string) {
+// fleetEventTag marks a line the server itself typed into FLEET (idle
+// events). FLEET treats a tagged line as a status report, so a page send must
+// never be able to forge one.
+const fleetEventTag = "[claude-sessions event]"
+
+// fleetEventTagRe finds the tag anywhere, in any case, with any whitespace
+// inside the brackets (newlines too: flattening turns a later line into
+// mid-text, so "only at the start" would not be enough).
+var fleetEventTagRe = regexp.MustCompile(`(?i)\[\s*claude-sessions\s+event\s*\]`)
+
+const fleetReservedTagMsg = "Text may not contain [claude-sessions event]. That tag is reserved for server events."
+
+// fleetCleanSayText makes raw safe to type as one prompt. When it is not,
+// code is "reserved_tag" or "bad_text" and msg the 400 reason. Every page
+// send goes through here; the idle-event sender does not.
+func fleetCleanSayText(raw string) (text, code, msg string) {
+	if fleetEventTagRe.MatchString(raw) {
+		return "", "reserved_tag", fleetReservedTagMsg
+	}
 	text, err := sanitizeFleetText(raw)
 	if err != nil {
-		return "", "bad text"
+		return "", "bad_text", "bad text"
 	}
 	// Claude Code switches to bash mode on a leading "!" and memory mode on
 	// "#". The box glyph changes, so every later send would refuse until the
 	// box is cleared at the terminal.
 	if text[0] == '!' || text[0] == '#' {
-		return "", "text must not start with ! or #"
+		return "", "bad_text", "text must not start with ! or #"
 	}
-	return text, ""
+	return text, "", ""
 }
 
 // fleetSayGateLocked applies the limits every page send shares: a 1 s gap
@@ -303,7 +320,11 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad cardId", http.StatusBadRequest)
 		return
 	}
-	text, msg := fleetCleanSayText(raw)
+	text, code, msg := fleetCleanSayText(raw)
+	if code == "reserved_tag" {
+		writeJSON(w, http.StatusBadRequest, fleetSayResult{Code: code, Error: msg})
+		return
+	}
 	if msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
