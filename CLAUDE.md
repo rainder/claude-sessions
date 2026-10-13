@@ -938,14 +938,41 @@ status lines, a notice above the prompt, or a rule wrapped into two lines in a
 narrow pane made a normal idle box read as not visible. The slash and `@` menus
 draw above the box with their own `❯` row, which is why the anchor is the
 *last* `❯` line. A dialog with a `❯ 1. Yes` row between two rules reads as
-non-empty text and refuses as `input_busy`. If Claude Code changes how it
+non-empty text and refuses as `input_busy`. A rule line is at least 10 `─`,
+starts and ends with `─`, and may hold **one** label of at most 80 runes
+between `─` runs: in a named session Claude Code writes the name into the top
+rule (`──────── FLEET ─`). The parser once accepted only lines made of `─`, so
+it never found the FLEET pane's top rule and refused every send as "input box
+is not visible" (`pane-named-session-busy.ansi`). If Claude Code changes how it
 draws the prompt, the parser finds no box and every send is refused (fails
 closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens;
 `pane-synth-*` are hand-built in the same escape style for states that cannot
 be produced on demand. A `dialog`, `input_busy` or `not_submitted` refusal
-that read the pane logs its last 15 lines (escapes stripped, dim text kept)
-to the server's stderr only — never to the response — so a refusal that
-cannot be reproduced later still leaves the screen behind.
+that read the pane appends an entry to
+`$XDG_STATE_HOME/claude-sessions/fleet-say.log` (default
+`~/.local/state/claude-sessions/fleet-say.log`; dir 0700, file 0600) — never
+to the response — so a refusal that cannot be reproduced later still leaves
+the screen behind. An entry is a `<RFC3339 UTC> refused code=… target=…`
+header, the last 15 pane lines (escapes stripped, dim text kept, `  | `
+prefix), the raw `-e` bytes of the last 6 lines (`  raw "%q"`, for when the
+parser itself is wrong), and a blank line, written in one `O_APPEND` write.
+Over 1 MiB the file moves to `fleet-say.log.1` (replacing an older one) before
+the append. Write errors are dropped; they never fail a say. **Why a file, not
+stderr:** the service's systemd unit runs with `StandardOutput=null`, and in
+practice journald showed nothing from the server either (stderr is not nulled
+in the unit, but nothing arrived), so the stderr log reached nobody.
+`service install` does not bake `XDG_STATE_HOME` into the unit (only `PATH`
+and `TMPDIR`), so the service writes the log under the default path even when
+your shell sets `XDG_STATE_HOME` — look there first.
+`fleetDeps.sayLogPath` points tests at a temp dir.
+
+**Rich text.** Card summaries and chat turns go through `renderRich` in
+`fleet.html`, a small markdown renderer: paragraphs (single newline = `<br>`),
+`-`/`*` and numbered lists, ``` fenced blocks, `#`–`###` lines as a bold
+line, and inline `code`, **bold**, *italic*, `[label](url)`. It builds nodes
+only with `createElement` and text nodes, so raw HTML in the text shows as
+text, and links go through `safeLink` (http and https only; anything else is
+the plain label). `fleet_page_test.go` forbids the HTML sinks.
 
 **Cursors.** Chat: `since=<byte position>` in the transcript; the server
 returns every turn that changed after it (a later line of the same assistant

@@ -120,8 +120,22 @@ section { min-width: 0; }
 .opt.is-lean { border-color: var(--accent); }
 .opt.lean-btn { background: var(--accent-tint); border-color: var(--accent); color: var(--accent); font-weight: 620; }
 .opt.lean-btn .k { border-color: var(--accent); color: var(--accent); background: transparent; }
-.summary { margin: 0 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.summary { margin: 0 0 10px; overflow-wrap: anywhere; }
 .links { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+/* renderRich output: paragraphs, lists, fenced blocks, `code`, **bold**,
+   *italic*, links and "#" lines as a bold line. */
+.rich p { margin: 0 0 .5em; }
+.rich ul, .rich ol { margin: 0 0 .5em; padding-left: 1.4em; }
+.rich li { margin: 0 0 .2em; }
+.rich > :last-child, .rich li:last-child { margin-bottom: 0; }
+.rich code { font-family: var(--mono); font-size: .88em; padding: .05em .3em; border-radius: 4px;
+  background: rgba(127, 127, 127, .18); overflow-wrap: anywhere; }
+.rich pre { margin: 0 0 .5em; padding: 8px 10px; border-radius: 8px; background: rgba(127, 127, 127, .14);
+  overflow-x: auto; white-space: pre; tab-size: 4; max-width: 100%; }
+.rich pre code { padding: 0; background: none; font-size: 12.5px; line-height: 1.4; overflow-wrap: normal; }
+.rich strong { font-weight: 650; }
+.rich em { font-style: italic; }
+.rich .md-h { margin-top: .2em; }
 .card .links { margin-top: 10px; font-size: 13px; }
 .sent { display: flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 13px; color: var(--accent); font-weight: 550; }
 .sent .dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
@@ -150,7 +164,7 @@ section { min-width: 0; }
 .turn .who { display: flex; gap: 8px; font-size: 12px; color: var(--muted); margin: 0 2px 3px; }
 .turn.user .who { justify-content: flex-end; }
 .turn .who b { color: var(--text); font-weight: 650; }
-.turn .body { background: var(--surface2); border-radius: 12px; padding: 8px 11px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14.5px; line-height: 1.45; }
+.turn .body { background: var(--surface2); border-radius: 12px; padding: 8px 11px; overflow-wrap: anywhere; font-size: 14.5px; line-height: 1.45; }
 .turn.user .body { background: var(--accent-tint); }
 .turn .body.fold { max-height: calc(12 * 1.45em + 16px); overflow: hidden;
   -webkit-mask-image: linear-gradient(to bottom, #000 78%, transparent); mask-image: linear-gradient(to bottom, #000 78%, transparent); }
@@ -332,6 +346,96 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       e.append(typeof k === "string" ? document.createTextNode(k) : k);
     }
     return e;
+  }
+
+  // renderRich is a small markdown renderer for untrusted text (card
+  // summaries, chat turns). It builds nodes only with createElement and text
+  // nodes, so raw HTML in the text shows as literal text. Blocks: paragraphs
+  // (a blank line ends one, a single newline is <br>), "- " / "* " lists,
+  // "1." / "2)" numbered lists (start kept), ``` fenced blocks (text as-is),
+  // and "#".."###" lines as a bold line. Inline: see richInline. Anything
+  // else, and every unclosed marker, stays literal.
+  function renderRich(text) {
+    const frag = document.createDocumentFragment();
+    const lines = str(text).split(/\r?\n/);
+    let para = null, list = null;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const fence = /^\s*```\s*([\w.+#-]*)\s*$/.exec(line);
+      if (fence) {
+        let j = i + 1;
+        while (j < lines.length && !/^\s*```\s*$/.test(lines[j])) j++;
+        if (j < lines.length) {
+          para = list = null;
+          frag.append(el("pre", "", el("code", "", lines.slice(i + 1, j).join("\n"))));
+          i = j;
+          continue;
+        }
+      }
+      if (!line.trim()) { para = list = null; continue; }
+      // Linear on purpose: a lazy group before "[ #]*$" rescans long runs
+      // of spaces or "#" quadratically. The closing "#"s are trimmed after.
+      const head = /^ {0,3}#{1,3} +(.*)$/.exec(line);
+      const headText = head ? head[1].trimEnd().replace(/\s#+$/, "").trimEnd() : "";
+      if (headText) {
+        para = list = null;
+        frag.append(el("p", "md-h", richInline(el("strong"), headText)));
+        continue;
+      }
+      const ul = /^ *[-*] +(.*)$/.exec(line), ol = ul ? null : /^ *(\d{1,9})[.)] +(.*)$/.exec(line);
+      if (ul || ol) {
+        const tag = ul ? "UL" : "OL";
+        if (!list || list.tagName !== tag) {
+          para = null;
+          list = el(tag.toLowerCase());
+          if (ol && ol[1] !== "1") list.start = parseInt(ol[1], 10);
+          frag.append(list);
+        }
+        list.append(richInline(el("li"), ul ? ul[1] : ol[2]));
+        continue;
+      }
+      // An indented line right after a list item continues that item.
+      if (list && /^\s/.test(line)) {
+        list.lastChild.append(el("br"));
+        richInline(list.lastChild, line.trim());
+        continue;
+      }
+      list = null;
+      if (para) para.append(el("br"));
+      else { para = el("p"); frag.append(para); }
+      richInline(para, line);
+    }
+    return frag;
+  }
+
+  // richInline appends one line to parent: `code`, [label](url) through
+  // safeLink (http and https only, anything else is the plain label),
+  // **bold**, *italic* and _italic_. Bold and italic need a non-space char
+  // right inside the markers, and an _ pair needs no word char right outside
+  // it, so a lone "*" and snake_case stay literal. Bold and italic content is
+  // parsed again for nested spans. A "*" pair also needs no word char or
+  // "/" right outside it, so glob paths like src/*.go stay literal.
+  //
+  // A line longer than richInlineMax is appended as plain text: unclosed
+  // markers make the inline regex quadratic per line, and one long tool
+  // output line must not freeze the phone on every chat render.
+  const richInlineMax = 2000;
+  function richInline(parent, s) {
+    if (s.length > richInlineMax) { parent.append(document.createTextNode(s)); return parent; }
+    const re = /`([^`]+)`|\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|\*\*(\S(?:.*?\S)?)\*\*|(^|[^\w/])\*([^\s*](?:.*?\S)?)\*(?![\w/])|(^|\W)_([^\s_](?:.*?[^\s_])?)_(?!\w)/g;
+    let last = 0, m;
+    while ((m = re.exec(s))) {
+      const start = m.index + (m[5] || m[7] || "").length;
+      if (start > last) parent.append(document.createTextNode(s.slice(last, start)));
+      if (m[1] !== undefined) parent.append(el("code", "", m[1]));
+      else if (m[2] !== undefined) parent.append(safeLink(m[3], m[2]));
+      else if (m[4] !== undefined) parent.append(richInline(el("strong"), m[4]));
+      else if (m[6] !== undefined) parent.append(richInline(el("em"), m[6]));
+      else parent.append(richInline(el("em"), m[8]));
+      last = re.lastIndex;
+    }
+    if (last < s.length) parent.append(document.createTextNode(s.slice(last)));
+    return parent;
   }
 
   function safeLink(url, label) {
@@ -550,7 +654,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     card.append(el("div", "card-top", title, talk));
 
     const sum = str(c.summary);
-    if (sum) card.append(el("p", "summary", sum));
+    if (sum) card.append(el("div", "summary rich", renderRich(sum)));
 
     if (lean) {
       const ll = el("p", "lean-line", "Lean: ", el("b", "", lean));
@@ -616,7 +720,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     row.addEventListener("toggle", () => { if (!id) return; if (row.open) expanded.add("row:" + id); else expanded.delete("row:" + id); });
     row.append(el("summary", "", l1, l2.childNodes.length ? l2 : null));
     const body = el("div", "row-body");
-    if (sum) body.append(el("p", "summary", sum));
+    if (sum) body.append(el("div", "summary rich", renderRich(sum)));
     if (links) body.append(links);
     row.append(body);
     return row;
@@ -839,7 +943,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const nodes = [];
     for (const t of chat.turns.values()) {
       const user = t.role === "user";
-      const body = el("div", "body", t.text);
+      const body = el("div", "body rich", renderRich(t.text));
       const wrap = el("div", "turn " + (user ? "user" : "fleet"),
         el("div", "who", el("b", "", user ? "Andy" : "FLEET"), el("span", "", clockWithDay(t.at))),
         body);

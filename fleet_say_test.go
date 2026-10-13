@@ -52,7 +52,6 @@ func newSayRig(t *testing.T, sessions []Session) *sayRig {
 	rig.s.fleet.typeText = func(_ string, text string) error { rig.typed = append(rig.typed, text); return nil }
 	rig.s.fleet.pressEnter = func(string) error { rig.enters++; return nil }
 	rig.s.fleet.paneInMode = func(string) (bool, error) { return false, nil }
-	rig.s.fleet.logf = func(string, ...any) {}
 	return rig
 }
 
@@ -389,24 +388,45 @@ func TestFleetSayRefusesLeadingBangOrHash(t *testing.T) {
 	}
 }
 
-// A refusal that read the pane logs the screen it saw to the server's stderr,
-// escapes stripped, and never puts it in the response.
+func readSayLog(t *testing.T, rig *sayRig) string {
+	t.Helper()
+	b, err := os.ReadFile(rig.s.fleet.sayLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// A refusal that read the pane appends the screen it saw to the say log file,
+// escapes stripped plus the raw bytes of the last lines, and never puts it in
+// the response.
 func TestFleetSayRefusalLogsPaneLines(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
-	var logged strings.Builder
-	rig.s.fleet.logf = func(format string, args ...any) { fmt.Fprintf(&logged, format, args...) }
 	var lines []string
 	for i := 0; i < 20; i++ {
 		lines = append(lines, fmt.Sprintf("old line %02d", i))
 	}
-	rig.captures = []string{strings.Join(lines, "\n") + "\n" + dialogCapture}
+	rig.captures = []string{strings.Join(lines, "\n") + "\n\x1b[38;5;244m" + dialogCapture}
 	code, res := rig.post(t, `{"text":"hi"}`, nil)
 	if code != http.StatusOK || res.Code != "dialog" {
 		t.Fatalf("%d %+v", code, res)
 	}
-	out := logged.String()
-	if !strings.HasPrefix(out, "fleet: say refused (dialog); last 15 pane lines:\n") {
+	st, err := os.Stat(rig.s.fleet.sayLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("log mode %v, want 0600", st.Mode().Perm())
+	}
+	if dst, err := os.Stat(filepath.Dir(rig.s.fleet.sayLogPath)); err != nil || dst.Mode().Perm() != 0o700 {
+		t.Fatalf("log dir: %v %v", dst, err)
+	}
+	out := readSayLog(t, rig)
+	if !strings.HasPrefix(out, "2026-10-13T10:00:00Z refused code=dialog target=fleet:0.0\n") {
 		t.Fatalf("log = %q", out)
+	}
+	if !strings.HasSuffix(out, "\n\n") {
+		t.Fatalf("entry must end with a blank line: %q", out)
 	}
 	if !strings.Contains(out, "  |  Do you want to proceed?\n") || !strings.Contains(out, "  | old line 19\n") ||
 		strings.Contains(out, "old line 08") || strings.Contains(out, "\x1b") {
@@ -415,6 +435,13 @@ func TestFleetSayRefusalLogsPaneLines(t *testing.T) {
 	if strings.Count(out, "  | ") != 15 {
 		t.Fatalf("log has %d pane lines, want 15: %q", strings.Count(out, "  | "), out)
 	}
+	if strings.Count(out, "  raw ") != 6 {
+		t.Fatalf("log has %d raw lines, want 6: %q", strings.Count(out, "  raw "), out)
+	}
+	if !strings.Contains(out, "  raw \"old line 18\"\n") || strings.Contains(out, "  raw \"old line 17\"") ||
+		!strings.Contains(out, `  raw "\x1b[38;5;244m────────────────────"`+"\n") {
+		t.Fatalf("raw lines must be the last 6 capture lines, %%q-quoted: %q", out)
+	}
 	if strings.Contains(res.Error, "proceed") {
 		t.Fatalf("pane text leaked into the response: %+v", res)
 	}
@@ -422,24 +449,25 @@ func TestFleetSayRefusalLogsPaneLines(t *testing.T) {
 
 func TestFleetSayInputBusyAndNotSubmittedLog(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
-	var logged strings.Builder
-	rig.s.fleet.logf = func(format string, args ...any) { fmt.Fprintf(&logged, format, args...) }
 	rig.captures = []string{"\x1b[2mdim kept\x1b[0m\n" + boxCapture("someone typing")}
 	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.Code != "input_busy" {
 		t.Fatalf("%+v", res)
 	}
-	if out := logged.String(); !strings.Contains(out, "say refused (input_busy)") ||
+	if out := readSayLog(t, rig); !strings.Contains(out, " refused code=input_busy target=fleet:0.0\n") ||
 		!strings.Contains(out, "  | dim kept\n") || !strings.Contains(out, "  | ❯ someone typing\n") {
 		t.Fatalf("log = %q", out)
 	}
 
-	logged.Reset()
 	rig.now = rig.now.Add(time.Minute)
 	rig.captures = []string{emptyBoxCapture, boxCapture("other words")}
 	if _, res := rig.post(t, `{"text":"hello"}`, nil); res.Code != "not_submitted" {
 		t.Fatalf("%+v", res)
 	}
-	if out := logged.String(); !strings.Contains(out, "say refused (not_submitted)") ||
+	out := readSayLog(t, rig)
+	if !strings.Contains(out, " refused code=input_busy ") {
+		t.Fatalf("the second entry must append, not replace: %q", out)
+	}
+	if !strings.Contains(out, "2026-10-13T10:01:00Z refused code=not_submitted target=fleet:0.0\n") ||
 		!strings.Contains(out, "  | ❯ other words\n") {
 		t.Fatalf("log = %q", out)
 	}
@@ -448,12 +476,55 @@ func TestFleetSayInputBusyAndNotSubmittedLog(t *testing.T) {
 // Refusals that never read the pane log nothing.
 func TestFleetSayOtherRefusalsDoNotLogPane(t *testing.T) {
 	rig := newSayRig(t, nil)
-	var logged strings.Builder
-	rig.s.fleet.logf = func(format string, args ...any) { fmt.Fprintf(&logged, format, args...) }
 	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.Code != "not_live" {
 		t.Fatalf("%+v", res)
 	}
-	if logged.Len() != 0 {
-		t.Fatalf("log = %q", logged.String())
+	if _, err := os.Stat(rig.s.fleet.sayLogPath); !os.IsNotExist(err) {
+		t.Fatalf("log file must not exist: %v", err)
+	}
+}
+
+// Past the size cap the log moves to .1 (replacing an older .1) and a new
+// file starts.
+func TestFleetSayLogRotatesAtCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fleet-say.log")
+	big := strings.Repeat("x", fleetSayLogMax+1)
+	if err := os.WriteFile(path, []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".1", []byte("older"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendFleetSayLog(path, "entry\n")
+	if b, _ := os.ReadFile(path); string(b) != "entry\n" {
+		t.Fatalf("new log = %d bytes", len(b))
+	}
+	if b, _ := os.ReadFile(path + ".1"); string(b) != big {
+		t.Fatalf(".1 = %d bytes, want the rotated log", len(b))
+	}
+	// At the cap (not over it) the file keeps growing.
+	exact := strings.Repeat("y", fleetSayLogMax)
+	if err := os.WriteFile(path, []byte(exact), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendFleetSayLog(path, "more\n")
+	if b, _ := os.ReadFile(path); string(b) != exact+"more\n" {
+		t.Fatalf("log at the cap must append, got %d bytes", len(b))
+	}
+}
+
+func TestFleetSayLogDefaultPath(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/xdg/state")
+	if got := fleetSayLogDefault(); got != "/xdg/state/claude-sessions/fleet-say.log" {
+		t.Fatalf("got %q", got)
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	if got := fleetSayLogDefault(); got != filepath.Join(home, ".local", "state", "claude-sessions", "fleet-say.log") {
+		t.Fatalf("got %q", got)
 	}
 }

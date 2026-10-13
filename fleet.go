@@ -47,7 +47,7 @@ type fleetDeps struct {
 	pressEnter func(target string) error         // nil → tmux send-keys Enter
 	sleep      func(time.Duration)               // nil → time.Sleep
 	paneInMode func(target string) (bool, error) // nil → tmux display #{pane_in_mode}
-	logf       func(format string, args ...any)  // nil → os.Stderr
+	sayLogPath string                            // refusal log; "" → fleetSayLogDefault()
 
 	sayMu     sync.Mutex // one send at a time, so two devices never interleave keystrokes
 	lastSayAt time.Time

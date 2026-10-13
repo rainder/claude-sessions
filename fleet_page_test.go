@@ -15,7 +15,11 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 	}
 	for _, need := range []string{"/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say",
 		"Europe/Vilnius", "noopener noreferrer", "visibilitychange", "Yes, I approve this write",
-		"since=", ".pct", ".account", ".windows"} {
+		"since=", ".pct", ".account", ".windows",
+		// Card summaries and chat turns go through the one markdown renderer,
+		// which knows fenced blocks and [label](url) links (via safeLink).
+		"function renderRich(", "renderRich(sum)", "renderRich(t.text)", "```", "](", `\]\(`,
+		"safeLink(m[3], m[2])"} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}

@@ -87,14 +87,21 @@ func paneInputText(capture string) (text string, found bool) {
 	return strings.Join(parts, " "), true
 }
 
-// isRuleLine reports a line made only of ─ (at least 10), the border Claude
-// Code draws above and below its input box.
+// isRuleLine reports the border Claude Code draws above and below its input
+// box: at least 10 ─ in all, starting and ending with ─. A named session puts
+// its name into the rule ("──────── FLEET ─"), so one contiguous label of at
+// most 80 runes between ─ runs is allowed too; a line made only of ─ still
+// qualifies. Two labels, or text at either end, is not a rule.
 func isRuleLine(s string) bool {
 	s = strings.TrimSpace(s)
-	if strings.Count(s, "─") < 10 {
+	if strings.Count(s, "─") < 10 || !strings.HasPrefix(s, "─") || !strings.HasSuffix(s, "─") {
 		return false
 	}
-	return strings.Trim(s, "─") == ""
+	label := strings.Trim(s, "─")
+	if label == "" {
+		return true
+	}
+	return !strings.Contains(label, "─") && utf8.RuneCountInString(label) <= 80
 }
 
 // visibleText strips CSI escape sequences from one captured line and drops
