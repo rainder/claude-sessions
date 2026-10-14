@@ -848,8 +848,8 @@ of the long-running Claude session named `FLEET` (spec and plan in
 `docs/superpowers/`). The server makes no decisions. It serves two files FLEET
 writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 `~/.claude/skills/fleet/scripts/fleet-state.py`) and `~/.claude/fleet/log.jsonl`
-(append-only, `fleet-log.sh`; the server appends `web-say` and `web-start`
-lines) — mirrors the FLEET transcript, types text into the FLEET pane, and can
+(append-only, `fleet-log.sh`; the server appends `web-say`, `web-start`,
+`web-switch` and `clickup` lines) — mirrors the FLEET transcript, types text into the FLEET pane, and can
 start FLEET when it is down. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
 `POST /fleet/start`, `/fleet/session`, `POST /fleet/session/say`,
@@ -990,11 +990,14 @@ stderr and the page gets `switch_failed` only. A switch logs one `web-switch`
 line (names only), releases the lock, then types
 `[claude-sessions event] account <p> switched from <old> to <new>; <note>`
 (names through `idleSanitize`) into FLEET via `idleDeliver`, synchronously, so
-the 200 carries `event` (`sent`, a refusal code, or `no_target`). A refused
+the 200 carries `event` (`sent` or a refusal code; no FLEET running is
+`target_missing`). A refused
 event is not retried (the 1 s say gap or a busy box can refuse it); the toast
 says "FLEET not told", and the `web-switch` log line is still there. Target:
-idle-events.json's `target` when set (enabled or not), read fresh (the idle
-loop holds its lock across a delivery), else the FLEET row's tmux session.
+`fleetEventTarget`, shared by every server event line (idle, account switch,
+ClickUp) — idle-events.json's `target`, enabled or not, read fresh (the idle
+loop holds its lock across a delivery); empty, missing or bad means the FLEET
+row, which `idleDeliver` resolves on its own fresh collect.
 The hint and note texts are constants in `fleet_account.go`, from a test of
 running sessions (2026-10-14, Claude Code 2.1.299, grok 1.0.52): claude stats
 `.credentials.json` before each request and reloads it on an mtime change, so
@@ -1299,7 +1302,12 @@ text.
 
 **Delivery fails closed.** Under `sayMu`, like `/fleet/session/say`, each
 attempt collects afresh and needs exactly one row whose tmux session name or
-session id is `target`; none or two refuse and nothing is typed. A grok target
+session id is `target`; none or two refuse and nothing is typed. An empty
+`target` is the FLEET row `findFleet` picks on that same fresh list (none →
+`target_missing`, two → `target_ambiguous`). That is the parity fix with
+FLEET's old `idle-stream.sh`, which ran inside FLEET and so always reached the
+current one: a pinned tmux name goes stale the moment Start FLEET opens a new
+tmux session, and every event then refuses as `target_missing` for good. A grok target
 is refused: the input-box parser knows only Claude Code's screen. Then the
 shared 1 s gap and `fleetTypeInto`: the exact `=` pane target, the dialog,
 copy-mode and empty-box checks, and Enter only once the box holds the text.
@@ -1323,12 +1331,13 @@ covers only `/fleet/say` and `/fleet/session/say`. The bearer
 paths and do not check it.
 
 **Files.** Config `~/.config/claude-sessions/idle-events.json`: `enabled`
-(false), `target`, `idleSeconds` (60, 10..86400), `shellSeconds` (1800,
+(false), `target` (empty = the FLEET session), `idleSeconds` (60, 10..86400), `shellSeconds` (1800,
 10..86400), `pollSeconds` (30, 5..600), `batchSeconds` (60, 30..3600),
 `ignore` (default `trecs-brain-1ac893`, `trecs-brain-bac5ac` when the key is
 absent; `[]` clears it). Missing means off. It is re-read when (mtime, size) changes, so
 enabling needs no restart; while off a poll is that one stat. A bad file
-(bad JSON, unknown key, out of range, `enabled` without `target`) logs
+(bad JSON, unknown key, out of range, a target that is not a tmux session
+name or session id) logs
 `config error` once per change and the last good config stays. State
 `$XDG_STATE_HOME/claude-sessions/idle-events-state.json` (dir 0700, file 0600,
 atomic): reported keys, the pending batch, and `lastSent`. `since` is not kept
@@ -1338,14 +1347,122 @@ per row, so a restart starts the clocks again. Log `idle-events.log` beside it
 `target ambiguous`, `config error`; counts only. A refusal code that repeats
 is logged once per 10 minutes, in this log and in `fleet-say.log`.
 
-**Enable.** Write `{"enabled": true, "target": "<FLEET tmux session or
-session id>"}` to the config file. `claude-sessions idle-events status` prints
-the config and state. `claude-sessions idle-events test --target <T>` types
+**Enable.** Write `{"enabled": true}` to the config file to follow the session
+named FLEET (`status` shows `FLEET (follows the session named FLEET)`), or add
+`"target": "<tmux session or session id>"` to pin another one.
+`claude-sessions idle-events status` prints the config and state. `claude-sessions idle-events test --target <T>` types
 `[claude-sessions event] test: delivery check, no action needed` into T through
 the same delivery function and prints `sent target=…` or `refused code=…`; it
 does not need `enabled`. It runs in its own process, so it shares neither
 `sayMu` nor the 1 s gap with the server: run it when nobody is typing into
-FLEET.
+FLEET. `test` still needs an explicit `--target`.
+
+### ClickUp events for FLEET
+
+`clickup_events.go` tells FLEET when a backlog ticket is new or has just turned
+urgent, so FLEET needs no watcher of its own. A goroutine started in
+`cmdServer` beside `runIdleEvents` (same recover-per-tick loop) runs
+`cu backlog --json` every `pollSeconds` and types one tagged line into FLEET
+only when something real happened. Like an idle event, a tagged line is a
+status report, never an instruction from Andy.
+
+**Source.** `cu` (clickup-tui): the configured path, else `cu` on `PATH`, else
+`~/.cargo/bin/cu` (the service unit's `PATH` may not hold it). 45 s timeout
+that kills the process group, stdin `/dev/null`, stdout capped at 8 MiB,
+stderr discarded and never logged — it could hold anything. The answer must be
+exactly one JSON array of objects (`parseClickupBacklog`): unknown fields are
+ignored (the contract may grow), an element without an `id` is skipped, but
+anything else off-shape — not an array, `null`, a non-object element, a field
+of the wrong type, trailing data — makes the whole answer bad. A failed run
+(start error, `exit N`, `timeout`, `bad output`, `not found`) logs
+`cu failed: <code>` once per code per 10 minutes, leaves the state untouched,
+sends nothing, and the next tick tries again. A changed contract must never
+read as "these tickets are gone" or "these are all new".
+
+**Diff.** The known tickets are read **from the state file on every tick**,
+never cached. That is deliberate: an operator can remove one id from the file,
+or set a stored priority to `high`, and the next tick produces a real event
+without anyone creating a ClickUp ticket. No state file, or an unreadable or
+unparseable one (`state error: rebaseline`), records every ticket and queues
+nothing (`baseline n=…`); an empty answer is not a baseline, since the next
+real one would read every ticket as new. A file that parses with **no**
+tickets is valid state, not a baseline: its `pending` is kept, and after 30
+days of an empty backlog the next real tickets are announced. After that: an id not
+known is `new`; a known one whose stored priority is not `urgent` and is
+`urgent` now is `urgent`; a new ticket that is already urgent is only `new`.
+Every seen ticket's priority, custom id and `lastSeen` are updated. A ticket
+missing from an answer is **kept** — a short or empty answer must never
+re-announce the backlog when it comes back — and pruned only once unseen for
+30 days.
+
+**Save before anything leaves.** The diff's result, with the new events
+already in `pending`, is saved **before** the page log is appended or the line
+is sent. The state is read from disk only, so a save that kept failing after a
+send would find, log and send the same events on every tick. A failed save
+logs `state error: save failed` (once per 10 minutes) and ends the tick with
+nothing appended or sent. After a delivery the cleared `pending` is saved
+again; if only that save fails, the next tick sends the line once more — the
+one duplicate a broken disk can cause.
+
+**Delivery.** Pending events plus the new ones go out as ONE line at once (no
+batch window): `[claude-sessions event] ticket ` plus entries joined by ` ; `
+(a newline would press Enter in the pane), each
+`new DR-1234 high cx:low by Andrius "title"` or `urgent DR-1234 urgent …`, at
+most 15 and within `sendKeysMaxLen`, then ` ; +N more`. Target and send are
+the idle events' (`fleetEventTarget`, `idleDeliver`): the same fresh collect,
+1 s gap and `fleetTypeInto` guards. `sent` clears pending and sets `lastSent`;
+`not_submitted` counts as delivered (a retry would duplicate the line if Andy
+presses Enter on the leftover) and appends a `note` to `log.jsonl`; any
+refusal keeps the events in `pending` (persisted, one per kind+id, newest
+wins, at most 100, oldest dropped), logs `refused code=… n=…` once per 10
+minutes, and retries next tick.
+
+**Sanitizing.** Titles and creator names are text strangers control, and the
+line lands in an LLM's prompt. Ref is the custom id when it matches
+`^[A-Z][A-Z0-9]{0,9}-\d{1,7}$`, else the ClickUp id when it matches
+`^[a-z0-9]{1,32}$`, else `-`; priority is one of the four or `none`; cx is the
+`^cx:[a-z]{1,16}$` tags joined with `+` (at most 3), else `no-cx`; the creator
+goes through `idleSanitize` (ASCII only); the title through the same
+`scrubEventField` with ASCII letters and digits, the Latin-1 Supplement and
+Latin Extended-A letters (U+00C0–U+017F without `×` and `÷`, which covers
+Lithuanian), and ` ._:/#()-,'?!&+` — no quote, no bracket, no control or
+format character — cut to 100 runes, no ellipsis. Not every Unicode letter:
+Lisu capitals and small capitals spell the tag where no fold catches them, and
+modifier letters such as `ˮ` (U+02EE) look like `"` and let a title fake a
+second entry. No `@` either: an open `@name` token can leave Claude Code's
+file-mention menu open when Enter is pressed. (`ᴀ` and `ɪ` were also added to
+`fleetLookalikes`, so the page-send guard folds every small capital of the
+tag's words.) Every field and
+the joined body go through `idleScrubTag`, and a creator plus title that spell
+the tag's words together drop the title (the two are the only free-text
+neighbours; scrubbing the body there would cut through the quote). Pending
+events are re-sanitized when the line is built, so a hand-edited state file
+cannot inject either.
+
+**Page feed.** Each event is also appended to `log.jsonl` **when it is
+detected**, not when it is delivered, so the page shows it while FLEET is down:
+type `clickup`, text `new DR-1234 (high, cx:low) by Andrius: title` from the
+same sanitized fields, and `url` only when it is a plain
+`https://app.clickup.com/t/<id>` link. Not on a baseline.
+
+**Files.** Config `~/.config/claude-sessions/clickup-events.json`, parsed as
+strictly as idle-events.json and re-read on an (mtime, size) change: `enabled`
+(false; missing file = off; while off a poll is one stat), `pollSeconds` (60,
+30..3600), `cu` (absolute clean path, "" = look it up), `args` (default
+`["backlog","--json"]`, 1..16 entries of `^[A-Za-z0-9._=:/-]{1,128}$`; empty
+is refused because bare `cu` is the TUI). State
+`$XDG_STATE_HOME/claude-sessions/clickup-events-state.json` (dir 0700, file
+0600, atomic): `{"tickets": {"<id>": {"customId", "priority", "lastSeen"}},
+"pending": [...], "lastSent"}`. Log `clickup-events.log` beside it (1 MiB
+rotation): `baseline n=…`, `detected n=…`, `sent n=… target=…`,
+`not submitted …`, `refused code=… n=…`, `cu failed: …`,
+`state error: rebaseline`, `state error: save failed`,
+`config error: …` — counts and codes only, never titles, never stderr.
+
+**Enable.** Write `{"enabled": true}` to the config file; the target follows
+idle-events.json (empty = FLEET). `claude-sessions clickup-events status`
+prints the config, the resolved `cu`, the known-ticket and pending counts, and
+`lastSent`. The first enabled tick only records a baseline.
 
 ### Usage polling
 

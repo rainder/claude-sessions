@@ -76,8 +76,8 @@ type fleetSwitchResult struct {
 	Provider string `json:"provider,omitempty"`
 	Name     string `json:"name,omitempty"`
 	Previous string `json:"previous,omitempty"`
-	// Event is idleDeliver's code for the line typed into FLEET: "sent", a
-	// refusal code, or "no_target".
+	// Event is idleDeliver's code for the line typed into FLEET: "sent" or a
+	// refusal code.
 	Event    string `json:"event,omitempty"`
 	Warnings int    `json:"warnings,omitempty"`
 	Code     string `json:"code,omitempty"`
@@ -397,14 +397,10 @@ func fleetSwitchEventText(provider, old, name string) string {
 }
 
 // fleetSwitchNotify types the switch event into FLEET and returns the
-// delivery code. The target is idle-events.json's target when set (enabled
-// or not), else the one FLEET row's tmux session.
+// delivery code: "sent" or idleDeliver's refusal code (target_missing when
+// no FLEET is running and no target is configured).
 func (s *server) fleetSwitchNotify(provider, old, name string) string {
 	target := s.fleetEventTarget()
-	if target == "" {
-		fmt.Fprintf(os.Stderr, "fleet: %s account switch event not delivered: code=no_target\n", provider)
-		return "no_target"
-	}
 	text := fleetSwitchEventText(provider, old, name)
 	var code string
 	if s.fleet.deliverEvent != nil {
@@ -413,31 +409,38 @@ func (s *server) fleetSwitchNotify(provider, old, name string) string {
 		code, _ = s.idleDeliver(target, text)
 	}
 	if code != "sent" {
-		fmt.Fprintf(os.Stderr, "fleet: %s account switch event not delivered: code=%s target=%s\n", provider, code, target)
+		fmt.Fprintf(os.Stderr, "fleet: %s account switch event not delivered: code=%s target=%s\n", provider, code, fleetEventTargetName(target))
 	}
 	return code
 }
 
-// fleetEventTarget reads idle-events.json fresh (not the idle loop's copy:
-// that loop holds its lock across a whole delivery). A missing or bad file
-// falls back to discovery on a fresh session list.
+// fleetEventTarget is where every server event line goes (idle events,
+// account switches, ClickUp tickets): idle-events.json's target, enabled or
+// not, read fresh — not the idle loop's copy, since that loop holds its lock
+// across a whole delivery. "" means the FLEET session, which idleDeliver
+// resolves on its own fresh session list at send time, so a FLEET restarted
+// in a new tmux session is still reached. A missing or bad file is "".
 func (s *server) fleetEventTarget() string {
-	if path, _, _ := s.idle.paths(); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			if c, err := parseIdleConfig(data); err == nil && c.Target != "" {
-				return c.Target
-			} else if err != nil {
-				fmt.Fprintf(os.Stderr, "fleet: %s: %v; finding FLEET instead\n", path, err)
-			}
-		}
+	path, _, _ := s.idle.paths()
+	if path == "" {
+		return ""
 	}
-	sessions, err := s.collectLocal()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	sess, reason := findFleet(sessions)
-	if reason != "" {
+	c, err := parseIdleConfig(data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fleet: %s: %v; sending to FLEET instead\n", path, err)
 		return ""
 	}
-	return tmuxSessionPart(sess.Tmux)
+	return c.Target
+}
+
+// fleetEventTargetName is a target for a log line: "" reads as FLEET.
+func fleetEventTargetName(target string) string {
+	if target == "" {
+		return "FLEET"
+	}
+	return target
 }

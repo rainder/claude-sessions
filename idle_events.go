@@ -64,9 +64,11 @@ func defaultIdleConfig() idleConfig {
 // a session id.
 var idleNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
-// parseIdleConfig reads the config over the defaults. Unknown keys, values
-// out of range, and enabled without a target are errors: the caller keeps
-// the last good config, so a typo can only ever leave the feature as it was.
+// parseIdleConfig reads the config over the defaults. Unknown keys and values
+// out of range are errors: the caller keeps the last good config, so a typo
+// can only ever leave the feature as it was. An empty target is "the FLEET
+// session" (idleDeliver resolves it on every send), so a FLEET that restarts
+// in a new tmux session is still reached.
 func parseIdleConfig(data []byte) (idleConfig, error) {
 	c := defaultIdleConfig()
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -95,9 +97,6 @@ func parseIdleConfig(data []byte) (idleConfig, error) {
 	}
 	if c.Target != "" && !idleNameRe.MatchString(c.Target) {
 		return idleConfig{}, errors.New("target must be a tmux session name or a session id")
-	}
-	if c.Enabled && c.Target == "" {
-		return idleConfig{}, errors.New("enabled needs a target")
 	}
 	for _, ig := range c.Ignore {
 		if !idleNameRe.MatchString(ig) {
@@ -152,8 +151,12 @@ type idleDeps struct {
 	batch      []idleEvent
 	opened     time.Time
 	lastSent   time.Time
-	wasOn      bool                 // the last tick saw the feature enabled
-	logAt      map[string]time.Time // last log line per refusal code
+	wasOn      bool // the last tick saw the feature enabled
+
+	// logMu guards logAt on its own: idleDeliver's say gate runs from the
+	// account-switch handler and the ClickUp loop too, without mu.
+	logMu sync.Mutex
+	logAt map[string]time.Time // last log line per refusal code
 }
 
 // claudeSessionsStateDir is $XDG_STATE_HOME/claude-sessions, or
@@ -333,9 +336,18 @@ var idleLabelRe = regexp.MustCompile(`[^A-Za-z0-9 ._:/#()-]+`)
 // smuggle the event tag, a quote, a newline, or an escape into FLEET's
 // prompt. "" becomes "-".
 func idleSanitize(s string) string {
-	s = strings.Join(strings.Fields(idleLabelRe.ReplaceAllString(s, " ")), " ")
-	if utf8.RuneCountInString(s) > idleLabelMax {
-		s = string([]rune(s)[:idleLabelMax])
+	return scrubEventField(s, idleLabelRe, idleLabelMax)
+}
+
+// scrubEventField is the scrub every free-text field of an event line gets:
+// each run drop matches becomes one space, whitespace collapses, the text is
+// cut to max runes, and the tag's words are broken up. drop must match
+// quotes, brackets and control characters, so the field can neither close
+// its quotes nor carry a newline or an escape. "" becomes "-".
+func scrubEventField(s string, drop *regexp.Regexp, max int) string {
+	s = strings.Join(strings.Fields(drop.ReplaceAllString(s, " ")), " ")
+	if utf8.RuneCountInString(s) > max {
+		s = string([]rune(s)[:max])
 		s = strings.TrimSpace(s)
 	}
 	s = idleScrubTag(s)
@@ -573,6 +585,8 @@ var fleetSayIdle = fleetSayWho{subject: "The idle-event target", pane: "the targ
 // key per idleLogEvery, so a target that refuses every poll for an hour
 // writes six lines, not 120. A send clears it.
 func (d *idleDeps) logGateLocked(key string) bool {
+	d.logMu.Lock()
+	defer d.logMu.Unlock()
 	now := d.clock()
 	if at, ok := d.logAt[key]; ok && now.Sub(at) < idleLogEvery {
 		return false
@@ -586,16 +600,14 @@ func (d *idleDeps) logGateLocked(key string) bool {
 
 // idleDeliver types text into the target through the page send pipeline.
 // Under sayMu, like /fleet/session/say: a fresh collect, exactly one row
-// whose tmux session or session id is target (else target_missing /
-// target_ambiguous, nothing typed), the shared 1 s gap, and fleetTypeInto
+// whose tmux session or session id is target — or, for an empty target, the
+// one FLEET row findFleet picks on that same list — else target_missing /
+// target_ambiguous, nothing typed; then the shared 1 s gap, and fleetTypeInto
 // (exact "=" pane, dialog and copy-mode refusals, an empty input box, Enter
 // only when the box holds the text). It skips fleetCleanSayText on purpose:
 // that refuses the event tag. code is "sent" or the refusal code; tmux names
 // the target row when one was resolved.
 func (s *server) idleDeliver(target, text string) (code, tmux string) {
-	if target == "" {
-		return "target_missing", ""
-	}
 	f := &s.fleet
 	f.sayMu.Lock()
 	defer f.sayMu.Unlock()
@@ -603,19 +615,33 @@ func (s *server) idleDeliver(target, text string) (code, tmux string) {
 	if err != nil {
 		return "list_failed", ""
 	}
-	var hits []Session
-	for _, row := range sessions {
-		if (row.Tmux != "" && tmuxSessionPart(row.Tmux) == target) || (row.SessionID != "" && row.SessionID == target) {
-			hits = append(hits, row)
+	var row Session
+	if target == "" {
+		// The FLEET session, whatever tmux session it runs in now.
+		fleet, reason := findFleet(sessions)
+		switch reason {
+		case "":
+			row = fleet
+		case "ambiguous":
+			return "target_ambiguous", ""
+		default:
+			return "target_missing", ""
 		}
+	} else {
+		var hits []Session
+		for _, row := range sessions {
+			if (row.Tmux != "" && tmuxSessionPart(row.Tmux) == target) || (row.SessionID != "" && row.SessionID == target) {
+				hits = append(hits, row)
+			}
+		}
+		switch {
+		case len(hits) == 0:
+			return "target_missing", ""
+		case len(hits) > 1:
+			return "target_ambiguous", ""
+		}
+		row = hits[0]
 	}
-	switch {
-	case len(hits) == 0:
-		return "target_missing", ""
-	case len(hits) > 1:
-		return "target_ambiguous", ""
-	}
-	row := hits[0]
 	tmux = tmuxSessionPart(row.Tmux)
 	if row.IsGrok() { // the input-box parser knows only Claude Code's screen
 		return "send_unsupported", tmux
@@ -658,7 +684,9 @@ func (s *server) idleSendLocked(cfg idleConfig, now time.Time) bool {
 	case "sent", "not_submitted":
 		if code == "sent" {
 			d.idleLog("sent n=%d target=%s", n, tmux)
+			d.logMu.Lock()
 			d.logAt = nil
+			d.logMu.Unlock()
 		} else {
 			if d.logGateLocked("idle:" + code) {
 				d.idleLog("not submitted n=%d target=%s; the batch counts as delivered", n, tmux)
@@ -814,7 +842,7 @@ func printIdleStatus(cfgPath, note string, cfg idleConfig, st idleStateFile, sta
 	}
 	target := cfg.Target
 	if target == "" {
-		target = "-"
+		target = "FLEET (follows the session named FLEET)"
 	}
 	ignore := "-"
 	if len(cfg.Ignore) > 0 {

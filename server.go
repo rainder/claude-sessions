@@ -770,6 +770,9 @@ type server struct {
 
 	// idle is the idle-event loop's seams and state (idle_events.go).
 	idle idleDeps
+
+	// clickup is the ClickUp ticket-event loop's seams (clickup_events.go).
+	clickup clickupDeps
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -2606,6 +2609,9 @@ func cmdServer(args []string) int {
 	// Idle events for FLEET: off until idle-events.json enables them; while
 	// off, each poll is one stat of that file.
 	go s.runIdleEvents()
+	// ClickUp ticket events for FLEET: off until clickup-events.json enables
+	// them; same one-stat cost while off.
+	go s.runClickupEvents()
 	// Web Push: a card that turns into a decision notifies the subscribed
 	// devices (fleet_push.go).
 	if s.fleet.vapid != nil {
