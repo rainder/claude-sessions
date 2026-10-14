@@ -147,6 +147,37 @@ func TestFleetAppHeaderOnlyOnTheAppPage(t *testing.T) {
 	}
 }
 
+func TestFleetStatusBarClearsTheClock(t *testing.T) {
+	page := string(fleetPageHTML)
+	// iOS standalone reads this tag and ignores the theme-color metas.
+	// black-translucent lets the page draw under the status bar.
+	if !strings.Contains(page, `<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">`) {
+		t.Fatal("status bar style must be black-translucent")
+	}
+	for _, meta := range []string{
+		`<meta name="theme-color" content="#f5f5f2" media="(prefers-color-scheme: light)">`,
+		`<meta name="theme-color" content="#0f1012" media="(prefers-color-scheme: dark)">`,
+	} {
+		if !strings.Contains(page, meta) {
+			t.Errorf("theme-color meta changed: %s", meta)
+		}
+	}
+	// White status text needs a dark band in light mode. Dark mode stays
+	// transparent. The band height is the inset, so a zero inset hides it.
+	for _, need := range []string{
+		`class="status-bar"`,
+		"--status-bar: #0f1012",
+		"--status-bar: transparent",
+		"height: env(safe-area-inset-top, 0px)",
+		"calc(env(safe-area-inset-top, 0px) + 10px)",
+		"env(safe-area-inset-top, 0px) + 12px",
+	} {
+		if !strings.Contains(page, need) {
+			t.Errorf("fleet.html must contain %q", need)
+		}
+	}
+}
+
 func TestFleetServiceWorkerVersionIsAnAssetHash(t *testing.T) {
 	w := httptest.NewRecorder()
 	fleetMux(fleetTestServer(t, nil)).ServeHTTP(w, httptest.NewRequest("GET", "/fleet/sw.js", nil))
