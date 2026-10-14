@@ -219,6 +219,9 @@ func (s *server) discoverFleetList() (Session, fleetSession, []Session) {
 	if err != nil {
 		return Session{}, fleetSessionDown("session list failed"), nil
 	}
+	if sessions == nil {
+		sessions = []Session{} // nil means the list failed
+	}
 	sess, reason := findFleet(sessions)
 	if reason != "" {
 		return Session{}, fleetSessionDown(reason), sessions
@@ -366,6 +369,14 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	s.fleetStartInfo(&fl, sessions)
 	out["fleet"] = fl
 	out["stale"] = fleetStateStale(state, stateErr, s.fleetNow())
+	// Read-only extras the server adds beside FLEET's own keys: the file's
+	// write time (for a state with no valid writtenAt) and the live status
+	// of every session a card names.
+	out["stateFileAt"] = nil
+	if at := s.fleetStateFileAt(); !at.IsZero() {
+		out["stateFileAt"] = at.UTC().Format(time.RFC3339)
+	}
+	out["liveSessions"] = fleetLiveSessions(fleetCardSessionNames(state), sessions)
 	if stateErr != "" {
 		out["stateError"] = stateErr
 	} else {
