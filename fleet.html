@@ -223,7 +223,10 @@ section { min-width: 0; }
 .links a { display: inline-flex; align-items: center; min-height: 44px; }
 /* Inline links: vertical padding on an inline box grows the tap area to
    about 44px without moving the text. */
-.rich a, .hent a { padding: 12px 0; margin: -12px 0; }
+.rich a, .hent a, .card-title a, .sv-ttl a, .sheet-card a, .sheet-choice a, .chosen-line a { padding: 12px 0; margin: -12px 0; }
+/* A link text can be a long URL or a short id with no break point: break
+   it anywhere rather than widen the card at phone width. */
+.rich a, .hent .c a, .card-title a, .sv-ttl a, .sheet-card a, .sheet-choice a, .chosen-line a { overflow-wrap: anywhere; }
 /* renderRich output: paragraphs, lists, fenced blocks, `code`, **bold**,
    *italic*, links and "#" lines as a bold line. */
 .rich p { margin: 0 0 .5em; }
@@ -380,7 +383,7 @@ body.sv-open { overflow: hidden; }
 .ty { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 5px; font-size: 11.5px; font-weight: 650; background: var(--surface2); color: var(--muted); vertical-align: 1px; }
 .ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say, .ty-web-start, .ty-web-switch { color: var(--accent); }
 .hent .tk { font-family: var(--mono); font-size: 12px; margin-right: 6px; }
-.hent a { margin-left: 6px; white-space: nowrap; }
+.hent a.open { margin-left: 6px; white-space: nowrap; }
 .more-row { padding: 10px 12px; border-top: 1px solid var(--line); text-align: center; }
 
 /* Confirm sheet */
@@ -792,7 +795,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
   // richInline appends one line to parent: `code`, [label](url) through
   // safeLink (http and https only, anything else is the plain label),
-  // **bold**, *italic* and _italic_. Bold and italic need a non-space char
+  // **bold**, *italic*, _italic_ and autolinks (see AUTOLINK). Bold and italic need a non-space char
   // right inside the markers, and an _ pair needs no word char right outside
   // it, so a lone "*" and snake_case stay literal. Bold and italic content is
   // parsed again for nested spans. A "*" pair also needs no word char or
@@ -801,10 +804,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // A line longer than richInlineMax is appended as plain text: unclosed
   // markers make the inline regex quadratic per line, and one long tool
   // output line must not freeze the phone on every chat render.
+  //
+  // Autolinks are alternatives of the same regex, not a pass over the text
+  // nodes afterwards: a URL must win over the _italic_ and *italic* rules
+  // ("/_x_/" inside a path), and code spans and [label](url) must win over
+  // the autolinks, which the leftmost match gives for free.
   const richInlineMax = 2000;
+  const RICH_RE = /`([^`]+)`|\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|\*\*(\S(?:.*?\S)?)\*\*|(^|[^\w/])\*([^\s*](?:.*?\S)?)\*(?![\w/])|(^|\W)_([^\s_](?:.*?[^\s_])?)_(?!\w)/;
   function richInline(parent, s) {
     if (s.length > richInlineMax) { parent.append(document.createTextNode(s)); return parent; }
-    const re = /`([^`]+)`|\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|\*\*(\S(?:.*?\S)?)\*\*|(^|[^\w/])\*([^\s*](?:.*?\S)?)\*(?![\w/])|(^|\W)_([^\s_](?:.*?[^\s_])?)_(?!\w)/g;
+    const re = new RegExp(RICH_RE.source + "|" + AUTOLINK.source, "g");
     let last = 0, m;
     while ((m = re.exec(s))) {
       const start = m.index + (m[5] || m[7] || "").length;
@@ -813,8 +822,53 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       else if (m[2] !== undefined) parent.append(safeLink(m[3], m[2]));
       else if (m[4] !== undefined) parent.append(richInline(el("strong"), m[4]));
       else if (m[6] !== undefined) parent.append(richInline(el("em"), m[6]));
-      else parent.append(richInline(el("em"), m[8]));
+      else if (m[8] !== undefined) parent.append(richInline(el("em"), m[8]));
+      else {
+        const [node, n] = autoLink(m[9], m[10], m[11], m[12]);
+        parent.append(node);
+        re.lastIndex = start + n;
+      }
       last = re.lastIndex;
+    }
+    if (last < s.length) parent.append(document.createTextNode(s.slice(last)));
+    return parent;
+  }
+
+  // AUTOLINK finds three things in plain text: a bare http(s) URL, a ClickUp
+  // ticket id (DR-1234; not a branch name like DR-1234-fix) and a
+  // trecs-brain PR number ("PR #2786", "PR#2786" or "#2786", 4-5 digits).
+  // Entity ids (pages, documents, projects) are not here on purpose: the
+  // page cannot know which environment one lives in, so FLEET writes those
+  // as [id](url). Groups: 1 URL, 2 ticket, 3 PR text, 4 PR number.
+  const AUTOLINK = /\b(https?:\/\/[^\s<>"'`]+)|\b(DR-\d{1,7})(?![\w-])|((?:\bPR ?|\B)#(\d{4,5}))(?!\w)/;
+  const CLICKUP_TASK = "https://app.clickup.com/t/90181100858/";
+  const TRECS_PR = "https://github.com/TRECS-SOFTWARE-LABS/trecs-brain/pull/";
+
+  // autoLink builds the link for one AUTOLINK match and returns it with the
+  // length of text it used: a URL leaves out trailing punctuation that ends
+  // the sentence, and a ")" that has no "(" in the URL.
+  function autoLink(url, ticket, pr, num) {
+    if (ticket) return [safeLink(CLICKUP_TASK + ticket, ticket), ticket.length];
+    if (pr) return [safeLink(TRECS_PR + num, pr), pr.length];
+    for (;;) {
+      const c = url[url.length - 1];
+      if (".,;:!?'\"*]".includes(c) || (c === ")" && url.split("(").length < url.split(")").length)) url = url.slice(0, -1);
+      else break;
+    }
+    return [safeLink(url, url), url.length];
+  }
+
+  // linkText appends plain text (a title, a ticket, an option label) to
+  // parent with AUTOLINK matches as links and nothing else parsed.
+  function linkText(parent, s) {
+    s = str(s);
+    const re = new RegExp(AUTOLINK.source, "g");
+    let last = 0, m;
+    while ((m = re.exec(s))) {
+      if (m.index > last) parent.append(document.createTextNode(s.slice(last, m.index)));
+      const [node, n] = autoLink(m[1], m[2], m[3], m[4]);
+      parent.append(node);
+      last = re.lastIndex = m.index + n;
     }
     if (last < s.length) parent.append(document.createTextNode(s.slice(last)));
     return parent;
@@ -1546,8 +1600,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const card = el("article", "card " + (explicit ? "k-yes" : "k-needs"));
     card.dataset.cardId = id;
     const title = el("div", "card-title",
-      head.ticket ? el("span", "tk", head.ticket) : null,
-      el("span", "tt", head.title));
+      head.ticket ? linkText(el("span", "tk"), head.ticket) : null,
+      linkText(el("span", "tt"), head.title));
     const meta = el("div", "card-meta");
     if (str(c.session)) { const se = el("span", "sess", str(c.session)); se.title = str(c.session); meta.append(se); }
     if (str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
@@ -1653,7 +1707,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   };
   function chosenLine(prefix, label, st) {
     return el("div", "chosen-line" + (st === "sending" ? " sending" : st === "unconfirmed" ? " warn" : ""),
-      el("span", "cl-t", el("span", "dot"), el("span", "", prefix, el("b", "", label), chosenState[st] || "")));
+      el("span", "cl-t", el("span", "dot"), el("span", "", prefix, linkText(el("b"), label), chosenState[st] || "")));
   }
 
   // answered: a card with an answer sent or on its way. It leaves the counts.
@@ -1920,11 +1974,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     d.classList.toggle("explicit", explicit);
     $("sheet-kicker").textContent = explicit ? "Explicit yes" : (lean ? "FLEET's pick" : "Option " + str(o.key));
     $("sheet-title").textContent = explicit ? "Approve this write?" : "Send this to FLEET?";
-    $("sheet-card").textContent = head.ticket ? head.ticket + " · " + head.title : head.title;
+    $("sheet-card").replaceChildren(linkText(document.createDocumentFragment(), head.ticket ? head.ticket + " · " + head.title : head.title));
     $("sheet-key").textContent = str(o.key);
     $("sheet-key").hidden = !str(o.key);
-    $("sheet-label").textContent = label;
-    $("sheet-line").textContent = str(o.line);
+    $("sheet-label").replaceChildren(linkText(document.createDocumentFragment(), label));
+    $("sheet-line").replaceChildren(linkText(document.createDocumentFragment(), str(o.line)));
     $("sheet-line").hidden = !str(o.line);
     $("sheet-text").textContent = sheet.text;
     $("sheet-note").hidden = !explicit;
@@ -2481,9 +2535,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (day !== lastDay) { nodes.push(el("div", "hday", t === null ? "Unknown date" : dayLabel(t))); lastDay = day; }
       const type = str(e.type);
       const c = el("div", "c", el("span", "ty ty-" + type.replace(/[^a-z-]/g, ""), type || "entry"));
-      if (str(e.ticket)) c.append(el("span", "tk", str(e.ticket)));
-      if (str(e.text)) c.append(str(e.text));
-      if (str(e.url)) c.append(safeLink(str(e.url), "Open ↗"));
+      if (str(e.ticket)) c.append(linkText(el("span", "tk"), str(e.ticket)));
+      if (str(e.text)) linkText(c, str(e.text));
+      if (str(e.url)) { const a = safeLink(str(e.url), "Open ↗"); if (a.tagName === "A") a.className = "open"; c.append(a); }
       nodes.push(el("div", "hent", el("span", "t", t === null ? "" : clock(e.at)), c));
     }
     if (!nodes.length) {
@@ -2825,9 +2879,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   function renderSvHead() {
     const t = sv.target || {}, c = svCard(sv.tmux);
     const ticket = str(t.ticket) || (c ? str(c.ticket) : "");
-    $("sv-ticket").textContent = ticket;
+    $("sv-ticket").replaceChildren(linkText(document.createDocumentFragment(), ticket));
     $("sv-ticket").hidden = !ticket;
-    $("sv-title").textContent = str(t.title) || (c ? cardHead(c).title : "") || sv.tmux;
+    $("sv-title").replaceChildren(linkText(document.createDocumentFragment(), str(t.title) || (c ? cardHead(c).title : "") || sv.tmux));
     const meta = [el("span", "mono", sv.tmux)];
     if (str(t.model)) meta.push(el("span", "", str(t.model)));
     const st = str(t.status);

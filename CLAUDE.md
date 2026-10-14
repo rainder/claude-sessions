@@ -1216,6 +1216,17 @@ line, and inline `code`, **bold**, *italic*, `[label](url)`. It builds nodes
 only with `createElement` and text nodes, so raw HTML in the text shows as
 text, and links go through `safeLink` (http and https only; anything else is
 the plain label). `fleet_page_test.go` forbids the HTML sinks.
+Autolinks (`AUTOLINK`, same safeLink path): a bare http(s) URL (trailing
+`.,;:!?'"*]` and an unbalanced `)` stay outside), a ClickUp id `DR-1234`
+(not `DR-1234-fix`) to `app.clickup.com/t/90181100858/<id>`, and `PR #2786`
+or `#2786` (4-5 digits) to the trecs-brain pull. They are alternatives of
+`richInline`'s own regex, so code spans and `[label](url)` win and a URL wins
+over `_italic_`. Entity ids are never guessed (the page does not know the
+environment); FLEET writes them as `[id](url)`. `linkText` does the same for
+plain fields: card title and ticket, the chosen label, history text and
+ticket, the session view head, and the confirm sheet (card, label, line).
+Option buttons and row titles stay plain: a link inside a `<button>`,
+`<summary>` or row `<a>` would be nested interactive content.
 
 **Cursors.** Chat: `since=<byte position>` in the transcript; the server
 returns every turn that changed after it (a later line of the same assistant
