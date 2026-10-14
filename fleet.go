@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
@@ -106,6 +107,17 @@ type fleetDeps struct {
 	grokKnownCache []KnownGrokAccountUsage
 	grokKnownAt    time.Time
 	grokKnownGen   int // bumped by a grok switch, so a fetch in flight is not kept
+
+	// Web Push (fleet_push.go, webpush.go). cmdServer loads vapid and sets
+	// pushSubsPath; a test server leaves vapid nil (503) unless it sets one.
+	vapid        *ecdsa.PrivateKey                              // nil → push unavailable
+	pushSubsPath string                                         // "" → subscriptions in memory only
+	pushSend     func(sub pushSub, payload []byte) (int, error) // nil → webpushSend
+	pushMu       sync.Mutex                                     // guards the fields below up to push, and the file
+	pushLoaded   bool
+	pushSubs     []pushSub
+	pushFails    map[pushSub]int // consecutive non-2xx per subscription (keys only, no time)
+	push         fleetPushLoop   // trigger state; the loop goroutine only
 }
 
 func (s *server) fleetDir() string {
@@ -266,6 +278,9 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
 	mux.HandleFunc("GET /fleet/accounts", s.fleetAccounts)
 	mux.HandleFunc("POST /fleet/account/switch", s.fleetAccountSwitch)
+	mux.HandleFunc("GET /fleet/push/key", s.fleetPushKey)
+	mux.HandleFunc("POST /fleet/push/subscribe", s.fleetPushSubscribe)
+	mux.HandleFunc("POST /fleet/push/unsubscribe", s.fleetPushUnsubscribe)
 	registerFleetPWARoutes(mux)
 }
 

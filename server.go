@@ -2558,6 +2558,15 @@ func cmdServer(args []string) int {
 	} else {
 		s.fleet.secret = sec
 	}
+	// Web Push for the FLEET page: the VAPID key is created once and never
+	// leaves the host except as its public half. Without it the push routes
+	// answer 503 and no trigger loop runs.
+	if key, err := loadOrCreateVAPIDKey(vapidKeyPath()); err != nil {
+		fmt.Fprintf(os.Stderr, "FLEET web push disabled (%v)\n", err)
+	} else {
+		s.fleet.vapid = key
+		s.fleet.pushSubsPath = fleetPushSubsPath()
+	}
 	// Parked grok usage for the page's account sheet; tests leave it nil.
 	s.fleet.grokKnown = fleetFetchKnownGrok
 	mux := http.NewServeMux()
@@ -2596,6 +2605,11 @@ func cmdServer(args []string) int {
 	// Idle events for FLEET: off until idle-events.json enables them; while
 	// off, each poll is one stat of that file.
 	go s.runIdleEvents()
+	// Web Push: a card that turns into a decision notifies the subscribed
+	// devices (fleet_push.go).
+	if s.fleet.vapid != nil {
+		go s.runFleetPush()
+	}
 
 	// Publish the resolved port so SpawnNew (invoked without it) embeds the right
 	// port in the tmux paste binding. Intercept Ctrl+V in tmux so remote-image

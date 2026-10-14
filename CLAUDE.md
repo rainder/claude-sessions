@@ -855,6 +855,7 @@ start FLEET when it is down. Routes: `GET /fleet`,
 `POST /fleet/start`, `/fleet/session`, `POST /fleet/session/say`,
 `POST /fleet/login`, `POST /fleet/login/arm`,
 `POST /fleet/login/revoke`, `/fleet/accounts`, `POST /fleet/account/switch`,
+`/fleet/push/key`, `POST /fleet/push/subscribe`, `POST /fleet/push/unsubscribe`,
 and the static app files (manifest, `sw.js`, icons), main mux only (never the loopback paste mux).
 
 **Auth.** Bearer header, or the `cs_fleet` cookie (`Path=/fleet`, `HttpOnly`,
@@ -1159,6 +1160,50 @@ in the unit, but nothing arrived), so the stderr log reached nobody.
 and `TMPDIR`), so the service writes the log under the default path even when
 your shell sets `XDG_STATE_HOME` — look there first.
 `fleetDeps.sayLogPath` points tests at a temp dir.
+
+**Web Push** (`webpush.go`, `fleet_push.go`). Stdlib only: RFC 8291
+encryption over RFC 8188 `aes128gcm` (one record; header plus ciphertext at most 4096 bytes, `crypto/ecdh`,
+`crypto/hkdf`, AES-GCM) and RFC 8292 VAPID (ES256 JWT, raw r||s, `aud` = the
+endpoint origin, `exp` 12 h because Apple refuses over 24 h, `sub` the project
+URL, never an email). `TestWebpushRFC8291AppendixA` reproduces the RFC's
+example byte for byte (the RFC's `Content-Length: 145` is off by one; the body
+is 144 bytes). Files: `~/.config/claude-sessions/vapid-key` (the P-256 scalar,
+base64url, 0600, made at server start; only the public half ever leaves the
+host) and `push-subs.json` beside it (0600, atomic, at most 16, oldest
+dropped, one entry per endpoint). Without the key the routes answer 503
+`push_unavailable` and no trigger runs. Auth is the account switch's: 401
+JSON, a cookie POST needs `sameOrigin`, `no-store`. Subscribe takes
+`PushSubscription.toJSON()` strictly (4 KiB, one value, no unknown field) and
+checks the endpoint before it is stored: https, no userinfo, no explicit port, at most
+1024 bytes, and a host on `fleetPushHosts` (exact or a subdomain: FCM,
+Mozilla, Apple, WNS). That allowlist is the SSRF guard: the server POSTs to
+that URL later. `p256dh` must be a P-256 point, `auth` 16 bytes. The send
+client never follows a redirect off the host and logs only the host, never the
+path (the path is the subscription's capability). **Trigger:** a 5 s loop
+(`runFleetPush`, started in `cmdServer` only when the key loaded) reads cards
+through `loadFleetState`. The first good parse is the baseline and pushes
+nothing; a bad file is skipped. A card pushes when it becomes `needs-you` or
+`explicit-yes` from absent or another kind (`fleetPushDiff`); moving between
+those two is not new. One push per card id per process; an id that leaves
+state.json is pruned, so a card that comes back later may push again. With no
+subscription the baseline still moves. The first trigger opens a 10 s batch
+(flushed at the first poll after it): one card is title = ticket (or FLEET),
+body = card title (120 runes), `tag`/`cardId` = the card id (an id over 128
+bytes: tag `fleet-card`, no `cardId`); more cards are
+"FLEET" / "N decisions need you", tag `fleet-batch`. Nothing else from the
+card goes out. 404/410 removes the subscription, and so do 5 non-2xx answers
+in a row (counted in memory; a transport error does not count). Removal
+matches endpoint **and** keys, so a device that re-subscribed with new keys
+during the send is kept.
+The page's bell (beside refresh) asks permission inside the tap (iOS needs
+the gesture), subscribes, and re-posts an existing subscription on every load.
+A subscription made with an older VAPID key (`options.applicationServerKey`
+differs from `/fleet/push/key`) is unsubscribed on load, so the bell shows off
+and one tap subscribes again.
+iOS Safari outside the Home Screen app has no PushManager, so the bell shows
+"Add to Home Screen". A notification tap focuses a /fleet page and posts
+`open-card`, or opens `/fleet#card-<id>`; the page shows Decide and scrolls to
+the card (`data-card-id`).
 
 **Rich text.** Card summaries and chat turns go through `renderRich` in
 `fleet.html`, a small markdown renderer: paragraphs (single newline = `<br>`),

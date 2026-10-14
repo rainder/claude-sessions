@@ -72,6 +72,21 @@ header.top {
 .refresh:hover span { color: var(--text); }
 .refresh svg { width: 17px; height: 17px; }
 .refresh.spinning svg { animation: rot .8s linear infinite; }
+/* Notifications: the refresh control's twin. on = accent; blocked and
+   "add to Home Screen" = struck through and dimmed. */
+.bell { flex: none; display: grid; place-items: center; width: 44px; height: 44px; margin: -6px -6px -6px -4px; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 50%; }
+.bell span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); }
+.bell:hover span { color: var(--text); }
+.bell svg { width: 17px; height: 17px; }
+.bell .bell-slash { display: none; }
+.bell[data-state="on"] span { color: var(--accent); border-color: var(--accent); background: var(--accent-tint); }
+.bell[data-state="on"] .bell-body { fill: currentColor; }
+.bell[data-state="blocked"] .bell-slash, .bell[data-state="install"] .bell-slash { display: inline; }
+.bell[data-state="blocked"] span, .bell[data-state="install"] span { opacity: .6; }
+.bell.busy svg { animation: pulse 1.2s ease-in-out infinite; }
+/* A card opened from a notification: a short accent ring. */
+.card.flash, .row.flash { animation: flash 1.6s ease-out; }
+@keyframes flash { 0%, 40% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 0 0 3px transparent; } }
 .chips { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 44px; margin: 4px 0 0; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; overflow-x: auto; scrollbar-width: none; font: inherit; color: inherit; }
 .chips[hidden] { display: none; }
 .chip { display: block; }
@@ -125,6 +140,7 @@ body.kb .chips, body.kb .quota, body.kb .accts { display: none !important; }
   .zero, .zero-rays { animation: none; }
   .st-busy .dot, .st-starting .dot, .chosen-line.sending .dot, .live-busy::before { animation: none; }
   .spin, .refresh.spinning svg { animation-duration: 2.4s; }
+  .bell.busy svg, .card.flash, .row.flash { animation: none; }
 }
 
 /* Page */
@@ -469,6 +485,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   .toast { top: calc(var(--hdr) + 10px); bottom: auto; transform: translate(-50%, -12px); }
 }
 @media (max-width: 480px) { .ago-pre { display: none; } }
+/* Below 360px (a 320px phone) "not running", "offline", the bell and refresh
+   do not fit one row: "offline" shrinks to its dot (the word stays for
+   screen readers, the title explains it) and the row gaps tighten. 360px and
+   up are unchanged. */
+@media (max-width: 359.98px) {
+  .hdr-row { gap: 6px; }
+  .pill.offline { font-size: 0; gap: 0; padding: 7px; }
+}
 /* Tablet widths: one view at a time in a readable column, nav centered. */
 @media (min-width: 761px) and (max-width: 1099.98px) {
   main { max-width: 852px; }
@@ -485,7 +509,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   .hdr-row { display: contents; }
   .accts { order: 1; flex: 0 1 auto; flex-wrap: nowrap; margin-top: 0; }
   .hdr-ago { order: 2; }
-  .refresh { order: 3; }
+  .bell, .refresh { order: 3; }
   /* As on a phone: the age alone (its title keeps the words), so the row
      still fits with "not running" or a long age. A crowded row wraps. */
   .ago-pre { display: none; }
@@ -520,6 +544,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <span class="pill" id="status"><span class="dot"></span><span id="status-t">loading</span></span>
       <span class="pill offline" id="offline" hidden title="The last request failed. The page tries again."><span class="dot"></span>offline</span>
       <span class="hdr-ago" id="ago"></span>
+      <button class="bell" id="bell" type="button" hidden aria-pressed="false" title="Notifications" aria-label="Notifications"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="bell-body" d="M6 9a6 6 0 0 1 12 0c0 5 2 6.5 2 6.5H4S6 14 6 9"/><path d="M10 19a2 2 0 0 0 4 0"/><path class="bell-slash" d="M4 3l16 18"/></svg></span></button>
       <button class="refresh" id="refresh" type="button" title="Refresh now" aria-label="Refresh now"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></span></button>
     </div>
     <button class="chips" id="chips" type="button" aria-expanded="false" aria-controls="quota" aria-label="Quota. Show details." hidden></button>
@@ -904,6 +929,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // ---- app state ---------------------------------------------------------
   let expired = false;
   let state = null, stateText = "", stateDay = "";
+  // A card a notification asked to show, until the cards render (see openCard).
+  let openCardID = null;
   let alive = false;
   const expanded = new Set();          // "row:<id>" for compact rows left open
   // cardId → {attempts, changing, cardChanged, inStrip}. attempts: every
@@ -1517,6 +1544,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const leanOpt = lean ? opts.find(o => str(o.key) === lean) : null;
 
     const card = el("article", "card " + (explicit ? "k-yes" : "k-needs"));
+    card.dataset.cardId = id;
     const title = el("div", "card-title",
       head.ticket ? el("span", "tk", head.ticket) : null,
       el("span", "tt", head.title));
@@ -1738,6 +1766,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const a = lastAttempt(pending.get(id));
     const head = cardHead(c);
     const row = el("details", "row sent-row");
+    row.dataset.cardId = id;
     if (expanded.has("sent:" + id)) row.open = true;
     row.addEventListener("toggle", () => {
       if (row.open) { expanded.add("sent:" + id); markCode(row); } else expanded.delete("sent:" + id);
@@ -1791,6 +1820,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     badge.classList.toggle("red", openYes > 0);
     badge.parentNode.parentNode.setAttribute("aria-label", n ? "Decide, " + n + " need you" : "Decide");
     markCode();
+    if (openCardID !== null && state) showCard();
   }
 
   function renderNow() {
@@ -2582,6 +2612,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     }
     svDepth = 0;
     closeSessionView();
+    if (h.startsWith("card-")) { openCard(cardFromHash(h)); return; }
     if (VIEWS.indexOf(h) >= 0) setView(h, true);
   });
   // Leaving the phone layout shows every part again; render a chat that was
@@ -2972,12 +3003,194 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     setTimeout(() => btn.classList.remove("spinning"), Math.max(0, 600 - (Date.now() - t0)));
   });
 
+  // ---- notifications -----------------------------------------------------
+  // Web Push: the bell subscribes this browser with the server's VAPID key.
+  // States: on, off, blocked (permission denied), install (iOS Safari outside
+  // the Home Screen app, which has no PushManager), and hidden (no support,
+  // or the server has no key). The permission prompt runs first thing in the
+  // tap handler: iOS shows it only inside a user gesture.
+  const pushUI = {state: "hidden", key: null, reg: null, busy: false};
+  const pushCapable = "Notification" in window && "serviceWorker" in navigator && "PushManager" in window;
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const standalone = navigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
+  const bellText = {
+    on: "Notifications on. Tap to turn off.",
+    off: "Notifications off. Tap to turn on.",
+    blocked: "Notifications are blocked in the browser settings.",
+    install: "Add to Home Screen to get notifications.",
+  };
+
+  function renderBell() {
+    const b = $("bell");
+    const st = pushUI.state;
+    b.hidden = st === "hidden";
+    b.dataset.state = st;
+    b.setAttribute("aria-pressed", st === "on" ? "true" : "false");
+    b.setAttribute("aria-disabled", st === "blocked" || st === "install" ? "true" : "false");
+    b.title = bellText[st] || "Notifications";
+    b.setAttribute("aria-label", b.title);
+    b.classList.toggle("busy", pushUI.busy);
+  }
+
+  function keyBytes(b64) {
+    const s = b64.replace(/-/g, "+").replace(/_/g, "/");
+    const bin = atob(s + "=".repeat((4 - s.length % 4) % 4));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  // postPush POSTs JSON to a push route; it answers {status, code} and never
+  // throws (status 0: the server could not be reached).
+  async function postPush(url, data) {
+    try {
+      const r = await fetch(url, {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
+      let body = null;
+      try { body = obj(JSON.parse(await r.text())); } catch { body = null; }
+      if (r.status === 401) expire();
+      return {status: r.status, ok: r.ok && !!body && body.ok === true, code: body ? str(body.code) : ""};
+    } catch {
+      return {status: 0, ok: false, code: ""};
+    }
+  }
+
+  // sameKey: does sub use the server's current VAPID key? A key the browser
+  // does not report counts as the same: nothing says it changed.
+  function sameKey(sub) {
+    const k = sub && sub.options && sub.options.applicationServerKey;
+    if (!k || !pushUI.key) return true;
+    const a = new Uint8Array(k);
+    return a.length === pushUI.key.length && a.every((v, i) => v === pushUI.key[i]);
+  }
+
+  // dropSub removes a subscription made with an old key, on the server and
+  // in the browser, so one tap can subscribe again with the current key.
+  async function dropSub(sub) {
+    await postPush("/fleet/push/unsubscribe", {endpoint: sub.endpoint});
+    try { await sub.unsubscribe(); } catch { /* already gone */ }
+  }
+
+  async function initPush() {
+    if (!pushCapable) {
+      pushUI.state = isIOS && !standalone ? "install" : "hidden";
+      renderBell();
+      return;
+    }
+    try {
+      const k = obj(JSON.parse(await getJSON("/fleet/push/key")));
+      pushUI.key = k && str(k.publicKey) ? keyBytes(str(k.publicKey)) : null;
+    } catch { pushUI.key = null; }
+    if (!pushUI.key) { pushUI.state = "hidden"; renderBell(); return; }
+    try {
+      pushUI.reg = await Promise.race([navigator.serviceWorker.ready, new Promise(res => setTimeout(() => res(null), 10000))]);
+    } catch { pushUI.reg = null; }
+    if (!pushUI.reg) { pushUI.state = "hidden"; renderBell(); return; }
+    let sub = null;
+    try { sub = await pushUI.reg.pushManager.getSubscription(); } catch { sub = null; }
+    if (sub && !sameKey(sub)) {
+      // The server's key was regenerated: the old subscription can never
+      // deliver. Drop it and show off.
+      await dropSub(sub);
+      sub = null;
+    }
+    if (sub && Notification.permission === "granted") {
+      pushUI.state = "on";
+      // Idempotent: covers a server that lost its subscription file.
+      postPush("/fleet/push/subscribe", sub.toJSON());
+    } else pushUI.state = Notification.permission === "denied" ? "blocked" : "off";
+    renderBell();
+  }
+
+  async function turnPushOn() {
+    // First, with nothing awaited before it: iOS needs the tap's gesture.
+    let perm;
+    try { perm = await Notification.requestPermission(); } catch { perm = Notification.permission; }
+    if (perm !== "granted") {
+      pushUI.state = perm === "denied" ? "blocked" : "off";
+      toast(perm === "denied" ? "Notifications are blocked. Allow them in the browser settings." : "Notifications were not turned on.", true);
+      return;
+    }
+    let sub;
+    try {
+      const old = await pushUI.reg.pushManager.getSubscription();
+      if (old && !sameKey(old)) await dropSub(old);
+      sub = await pushUI.reg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: pushUI.key});
+    } catch {
+      toast("This browser could not subscribe to notifications.", true);
+      return;
+    }
+    const r = await postPush("/fleet/push/subscribe", sub.toJSON());
+    if (r.ok) { pushUI.state = "on"; toast("Notifications on."); return; }
+    // The server did not store it: drop the browser side too, so the bell
+    // tells the truth.
+    try { await sub.unsubscribe(); } catch { /* already gone */ }
+    pushUI.state = "off";
+    if (r.status === 401) return;
+    toast(r.code === "bad_endpoint" ? "This browser's push service is not supported." :
+      r.status === 0 ? "The page cannot reach the server. Try again." : "Notifications failed (HTTP " + r.status + ").", true);
+  }
+
+  async function turnPushOff() {
+    let sub = null;
+    try { sub = await pushUI.reg.pushManager.getSubscription(); } catch { sub = null; }
+    if (!sub) { pushUI.state = "off"; return; }
+    const r = await postPush("/fleet/push/unsubscribe", {endpoint: sub.endpoint});
+    let gone = false;
+    try { gone = await sub.unsubscribe(); } catch { gone = false; }
+    pushUI.state = gone ? "off" : "on";
+    if (!gone) toast("Notifications could not be turned off. Try again.", true);
+    else if (r.ok) toast("Notifications off.");
+    else if (r.status !== 401) toast("Notifications off here; the server will drop the device on its next push.");
+  }
+
+  $("bell").addEventListener("click", () => {
+    if (pushUI.busy) return;
+    const st = pushUI.state;
+    if (st === "install" || st === "blocked") { toast(bellText[st], st === "blocked"); return; }
+    if (st !== "on" && st !== "off") return;
+    pushUI.busy = true;
+    renderBell();
+    // turnPushOn calls requestPermission synchronously inside this handler.
+    (st === "off" ? turnPushOn() : turnPushOff()).finally(() => { pushUI.busy = false; renderBell(); });
+  });
+
+  // A notification tap: the worker posts {type: "open-card"} to an open
+  // page, or opens /fleet#card-<id>. Either way: Decide, card in view.
+  function openCard(id) {
+    openCardID = id;
+    viewChosen = true;
+    setView("decide", true);
+    if (state) showCard();
+  }
+  function showCard() {
+    const id = openCardID;
+    openCardID = null;
+    if (!id) return;
+    const hit = Array.from(document.querySelectorAll("[data-card-id]")).find(e => e.dataset.cardId === id);
+    if (!hit) return;
+    hit.scrollIntoView({block: "center", behavior: "smooth"});
+    hit.classList.remove("flash");
+    void hit.offsetWidth;
+    hit.classList.add("flash");
+    setTimeout(() => hit.classList.remove("flash"), 1700);
+  }
+  const cardFromHash = h => { try { return decodeURIComponent(h.slice("card-".length)); } catch { return ""; } };
+  if ("serviceWorker" in navigator) {
+    try {
+      navigator.serviceWorker.addEventListener("message", e => {
+        const d = obj(e.data);
+        if (d && d.type === "open-card") openCard(str(d.cardId));
+      });
+    } catch { /* not allowed here */ }
+  }
+
   // ---- boot --------------------------------------------------------------
   // The cross-site hop lands on /fleet?hop=1; tidy the address bar.
   if (new URLSearchParams(location.search).get("hop") === "1") history.replaceState(null, "", "/fleet" + location.hash);
   {
     const h = location.hash.slice(1);
     if (VIEWS.indexOf(h) >= 0) { viewChosen = true; setView(h, false); } else setView("decide", false);
+    if (h.startsWith("card-")) openCard(cardFromHash(h));
     if (h.startsWith("session/")) {
       // A reload keeps history.state, so a pushed entry still knows its depth.
       const st = obj(history.state);
@@ -3000,6 +3213,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   if ("serviceWorker" in navigator) {
     try { navigator.serviceWorker.register("/fleet/sw.js", {scope: "/fleet"}).catch(() => {}); } catch { /* not allowed here */ }
   }
+  initPush().catch(() => { pushUI.state = "hidden"; renderBell(); });
 })();
 </script>
 </body>

@@ -14,6 +14,8 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		}
 	}
 	for _, need := range []string{"/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say", "/fleet/accounts", "/fleet/account/switch",
+		"/fleet/push/key", "/fleet/push/subscribe", "/fleet/push/unsubscribe", "requestPermission()", "pushManager.subscribe(",
+		`"open-card"`, "dataset.cardId", "Add to Home Screen to get notifications", "sameKey(", "options.applicationServerKey",
 		"Europe/Vilnius", "noopener noreferrer", "visibilitychange", "Yes, I approve this write",
 		"since=", ".pct", ".account", ".windows",
 		// Card summaries and chat turns go through the one markdown renderer,
