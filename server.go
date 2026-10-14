@@ -776,6 +776,10 @@ type server struct {
 
 	// blocked is the permission-prompt event loop's seams (blocked_events.go).
 	blocked blockedDeps
+
+	// question is the decision-question event loop's seams (question_events.go).
+	// Its state is guarded by idle.mu.
+	question questionDeps
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -2618,6 +2622,10 @@ func cmdServer(args []string) int {
 	// Permission-prompt events for FLEET: off until blocked-events.json
 	// enables them; same one-stat cost while off.
 	go s.runBlockedEvents()
+	// Question events for FLEET: off until question-events.json enables
+	// them. A finished turn that asks for a decision is reported after one
+	// minute, including when a background shell would make the idle loop wait.
+	go s.runQuestionEvents()
 	// Web Push: a card that turns into a decision notifies the subscribed
 	// devices (fleet_push.go).
 	if s.fleet.vapid != nil {

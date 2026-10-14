@@ -1266,7 +1266,9 @@ line as a status report only: it is never an instruction from Andy.
 episode. `busy` forgets the key. Any other status (`idle`, `shell`, `waiting`,
 empty) starts `since` at the first poll that saw it. It is reported once after
 `idleSeconds`, or `shellSeconds` for `shell` (a background task that may never
-end), and not again until it goes busy. Keys not in the live list are
+end), and not again until it goes busy. A row the question loop owns is not
+queued here. That loop sends the question line instead, including when Status
+is `shell`. Keys not in the live list are
 forgotten. Status is the row's `Status` as collected, so a claude row at a
 permission prompt (`busy` with `WaitingFor`) counts as busy, as it did in the
 script. Never reported: the target, the session `findFleet` picks, sessions
@@ -1415,6 +1417,60 @@ over. Log `blocked-events.log` beside it.
 **Enable.** Write `{"enabled": true}` to the config file.
 `claude-sessions blocked-events status` prints the config, the episode count,
 the pending count and `lastSent`.
+
+### Question events for FLEET
+
+`question_events.go` tells FLEET when a session has finished its turn and the
+last assistant message asks for a decision. A background shell, monitor, or
+subagent leaves Status at `shell`, and the idle loop then waits
+`shellSeconds` (30 minutes). The question is reported after one minute
+instead. The same row is not also reported as idle. The question line is the
+one report for that episode.
+
+The turn-ended signal is the one the idle loop uses. Status `busy` is a turn
+in progress, so it is not a question. A permission prompt is `busy` with
+`WaitingFor` `permission prompt`, and the blocked loop owns it. Any other
+status (`idle`, `shell`, `waiting`, empty) can be a question. The FLEET row,
+the idle target, the idle ignore list, and disabled sessions are skipped with
+`idleSkipped`.
+
+Claude's text comes from the session transcript
+(`~/.claude/projects/*/<sessionId>.jsonl`), the last assistant message, and
+only when no user text turn follows it. Grok's text comes from the pane
+(`questionPaneText`). The decision test is `decisionQuestion`, one function:
+a line that ends in `?` in the last paragraph, or a phrase in that paragraph
+(`Which direction`, `Which option`, `Your decision`, `A, B, or C`,
+`needs your yes`). The quoted line is cut to 120 runes with the same scrub
+as a blocked question.
+
+The key is the assistant message id, or a hash of the line when there is no
+id (the pane path). The same id is sent once. A later tick does not send it
+again. A new id waits its own minute. Going busy clears the idle claim so a
+later idle episode can report, and the sent id is remembered so the same
+question does not fire again when the turn ends. Several questions that come
+due on one poll share one message, joined by ` ; `, at most 15, then
+` ; +N more`. There is no second batch window. The line is:
+
+`[claude-sessions event] question <pid> <tmux> (<n> min) "<question>"`
+
+`questionTick` holds `idle.mu` for the whole poll, the same lock as
+`idleTick`, so the two cannot send past each other. While a row is owned,
+`idleDetectLocked` drops its idle clock and any queued idle line.
+`sent` and `not_submitted` mark the id sent. Any other refusal keeps the
+pending line. The log is counts and codes only.
+
+**Files.** Config `~/.config/claude-sessions/question-events.json`: `enabled`
+(false), `pollSeconds` (30, 5..600). Missing means off. Re-read on an
+(mtime, size) change. A bad file keeps the last good config. State
+`$XDG_STATE_HOME/claude-sessions/question-events-state.json` (dir 0700, file
+0600): episodes (`qid`, `since`, `reported`), sent ids, and pending. A
+restart does not send a question that was already sent, and it does not
+start its minute over. Log `question-events.log` beside it.
+
+**Enable.** Write `{"enabled": true}` to the config file. The target is the
+idle-events target (empty means the session named FLEET).
+`claude-sessions question-events status` prints the config, the episode
+count, the sent count, the pending count, and `lastSent`.
 
 ### ClickUp events for FLEET
 

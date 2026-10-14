@@ -454,6 +454,16 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 			}
 			continue
 		}
+		// A question event owns this episode, including a shell row whose
+		// idle report would otherwise wait shellSeconds. Drop a line that
+		// was queued before the question loop claimed the row.
+		if s.question.ownsIdle(key) {
+			delete(d.since, key)
+			if d.dropFromBatchLocked(key) {
+				changed = true
+			}
+			continue
+		}
 		if d.reported[key] {
 			continue
 		}
