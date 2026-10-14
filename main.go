@@ -70,6 +70,8 @@ func main() {
 		os.Exit(cmdFleetURL(args[1:]))
 	case "idle-events":
 		os.Exit(cmdIdleEvents(args[1:]))
+	case "clickup-events":
+		os.Exit(cmdClickupEvents(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -125,6 +127,8 @@ subcommands:
                                   show the idle-event config and state, or
                                   type one test line into session T (tmux
                                   session name or session id)
+  clickup-events status           show the ClickUp ticket-event config and
+                                  state
   summary [claude|codex]          print or set the ticket/conversation
                                   summary backend (default claude)
   notify-test                     send a test push to every registered device

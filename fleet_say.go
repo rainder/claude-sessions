@@ -157,6 +157,7 @@ var fleetLookalikes = map[rune]rune{
 	// Latin and letterlike variants
 	'ı': 'i', 'ɩ': 'i', 'ℓ': 'l', 'ℯ': 'e', 'ⅽ': 'c', 'ⅾ': 'd', 'ⅰ': 'i', 'ⅴ': 'v', 'ⅼ': 'l',
 	'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ꜱ': 's', 'ᴏ': 'o', 'ᴜ': 'u', 'ᴠ': 'v', 'ᴛ': 't', 'ʟ': 'l', 'ɴ': 'n',
+	'ᴀ': 'a', 'ɪ': 'i',
 	// Cherokee capitals that read as Latin
 	'Ꮯ': 'c', 'Ꮮ': 'l', 'Ꭺ': 'a', 'Ꭼ': 'e', 'Ꮪ': 's', 'Ꭰ': 'd', 'Ꮩ': 'v', 'Ꭲ': 't',
 }

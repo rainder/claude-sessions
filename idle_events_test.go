@@ -427,8 +427,50 @@ func TestIdleEventsGrokTargetIsRefused(t *testing.T) {
 	if code, _ := rig.s.idleDeliver("fleet", idleTestMessage); code != "send_unsupported" || len(rig.typed) != 0 {
 		t.Fatalf("code %q typed %q", code, rig.typed)
 	}
+	// "" is the FLEET row, and a grok row is never FLEET.
 	if code, _ := rig.s.idleDeliver("", idleTestMessage); code != "target_missing" {
 		t.Fatalf("empty target %q", code)
+	}
+}
+
+func TestIdleEventsEmptyTargetFollowsFleet(t *testing.T) {
+	c, err := parseIdleConfig([]byte(`{"enabled":true}`))
+	if err != nil || !c.Enabled || c.Target != "" {
+		t.Fatalf("enabled without a target: %+v %v", c, err)
+	}
+	if _, err := parseIdleConfig([]byte(`{"enabled":true,"target":""}`)); err != nil {
+		t.Fatalf("empty target: %v", err)
+	}
+
+	rig := newIdleRig(t, `{"enabled":true}`)
+	moved := fleetRow()
+	moved.Tmux = "fleet-2:0.0" // FLEET restarted in a new tmux session
+	rig.rows = []Session{moved, worker(61, "w", "idle", "w:0.0")}
+	rig.tick(0)
+	rig.run(3 * time.Minute)
+	if len(rig.typed) != 1 || rig.targets[0] != "=fleet-2:0.0" {
+		t.Fatalf("typed %q targets %q", rig.typed, rig.targets)
+	}
+	// FLEET itself is never reported.
+	if rig.s.idle.reported["7:sid"] || !strings.Contains(rig.log(t), " sent n=1 target=fleet-2\n") {
+		t.Fatalf("reported %v log %q", rig.s.idle.reported, rig.log(t))
+	}
+
+	// Missing and ambiguous FLEET refuse, nothing typed.
+	rig2 := newIdleRig(t, "")
+	rig2.rows = []Session{worker(62, "x", "idle", "x:0.0")}
+	if code, _ := rig2.s.idleDeliver("", idleTestMessage); code != "target_missing" || len(rig2.typed) != 0 {
+		t.Fatalf("missing: %q typed %q", code, rig2.typed)
+	}
+	two := fleetRow()
+	two.PID, two.SessionID, two.Tmux = 8, "sid2", "fleet-b:0.0"
+	rig2.rows = []Session{fleetRow(), two}
+	if code, _ := rig2.s.idleDeliver("", idleTestMessage); code != "target_ambiguous" || len(rig2.typed) != 0 {
+		t.Fatalf("ambiguous: %q typed %q", code, rig2.typed)
+	}
+	rig2.rows = []Session{fleetRow()}
+	if code, tmux := rig2.s.idleDeliver("", idleTestMessage); code != "sent" || tmux != "fleet" || rig2.targets[0] != "=fleet:0.0" {
+		t.Fatalf("single FLEET: %q %q %q", code, tmux, rig2.targets)
 	}
 }
 
@@ -459,7 +501,6 @@ func TestIdleEventsConfigReloadAndBadFiles(t *testing.T) {
 		`{"enabled":true,"target":"fleet","pollSeconds":601}`,
 		`{"enabled":true,"target":"fleet","batchSeconds":10}`,
 		`{"enabled":true,"target":"fleet","shellSeconds":90000}`,
-		`{"enabled":true,"target":""}`,
 		`{"enabled":true,"target":"fle et"}`,
 		`{"enabled":true,"target":"fleet","ignore":["a;b"]}`,
 		`{"enabled":true,"target":"fleet","typo":1}`,
@@ -520,6 +561,11 @@ func TestIdleEventsCLI(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("status lacks %q:\n%s", want, out)
 		}
+	}
+	_ = os.WriteFile(filepath.Join(cfgDir, "idle-events.json"), []byte(`{"enabled":true}`), 0o600)
+	out = captureStdout(t, func() { cmdIdleEvents([]string{"status"}) })
+	if !strings.Contains(out, "target:     FLEET (follows the session named FLEET)") {
+		t.Errorf("empty target status:\n%s", out)
 	}
 }
 

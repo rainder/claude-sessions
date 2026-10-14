@@ -180,7 +180,8 @@ func TestFleetAccountSwitchFallsBackToFleetRow(t *testing.T) {
 	if w.Code != http.StatusOK || out.Event != "sent" || out.Previous != "" {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if len(*events) != 1 || (*events)[0].target != "FLEET-row" {
+	// No configured target: "" is FLEET, resolved by idleDeliver at send.
+	if len(*events) != 1 || (*events)[0].target != "" {
 		t.Fatalf("events %v", *events)
 	}
 	if !strings.HasPrefix((*events)[0].text, "[claude-sessions event] account grok switched from - to gy; ") {
@@ -192,13 +193,16 @@ func TestFleetAccountSwitchFallsBackToFleetRow(t *testing.T) {
 }
 
 func TestFleetAccountSwitchNoTarget(t *testing.T) {
-	s, switches, events, _ := fleetAccountServer(t, nil)
+	s, switches, _, _ := fleetAccountServer(t, nil)
+	s.fleet.deliverEvent = nil // the real idleDeliver: no FLEET row, nothing typed
+	typed := 0
+	s.fleet.typeText = func(string, string) error { typed++; return nil }
 	w, out := postFleetSwitch(s, `{"provider":"claude","name":"work"}`, nil)
-	if w.Code != http.StatusOK || !out.OK || out.Event != "no_target" {
+	if w.Code != http.StatusOK || !out.OK || out.Event != "target_missing" {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if len(*switches) != 1 || len(*events) != 0 {
-		t.Fatal("switch must still happen; no delivery without a target")
+	if len(*switches) != 1 || typed != 0 {
+		t.Fatal("switch must still happen; nothing typed without a target")
 	}
 }
 

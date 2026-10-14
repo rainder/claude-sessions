@@ -113,6 +113,8 @@ claude-sessions idle-events status         # idle events for FLEET: config, repo
 claude-sessions idle-events test --target T
                                             # type one tagged test line into session T (tmux
                                             # session name or session id), same send guards
+claude-sessions clickup-events status      # ClickUp ticket events for FLEET: config, cu path,
+                                            # known tickets, pending
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
 claude-sessions notify-test                # send a test push to every registered device
 claude-sessions attach PID                 # tmux attach (or switch-client)
@@ -471,6 +473,7 @@ fleet_pane.go        Claude Code input-box parser for a tmux capture
 fleet_login.go       /fleet login: one-time codes, fleet-only cookie secret, revoke
 fleet_url.go         `fleet-url` CLI
 idle_events.go       idle events for FLEET: detect idle sessions, type one tagged line into FLEET
+clickup_events.go    ClickUp events for FLEET: poll `cu backlog --json`, type new/urgent tickets into FLEET
 fleet.html           the embedded page (vanilla JS, no CDN)
 account.go           Claude account switching (credential + identity snapshots, flock)
 grok_account.go      Grok account snapshots (save/switch/list/remove)
