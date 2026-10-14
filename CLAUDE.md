@@ -1140,6 +1140,16 @@ drift or collide as FLEET appends.
 **state.json.** Re-read only when (mtime, size) changes; a bad file never
 replaces the last good copy and never causes a 500 (`stateError` says why).
 `stale` when `writtenAt` is missing, unparseable, or older than 40 minutes.
+The server adds two read-only keys after FLEET's own (server keys win):
+`stateFileAt`, the mtime of the copy served (the header stamp uses it when
+`writtenAt` is bad, and turns amber after 30 min), and `liveSessions`, for
+each tmux session a card names (`fleetSessionNameRe` only) the server's own
+status from the cached list: `busy`/`idle`/`shell`/`waiting`, `gone` (no local
+row), `ambiguous` (2+ rows), plus `since` (the row's `updatedAt`) when not
+busy. Null when the list failed, so a failure never reads as "every session
+ended". The page shows it as a badge on working and waiting cards only; FLEET
+still owns card order and kind. For grok rows `since` is the last activity,
+not the status change.
 "Done today" is computed in the page at local midnight Europe/Vilnius.
 
 ### Idle events for FLEET

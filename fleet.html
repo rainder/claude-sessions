@@ -115,7 +115,7 @@ body.kb .chips, body.kb .quota { display: none !important; }
 @keyframes zero-breathe { 0%, 100% { opacity: .55; transform: scale(.97); } 50% { opacity: 1; transform: scale(1.03); } }
 @media (prefers-reduced-motion: reduce) {
   .zero, .zero-rays { animation: none; }
-  .st-busy .dot, .st-starting .dot, .chosen-line.sending .dot { animation: none; }
+  .st-busy .dot, .st-starting .dot, .chosen-line.sending .dot, .live-busy::before { animation: none; }
   .spin, .refresh.spinning svg { animation-duration: 2.4s; }
 }
 
@@ -239,6 +239,15 @@ section { min-width: 0; }
 .row-l2 { margin-top: 2px; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
 .row-l2 .sess { font-family: var(--mono); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-l2 .wo { color: var(--amber); }
+.hdr-ago.late { color: var(--amber); }
+/* Live badge: the server's own view of a card's session (not FLEET's). */
+.live { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.live::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.live-busy { color: var(--accent); } .live-busy::before { background: var(--accent); animation: pulse 2s ease-in-out infinite; }
+.live-idle::before { background: var(--green); }
+.live-shell::before { background: var(--accent); opacity: .6; }
+.live-waiting { color: var(--amber); } .live-waiting::before { background: var(--amber); }
+.live-gone { color: var(--red); } .live-gone::before { background: transparent; border: 1.5px solid var(--red); width: 5px; height: 5px; }
 .row-body { padding: 0 12px 10px; font-size: 14px; }
 .sec-sent { margin-top: 18px; }
 .sent-row .row-l1 .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
@@ -823,7 +832,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
   function updateRel() {
     for (const s of document.querySelectorAll(".rel")) s.textContent = (s.dataset.prefix || "") + ago(s.dataset.at);
+    for (const s of document.querySelectorAll(".live[data-since]")) s.textContent = liveText(s.dataset.label, s.dataset.since);
     renderAgo();
+  }
+  // "idle 12 min": how long the session has been in its state.
+  function liveText(label, since) {
+    const m = minsSince(since);
+    return m === null ? label : label + " " + (m < 1 ? "just now" : ageText(m));
   }
 
   // ---- app state ---------------------------------------------------------
@@ -921,11 +936,15 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
 
   // ---- header ------------------------------------------------------------
+  // The stamp is FLEET's own writtenAt; when that is missing or bad, the
+  // server's stateFileAt (the file's mtime). Over 30 min it turns amber.
+  const AGO_LATE_MIN = 30;
   function renderAgo() {
-    const at = state && state.writtenAt;
-    const a = ago(at);
+    const at = state ? (parseTime(state.writtenAt) !== null ? state.writtenAt : state.stateFileAt) : "";
+    const a = ago(at), m = minsSince(at);
     $("ago").replaceChildren(...(a ? [el("span", "ago-pre", "State written "), a] : []));
     $("ago").title = a ? "State written " + a : "";
+    $("ago").classList.toggle("late", m !== null && m > AGO_LATE_MIN);
   }
 
   const fleetInfo = () => obj(state && state.fleet);
@@ -1414,10 +1433,34 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // have details.
   const SV_NAME = /^[A-Za-z0-9._-]{1,128}$/;
   const sessOf = v => str(v).split(":")[0].trim();
+  // liveBadge reads liveSessions, which the server adds to /fleet/state from
+  // its own session list. Only working and waiting cards get one; no badge
+  // when the list failed (null) or the name is ambiguous.
+  const LIVE_LABEL = {busy: "busy", idle: "idle", shell: "shell", waiting: "waiting", gone: "session ended"};
+  function liveBadge(c) {
+    const k = str(c.kind);
+    if (k !== "working" && k !== "waiting") return null;
+    const live = obj(state && state.liveSessions), tm = sessOf(c.session);
+    if (!live || !tm) return null;
+    const e = obj(live[tm]), st = e ? str(e.status) : "";
+    const label = LIVE_LABEL[st];
+    if (!label) return null;
+    const b = el("span", "live live-" + st, label);
+    const since = e && st !== "busy" && st !== "gone" ? str(e.since) : "";
+    if (since && parseTime(since) !== null) {
+      b.dataset.label = label;
+      b.dataset.since = since;
+      b.textContent = liveText(label, since);
+    }
+    b.title = st === "gone" ? "No live session runs in " + tm : "Live status of " + tm + " (from this server, not FLEET)";
+    return b;
+  }
   function compactRow(c) {
     const head = cardHead(c);
     const l1 = el("div", "row-l1", head.ticket ? el("span", "tk", head.ticket) : null, el("span", "tt", head.title));
     const l2 = el("div", "row-l2");
+    const lv = liveBadge(c);
+    if (lv) l2.append(lv);
     if (str(c.session)) { const s = el("span", "sess", str(c.session)); s.title = str(c.session); l2.append(s); }
     if (str(c.waitingOn)) l2.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
     if (str(c.updatedAt)) l2.append(relSpan(c.updatedAt));
@@ -2731,6 +2774,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   renderHistory();
   applyEnabled();
   startAll();
+  // Ages tick each minute even when a poll fails.
+  setInterval(() => guard(updateRel), 60000);
 
   // The service worker makes the page installable and serves the shell when
   // offline. It never caches data; see fleet_sw.js.
