@@ -1203,7 +1203,11 @@ and one tap subscribes again.
 iOS Safari outside the Home Screen app has no PushManager, so the bell shows
 "Add to Home Screen". A notification tap focuses a /fleet page and posts
 `open-card`, or opens `/fleet#card-<id>`; the page shows Decide and scrolls to
-the card (`data-card-id`).
+the card (`data-card-id`). Every send appends one line to `fleet-push.log` beside `fleet-say.log`
+(same writer, 0600, 1 MiB rotation): `<RFC3339> push card=<id>|batch=<n>
+host=<push host> status=<code|error>`, nothing else — never the endpoint path,
+keys, payload or error text. `pushLogPath` "" means no log; only `cmdServer`
+sets it.
 
 **Rich text.** Card summaries and chat turns go through `renderRich` in
 `fleet.html`, a small markdown renderer: paragraphs (single newline = `<br>`),

@@ -112,6 +112,7 @@ type fleetDeps struct {
 	// pushSubsPath; a test server leaves vapid nil (503) unless it sets one.
 	vapid        *ecdsa.PrivateKey                              // nil → push unavailable
 	pushSubsPath string                                         // "" → subscriptions in memory only
+	pushLogPath  string                                         // send log; "" → no log (cmdServer sets it)
 	pushSend     func(sub pushSub, payload []byte) (int, error) // nil → webpushSend
 	pushMu       sync.Mutex                                     // guards the fields below up to push, and the file
 	pushLoaded   bool

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -526,5 +527,37 @@ func TestFleetPushGoneKeepsResubscribedDevice(t *testing.T) {
 	subs := readPushSubsFile(t, s)
 	if len(subs) != 1 || subs[0].P256dh != p || subs[0].Auth != a {
 		t.Fatalf("the re-subscribed device was removed: %+v", subs)
+	}
+}
+
+// The send log holds one line per send: time, card id or batch size, host
+// and status — never the endpoint path or the payload.
+func TestFleetPushSendLog(t *testing.T) {
+	s, now, _, codes := fleetPushServer(t)
+	s.fleet.pushLogPath = filepath.Join(t.TempDir(), "state", "fleet-push.log")
+	eps := []string{"https://fcm.googleapis.com/fcm/send/secret-ok", "https://web.push.apple.com/secret-gone"}
+	fleetPushSubscribeN(t, s, eps...)
+	codes[eps[1]] = 410
+	fleetPushWriteState(t, s, 1)
+	s.fleetPushTick()
+	fleetPushWriteState(t, s, 2, card("a/\nb", "needs-you", "DR-1", "Secret title"))
+	advance(s, now, 5*time.Second)
+	advance(s, now, 5*time.Second)
+	advance(s, now, 5*time.Second)
+	b, err := os.ReadFile(s.fleet.pushLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	sort.Strings(lines)
+	want := []string{" push card=ab host=fcm.googleapis.com status=201", " push card=ab host=web.push.apple.com status=410"}
+	if len(lines) != 2 || !strings.HasSuffix(lines[0], want[0]) || !strings.HasSuffix(lines[1], want[1]) {
+		t.Fatalf("log = %q", b)
+	}
+	if strings.Contains(string(b), "secret") || strings.Contains(string(b), "Secret") || strings.Contains(string(b), "DR-1") {
+		t.Fatalf("log leaks endpoint or payload: %q", b)
+	}
+	if st, _ := os.Stat(s.fleet.pushLogPath); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode().Perm())
 	}
 }
