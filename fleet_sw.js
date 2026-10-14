@@ -5,7 +5,7 @@
 //
 // It caches only what is the same for every visitor: the manifest, the icons,
 // and a copy of the app page for offline start. It never touches data or
-// actions (state, chat, log, usage, say, start, accounts), login (any c= link,
+// actions (state, chat, log, usage, say, start, accounts, push), login (any c= link,
 // /fleet/login*), or anything outside /fleet. /fleet itself is network first
 // and cached only when the response is the app (X-Fleet-App: 1), never the
 // hop or login pages, which depend on auth.
@@ -20,7 +20,7 @@ const ASSETS = [
   "/fleet/icon-maskable-512.png",
   "/fleet/apple-touch-icon.png",
 ];
-const NEVER = ["/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say", "/fleet/start", "/fleet/login", "/fleet/accounts", "/fleet/account", "/fleet/sw.js"];
+const NEVER = ["/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say", "/fleet/start", "/fleet/login", "/fleet/accounts", "/fleet/account", "/fleet/push", "/fleet/sw.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -78,4 +78,42 @@ self.addEventListener("fetch", (event) => {
   if (ASSETS.includes(url.pathname)) {
     event.respondWith(asset(req, url.pathname));
   }
+});
+
+// Web Push: the server sends {title, body, tag, cardId} (fleet_push.go).
+// Anything unreadable still shows a notification: a push the worker swallows
+// would count against the site on some browsers.
+self.addEventListener("push", (event) => {
+  let title = "FLEET", body = "Something needs you", tag = "fleet", cardId = "";
+  try {
+    const d = event.data ? event.data.json() : null;
+    if (d && typeof d === "object") {
+      if (typeof d.title === "string" && d.title) title = d.title;
+      if (typeof d.body === "string" && d.body) body = d.body;
+      if (typeof d.tag === "string" && d.tag) tag = d.tag;
+      if (typeof d.cardId === "string") cardId = d.cardId;
+    }
+  } catch (_) {}
+  event.waitUntil(self.registration.showNotification(title, {
+    body, tag, data: {cardId}, renotify: false, icon: "/fleet/icon-192.png",
+  }));
+});
+
+// A tap: focus an open FLEET page and ask it to show the card, else open
+// one at /fleet#card-<id>.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const data = event.notification.data || {};
+  const cardId = typeof data.cardId === "string" ? data.cardId : "";
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({type: "window", includeUncontrolled: true});
+    for (const c of wins) {
+      const u = new URL(c.url);
+      if (u.origin !== self.location.origin || u.pathname !== "/fleet") continue;
+      try { await c.focus(); } catch (_) {}
+      c.postMessage({type: "open-card", cardId});
+      return;
+    }
+    await self.clients.openWindow("/fleet" + (cardId ? "#card-" + encodeURIComponent(cardId) : ""));
+  })());
 });
