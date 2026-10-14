@@ -773,6 +773,9 @@ type server struct {
 
 	// clickup is the ClickUp ticket-event loop's seams (clickup_events.go).
 	clickup clickupDeps
+
+	// blocked is the permission-prompt event loop's seams (blocked_events.go).
+	blocked blockedDeps
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -2612,6 +2615,9 @@ func cmdServer(args []string) int {
 	// ClickUp ticket events for FLEET: off until clickup-events.json enables
 	// them; same one-stat cost while off.
 	go s.runClickupEvents()
+	// Permission-prompt events for FLEET: off until blocked-events.json
+	// enables them; same one-stat cost while off.
+	go s.runBlockedEvents()
 	// Web Push: a card that turns into a decision notifies the subscribed
 	// devices (fleet_push.go).
 	if s.fleet.vapid != nil {
