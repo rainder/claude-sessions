@@ -1464,6 +1464,13 @@ idle-events.json (empty = FLEET). `claude-sessions clickup-events status`
 prints the config, the resolved `cu`, the known-ticket and pending counts, and
 `lastSent`. The first enabled tick only records a baseline.
 
+**Token.** The systemd service has neither `CLICKUP_API_TOKEN` nor a reachable
+keyring, so a bare `cu` fails there with exit 2 (`cu failed: exit 2` in the
+log). On agent-workstation `cu` in the config points at
+`~/.local/bin/cu-with-token`, a zsh wrapper: zsh reads `~/.zshenv`, where the
+token already lives, and the wrapper passes only `HOME`, `PATH` and the token
+on to `cu`. No second copy of the token is written anywhere.
+
 ### Usage polling
 
 Two different things live here and they cost wildly different amounts, which is
