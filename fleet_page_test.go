@@ -13,7 +13,7 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 			t.Errorf("fleet.html must not contain %q", bad)
 		}
 	}
-	for _, need := range []string{"/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say",
+	for _, need := range []string{"/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say", "/fleet/accounts", "/fleet/account/switch",
 		"Europe/Vilnius", "noopener noreferrer", "visibilitychange", "Yes, I approve this write",
 		"since=", ".pct", ".account", ".windows",
 		// Card summaries and chat turns go through the one markdown renderer,

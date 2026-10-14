@@ -89,6 +89,23 @@ type fleetDeps struct {
 	// paneCommand reports a tmux session's pane command; ok false when the
 	// session is gone. nil → tmux display-message #{pane_current_command}.
 	paneCommand func(name string) (cmd string, ok bool)
+
+	// Account switch (fleet_account.go). provider is "claude" or "grok".
+	accountNames   func(provider string) ([]string, error) // nil → snapshotAccountNames / grokSnapshotNames
+	accountCurrent func(provider string) string            // nil → currentAccountName / grokCurrentAccountName
+	accountLive    func(provider string) string            // live email, never sent; nil → loadAccountEmail / liveGrokEmail
+	claudeUsage    func() []claudeUsageNumbers             // nil → s.numbers.build().Claude (none when s.numbers is nil)
+	grokLiveUsage  func() []providerUsageNumbers           // nil → grokUsageNumbers(now, false)
+	// grokKnown fetches parked grok usage (network). nil → no parked usage;
+	// cmdServer sets fleetFetchKnownGrok, so tests never reach the network.
+	grokKnown      func() []KnownGrokAccountUsage
+	deliverEvent   func(target, text string) string // nil → s.idleDeliver
+	switchMu       sync.Mutex                       // one switch at a time; held → 409 busy
+	grokFetchMu    sync.Mutex                       // single-flights grokKnown
+	grokKnownMu    sync.Mutex                       // guards the three below
+	grokKnownCache []KnownGrokAccountUsage
+	grokKnownAt    time.Time
+	grokKnownGen   int // bumped by a grok switch, so a fetch in flight is not kept
 }
 
 func (s *server) fleetDir() string {
@@ -247,6 +264,8 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("POST /fleet/login", s.fleetLogin)
 	mux.HandleFunc("POST /fleet/login/arm", s.fleetLoginArm)
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
+	mux.HandleFunc("GET /fleet/accounts", s.fleetAccounts)
+	mux.HandleFunc("POST /fleet/account/switch", s.fleetAccountSwitch)
 	registerFleetPWARoutes(mux)
 }
 

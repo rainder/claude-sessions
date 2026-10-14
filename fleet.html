@@ -94,13 +94,21 @@ header.top {
 .chip { flex: none; padding: 4px 9px 5px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 12px; line-height: 1.25; min-width: 82px; }
 .chip .lbl { color: var(--muted); margin-right: 5px; }
 .chip .val { font-weight: 650; font-variant-numeric: tabular-nums; }
-body.kb .chips, body.kb .quota { display: none !important; }
+body.kb .chips, body.kb .quota, body.kb .accts { display: none !important; }
 .chip .bar { display: block; height: 3px; border-radius: 2px; background: var(--line); margin-top: 4px; overflow: hidden; }
 .chip .bar i { display: block; height: 100%; width: 0; background: var(--muted); border-radius: 2px; }
 .chip.ok .val { color: var(--green); } .chip.ok .bar i { background: var(--green); }
 .chip.warn .val { color: var(--amber); } .chip.warn .bar i { background: var(--amber); }
 .chip.high .val { color: var(--red); } .chip.high .bar i { background: var(--red); }
 .chip.old { opacity: .6; }
+/* Account chips: one per provider with saved accounts; tap to switch. */
+.accts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; min-width: 0; }
+.acct-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; min-height: 36px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 12.5px; line-height: 1.25; cursor: pointer; }
+.acct-chip:hover { border-color: var(--muted); }
+.acct-chip .ac-p { flex: none; color: var(--muted); }
+.acct-chip .ac-n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.acct-chip .ac-n.none { font-weight: 450; color: var(--muted); }
+.acct-chip .ac-c { flex: none; color: var(--muted); font-size: 11px; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @keyframes rot { to { transform: rotate(360deg); } }
 .spin { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: rot .8s linear infinite; }
@@ -354,7 +362,7 @@ body.sv-open { overflow: hidden; }
 .hent .t { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12.5px; padding-top: 2px; }
 .hent .c { min-width: 0; overflow-wrap: anywhere; }
 .ty { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 5px; font-size: 11.5px; font-weight: 650; background: var(--surface2); color: var(--muted); vertical-align: 1px; }
-.ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say, .ty-web-start { color: var(--accent); }
+.ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say, .ty-web-start, .ty-web-switch { color: var(--accent); }
 .hent .tk { font-family: var(--mono); font-size: 12px; margin-right: 6px; }
 .hent a { margin-left: 6px; white-space: nowrap; }
 .more-row { padding: 10px 12px; border-top: 1px solid var(--line); text-align: center; }
@@ -365,7 +373,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 .sheet-in { padding: 18px 18px 16px; display: grid; gap: 12px; }
 .kicker { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
 .sheet.explicit .kicker { color: var(--red); }
-.sheet h2 { margin: 0; font-size: 19px; line-height: 1.3; }
+.sheet h2 { margin: 0; font-size: 19px; line-height: 1.3; overflow-wrap: anywhere; }
 .sheet-card { margin: 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
 .sheet-text { margin: 0; padding: 12px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15.5px; max-height: 38vh; overflow-y: auto; }
 .sheet-choice { margin: 0; padding: 12px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); display: grid; gap: 3px; overflow-wrap: anywhere; }
@@ -379,6 +387,19 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 .sheet-actions { display: grid; gap: 8px; margin-top: 4px; }
 .sheet-actions .btn { width: 100%; min-height: 50px; padding: 8px 16px; overflow-wrap: anywhere; }
 .readok { margin: 0; padding: 12px; text-align: center; font-size: 14px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
+.acct-list { display: grid; gap: 8px; max-height: 50vh; overflow-y: auto; }
+.acct-opt { display: grid; gap: 3px; width: 100%; min-height: 50px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.acct-opt:hover:not(:disabled) { border-color: var(--muted); }
+.acct-opt:disabled { cursor: default; }
+.acct-opt.on { border-color: var(--accent); background: var(--accent-tint); }
+.acct-opt .ao-name { font-size: 16px; font-weight: 650; }
+.acct-opt .ao-on { margin-left: 8px; padding: 0 6px; border-radius: 6px; background: var(--accent); color: var(--on-accent); font-size: 11.5px; font-weight: 700; vertical-align: 2px; }
+.acct-opt .ao-use { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.acct-opt .ao-use.old { opacity: .6; }
+.acct-opt .ao-w { white-space: nowrap; }
+.acct-opt .ao-w b { font-weight: 700; }
+.acct-opt .ao-w.ok b { color: var(--green); } .acct-opt .ao-w.warn b { color: var(--amber); } .acct-opt .ao-w.high b { color: var(--red); }
+.acct-hint { margin: 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   dialog.sheet { width: 100%; max-width: 100%; margin: auto 0 0; border-radius: 18px 18px 0 0; }
   .sheet-in { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
@@ -480,6 +501,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <button class="refresh" id="refresh" type="button" title="Refresh now" aria-label="Refresh now"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></span></button>
     </div>
     <button class="chips" id="chips" type="button" aria-expanded="false" aria-controls="quota" aria-label="Quota. Show details." hidden></button>
+    <div class="accts" id="accts" hidden></div>
     <div class="quota" id="quota" hidden></div>
   </div>
 </header>
@@ -609,6 +631,22 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   </div>
 </dialog>
 
+<dialog class="sheet" id="acct-sheet" aria-labelledby="acct-title">
+  <div class="sheet-in">
+    <p class="kicker" id="acct-kicker"></p>
+    <h2 id="acct-title"></h2>
+    <div class="acct-list" id="acct-list"></div>
+    <p class="acct-hint" id="acct-hint" hidden></p>
+    <div class="sheet-actions" id="acct-pick-actions">
+      <button class="btn" id="acct-close" type="button">Close</button>
+    </div>
+    <div class="sheet-actions" id="acct-confirm-actions" hidden>
+      <button class="btn btn-primary" id="acct-go" type="button">Switch</button>
+      <button class="btn" id="acct-cancel" type="button">Cancel</button>
+    </div>
+  </div>
+</dialog>
+
 <nav class="tabbar" id="tabbar" aria-label="Views">
   <button class="tab" type="button" data-view="decide"><span class="tab-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4.5"/><path d="M4 13.5 6.4 5.4A2 2 0 0 1 8.3 4h7.4a2 2 0 0 1 1.9 1.4L20 13.5"/><path d="M4 13.5h4.5l1.2 2.5h4.6l1.2-2.5H20"/></svg><span class="badge" id="badge-decide" hidden></span></span><span class="tab-l">Decide</span></button>
   <button class="tab" type="button" data-view="chat"><span class="tab-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12.5a7.5 7.5 0 0 1-10.9 6.7L4 20.5l1.3-4.6A7.5 7.5 0 1 1 20 12.5Z"/></svg></span><span class="tab-l">Chat</span></button>
@@ -624,7 +662,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // Every node is built with createElement + textContent. Card, chat and log
   // text is untrusted; links go through safeLink (http and https only).
 
-  const TYPES = ["merge", "kill", "spawn", "ticket", "decision", "ruling", "relay", "web-say", "web-start", "note"];
+  const TYPES = ["merge", "kill", "spawn", "ticket", "decision", "ruling", "relay", "web-say", "web-start", "web-switch", "note"];
   const BACKOFF_CAP = 60000;
   const $ = id => document.getElementById(id);
 
@@ -1269,11 +1307,168 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
   // A held key repeats: the Enter that opened a sheet must not go on to
   // press the button that gets the focus in it.
-  for (const id of ["sheet", "start-sheet"]) $(id).addEventListener("keydown", e => { if (e.repeat) { e.preventDefault(); e.stopPropagation(); } }, true);
+  for (const id of ["sheet", "start-sheet", "acct-sheet"]) $(id).addEventListener("keydown", e => { if (e.repeat) { e.preventDefault(); e.stopPropagation(); } }, true);
 
   $("start-go").addEventListener("click", () => { $("start-go").disabled = true; closeStartSheet(); startFleet(); });
   $("start-cancel").addEventListener("click", closeStartSheet);
   $("start-sheet").addEventListener("click", e => { if (e.target === $("start-sheet")) closeStartSheet(); });
+
+  // ---- account switch ----------------------------------------------------
+  // /fleet/accounts lists each provider's saved accounts (names only, never
+  // emails) with their usage. A chip per provider opens a sheet: pick an
+  // account, then confirm. Only the confirm's Switch button POSTs.
+  const ACCT_LABEL = {claude: "Claude", grok: "Grok"};
+  const acct = {data: null, key: "", provider: "", pick: "", flight: false};
+
+  function acctGroup(p) {
+    const g = obj(acct.data && acct.data[p]);
+    return g ? {accounts: arr(g.accounts).map(obj).filter(a => a && str(a.name)), hint: str(g.hint), unsaved: g.activeUnsaved === true} : null;
+  }
+
+  function renderAccounts(d) {
+    const key = JSON.stringify(d);
+    if (key === acct.key) return; // a rebuilt chip or row under a finger loses the tap
+    acct.key = key;
+    acct.data = obj(d);
+    const chips = [];
+    for (const p of ["claude", "grok"]) {
+      const g = acctGroup(p);
+      if (!g || !g.accounts.length) continue;
+      const act = g.accounts.find(a => a.active === true);
+      const name = act ? str(act.name) : (g.unsaved ? "unsaved" : "—");
+      const b = el("button", "acct-chip", el("span", "ac-p", ACCT_LABEL[p]), el("span", "ac-n" + (act ? "" : " none"), name), el("span", "ac-c", "▾"));
+      b.type = "button";
+      b.setAttribute("aria-label", ACCT_LABEL[p] + " account: " + name + ". Switch.");
+      b.addEventListener("click", () => openAcctSheet(p));
+      chips.push(b);
+    }
+    $("accts").replaceChildren(...chips);
+    $("accts").hidden = !chips.length;
+    if ($("acct-sheet").open && !acct.pick && !acct.flight) renderAcctList();
+    measure();
+  }
+
+  // acctWindows is the usage line's parts: [label, window] pairs.
+  function acctWindows(p, a) {
+    const out = [];
+    if (p === "claude") {
+      const ws = obj(a.weeklyScoped);
+      out.push(["5h", obj(a.fiveHour)], ["7d", obj(a.sevenDay)], [ws && str(ws.label) ? str(ws.label) : "Scoped", ws]);
+    } else {
+      for (const w of arr(a.windows)) { const wo = obj(w); if (wo) out.push([str(wo.label) || "use", wo]); }
+    }
+    return out.filter(([, w]) => w && num(w.pct));
+  }
+
+  function acctUsage(p, a) {
+    const ws = acctWindows(p, a);
+    if (!ws.length) return el("span", "ao-use", "no usage data");
+    const line = el("span", "ao-use" + (a.stale === true ? " old" : ""));
+    ws.forEach(([label, w], i) => {
+      if (i) line.append(" · ");
+      const u = str(w.resetsAt) ? untilText(w.resetsAt) : "";
+      line.append(el("span", "ao-w " + pctClass(w.pct), label + " ", el("b", "", Math.round(w.pct) + "%"), u ? " " + u : ""));
+    });
+    if (a.stale === true) line.append(" · old numbers");
+    return line;
+  }
+
+  function renderAcctList() {
+    const p = acct.provider, g = acctGroup(p);
+    $("acct-kicker").textContent = ACCT_LABEL[p] + " account";
+    $("acct-title").textContent = "Switch to which account?";
+    const rows = (g ? g.accounts : []).map(a => {
+      const on = a.active === true, name = str(a.name);
+      const b = el("button", "acct-opt" + (on ? " on" : ""), el("span", "ao-name", name, on ? el("span", "ao-on", "active") : null), acctUsage(p, a));
+      b.type = "button";
+      b.disabled = on;
+      if (!on) b.addEventListener("click", () => confirmAcct(name));
+      return b;
+    });
+    if (g && g.unsaved) rows.push(el("p", "acct-hint", "The live account is not saved under a name."));
+    $("acct-list").replaceChildren(...rows);
+    $("acct-list").hidden = false;
+    $("acct-hint").hidden = true;
+    $("acct-pick-actions").hidden = false;
+    $("acct-confirm-actions").hidden = true;
+  }
+
+  function openAcctSheet(p) {
+    if (expired || acct.flight || !ACCT_LABEL[p]) return;
+    acct.provider = p; acct.pick = "";
+    renderAcctList();
+    const d = $("acct-sheet");
+    if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
+    $("acct-close").focus();
+  }
+
+  function confirmAcct(name) {
+    if (acct.flight) return;
+    const g = acctGroup(acct.provider);
+    acct.pick = name;
+    $("acct-title").textContent = "Switch " + ACCT_LABEL[acct.provider] + " to " + name + "?";
+    $("acct-hint").textContent = g ? g.hint : "";
+    $("acct-hint").hidden = !(g && g.hint);
+    $("acct-list").hidden = true;
+    $("acct-pick-actions").hidden = true;
+    $("acct-confirm-actions").hidden = false;
+    $("acct-go").disabled = false; $("acct-cancel").disabled = false;
+    $("acct-go").focus();
+  }
+
+  function closeAcctSheet() {
+    const d = $("acct-sheet");
+    if (d.open) { if (typeof d.close === "function") d.close(); else d.removeAttribute("open"); }
+    acct.pick = "";
+  }
+
+  const acctErrors = {
+    bad_provider: "That provider cannot be switched.",
+    unknown_account: "That account is not saved on the host any more.",
+    busy: "Another switch is running. Try again in a moment.",
+    switch_failed: "The switch failed. See the server log.",
+    origin: "The browser sent the wrong origin. Reload the page.",
+    bad_request: "The page sent a bad request. Reload the page.",
+  };
+
+  async function acctSwitch() {
+    if (acct.flight || expired || !acct.provider || !acct.pick) return;
+    const provider = acct.provider, name = acct.pick, label = ACCT_LABEL[provider];
+    acct.flight = true;
+    $("acct-go").disabled = true; $("acct-cancel").disabled = true;
+    let r = null, body = null;
+    try {
+      r = await fetch("/fleet/account/switch", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({provider, name})});
+      try { body = obj(JSON.parse(await r.text())); } catch { body = null; }
+    } catch {
+      r = null;
+    }
+    acct.flight = false;
+    $("acct-go").disabled = false; $("acct-cancel").disabled = false;
+    if (r && r.status === 401) { closeAcctSheet(); expire(); toast("Session expired. Run claude-sessions fleet-url on the host.", true); return; }
+    if (r && r.ok && body && body.ok === true) {
+      closeAcctSheet();
+      if (body.noop === true) toast(name + " is already active.");
+      else {
+        const ev = str(body.event);
+        toast(label + " now on " + name + "." + (ev === "sent" ? " FLEET told." : " FLEET not told (" + (ev || "unknown") + ")."), ev !== "sent");
+      }
+      runNow("usage");
+      runNow("accounts");
+      return;
+    }
+    if (!r) { toast("The page cannot reach the server. Try again.", true); return; }
+    const code = body ? str(body.code) : "";
+    toast(acctErrors[code] || "The switch failed (HTTP " + r.status + ").", true);
+    if (code === "unknown_account") { closeAcctSheet(); runNow("accounts"); }
+  }
+
+  $("acct-go").addEventListener("click", acctSwitch);
+  $("acct-cancel").addEventListener("click", closeAcctSheet);
+  $("acct-close").addEventListener("click", closeAcctSheet);
+  $("acct-sheet").addEventListener("click", e => { if (e.target === $("acct-sheet")) closeAcctSheet(); });
+  $("acct-sheet").addEventListener("close", () => { acct.pick = ""; });
 
   function sentence(t) {
     t = t.charAt(0).toUpperCase() + t.slice(1);
@@ -2275,6 +2470,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       return applyChat(await getJSON(url));
     }},
     usage: {base: 60000, fn: async () => { const t = await getJSON("/fleet/usage"); guard(() => renderUsage(JSON.parse(t))); }},
+    accounts: {base: 60000, fn: async () => { const t = await getJSON("/fleet/accounts"); guard(() => renderAccounts(JSON.parse(t))); }},
   };
   for (const [name, p] of Object.entries(pollers)) { p.name = name; p.cur = p.base; p.timer = 0; p.busy = false; }
 

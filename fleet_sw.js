@@ -5,7 +5,7 @@
 //
 // It caches only what is the same for every visitor: the manifest, the icons,
 // and a copy of the app page for offline start. It never touches data or
-// actions (state, chat, log, usage, say, start), login (any c= link,
+// actions (state, chat, log, usage, say, start, accounts), login (any c= link,
 // /fleet/login*), or anything outside /fleet. /fleet itself is network first
 // and cached only when the response is the app (X-Fleet-App: 1), never the
 // hop or login pages, which depend on auth.
@@ -20,7 +20,7 @@ const ASSETS = [
   "/fleet/icon-maskable-512.png",
   "/fleet/apple-touch-icon.png",
 ];
-const NEVER = ["/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say", "/fleet/start", "/fleet/login", "/fleet/sw.js"];
+const NEVER = ["/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say", "/fleet/start", "/fleet/login", "/fleet/accounts", "/fleet/account", "/fleet/sw.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
