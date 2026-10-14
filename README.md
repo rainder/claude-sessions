@@ -113,6 +113,8 @@ claude-sessions idle-events status         # idle events for FLEET: config, repo
 claude-sessions idle-events test --target T
                                             # type one tagged test line into session T (tmux
                                             # session name or session id), same send guards
+claude-sessions blocked-events status     # permission-prompt events for FLEET: config,
+                                            # episodes, pending
 claude-sessions clickup-events status      # ClickUp ticket events for FLEET: config, cu path,
                                             # known tickets, pending
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app

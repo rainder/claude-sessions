@@ -1357,6 +1357,65 @@ does not need `enabled`. It runs in its own process, so it shares neither
 `sayMu` nor the 1 s gap with the server: run it when nobody is typing into
 FLEET. `test` still needs an explicit `--target`.
 
+### Blocked permission events for FLEET
+
+`blocked_events.go` tells FLEET when a session has sat at a permission prompt.
+An approval dialog is not idle: Claude leaves `Status` at `busy`, so the idle
+loop never reports it. The signal is the one both tools already publish,
+`WaitingFor == "permission prompt"` — Claude writes it in the session file,
+and `grokStatusFromEvents` sets it while a tool permission is open. Grok's
+`ask_user_question` (`WaitingFor` `"input"`) is not an approval and is not
+reported.
+
+The question text is not in that field. Claude stores only the label, and
+grok's `events.jsonl` stores only the tool name, so the line quotes one line
+read from the pane (`permissionQuestion`). Claude's dialog asks
+`Do you want to proceed?` above a `❯ 1. Yes` menu. Grok's menu is
+`Allow once` / `Reject once` / `Always allow …`, under a title such as
+`Allow ` + the command or `Allow Edit to <file>`. The menu used is the lowest
+one in the last 25 lines, so an older dialog still on screen is not the
+prompt. The fingerprint is that question plus the dialog body under a rule
+that sits within 12 lines above it (Claude's own border). Scrollback above
+that rule is ignored. A farther rule is ignored too. With no rule in that
+window the question line is the whole fingerprint: Grok's title already
+carries the command, and a changing line above it must not reset the clock.
+A capture miss at send time uses the question already read. When no read has
+succeeded, the question is `permission prompt`.
+
+After the prompt has been up for 60 seconds the loop types one line:
+
+`[claude-sessions event] blocked <pid> <tmux> (<n> min) "<question>"`
+
+`<n>` is whole minutes from the first poll that saw this prompt. The question
+is scrubbed (`scrubEventField`, 120 runes, the ClickUp title set plus a
+backtick) and the body goes through `idleScrubTag` before the tag is added.
+Every prompt that crosses the minute on the same poll shares one message,
+joined with ` ; `, at most 15, then ` ; +N more`. There is no second batch
+window. The line is sent once per prompt. It is sent again only when the
+session leaves the permission state and comes back, or the fingerprint
+changes, and that new prompt waits its own minute.
+
+The FLEET row, the configured idle target, the idle ignore list and disabled
+sessions are skipped with `idleSkipped`. A skipped row keeps its episode, so
+turning the skip off does not send the same prompt again. The target is
+`fleetEventTarget`, and
+the send is `idleDeliver`. `sent` and `not_submitted` clear the pending line
+(`not_submitted` must not be retried: the text is already in the box). Any
+other refusal keeps it and the next poll tries again. The log is counts and
+codes only. The question can be a shell command, so it is never written there.
+
+**Files.** Config `~/.config/claude-sessions/blocked-events.json`: `enabled`
+(false), `pollSeconds` (30, 5..600). Missing means off. Re-read on an
+(mtime, size) change; a bad file keeps the last good config. State
+`$XDG_STATE_HOME/claude-sessions/blocked-events-state.json` (dir 0700, file
+0600): episodes (`fp`, `since`, `reported`) and pending. A restart does not
+send a prompt that was already reported, and it does not start its minute
+over. Log `blocked-events.log` beside it.
+
+**Enable.** Write `{"enabled": true}` to the config file.
+`claude-sessions blocked-events status` prints the config, the episode count,
+the pending count and `lastSent`.
+
 ### ClickUp events for FLEET
 
 `clickup_events.go` tells FLEET when a backlog ticket is new or has just turned
