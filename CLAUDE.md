@@ -854,8 +854,8 @@ start FLEET when it is down. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
 `POST /fleet/start`, `/fleet/session`, `POST /fleet/session/say`,
 `POST /fleet/login`, `POST /fleet/login/arm`,
-`POST /fleet/login/revoke`, and the static app files (manifest, `sw.js`,
-icons), main mux only (never the loopback paste mux).
+`POST /fleet/login/revoke`, `/fleet/accounts`, `POST /fleet/account/switch`,
+and the static app files (manifest, `sw.js`, icons), main mux only (never the loopback paste mux).
 
 **Auth.** Bearer header, or the `cs_fleet` cookie (`Path=/fleet`, `HttpOnly`,
 `SameSite=Strict`). The cookie holds a **fleet-only secret**
@@ -964,6 +964,44 @@ until FLEET is seen alive. `fleet.canStart` is `not_live`, not `lastLive`,
 no start in flight or pending, and the 60 s free. Errors never carry paths;
 the spawn error goes to stderr. A 401 here is JSON (`code: unauthorized`).
 
+**Account switch** (`fleet_account.go`). `GET /fleet/accounts` lists each
+provider's saved snapshots (`claude`, `grok`; names `accountNameOK` refuses
+are dropped, since such a file name could be an email) as `{name, active,
+windows, stale}` plus the provider's `hint`, and `activeUnsaved` when a live
+account matches no snapshot. **No email anywhere**: claude windows are copied
+by name from `s.numbers.build()` (never `account` or credits); the active grok
+row uses the grok hub cache only when its account matches the live one (it
+can still hold the pre-switch account); parked grok rows come from
+`fetchKnownGrokAccountsWith(false)`, at most once per `usageRefreshInterval`,
+single-flighted, dropped on a grok switch (`fleetDeps.grokKnown`, set only in
+`cmdServer`, so tests never fetch). That read **never rotates** a parked
+refresh token: a refused token just shows no usage, because a page left open
+must not drive rotation from the always-on server (the TUI hub still rotates).
+The active name goes through `accountNameOK` too (`fleetAccountCurrent`), so
+an email-shaped snapshot name never reaches `previous` or the log line. `POST /fleet/account/switch`
+(`{"provider","name"}`), guards in order: auth (401 JSON), cookie needs
+`sameOrigin` (403 `origin`), one strict JSON value, 4 KiB (400
+`bad_request`), `bad_provider`, the name exactly in that provider's fresh list
+(400 `unknown_account`; the switch is never called), `switchMu.TryLock` (409
+`busy`), the active name is `noop` (no switch, log or event). Then
+`s.switchAccountTo`: its errors and warnings can hold emails, so they go to
+stderr and the page gets `switch_failed` only. A switch logs one `web-switch`
+line (names only), releases the lock, then types
+`[claude-sessions event] account <p> switched from <old> to <new>; <note>`
+(names through `idleSanitize`) into FLEET via `idleDeliver`, synchronously, so
+the 200 carries `event` (`sent`, a refusal code, or `no_target`). A refused
+event is not retried (the 1 s say gap or a busy box can refuse it); the toast
+says "FLEET not told", and the `web-switch` log line is still there. Target:
+idle-events.json's `target` when set (enabled or not), read fresh (the idle
+loop holds its lock across a delivery), else the FLEET row's tmux session.
+The hint and note texts are constants in `fleet_account.go`, from a test of
+running sessions (2026-10-14, Claude Code 2.1.299, grok 1.0.52): claude stats
+`.credentials.json` before each request and reloads it on an mtime change, so
+it uses the new login on its next request with no restart; grok keeps its
+in-memory token until its own refresh (`expires_at` − 300 s; tokens live
+~6 h), then adopts the disk token. Neither wrote its old token back. Re-test
+when either CLI changes major behaviour.
+
 **Read-only chat.** When the code is `not_live` and fleet-last.json names a
 session whose transcript exists, `/fleet/chat` answers that transcript with
 the same cursor rules plus `readOnly: true`, so the page still shows what FLEET
@@ -983,7 +1021,7 @@ first, stored only when the response carries `X-Fleet-App: 1`, which only the
 app page sends, and served from the cache only when the network fails. A
 failed cache store never costs the response. It
 never handles a non-GET, anything outside `/fleet`, any `c=` link, or
-state/chat/log/usage/say/start/login*: those are live data, actions, or
+state/chat/log/usage/say/start/login*/accounts/account*: those are live data, actions, or
 depend on auth, and a cached answer would show an old FLEET or a stale login.
 
 **HTTPS.** The service worker and Android's install prompt need a secure

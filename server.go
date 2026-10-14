@@ -2558,6 +2558,8 @@ func cmdServer(args []string) int {
 	} else {
 		s.fleet.secret = sec
 	}
+	// Parked grok usage for the page's account sheet; tests leave it nil.
+	s.fleet.grokKnown = fleetFetchKnownGrok
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("GET /usage", s.usage)

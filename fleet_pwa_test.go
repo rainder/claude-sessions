@@ -46,7 +46,7 @@ func TestFleetServiceWorkerScopeHeader(t *testing.T) {
 	// The worker must leave data, actions and login alone, and cache /fleet
 	// only when it is the app page.
 	for _, need := range []string{"/fleet/state", "/fleet/chat", "/fleet/log", "/fleet/usage", "/fleet/say",
-		"/fleet/start", "/fleet/login", `searchParams.has("c")`, `"X-Fleet-App"`, `req.method !== "GET"`,
+		"/fleet/start", "/fleet/login", "/fleet/accounts", "/fleet/account", `searchParams.has("c")`, `"X-Fleet-App"`, `req.method !== "GET"`,
 		"clients.claim()", "const VERSION = "} {
 		if !strings.Contains(sw, need) {
 			t.Errorf("sw.js must contain %q", need)

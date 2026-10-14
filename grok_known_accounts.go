@@ -39,6 +39,13 @@ func derefKnownGrokAccounts(res *knownGrokAccountsResult) []KnownGrokAccountUsag
 // parked copy of the live grant). A per-account failure omits that account
 // this pass rather than failing the batch.
 func fetchKnownGrokAccounts() (*knownGrokAccountsResult, error) {
+	return fetchKnownGrokAccountsWith(true)
+}
+
+// fetchKnownGrokAccountsWith is fetchKnownGrokAccounts; rotate=false skips an
+// account whose token is refused instead of rotating its parked refresh token
+// (the FLEET page's server-side read must never rotate a grant).
+func fetchKnownGrokAccountsWith(rotate bool) (*knownGrokAccountsResult, error) {
 	names, err := grokSnapshotNames()
 	if err != nil {
 		return &knownGrokAccountsResult{}, nil
@@ -57,7 +64,7 @@ func fetchKnownGrokAccounts() (*knownGrokAccountsResult, error) {
 		u, err := fetchGrokUsageWith(tok, email)
 		if err != nil {
 			var he *grokHTTPError
-			if errors.As(err, &he) && (he.Status == http.StatusUnauthorized || he.Status == http.StatusForbidden) {
+			if rotate && errors.As(err, &he) && (he.Status == http.StatusUnauthorized || he.Status == http.StatusForbidden) {
 				if rotated := tryRotateGrokSnapshot(name); rotated != "" {
 					u, err = fetchGrokUsageWith(rotated, email)
 				}
