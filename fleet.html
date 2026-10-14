@@ -104,7 +104,17 @@ body.kb .chips, body.kb .quota { display: none !important; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @keyframes rot { to { transform: rotate(360deg); } }
 .spin { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: rot .8s linear infinite; }
+/* Decide empty state: a sun half-risen over a calm sea. */
+.zero { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 22px 12px 18px; text-align: center; animation: zero-in .6s ease-out both; }
+.zero-art { display: block; max-width: 100%; height: auto; fill: none; overflow: visible; }
+.zero-sun { stroke: var(--accent); fill: var(--accent-tint); }
+.zero-rays { stroke: var(--accent); transform-box: view-box; transform-origin: 60px 50px; animation: zero-breathe 3.6s ease-in-out infinite; }
+.zero-sea { stroke: var(--muted); opacity: .55; }
+.zero-text { margin: 0; font-size: 14px; color: var(--muted); }
+@keyframes zero-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes zero-breathe { 0%, 100% { opacity: .55; transform: scale(.97); } 50% { opacity: 1; transform: scale(1.03); } }
 @media (prefers-reduced-motion: reduce) {
+  .zero, .zero-rays { animation: none; }
   .st-busy .dot, .st-starting .dot, .chosen-line.sending .dot { animation: none; }
   .spin, .refresh.spinning svg { animation-duration: 2.4s; }
 }
@@ -479,7 +489,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         <h2 class="sec-h" id="h-needs">Needs you <span class="n" id="n-needs">0</span></h2>
         <div id="list-needs"></div>
       </section>
-      <p class="empty" id="no-decisions" hidden>Nothing needs you now.</p>
+      <div class="zero" id="no-decisions" hidden>
+        <svg class="zero-art" viewBox="0 0 120 84" width="112" height="78" aria-hidden="true" focusable="false">
+          <g class="zero-rays" stroke-width="3" stroke-linecap="round">
+            <path d="M60 18V9M37.4 27.4 31 21M82.6 27.4 89 21M29.9 39.1 21.5 36M90.1 39.1 98.5 36"/>
+          </g>
+          <path class="zero-sun" d="M34 50a26 26 0 0 1 52 0" stroke-width="3.5" stroke-linecap="round"/>
+          <path class="zero-sea" d="M8 50h104M30 62h60M46 73h28" stroke-width="3" stroke-linecap="round"/>
+        </svg>
+        <p class="zero-text">Nothing needs you now.</p>
+      </div>
       <section class="sec-sent" id="sec-sent" aria-labelledby="h-sent" hidden>
         <h2 class="sec-h" id="h-sent">Sent - waiting for FLEET <span class="n" id="n-sent">0</span></h2>
         <div class="rows" id="list-sent"></div>
