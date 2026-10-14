@@ -2566,6 +2566,7 @@ func cmdServer(args []string) int {
 	} else {
 		s.fleet.vapid = key
 		s.fleet.pushSubsPath = fleetPushSubsPath()
+		s.fleet.pushLogPath = fleetPushLogDefault()
 	}
 	// Parked grok usage for the page's account sheet; tests leave it nil.
 	s.fleet.grokKnown = fleetFetchKnownGrok

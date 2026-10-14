@@ -519,6 +519,10 @@ func (s *server) fleetPushFlush() {
 		}
 		send = func(sub pushSub, p []byte) (int, error) { return webpushSend(webpushClient, key, sub, p, now) }
 	}
+	what := "batch=" + strconv.Itoa(len(cards))
+	if len(cards) == 1 {
+		what = "card=" + fleetPushLogID(cards[0].ID)
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	// gone holds the exact subscriptions sent to (endpoint and keys): a
@@ -530,6 +534,7 @@ func (s *server) fleetPushFlush() {
 			defer wg.Done()
 			code, err := send(sub, payload)
 			host := pushEndpointHost(sub.Endpoint)
+			s.logFleetPush(what, host, code, err)
 			switch {
 			case err != nil:
 				// A transport error may be this host's own network: it
@@ -589,6 +594,46 @@ func (s *server) pushFailure(sub pushSub, failed bool) int {
 
 // pushEndpointHost is the only part of an endpoint the log may show: the
 // path is the subscription's capability.
+// fleetPushLogDefault is fleet-push.log beside fleet-say.log.
+func fleetPushLogDefault() string {
+	if p := fleetSayLogDefault(); p != "" {
+		return filepath.Join(filepath.Dir(p), "fleet-push.log")
+	}
+	return ""
+}
+
+// logFleetPush appends one line per send: time, the card id or batch size,
+// the push host and the HTTP status ("error" for a transport failure), and
+// nothing else — never the endpoint path, keys, payload or error text. Same
+// writer and 1 MiB rotation as fleet-say.log: stderr reaches nobody here.
+func (s *server) logFleetPush(what, host string, code int, err error) {
+	if s.fleet.pushLogPath == "" {
+		return
+	}
+	status := strconv.Itoa(code)
+	if err != nil {
+		status = "error"
+	}
+	appendFleetSayLog(s.fleet.pushLogPath, fmt.Sprintf("%s push %s host=%s status=%s\n",
+		s.fleetNow().UTC().Format(time.RFC3339), what, host, status))
+}
+
+// fleetPushLogID keeps a card id log-safe: [A-Za-z0-9._:-] only, at most 64
+// bytes, "-" when nothing is left.
+func fleetPushLogID(id string) string {
+	var b strings.Builder
+	for i := 0; i < len(id) && b.Len() < 64; i++ {
+		c := id[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == ':' || c == '-' {
+			b.WriteByte(c)
+		}
+	}
+	if b.Len() == 0 {
+		return "-"
+	}
+	return b.String()
+}
+
 func pushEndpointHost(endpoint string) string {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" {
