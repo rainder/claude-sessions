@@ -74,6 +74,8 @@ func main() {
 		os.Exit(cmdClickupEvents(args[1:]))
 	case "blocked-events":
 		os.Exit(cmdBlockedEvents(args[1:]))
+	case "question-events":
+		os.Exit(cmdQuestionEvents(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -130,6 +132,8 @@ subcommands:
                                   type one test line into session T (tmux
                                   session name or session id)
   blocked-events status           show the permission-prompt event config and
+                                  state
+  question-events status          show the decision-question event config and
                                   state
   clickup-events status           show the ClickUp ticket-event config and
                                   state

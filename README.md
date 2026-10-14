@@ -115,6 +115,8 @@ claude-sessions idle-events test --target T
                                             # session name or session id), same send guards
 claude-sessions blocked-events status     # permission-prompt events for FLEET: config,
                                             # episodes, pending
+claude-sessions question-events status    # decision-question events for FLEET: config,
+                                            # episodes, sent, pending
 claude-sessions clickup-events status      # ClickUp ticket events for FLEET: config, cu path,
                                             # known tickets, pending
 claude-sessions pair [--port N]            # print a pairing QR for the iOS app
