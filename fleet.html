@@ -394,6 +394,8 @@ body.sv-open { overflow: hidden; }
 /* History */
 .filters { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 8px; scrollbar-width: none; }
 .filters::-webkit-scrollbar { display: none; }
+/* 600px and up there is room to wrap, so every filter shows. */
+@media (min-width: 600px) { .filters { flex-wrap: wrap; overflow: visible; } }
 @media (max-width: 599.98px) {
   .filters { padding-right: 28px; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
 }
@@ -1924,7 +1926,24 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return row;
   }
 
-  function renderCards() {
+  // keepFocus runs a render that rebuilds controls. Focus inside an element
+  // with data-fkey (a card, a row, a filter) is found again by that key and
+  // the control's place in it.
+  const FOCUSABLE = "a[href], button, summary, textarea";
+  function fkeyHost(k) { return k ? [...document.querySelectorAll("[data-fkey]")].find(e => e.dataset.fkey === k) || null : null; }
+  function focusablesIn(host) { return [...(host.matches(FOCUSABLE) ? [host] : []), ...host.querySelectorAll(FOCUSABLE)]; }
+  function keepFocus(render) {
+    const a = document.activeElement, host = a && a !== document.body ? a.closest("[data-fkey]") : null;
+    const k = host ? host.dataset.fkey : "", idx = host ? focusablesIn(host).indexOf(a) : -1;
+    render();
+    if (!k || idx < 0 || (document.activeElement && document.activeElement !== document.body)) return;
+    const nh = fkeyHost(k), f = nh && focusablesIn(nh)[idx];
+    if (f) f.focus({preventScroll: true});
+  }
+  const fkey = (node, key) => { if (key) node.dataset.fkey = key; return node; };
+
+  function renderCards() { keepFocus(renderCardsNow); }
+  function renderCardsNow() {
     const cards = arr(state && state.cards).map(obj).filter(Boolean);
     const g = {yes: [], needs: [], working: [], waiting: [], done: [], sent: []};
     for (const c of cards) {
@@ -1936,12 +1955,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       else if (k === "done") { if (isToday(str(c.updatedAt))) g.done.push(c); }
       else g.working.push(c);
     }
-    $("list-yes").replaceChildren(...g.yes.map(c => decisionCard(c, true)));
-    $("list-needs").replaceChildren(...g.needs.map(c => decisionCard(c, false)));
+    const cid = c => str(c.id) ? "card:" + str(c.id) : "";
+    $("list-yes").replaceChildren(...g.yes.map(c => fkey(decisionCard(c, true), cid(c))));
+    $("list-needs").replaceChildren(...g.needs.map(c => fkey(decisionCard(c, false), cid(c))));
     $("sec-yes").hidden = !g.yes.length;
     $("sec-needs").hidden = !g.needs.length;
     $("no-decisions").hidden = !!(g.yes.length || g.needs.length) || !state;
-    $("list-sent").replaceChildren(...g.sent.map(sentRow));
+    $("list-sent").replaceChildren(...g.sent.map(c => fkey(sentRow(c), cid(c) && "sent:" + cid(c))));
     $("sec-sent").hidden = !g.sent.length;
     $("n-sent").textContent = g.sent.length;
     const openYes = g.yes.filter(c => !answered(c)).length, openNeeds = g.needs.filter(c => !answered(c)).length;
@@ -1951,7 +1971,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       $("n-" + k).textContent = g[k].length;
       const box = $("list-" + k);
       if (!g[k].length) box.replaceChildren(el("p", "empty", k === "done" ? "Nothing done today." : "None."));
-      else box.replaceChildren(el("div", "rows", ...g[k].map(compactRow)));
+      else box.replaceChildren(el("div", "rows", ...g[k].map(c => fkey(compactRow(c), cid(c) && "row:" + cid(c)))));
     }
     const n = openYes + openNeeds;
     decideN = n;
@@ -2328,7 +2348,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!fk || idx < 0) return;
     const nt = log.querySelector(fk);
     const f = nt && nt.querySelectorAll("a, button")[idx];
-    if (f) f.focus({preventScroll: true});
+    if (!f) return;
+    const shown = f.tabIndex === -1 ? nt.querySelector(":scope > .link-btn") : f;
+    if (shown) shown.focus({preventScroll: true});
   }
 
   // addFolds folds only turns that really overflow 12 lines, with a
@@ -2638,9 +2660,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     renderOffline();
   }
 
-  function renderFilters() {
+  function renderFilters() { keepFocus(renderFiltersNow); }
+  function renderFiltersNow() {
     const mk = (label, val) => {
-      const b = el("button", "fchip", label);
+      const b = fkey(el("button", "fchip", label), "filter:" + val);
       b.type = "button";
       b.setAttribute("aria-pressed", hist.filter === val ? "true" : "false");
       b.addEventListener("click", () => { hist.filter = hist.filter === val ? "" : val; guard(renderFilters); guard(renderHistory); });
@@ -2880,8 +2903,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   function openSession(t) {
     if (sv.open && sv.tmux === t) return;
     const opener = document.activeElement !== document.body ? document.activeElement : null;
+    const openerHost = opener && opener.closest("[data-fkey]");
     closeSessionView();
-    Object.assign(sv, {opener, open: true, tmux: t, target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
+    Object.assign(sv, {opener, openerKey: openerHost ? openerHost.dataset.fkey : "", open: true, tmux: t, target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
       key: "", sumKey: "", follow: true, unseen: false, rev: 0, loadingOlder: false, confirm: false, sending: sv.pending.has(t)});
     sv.turns = new Map(); sv.foldOpen = new Set();
     sv.gen++;
@@ -2923,8 +2947,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     document.body.classList.remove("sv-open");
     document.querySelector("main").inert = false;
     measure();
-    if (sv.opener && sv.opener.isConnected) sv.opener.focus({preventScroll: true});
-    sv.opener = null;
+    const back = sv.opener && sv.opener.isConnected ? sv.opener : (() => { const h = fkeyHost(sv.openerKey); return h && focusablesIn(h)[0]; })();
+    if (back) back.focus({preventScroll: true});
+    sv.opener = null; sv.openerKey = "";
   }
 
   // Back: return to the Fleet tab. Session views opened from the page go
