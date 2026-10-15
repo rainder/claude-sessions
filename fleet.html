@@ -132,6 +132,9 @@ body.kb .chips, body.kb .quota, body.kb .accts { display: none !important; }
 .accts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; min-width: 0; }
 .acct-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; min-height: 36px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 12.5px; line-height: 1.25; cursor: pointer; }
 .acct-chip:hover { border-color: var(--muted); }
+/* The hit area reaches 44px without a taller chip or header. */
+.acct-chip { position: relative; }
+.acct-chip::after { content: ""; position: absolute; inset: -4px -3px; }
 .acct-chip .ac-p { flex: none; color: var(--muted); }
 .acct-chip .ac-n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
 .acct-chip .ac-n.none { font-weight: 450; color: var(--muted); }
@@ -172,7 +175,7 @@ main { max-width: 1600px; margin: 0 auto; padding: 12px max(env(safe-area-inset-
 .banner .b-note { display: block; margin-top: 1px; font-size: 13px; font-weight: 450; color: var(--muted); }
 .banner.act .btn { flex: none; min-height: 44px; }
 /* One line; a tap or Enter shows the whole note (the title has it too). */
-.now { margin: 0 0 14px; font-size: 14px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.now { margin: -8px 0 6px; padding: 8px 0; font-size: 14px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .now.open { white-space: normal; overflow-wrap: anywhere; }
 .now b { color: var(--text); font-weight: 600; margin-right: 4px; }
 .layout { display: flex; flex-direction: column; gap: 22px; }
@@ -385,6 +388,9 @@ body.sv-open { overflow: hidden; }
 /* History */
 .filters { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 8px; scrollbar-width: none; }
 .filters::-webkit-scrollbar { display: none; }
+@media (max-width: 599.98px) {
+  .filters { padding-right: 28px; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+}
 .fchip { position: relative; flex: none; min-height: 36px; padding: 0 13px; border-radius: 99px; border: 1px solid var(--line); background: var(--surface); font-size: 13px; cursor: pointer; }
 .fchip::before { content: ""; position: absolute; inset: -4px 0; }
 .fchip[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
@@ -415,7 +421,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 .sheet-choice .sc-line { font-size: 14px; color: var(--muted); }
 .sheet.explicit .sheet-choice { border: 2px solid var(--red); background: var(--red-tint); }
 .sheet-raw { margin: 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; max-height: 20vh; overflow-y: auto; }
-.sheet-raw .mono { color: var(--text); white-space: pre-wrap; }
+.sheet-raw .mono { font-size: 1em; font-weight: 600; color: var(--text); white-space: pre-wrap; }
 .sheet-note { margin: 0; font-size: 14px; color: var(--red); font-weight: 550; }
 .sheet-actions { display: grid; gap: 8px; margin-top: 4px; }
 .sheet-actions .btn { width: 100%; min-height: 50px; padding: 8px 16px; overflow-wrap: anywhere; }
@@ -428,7 +434,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 .acct-opt .ao-name { font-size: 16px; font-weight: 650; }
 .acct-opt .ao-on { margin-left: 8px; padding: 0 6px; border-radius: 6px; background: var(--accent); color: var(--on-accent); font-size: 11.5px; font-weight: 700; vertical-align: 2px; }
 .acct-opt .ao-use { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.acct-opt .ao-use.old { opacity: .6; }
+.acct-opt .ao-use .old { color: var(--amber); font-weight: 550; }
 .acct-opt .ao-w { white-space: nowrap; }
 .acct-opt .ao-w b { font-weight: 700; }
 .acct-opt .ao-w.ok b { color: var(--green); } .acct-opt .ao-w.warn b { color: var(--amber); } .acct-opt .ao-w.high b { color: var(--red); }
@@ -560,6 +566,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   .chip .bar { margin-top: 3px; }
   .accts { flex: 0 1 auto; flex-wrap: nowrap; margin: 0; }
   .acct-chip { min-height: 32px; padding: 3px 9px; }
+  .acct-chip::after { inset: -6px -3px; }
+}
+@media (min-width: 761px) and (pointer: coarse) {
+  .chips, .acct-chip { min-height: 44px; }
 }
 
 /* Wide screens: three columns in one screen. The page does not scroll;
@@ -1506,13 +1516,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   function acctUsage(p, a) {
     const ws = acctWindows(p, a);
     if (!ws.length) return el("span", "ao-use", "no usage data");
-    const line = el("span", "ao-use" + (a.stale === true ? " old" : ""));
+    const line = el("span", "ao-use");
     ws.forEach(([label, w], i) => {
       if (i) line.append(" · ");
       const u = str(w.resetsAt) ? untilText(w.resetsAt) : "";
       line.append(el("span", "ao-w " + pctClass(w.pct), label + " ", el("b", "", Math.round(w.pct) + "%"), u ? " " + u : ""));
     });
-    if (a.stale === true) line.append(" · old numbers");
+    if (a.stale === true) line.append(" · ", el("span", "old", "old numbers"));
     return line;
   }
 
@@ -2272,13 +2282,20 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       const uuid = w.dataset.uuid;
       const isOpen = openSet.has(uuid);
       if (!isOpen && body.scrollHeight <= body.clientHeight + 4) { body.classList.remove("fold"); continue; }
+      if (!isOpen) {
+        const cut = body.getBoundingClientRect().bottom - 4;
+        for (const f of body.querySelectorAll("a, button")) if (f.getBoundingClientRect().top >= cut) f.tabIndex = -1;
+      }
       const t = el("button", "link-btn", isOpen ? "Show less" : "Show all");
       t.type = "button";
+      t.setAttribute("aria-expanded", isOpen ? "true" : "false");
       t.addEventListener("click", () => {
         if (openSet.has(uuid)) openSet.delete(uuid); else openSet.add(uuid);
         const keep = log.scrollTop;
         rerender();
         log.scrollTop = keep;
+        const again = log.querySelector('.turn[data-uuid="' + CSS.escape(uuid) + '"] > .link-btn');
+        if (again) again.focus({preventScroll: true});
       });
       w.append(t);
     }
@@ -2800,14 +2817,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   let svDepth = 0;
   function openSession(t) {
     if (sv.open && sv.tmux === t) return;
+    const opener = document.activeElement !== document.body ? document.activeElement : null;
     closeSessionView();
-    Object.assign(sv, {open: true, tmux: t, target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
+    Object.assign(sv, {opener, open: true, tmux: t, target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
       key: "", sumKey: "", follow: true, unseen: false, rev: 0, loadingOlder: false, confirm: false, sending: false});
     sv.turns = new Map(); sv.foldOpen = new Set();
     sv.gen++;
     setView("fleet", false);
     document.body.classList.add("sv-open");
     $("sv").hidden = false;
+    document.querySelector("main").inert = true;
     $("sv-say").value = "";
     $("sv-warn").hidden = true;
     $("sv-sum").open = false;
@@ -2816,6 +2835,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     guard(svRender);
     svApplySend();
     measure();
+    $("sv-back").focus({preventScroll: true});
     svPoll();
   }
 
@@ -2826,7 +2846,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     sv.confirm = false;
     $("sv").hidden = true;
     document.body.classList.remove("sv-open");
+    document.querySelector("main").inert = false;
     measure();
+    if (sv.opener && sv.opener.isConnected) sv.opener.focus({preventScroll: true});
+    sv.opener = null;
   }
 
   // Back: return to the Fleet tab. Session views opened from the page go
