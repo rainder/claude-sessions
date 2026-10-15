@@ -1369,10 +1369,18 @@ Andy presses Enter on the leftover. A `note` goes to `log.jsonl`, as
 at most 15, then
 ` ; +N more`. A row's own tickets are those in its tmux session name and
 worktree name (`sessionOwnTickets`), not its cwd or name: a name can say
-"follow-up to DR-100". When the row has at least one own ticket and every one
-has a fresh cached ClickUp status of `testing`, `done`, `closed` or
+"follow-up to DR-100". A tmux name `dr-5241-5243-5242` is three ids: the
+`DR-` id, then each exact 4-digit group after it (`sessionTicketRe`). The
+worktree name adds its id too. When the row has at least one own ticket and
+every one has a fresh cached ClickUp status of `testing`, `done`, `closed` or
 `complete`, its entry is `finished: <pid> <tmux> <TICKET> <status>` for the
-first own ticket (a reminder: `finished (reminder, 4h same message): …`). The
+first own ticket (a reminder: `finished (reminder, 4h same message): …`).
+An unknown status, or any other status, keeps the normal idle line. A
+permission prompt is blocked, never finished: `WaitingFor` `permission
+prompt` (the blocked loop still sends its own line), or a pane that shows
+the approval dialog when the tickets would otherwise read as finished
+(`idlePause`). Finished uses the idle dedupe: one send per last message,
+then at most the same 4 h reminder. The
 event keeps the own tickets, and the status is read at send time. A cold
 cache is a plain idle entry. Every field a session controls is constrained: status is
 `idle`, `shell` or `waiting`, else `-`; tmux must match

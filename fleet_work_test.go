@@ -20,6 +20,13 @@ func TestSessionTickets(t *testing.T) {
 		{Session{Tmux: "spawn-dr-5187-ad-terminates-ref-30477b:0.0"}, []string{"DR-5187"}},
 		{Session{Tmux: "spawn-dr-4974-x:0.0", CWD: "/home/a/repo/.claude/worktrees/DR-5158"}, []string{"DR-4974", "DR-5158"}},
 		{Session{Tmux: "spawn-dr-5100-dr-5101-slug:1.2"}, []string{"DR-5100", "DR-5101"}},
+		// A 4-digit group after an id is another id. A 3-digit or 5-digit
+		// group is not. The hex tail is not an id. The worktree id is kept.
+		{Session{Tmux: "spawn-dr-5241-5243-5242-extraction-tail-fc8477:0.0"}, []string{"DR-5241", "DR-5243", "DR-5242"}},
+		{Session{Tmux: "spawn-dr-5241-5243:0.0", WorktreeName: "DR-5244"}, []string{"DR-5241", "DR-5243", "DR-5244"}},
+		{Session{Tmux: "spawn-dr-5241-524-x:0.0"}, []string{"DR-5241"}},
+		{Session{Tmux: "spawn-dr-5241-52435-x:0.0"}, []string{"DR-5241"}},
+		{Session{Tmux: "spawn-dr-5241-5243-dr-9:0.0"}, []string{"DR-5241", "DR-5243", "DR-9"}},
 		// Order: tmux, worktree name, cwd, name; once each.
 		{Session{Tmux: "w:0.0", WorktreeName: "DR-2", CWD: "/x/dr-1", Name: "DR-2 and DR-3"}, []string{"DR-2", "DR-1", "DR-3"}},
 		// A bare number, a hex suffix, or a longer word is no ticket.
@@ -575,7 +582,10 @@ func TestIdleMessageFinishedEntry(t *testing.T) {
 // worktree name) to be finished; a ticket in the cwd or the name does not
 // count.
 func TestIdleFinishedUsesOwnTicketsOnly(t *testing.T) {
-	status := map[string]string{"DR-100": "done", "DR-200": "in development", "DR-1": "done", "DR-2": "testing", "DR-3": "in development"}
+	status := map[string]string{
+		"DR-100": "done", "DR-200": "in development", "DR-1": "done", "DR-2": "testing", "DR-3": "in development",
+		"DR-5241": "testing", "DR-5243": "done", "DR-5242": "in development", "DR-5244": "testing",
+	}
 	lookup := func(t string) string { return status[t] }
 	cases := []struct {
 		row    Session
@@ -588,6 +598,9 @@ func TestIdleFinishedUsesOwnTicketsOnly(t *testing.T) {
 		{Session{Tmux: "spawn-dr-1-dr-3:0.0"}, "", false},
 		{Session{Tmux: "plain:0.0", WorktreeName: "DR-2"}, "DR-2", true},
 		{Session{Tmux: "plain:0.0", Name: "DR-1"}, "", false}, // no own ticket
+		// One open id in the grouped name, or only on the worktree, blocks finished.
+		{Session{Tmux: "spawn-dr-5241-5243-5242-extraction-tail-fc8477:0.0"}, "", false},
+		{Session{Tmux: "spawn-dr-5241-5243:0.0", WorktreeName: "DR-5242"}, "", false},
 	}
 	for _, c := range cases {
 		e := idleEvent{Tickets: idleOwnTickets(c.row)}
@@ -598,6 +611,31 @@ func TestIdleFinishedUsesOwnTicketsOnly(t *testing.T) {
 	}
 	if got := sessionOwnTickets(Session{Tmux: "spawn-dr-5-x:0.0", WorktreeName: "DR-6", CWD: "/x/DR-7", Name: "DR-8"}); !reflect.DeepEqual(got, []string{"DR-5", "DR-6"}) {
 		t.Fatalf("own tickets = %v", got)
+	}
+	grouped := Session{Tmux: "spawn-dr-5241-5243-5242-extraction-tail-fc8477:0.0", WorktreeName: "DR-5244"}
+	if got := sessionOwnTickets(grouped); !reflect.DeepEqual(got, []string{"DR-5241", "DR-5243", "DR-5242", "DR-5244"}) {
+		t.Fatalf("grouped own tickets = %v", got)
+	}
+	// Every id finished: the line names the first one.
+	allDone := func(id string) string {
+		if id == "DR-5241" || id == "DR-5243" || id == "DR-5242" {
+			return "testing"
+		}
+		return ""
+	}
+	tk, st, ok := idleFinished(idleEvent{Tickets: idleOwnTickets(Session{Tmux: grouped.Tmux})}, allDone)
+	if !ok || tk != "DR-5241" || st != "testing" {
+		t.Fatalf("all done: ok=%v %q %q", ok, tk, st)
+	}
+	// A missing status is unknown, so the row stays idle.
+	unknown := func(id string) string {
+		if id == "DR-5242" {
+			return ""
+		}
+		return "done"
+	}
+	if _, _, ok := idleFinished(idleEvent{Tickets: idleOwnTickets(Session{Tmux: "spawn-dr-5241-5242:0.0"})}, unknown); ok {
+		t.Fatal("unknown status counted as finished")
 	}
 }
 

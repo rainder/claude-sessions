@@ -32,9 +32,12 @@ const (
 	fleetEndedGrace = 15 * time.Second
 )
 
-// sessionTicketRe is ticketIDRe for any letter case: a tmux name or a
-// worktree directory is often lower case (spawn-dr-5187-slug).
-var sessionTicketRe = regexp.MustCompile(`(?i)\bDR-\d{1,6}\b`)
+// sessionTicketRe matches one DR id, plus a run of exact 4-digit groups
+// after it. A tmux name is often lower case. spawn-dr-5241-5243-5242-slug
+// is DR-5241, DR-5243 and DR-5242. A word after the id (spawn-dr-5187-slug)
+// does not continue the run. The first id is 1 to 6 digits. Only a following
+// group of exactly 4 digits is another id.
+var sessionTicketRe = regexp.MustCompile(`(?i)\bDR-\d{1,6}(?:-\d{4})*\b`)
 
 // sessionTickets lists the ticket ids a session names, in first-seen order
 // over its tmux session name, worktree name, cwd and name; upper case, once
@@ -49,7 +52,8 @@ func sessionTickets(s Session) []string {
 }
 
 // sessionOwnTickets is the tickets the session itself works on: only those
-// in its tmux session name and worktree name. A cwd or a free-text name can
+// in its tmux session name and worktree name. A grouped name
+// dr-5241-5243-5242 contributes each id. A cwd or a free-text name can
 // mention other tickets ("follow-up to DR-100").
 func sessionOwnTickets(s Session) []string {
 	out := []string{}
@@ -62,11 +66,24 @@ func sessionOwnTickets(s Session) []string {
 
 func appendTickets(out []string, seen map[string]bool, src string) []string {
 	for _, m := range sessionTicketRe.FindAllString(src, -1) {
-		id := strings.ToUpper(m)
-		if !seen[id] {
-			seen[id] = true
-			out = append(out, id)
+		for _, id := range ticketGroup(m) {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
 		}
+	}
+	return out
+}
+
+// ticketGroup splits one sessionTicketRe match. "dr-5241-5243-5242" is
+// DR-5241, DR-5243, DR-5242. The regex has already checked the shape.
+func ticketGroup(m string) []string {
+	rest := strings.ToUpper(m)[len("DR-"):]
+	parts := strings.Split(rest, "-")
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		out[i] = "DR-" + p
 	}
 	return out
 }

@@ -631,8 +631,10 @@ func idleReminderPhrase() string {
 // idleDetectLocked runs one poll over the live rows and queues an event per
 // newly reported message. It reports whether the persisted state changed.
 //
-// A report is once per last message. busy withdraws a line that has not been
-// delivered and stops the clock. It does not forget a message already sent.
+// A report is once per last message. busy, and a permission prompt, withdraw
+// a line that has not been delivered and stop the clock. They do not forget
+// a message already sent. Finished uses that same dedupe: one send per last
+// message, then a reminder after idleReminderEvery.
 // The same message queues one reminder after idleReminderEvery, then again
 // after each further gap. A new last message waits the normal idle or shell
 // gap.
@@ -663,7 +665,11 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 			continue
 		}
 		msgID := d.messageIDLocked(s, row)
-		if row.Status == "busy" {
+		// busy is a live turn. A permission prompt belongs to the blocked
+		// loop, even when Status is still idle. A pane that shows the
+		// approval dialog does too, once every own ticket would otherwise
+		// read as finished — that is the false "finished" line this stops.
+		if s.idlePause(row, now) {
 			delete(d.since, key)
 			delete(d.timing, key)
 			if d.dropFromBatchLocked(key) {
@@ -877,12 +883,51 @@ func keepTicketShape(in []string) []string {
 	return out
 }
 
+// idlePause reports a row that must not produce an idle or finished line
+// this poll. Status busy is a live turn. WaitingFor "permission prompt" is
+// the blocked loop's row. A pane that still shows the approval dialog
+// ("Do you want to proceed?", or Grok's allow menu) is the same hold when
+// every own ticket would otherwise read as finished. A capture miss is not
+// a hold: the blocked loop has the same rule, and a tmux failure must not
+// hide a real finished line.
+func (s *server) idlePause(row Session, now time.Time) bool {
+	if row.Status == "busy" || blockedOnPermission(row) {
+		return true
+	}
+	_, _, done := idleFinished(idleEvent{Tickets: idleOwnTickets(row)}, func(t string) string {
+		return s.idleTicketStatus(t, now)
+	})
+	if !done {
+		return false
+	}
+	return s.paneShowsPermission(row)
+}
+
+// paneShowsPermission reads the row's pane and reports whether it is an
+// approval dialog. idle.capture is the test seam; production uses capturePane.
+func (s *server) paneShowsPermission(row Session) bool {
+	if row.Tmux == "" {
+		return false
+	}
+	capFn := s.idle.capture
+	if capFn == nil {
+		capFn = capturePane
+	}
+	text, err := capFn(row.Tmux)
+	if err != nil || text == "" {
+		return false
+	}
+	_, _, ok := permissionQuestion(text)
+	return ok
+}
+
 // idleFinished reports a row whose work is done: it has at least one own
 // ticket, and every one has a status (from status, which may be nil) of
 // testing, done, closed or complete. It names the first ticket and its
-// status. Each ticket is checked against its fixed shape again, since a
-// hand-edited state file can hold anything; one that fails means "not
-// finished".
+// status. One unknown status, or any status outside that set, means the
+// normal idle line. Each ticket is checked against its fixed shape again,
+// since a hand-edited state file can hold anything; one that fails means
+// "not finished".
 func idleFinished(e idleEvent, status func(string) string) (ticket, st string, ok bool) {
 	if status == nil || len(e.Tickets) == 0 {
 		return "", "", false

@@ -15,9 +15,11 @@ import (
 )
 
 // Blocked permission events for FLEET. A session that sits at a permission
-// prompt is not idle — Claude keeps Status "busy" — so the idle loop never
-// mentions it, and the session waits until someone looks. This loop types one
-// line after the prompt has been up for a minute, once per prompt.
+// prompt is not idle. Claude keeps Status "busy", and idlePause also holds a
+// row whose WaitingFor is "permission prompt", or whose pane still shows the
+// approval dialog when its tickets would otherwise read as finished. This
+// loop still types one line after the prompt has been up for a minute, once
+// per prompt.
 //
 // Detection is the signal both tools already publish: WaitingFor ==
 // "permission prompt". The question text is not in that field (Claude stores

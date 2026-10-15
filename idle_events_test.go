@@ -36,6 +36,9 @@ func newIdleRig(t *testing.T, cfg string) *idleRig {
 		return nil
 	}
 	rig.useDir(rig.s)
+	// Finished rows read the pane. An empty capture is not a permission
+	// dialog, and it keeps these tests off the real tmux binary.
+	rig.s.idle.capture = func(string) (string, error) { return "", nil }
 	if cfg != "" {
 		rig.writeConfig(t, cfg)
 	}
@@ -84,6 +87,95 @@ func (rig *idleRig) log(t *testing.T) string {
 
 func worker(pid int, sid, status, tmux string) Session {
 	return Session{PID: pid, SessionID: sid, Status: status, Tmux: tmux}
+}
+
+const groupedIdleTmux = "spawn-dr-5241-5243-5242-extraction-tail-fc8477:0.0"
+
+func recordGroupedTickets(rig *idleRig, open string) {
+	for _, id := range []string{"DR-5241", "DR-5243", "DR-5242"} {
+		st := "testing"
+		if id == "DR-5243" {
+			st = "done"
+		}
+		if id == "DR-5242" {
+			st = "complete"
+		}
+		if id == open {
+			st = "in development"
+		}
+		rig.s.fleet.tickets.record(id, st, true, rig.now)
+	}
+}
+
+func TestIdleEventsGroupedOpenTicketStaysIdle(t *testing.T) {
+	rig := newIdleRig(t, idleCfgOn)
+	rig.s.idle.lastMessage = func(Session) (string, bool) { return "msg-1", true }
+	row := worker(2403923, "g", "idle", groupedIdleTmux)
+	row.WorktreeName = "DR-5244"
+	rig.rows = []Session{fleetRow(), row}
+	recordGroupedTickets(rig, "DR-5242")
+	rig.s.fleet.tickets.record("DR-5244", "testing", true, rig.now)
+	rig.run(3 * time.Minute)
+	want := `[claude-sessions event] idle idle: 2403923 idle ` + groupedIdleTmux + ` (2 min) "DR-5241"`
+	if len(rig.typed) != 1 || rig.typed[0] != want {
+		t.Fatalf("typed %q", rig.typed)
+	}
+}
+
+func TestIdleEventsGroupedFinishedSendsOnce(t *testing.T) {
+	rig := newIdleRig(t, idleCfgOn)
+	rig.s.idle.lastMessage = func(Session) (string, bool) { return "msg-1", true }
+	rig.rows = []Session{fleetRow(), worker(2403923, "g", "idle", groupedIdleTmux)}
+	recordGroupedTickets(rig, "")
+	rig.run(3 * time.Minute)
+	want := `[claude-sessions event] idle finished: 2403923 ` + groupedIdleTmux + ` DR-5241 testing`
+	if len(rig.typed) != 1 || rig.typed[0] != want {
+		t.Fatalf("typed %q", rig.typed)
+	}
+	rig.run(10 * time.Minute)
+	if len(rig.typed) != 1 {
+		t.Fatalf("repeat ticks: %q", rig.typed)
+	}
+	// The same last message may remind once the 4 h gap has run.
+	rig.tick(idleReminderEvery)
+	recordGroupedTickets(rig, "")
+	rig.tick(60 * time.Second)
+	if len(rig.typed) != 2 || !strings.Contains(rig.typed[1], "finished (reminder, 4h same message): 2403923 "+groupedIdleTmux+" DR-5241 testing") {
+		t.Fatalf("reminder %q", rig.typed)
+	}
+}
+
+func TestIdleEventsPermissionPromptDoesNotSendFinished(t *testing.T) {
+	run := func(t *testing.T, setup func(*idleRig, Session) Session) {
+		t.Helper()
+		rig := newIdleRig(t, idleCfgOn)
+		rig.s.idle.lastMessage = func(Session) (string, bool) { return "msg-1", true }
+		row := setup(rig, worker(2403923, "g", "idle", groupedIdleTmux))
+		rig.rows = []Session{fleetRow(), row}
+		recordGroupedTickets(rig, "")
+		rig.run(3 * time.Minute)
+		for _, line := range rig.typed {
+			if strings.Contains(line, "finished") {
+				t.Fatalf("finished while blocked: %q", rig.typed)
+			}
+		}
+		if len(rig.typed) != 0 {
+			t.Fatalf("idle line while blocked: %q", rig.typed)
+		}
+	}
+	t.Run("pane", func(t *testing.T) {
+		run(t, func(rig *idleRig, row Session) Session {
+			rig.s.idle.capture = func(string) (string, error) { return dialogCapture, nil }
+			return row
+		})
+	})
+	t.Run("waitingFor", func(t *testing.T) {
+		run(t, func(_ *idleRig, row Session) Session {
+			row.Status = "idle"
+			row.WaitingFor = "permission prompt"
+			return row
+		})
+	})
 }
 
 func TestIdleEventsReportsAnIdleSessionOnceAfterTheThreshold(t *testing.T) {
