@@ -38,12 +38,19 @@ func fleetSessionRows(workerSID string) []Session {
 		{PID: 15, SessionID: "dup-b", Tmux: "dup:1.0"},
 		{PID: 16, SessionID: fleetUUID(199), Tmux: "spawn-dr-4:0.0"}, // no transcript on disk
 		{PID: 17, SessionID: "not-on-a-card", Tmux: "other:0.0"},
+		// Live, but disabled: not a working-list row, and on no card.
+		{PID: 18, SessionID: fleetDisabledSID, Tmux: "off:0.0"},
 	}
 }
+
+const fleetDisabledSID = "disabled-sid"
+
+func fleetDisabledSeam(sid string) bool { return sid == fleetDisabledSID }
 
 func fleetSessionServer(t *testing.T, workerSID string) *server {
 	t.Helper()
 	s := fleetTestServer(t, fleetSessionRows(workerSID))
+	s.fleet.disabled = fleetDisabledSeam
 	writeFleetFile(t, s, "state.json", fleetSessionState)
 	return s
 }
@@ -70,7 +77,8 @@ func TestFleetSessionAllowlist(t *testing.T) {
 	}{
 		{"spawn-dr-1-fix", 200, ""},
 		{"grok-dr-2", 200, ""},
-		{"other", 403, "not_allowed"},             // live, but no card names it
+		{"other", 200, ""},                        // no card, but a working-list row
+		{"off", 403, "not_allowed"},               // live and disabled, no card
 		{"nobody", 403, "not_allowed"},            // neither
 		{"fleet", 403, "fleet_self"},              // FLEET's own tmux session
 		{"named-fleet", 403, "fleet_self"},        // a row there is named FLEET
@@ -88,10 +96,19 @@ func TestFleetSessionAllowlist(t *testing.T) {
 			t.Errorf("t=%q: %d %v, want %d %s", c.t, code, out, c.code, c.err)
 		}
 	}
-	// No state.json at all: nothing is allowed.
+	// No state.json at all: only working-list rows are allowed, and the
+	// head comes from the row.
 	s2 := fleetTestServer(t, fleetSessionRows(fleetUUID(102)))
-	if code, out := getFleetSession(t, s2, "t=spawn-dr-1-fix"); code != 403 || out["code"] != "not_allowed" {
-		t.Fatalf("no state: %d %v", code, out)
+	s2.fleet.disabled = fleetDisabledSeam
+	code, out := getFleetSession(t, s2, "t=spawn-dr-1-fix")
+	tg, _ := out["target"].(map[string]any)
+	if code != 200 || tg["ticket"] != "DR-1" || tg["title"] != "DR-1 fix" || tg["kind"] != "" {
+		t.Fatalf("no state, derived row: %d %v", code, out)
+	}
+	for _, name := range []string{"off", "fleet", "named-fleet", "nobody"} {
+		if code, out := getFleetSession(t, s2, "t="+name); code != 403 {
+			t.Fatalf("no state, %s: %d %v", name, code, out)
+		}
 	}
 }
 
@@ -246,6 +263,7 @@ func TestFleetSessionPaneCap(t *testing.T) {
 // pane each keystroke went to.
 func sessionSayRig(t *testing.T) (*sayRig, *[]string) {
 	rig := newSayRig(t, fleetSessionRows(fleetUUID(108)))
+	rig.s.fleet.disabled = fleetDisabledSeam
 	writeFleetFile(t, rig.s, "state.json", fleetSessionState)
 	var targets []string
 	rig.s.fleet.typeText = func(target, text string) error {
@@ -305,7 +323,7 @@ func TestFleetSessionSayRefusals(t *testing.T) {
 		{"cross origin", `{"target":"spawn-dr-1-fix","text":"hi"}`, func(r *http.Request) { r.Header.Set("Origin", "http://evil.test") }, 403, "origin"},
 		{"no auth", `{"target":"spawn-dr-1-fix","text":"hi"}`, func(r *http.Request) { r.Header.Del("Cookie") }, 401, "unauthorized"},
 		{"grok", `{"target":"grok-dr-2","text":"hi"}`, nil, 409, "send_unsupported"},
-		{"not on a card", `{"target":"other","text":"hi"}`, nil, 403, "not_allowed"},
+		{"not on a card and disabled", `{"target":"off","text":"hi"}`, nil, 403, "not_allowed"},
 		{"fleet itself", `{"target":"fleet","text":"hi"}`, nil, 403, "fleet_self"},
 		{"gone", `{"target":"ended-dr-3","text":"hi"}`, nil, 404, "gone"},
 		{"ambiguous", `{"target":"dup","text":"hi"}`, nil, 409, "ambiguous"},

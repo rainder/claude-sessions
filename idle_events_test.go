@@ -299,7 +299,7 @@ func TestIdleEventsMessageCapsEntries(t *testing.T) {
 	for i := 0; i < idleBatchMax; i++ {
 		events = append(events, idleEvent{PID: 100000 + i, Status: "shell", Tmux: "a-long-tmux-session-name-0123456789:10.10", Label: strings.Repeat("x", idleLabelMax)})
 	}
-	if m := idleMessage(events, rig.now); !strings.HasSuffix(m, fmt.Sprintf(" ; +%d more", idleBatchMax-idleMessageMax)) || len(m) > sendKeysMaxLen {
+	if m := idleMessage(events, rig.now, nil); !strings.HasSuffix(m, fmt.Sprintf(" ; +%d more", idleBatchMax-idleMessageMax)) || len(m) > sendKeysMaxLen {
 		t.Fatalf("full batch message %d bytes: %q", len(m), m)
 	}
 }
@@ -342,7 +342,7 @@ func TestIdleEventsSessionTextIsConstrained(t *testing.T) {
 		}
 	}
 	// Neighbouring fields cannot spell the tag's words together either.
-	msg := idleMessage([]idleEvent{{PID: 1, Status: "claude-sessions", Tmux: "event:0.0", Label: "-"}}, time.Now())
+	msg := idleMessage([]idleEvent{{PID: 1, Status: "claude-sessions", Tmux: "event:0.0", Label: "-"}}, time.Now(), nil)
 	if fleetHasEventPhrase(strings.TrimPrefix(msg, fleetEventTag)) {
 		t.Errorf("fields joined into the tag: %q", msg)
 	}

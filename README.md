@@ -470,7 +470,9 @@ fleet.go             /fleet web page: cookie auth, state.json, log.jsonl, routes
 fleet_chat.go        /fleet/chat: FLEET transcript mirror (byte-position cursor)
 fleet_say.go         /fleet/say: type a page answer into the FLEET pane, with guards
 fleet_start.go       /fleet/start: resume or start FLEET when it is down
-fleet_session.go     /fleet/session: view and type into a session a FLEET card names (allowlisted)
+fleet_session.go     /fleet/session: view and type into a session a FLEET card or the working list names (allowlisted)
+fleet_work.go        /fleet/state working list (sessions), FLEET notes, recently ended tracker
+fleet_ticket_status.go  ClickUp status per ticket via `cu fetch` (cache, due rules)
 fleet_last.go        fleet-last.json: the last FLEET session seen alive
 fleet_pwa.go         /fleet manifest, service worker (fleet_sw.js) and icons (fleet_assets/)
 fleet_pane.go        Claude Code input-box parser for a tmux capture
