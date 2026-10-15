@@ -122,6 +122,7 @@ header.top {
 .chip .lbl { color: var(--muted); margin-right: 5px; }
 .chip .val { font-weight: 650; font-variant-numeric: tabular-nums; }
 body.kb .chips, body.kb .quota, body.kb .accts { display: none !important; }
+@media (max-width: 1099.98px) { body.sv-open .chips, body.sv-open .quota, body.sv-open .accts { display: none !important; } }
 .chip .bar { display: block; height: 3px; border-radius: 2px; background: var(--line); margin-top: 4px; overflow: hidden; }
 .chip .bar i { display: block; height: 100%; width: 0; background: var(--muted); border-radius: 2px; }
 .chip.ok .val { color: var(--green); } .chip.ok .bar i { background: var(--green); }
@@ -248,6 +249,11 @@ section { min-width: 0; }
    *italic*, links and "#" lines as a bold line. */
 .rich p { margin: 0 0 .5em; }
 .rich ul, .rich ol { margin: 0 0 .5em; padding-left: 1.4em; }
+/* Pipe tables: a wide table scrolls in its own box, never the page. */
+.rich .tbl { max-width: 100%; overflow-x: auto; margin: 0 0 .5em; scrollbar-width: thin; }
+.rich table { border-collapse: collapse; font-size: .92em; line-height: 1.35; }
+.rich th, .rich td { padding: 4px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.rich th { background: var(--surface2); font-weight: 650; white-space: nowrap; }
 .rich li { margin: 0 0 .2em; }
 .rich > :last-child, .rich li:last-child { margin-bottom: 0; }
 .rich code { font-family: var(--mono); font-size: .88em; padding: .05em .3em; border-radius: 4px;
@@ -314,7 +320,7 @@ body.sv-open { overflow: hidden; }
 .sv-back svg { width: 22px; height: 22px; }
 .sv-ttl { flex: 1; min-width: 0; }
 .sv-ttl .tk { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); }
-.sv-ttl h2 { margin: 0; font-size: 16px; line-height: 1.3; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv-ttl h2 { margin: 0; font-size: 16px; line-height: 1.3; font-weight: 650; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 .sv-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0 4px 4px 48px; font-size: 12.5px; color: var(--muted); min-width: 0; }
 .sv-meta .mono { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; min-width: 0; }
 .sv-meta .pill { font-size: 12px; padding: 1px 8px; }
@@ -790,6 +796,29 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // "1." / "2)" numbered lists (start kept), ``` fenced blocks (text as-is),
   // and "#".."###" lines as a bold line. Inline: see richInline. Anything
   // else, and every unclosed marker, stays literal.
+  const TABLE_RULE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+  // tableCells splits one row on "|", but not on "\|" or a "|" in `code`.
+  function tableCells(line) {
+    const cells = [];
+    let cur = "", code = false;
+    const t = line.trim();
+    for (let k = 0; k < t.length; k++) {
+      const ch = t[k];
+      if (ch === "\\" && t[k + 1] === "|" && !code) { cur += "|"; k++; continue; }
+      if (ch === "`") code = !code;
+      if (ch === "|" && !code) { cells.push(cur.trim()); cur = ""; continue; }
+      cur += ch;
+    }
+    cells.push(cur.trim());
+    if (t.startsWith("|")) cells.shift();
+    if (t.endsWith("|") && !code && cells.length) cells.pop();
+    return cells;
+  }
+  // richTable builds the table node by node; a wide one scrolls in its box.
+  function richTable(head, rows) {
+    const tr = (cells, tag) => el("tr", "", ...cells.map(c => richInline(el(tag), c)));
+    return el("div", "tbl", el("table", "", el("thead", "", tr(tableCells(head), "th")), el("tbody", "", ...rows.map(r => tr(tableCells(r), "td")))));
+  }
   function renderRich(text) {
     const frag = document.createDocumentFragment();
     const lines = str(text).split(/\r?\n/);
@@ -815,6 +844,15 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (headText) {
         para = list = null;
         frag.append(el("p", "md-h", richInline(el("strong"), headText)));
+        continue;
+      }
+      // A pipe table: a "|" row, then a |---|---| rule, then more "|" rows.
+      if (/^\s*\|/.test(line) && i + 1 < lines.length && TABLE_RULE.test(lines[i + 1])) {
+        let j = i + 2;
+        while (j < lines.length && /^\s*\|/.test(lines[j])) j++;
+        para = list = null;
+        frag.append(richTable(line, lines.slice(i + 2, j)));
+        i = j - 1;
         continue;
       }
       const ul = /^ *[-*] +(.*)$/.exec(line), ol = ul ? null : /^ *(\d{1,9})[.)] +(.*)$/.exec(line);
@@ -2277,9 +2315,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // addFolds folds only turns that really overflow 12 lines, with a
   // "Show all" / "Show less" button. openSet holds the unfolded uuids.
   function addFolds(log, openSet, rerender) {
-    for (const w of log.querySelectorAll(".turn[data-uuid]")) {
+    const all = [...log.querySelectorAll(".turn[data-uuid]")], replies = all.filter(w => !w.classList.contains("user"));
+    const keep = new Set([all[all.length - 1], replies[replies.length - 1]]);
+    for (const w of all) {
       const body = w.querySelector(".body");
       const uuid = w.dataset.uuid;
+      if (keep.has(w)) { body.classList.remove("fold"); continue; }
       const isOpen = openSet.has(uuid);
       if (!isOpen && body.scrollHeight <= body.clientHeight + 4) { body.classList.remove("fold"); continue; }
       if (!isOpen) {
@@ -2787,7 +2828,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // view never blocks the next view's polls.
   const sv = {open: false, tmux: "", gen: 0, timer: 0, busyGen: -1, target: null, source: "", turns: new Map(),
     pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", sumKey: "", follow: true, unseen: false, rev: 0,
-    foldOpen: new Set(), loadingOlder: false, confirm: false, confirmTimer: 0, sending: false};
+    foldOpen: new Set(), loadingOlder: false, confirm: false, confirmTimer: 0, sending: false,
+    drafts: new Map(), warned: new Set()}; // per tmux name, kept for the page's life
   const SV_POLL = 3000;
   const svCard = t => arr(state && state.cards).map(obj).find(c => c && sessOf(c.session) === t) || null;
   const svOpenErrors = {
@@ -2826,9 +2868,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     setView("fleet", false);
     document.body.classList.add("sv-open");
     $("sv").hidden = false;
-    document.querySelector("main").inert = true;
-    $("sv-say").value = "";
-    $("sv-warn").hidden = true;
+    document.querySelector("main").inert = !wideMQ.matches;
+    $("sv-say").value = sv.drafts.get(t) || "";
+    $("sv-warn").hidden = !sv.warned.has(t);
+    svGrow();
     $("sv-sum").open = false;
     if (!SV_NAME.test(t)) sv.error = svOpenErrors.bad_target;
     guard(renderSvHead);
@@ -2839,8 +2882,15 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     svPoll();
   }
 
+  // Wide: the panel sits beside the columns, which stay usable. Narrower:
+  // it covers them, so they leave the tab order.
+  const wideMQ = window.matchMedia("(min-width: 1100px)");
+  wideMQ.addEventListener("change", () => { if (sv.open) document.querySelector("main").inert = !wideMQ.matches; });
   function closeSessionView() {
     if (!sv.open) return;
+    const draft = $("sv-say").value;
+    if (draft.trim()) sv.drafts.set(sv.tmux, draft); else sv.drafts.delete(sv.tmux);
+    if ($("sv-warn").hidden) sv.warned.delete(sv.tmux); else sv.warned.add(sv.tmux);
     sv.open = false; sv.gen++;
     clearTimeout(sv.timer); clearTimeout(sv.confirmTimer);
     sv.confirm = false;
@@ -2952,7 +3002,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const ticket = str(t.ticket) || (c ? str(c.ticket) : "");
     $("sv-ticket").replaceChildren(linkText(document.createDocumentFragment(), ticket));
     $("sv-ticket").hidden = !ticket;
-    $("sv-title").replaceChildren(linkText(document.createDocumentFragment(), str(t.title) || (c ? cardHead(c).title : "") || sv.tmux));
+    const title = str(t.title) || (c ? cardHead(c).title : "") || sv.tmux;
+    $("sv-title").replaceChildren(linkText(document.createDocumentFragment(), title));
+    $("sv-title").title = title;
     const meta = [el("span", "mono", sv.tmux)];
     if (str(t.model)) meta.push(el("span", "", str(t.model)));
     const st = str(t.status);
@@ -3084,8 +3136,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     sv.sending = true;
     svApplySend();
     const res = await postSay("/fleet/session/say", {target: tmux, text}, svSendErrors);
-    sv.sending = false;
     const here = gen === sv.gen;
+    if (here) sv.sending = false; // a newer view reset it; this answer is not its own
     if (res.ok) {
       if (here && $("sv-say").value.trim() === text) { $("sv-say").value = ""; svGrow(); }
       if (here) $("sv-warn").hidden = true;
