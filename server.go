@@ -2580,6 +2580,9 @@ func cmdServer(args []string) int {
 	}
 	// Parked grok usage for the page's account sheet; tests leave it nil.
 	s.fleet.grokKnown = fleetFetchKnownGrok
+	// The page's "recently ended" group survives a restart; tests keep it in
+	// memory.
+	s.fleet.ended.path = fleetEndedPathDefault()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("GET /usage", s.usage)

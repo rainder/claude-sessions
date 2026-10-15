@@ -184,6 +184,8 @@ type clickupDeps struct {
 	sleep      func(time.Duration)                           // nil → time.Sleep
 	run        func(ctx context.Context) ([]byte, error)     // nil → the cu binary
 	deliver    func(target, text string) (code, tmux string) // nil → s.idleDeliver
+	// fetchStatus returns `cu fetch <ticket>` stdout; nil → the cu binary.
+	fetchStatus func(ctx context.Context, ticket string) (string, error)
 
 	mu         sync.Mutex // one tick at a time; guards everything below
 	cfg        clickupConfig
@@ -646,14 +648,16 @@ func (s *server) clickupDeliver(target, text string) (code, tmux string) {
 }
 
 // clickupTick is one poll. While disabled it costs one stat of the config
-// file.
-func (s *server) clickupTick() {
+// file. It reports whether cu answered the backlog call (enabled, and the
+// run and parse worked), so the loop can skip the status pass when cu is
+// broken or hung.
+func (s *server) clickupTick() (cuOK bool) {
 	d := &s.clickup
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	cfg := d.reloadConfigLocked()
 	if !cfg.Enabled {
-		return
+		return false
 	}
 	tickets, err := d.fetchLocked(cfg)
 	if err != nil {
@@ -661,8 +665,9 @@ func (s *server) clickupTick() {
 		if d.logGateLocked("cu:" + code) {
 			d.clickupLog("cu failed: %s", code)
 		}
-		return
+		return false
 	}
+	cuOK = true
 	now := d.clock()
 	_, statePath, _ := d.paths()
 	st, missing, err := loadClickupState(statePath)
@@ -742,6 +747,7 @@ func (s *server) clickupTick() {
 			d.saveFailedLocked(err)
 		}
 	}
+	return cuOK
 }
 
 func findClickupTicket(tickets []clickupTicket, id string) *clickupTicket {
@@ -762,17 +768,31 @@ func (s *server) runClickupEvents() {
 		sleep = time.Sleep
 	}
 	for {
+		cuOK := false
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(os.Stderr, "clickup events: tick failed: %v\n", r)
 				}
 			}()
-			s.clickupTick()
+			cuOK = s.clickupTick()
 		}()
 		d.mu.Lock()
-		poll := d.cfg.PollSeconds
+		poll, cfg := d.cfg.PollSeconds, d.cfg
 		d.mu.Unlock()
+		if cfg.Enabled && cuOK {
+			// Ticket statuses for the FLEET page, after the tick and outside
+			// its lock (fleet_ticket_status.go). Not when the backlog call
+			// failed: a hung cu would add up to 4 × 45 s to every pass.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Fprintf(os.Stderr, "clickup events: status pass failed: %v\n", r)
+					}
+				}()
+				s.refreshTicketStatuses(context.Background(), cfg, d.clock())
+			}()
+		}
 		if poll <= 0 {
 			poll = clickupDefaultPoll
 		}

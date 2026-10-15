@@ -1071,8 +1071,11 @@ This types into sessions other than FLEET, so one allowlist,
 `fleetResolveSession`, gates both, in order: the name matches
 `^[A-Za-z0-9._-]{1,128}$` (400 `bad_target`; a pane address is refused, so
 the request can never pick a pane); a card in the **current** state.json names
-it (403 `not_allowed`: the page may open only what FLEET put on a card, and a
-card that left state.json closes the door); it is not FLEET's tmux session and
+it, or it is a live row of the working list below, from the same fresh list
+(403 `not_allowed`: the page may open only what FLEET put on a card or what
+the server lists itself, and a card that left state.json closes the door);
+with no card, the head's ticket and title come from that row; it is not
+FLEET's tmux session and
 no row there is named FLEET (403 `fleet_self`: FLEET has its own box with its
 own guards); exactly one live row, claude or grok, sits in it (404 `gone`,
 409 `ambiguous`), so the pane address is the resolved row's `Tmux` and never
@@ -1250,10 +1253,68 @@ each tmux session a card names (`fleetSessionNameRe` only) the server's own
 status from the cached list: `busy`/`idle`/`shell`/`waiting`, `gone` (no local
 row), `ambiguous` (2+ rows), plus `since` (the row's `updatedAt`) when not
 busy. Null when the list failed, so a failure never reads as "every session
-ended". The page shows it as a badge on working and waiting cards only; FLEET
-still owns card order and kind. For grok rows `since` is the last activity,
-not the status change.
-"Done today" is computed in the page at local midnight Europe/Vilnius.
+ended". The page no longer reads `liveSessions`: the working list below
+carries each row's status. It stays for one release, and goes together with
+working and waiting cards. For grok rows `since` is the last activity, not
+the status change.
+"Done today" is computed in the page at local midnight Europe/Vilnius, from
+a done card's `doneAt`, else its `updatedAt`.
+
+**Working list** (`fleet_work.go`). The server derives it; FLEET does not
+write it. `/fleet/state` key `sessions` is one row per local row with a tmux
+session that is not FLEET (findFleet's pick, or any row named FLEET in that
+tmux session, as `fleet_self`) and not disabled. The idle ignore list does not
+apply. A row is `{tmux, pid, name, nameSource, tickets, tool, model, status,
+since, startedAt, ticketStatus, note}`. `tickets` is `sessionTickets`: the
+ticket ids in the tmux session name, worktree name, cwd and name, upper case,
+first-seen order. Order: waiting, idle, shell, no status, busy, then tmux
+name. Two rows in one tmux session stay two rows. `sessions` is null when the
+list failed. state.json may hold top-level `notes` (tmux session name → text);
+each note goes on the live row in that session. A bad key, a value that is
+not a string or holds a control character, and a session with no live row
+are ignored; a note is cut to 200 runes. The page shows `sessions` as the
+Working list. Working and waiting cards still parse for one release (their
+`session` still counts for `liveSessions` and the session allowlist), but the
+page does not show them, nor any unknown kind.
+
+**Recently ended.** `fleetEndedTracker` keeps the rows it last saw, keyed by
+`pid:sessionId`. One missing look is not an end: the three observers read
+lists of different age, and a torn grok registry read drops every grok row
+for one poll. The first miss records `missingSince` and keeps the row; it
+ends only when a later look still misses it at least 15 s
+(`fleetEndedGrace`) after that. Seeing it again clears the miss. An ended row
+is `{tmux, name, tickets, tool, model, endedAt, ticketStatus}`, with
+`endedAt` the last time it was seen. A missing row does not end when a live
+row runs in the same tmux session, or when the session still runs (a
+disabled row left the list, it did not end). An
+ended row goes after 24 h, or when its tmux session is live again; one per
+tmux session, the newest. `/fleet/state`'s `ended` lists them newest first.
+The tracker sees `/fleet/state`'s list, the idle loop's fresh list, and the
+status pass's list; never a failed one. Only the ended list is saved:
+`$XDG_STATE_HOME/claude-sessions/fleet-ended.json` (0600, atomic), written
+only when it changed. `cmdServer` sets the path; tests keep it in memory.
+
+**Ticket status** (`fleet_ticket_status.go`). `cu` has no JSON status, so the
+server runs `cu fetch <ticket>` and reads the `Status:` line, lower case,
+only `^[a-z0-9][a-z0-9 /_-]{0,31}$`. Only the header block counts: the
+`<ID>  <title>` line and the `Key: value` lines up to the first blank line
+(checked against real `cu fetch` output). The description comes after that
+blank line, and strangers write it, so a `Status: done` line there is never
+read. The ClickUp events loop runs one pass after each tick, outside its
+lock, and only while clickup-events is enabled and that tick's backlog `cu`
+call worked (a hung `cu` must not add 4 × 45 s per pass). So the status needs
+the same setup (the same `cu`, runner and 45 s timeout). A ticket is
+due when it was never tried, its last try is 15 min old, or a row naming it
+went quiet (not busy) after the last try. The last try, not the last success:
+a failing `cu` must not be asked on every pass. At most 4 fetches per pass,
+never tried first, then the oldest try. Only `^[A-Z][A-Z0-9]{0,9}-\d{1,7}$`
+reaches `cu`. A failure keeps the old status and logs
+`status fetch failed: <code>` to `clickup-events.log`, once per code per
+10 min. The cache is in memory, and drops a ticket no live or ended row names.
+A status fetched more than 2 h ago (`fleetTicketStatusMaxAge`) is not served,
+so a failing `cu` or a disabled loop does not show old statuses for ever.
+Rows read `ticketStatus` from it; an ended row falls back to the status it had
+when it ended.
 
 ### Idle events for FLEET
 
@@ -1306,11 +1367,18 @@ Andy presses Enter on the leftover. A `note` goes to `log.jsonl`, as
 `idle: <pid> <status> <tmux> (<n> min) "<label>"`, or for a reminder
 `idle (reminder, 4h same message): <pid> <status> <tmux> (<n> min) "<label>"`,
 at most 15, then
-` ; +N more`. Every field a session controls is constrained: status is
+` ; +N more`. A row's own tickets are those in its tmux session name and
+worktree name (`sessionOwnTickets`), not its cwd or name: a name can say
+"follow-up to DR-100". When the row has at least one own ticket and every one
+has a fresh cached ClickUp status of `testing`, `done`, `closed` or
+`complete`, its entry is `finished: <pid> <tmux> <TICKET> <status>` for the
+first own ticket (a reminder: `finished (reminder, 4h same message): …`). The
+event keeps the own tickets, and the status is read at send time. A cold
+cache is a plain idle entry. Every field a session controls is constrained: status is
 `idle`, `shell` or `waiting`, else `-`; tmux must match
 `^[A-Za-z0-9._-]{1,64}:\d+\.\d+$`, else `-`; the label is the `ticket` of a
-FLEET card whose `session` names the row's tmux session, else the user-set
-name, else `-`, scrubbed to `[A-Za-z0-9 ._:/#()-]` (no quotes, so it cannot
+FLEET card whose `session` names the row's tmux session, else the first
+ticket the row names (`sessionTickets`), else the user-set name, else `-`, scrubbed to `[A-Za-z0-9 ._:/#()-]` (no quotes, so it cannot
 leave its quotes), max 40 runes. No field, and not the joined body, may spell
 the tag's words, bracket or not (`idleScrubTag`, `fleetHasEventPhrase`): a
 status beside a tmux name could spell them together. Never pane or transcript

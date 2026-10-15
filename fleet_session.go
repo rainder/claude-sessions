@@ -15,10 +15,11 @@ import (
 )
 
 // The FLEET page's session view: the transcript of a session a FLEET card
-// names, and a box to type into it. It types into sessions other than FLEET,
-// so the target is allowlisted (fleetResolveSession): only a tmux session
-// named by a card in the current state.json, never FLEET itself, and exactly
-// one live row there. The pane address always comes from that resolved row;
+// names or the working list holds, and a box to type into it. It types into
+// sessions other than FLEET, so the target is allowlisted
+// (fleetResolveSession): only a tmux session named by a card in the current
+// state.json or a live working-list row, never FLEET itself, and exactly one
+// live row there. The pane address always comes from that resolved row;
 // the request supplies a validated name and nothing else.
 
 const (
@@ -85,17 +86,19 @@ func (s *server) fleetSessionCards() map[string]fleetCardInfo {
 }
 
 // fleetResolveSession is the allowlist, in order: a well-formed name; a card
-// in the current state.json names it (the page may open only what FLEET put
-// on a card); not FLEET's own session (FLEET has its own guarded box, and
+// in the current state.json names it, or it is a live row of the working
+// list (the page may open only what FLEET put on a card or what the server
+// itself lists); not FLEET's own session (FLEET has its own guarded box, and
 // typing into it from here would skip those guards); exactly one live row
 // (claude or grok) in that tmux session, so the pane address is unambiguous.
+// With no card, the ticket and title come from that row.
 func (s *server) fleetResolveSession(name string, sessions []Session) (Session, fleetCardInfo, *fleetSessionErr) {
 	if !fleetSessionNameRe.MatchString(name) {
 		return Session{}, fleetCardInfo{}, &fleetSessionErr{http.StatusBadRequest, "bad_target", "bad session name"}
 	}
 	card, ok := s.fleetSessionCards()[name]
-	if !ok {
-		return Session{}, fleetCardInfo{}, &fleetSessionErr{http.StatusForbidden, "not_allowed", "no FLEET card names this session"}
+	if !ok && !s.fleetIsDerived(name, sessions) {
+		return Session{}, fleetCardInfo{}, &fleetSessionErr{http.StatusForbidden, "not_allowed", "no FLEET card or live session list row names this session"}
 	}
 	self := &fleetSessionErr{http.StatusForbidden, "fleet_self", "this is FLEET's own session"}
 	if fl, reason := findFleet(sessions); reason == "" && fl.Tmux != "" && tmuxSessionPart(fl.Tmux) == name {
@@ -115,10 +118,24 @@ func (s *server) fleetResolveSession(name string, sessions []Session) (Session, 
 	case 0:
 		return Session{}, card, &fleetSessionErr{http.StatusNotFound, "gone", "this session has ended"}
 	case 1:
+		if !ok {
+			card = fleetCardInfo{Ticket: strings.Join(sessionTickets(hits[0]), ", "), Title: hits[0].Name}
+		}
 		return hits[0], card, nil
 	default:
 		return Session{}, card, &fleetSessionErr{http.StatusConflict, "ambiguous", "two or more sessions share this tmux session"}
 	}
+}
+
+// fleetIsDerived reports whether a working-list row runs in tmux session
+// name, on the list the caller resolved from.
+func (s *server) fleetIsDerived(name string, sessions []Session) bool {
+	for _, row := range s.fleetDerivedSessions(sessions) {
+		if tmuxSessionPart(row.Tmux) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // fleetSessionTags are the wrapper blocks Claude Code puts inside turns:

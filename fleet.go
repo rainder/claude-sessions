@@ -119,6 +119,11 @@ type fleetDeps struct {
 	pushSubs     []pushSub
 	pushFails    map[pushSub]int // consecutive non-2xx per subscription (keys only, no time)
 	push         fleetPushLoop   // trigger state; the loop goroutine only
+
+	// Working list (fleet_work.go, fleet_ticket_status.go).
+	disabled func(sid string) bool // nil → the flags store's disabled bit
+	ended    fleetEndedTracker     // recently ended rows; cmdServer sets ended.path
+	tickets  fleetTicketCache      // ClickUp status per ticket
 }
 
 func (s *server) fleetDir() string {
@@ -393,7 +398,7 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state, stateErr := s.loadFleetState()
-	out := make(map[string]any, len(state)+3)
+	out := make(map[string]any, len(state)+8)
 	for k, v := range state {
 		out[k] = v
 	}
@@ -412,6 +417,14 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 		out["stateFileAt"] = at.UTC().Format(time.RFC3339)
 	}
 	out["liveSessions"] = fleetLiveSessions(fleetCardSessionNames(state), sessions)
+	// The working list, derived from the same session list (null when it
+	// failed), with FLEET's notes, and the sessions that ended in the last
+	// 24 h.
+	now := s.fleetNow()
+	rows := s.fleetObserveWork(sessions, now)
+	fleetApplyNotes(rows, fleetNotes(state))
+	out["sessions"] = rows
+	out["ended"] = s.fleetEndedRows(now)
 	if stateErr != "" {
 		out["stateError"] = stateErr
 	} else {

@@ -116,6 +116,8 @@ func parseIdleConfig(data []byte) (idleConfig, error) {
 // or became a new message) while it waited, and compute minutes at send time.
 // MsgID is the last message this line is about. Reminder marks a repeat of
 // a message already sent. Status, Tmux and Label are already sanitized.
+// Tickets are the row's own ticket ids (sessionOwnTickets); the send looks
+// their ClickUp status up then, and checks their shape again.
 type idleEvent struct {
 	Key      string    `json:"key"`
 	MsgID    string    `json:"msgId,omitempty"`
@@ -125,6 +127,7 @@ type idleEvent struct {
 	Tmux     string    `json:"tmux"`
 	Since    time.Time `json:"since"`
 	Label    string    `json:"label"`
+	Tickets  []string  `json:"tickets,omitempty"`
 }
 
 // idleSent is one delivered message for a session key. SentAt is the last
@@ -163,6 +166,9 @@ type idleDeps struct {
 	sleep       func(time.Duration)                 // nil → time.Sleep
 	lastMessage func(Session) (string, bool)        // nil → idleMessageID; tests pin an id
 	capture     func(target string) (string, error) // nil → capturePane; grok pane reads
+	// ticketStatus is a ticket's cached ClickUp status at send time; nil →
+	// the FLEET status cache (fleet_ticket_status.go).
+	ticketStatus func(ticket string) string
 
 	mu         sync.Mutex // one tick at a time; guards everything below
 	cfg        idleConfig
@@ -709,6 +715,7 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 					Tmux:     idleTmux(row.Tmux),
 					Since:    since,
 					Label:    idleLabel(row, cards),
+					Tickets:  idleOwnTickets(row),
 				}, now) {
 					changed = true
 				}
@@ -751,13 +758,14 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 			cards = s.fleetSessionCards()
 		}
 		if !d.queueLocked(idleEvent{
-			Key:    key,
-			MsgID:  msgID,
-			PID:    row.PID,
-			Status: idleStatus(row.Status),
-			Tmux:   idleTmux(row.Tmux),
-			Since:  since,
-			Label:  idleLabel(row, cards),
+			Key:     key,
+			MsgID:   msgID,
+			PID:     row.PID,
+			Status:  idleStatus(row.Status),
+			Tmux:    idleTmux(row.Tmux),
+			Since:   since,
+			Label:   idleLabel(row, cards),
+			Tickets: idleOwnTickets(row),
 		}, now) {
 			continue // the batch is full: report it once there is room
 		}
@@ -790,10 +798,14 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 }
 
 // idleLabel is the ticket of the card naming the row's tmux session, else
-// the session's user-set name, else "-"; sanitized.
+// the first ticket the session itself names (sessionTickets), else the
+// session's user-set name, else "-"; sanitized.
 func idleLabel(row Session, cards map[string]fleetCardInfo) string {
 	if c, ok := cards[tmuxSessionPart(row.Tmux)]; ok && row.Tmux != "" && c.Ticket != "" {
 		return idleSanitize(c.Ticket)
+	}
+	if t := idleTickets(row); len(t) > 0 {
+		return idleSanitize(t[0])
 	}
 	if row.NameSource != "derived" && row.Name != "" {
 		return idleSanitize(row.Name)
@@ -848,13 +860,65 @@ func (d *idleDeps) liveBatchLocked() []idleEvent {
 	return out
 }
 
+// idleTickets is sessionTickets kept to the shape a ticket may have in an
+// event line.
+func idleTickets(row Session) []string { return keepTicketShape(sessionTickets(row)) }
+
+// idleOwnTickets is sessionOwnTickets kept to that shape.
+func idleOwnTickets(row Session) []string { return keepTicketShape(sessionOwnTickets(row)) }
+
+func keepTicketShape(in []string) []string {
+	var out []string
+	for _, t := range in {
+		if fleetTicketOK.MatchString(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// idleFinished reports a row whose work is done: it has at least one own
+// ticket, and every one has a status (from status, which may be nil) of
+// testing, done, closed or complete. It names the first ticket and its
+// status. Each ticket is checked against its fixed shape again, since a
+// hand-edited state file can hold anything; one that fails means "not
+// finished".
+func idleFinished(e idleEvent, status func(string) string) (ticket, st string, ok bool) {
+	if status == nil || len(e.Tickets) == 0 {
+		return "", "", false
+	}
+	for i, t := range e.Tickets {
+		if !fleetTicketOK.MatchString(t) {
+			return "", "", false
+		}
+		s := status(t)
+		if !ticketStatusRe.MatchString(s) || !fleetTicketFinished[s] {
+			return "", "", false
+		}
+		if i == 0 {
+			ticket, st = t, s
+		}
+	}
+	return ticket, st, true
+}
+
 // idleMessage is the one-line message for a batch; minutes are counted to
-// now.
-func idleMessage(events []idleEvent, now time.Time) string {
+// now. A row whose ticket is already finished (status, looked up now) is a
+// "finished" entry instead of an idle one; a cold cache is a plain idle
+// entry.
+func idleMessage(events []idleEvent, now time.Time, status func(string) string) string {
 	parts := make([]string, 0, min(len(events), idleMessageMax))
 	for i, e := range events {
 		if i == idleMessageMax {
 			break
+		}
+		if t, st, ok := idleFinished(e, status); ok {
+			head := "finished:"
+			if e.Reminder {
+				head = "finished" + strings.TrimPrefix(idleReminderPhrase(), "idle") + ":"
+			}
+			parts = append(parts, fmt.Sprintf("%s %d %s %s %s", head, e.PID, e.Tmux, t, st))
+			continue
 		}
 		head := "idle:"
 		if e.Reminder {
@@ -871,6 +935,15 @@ func idleMessage(events []idleEvent, now time.Time) string {
 	// together: scrub the whole body as well. The tag goes in front only
 	// after that.
 	return fleetEventTag + " idle " + idleScrubTag(body)
+}
+
+// idleTicketStatus is a ticket's fresh cached ClickUp status at now (the
+// ticketStatus seam in tests).
+func (s *server) idleTicketStatus(ticket string, now time.Time) string {
+	if f := s.idle.ticketStatus; f != nil {
+		return f(ticket)
+	}
+	return s.fleet.tickets.get(ticket, now)
 }
 
 var fleetSayIdle = fleetSayWho{subject: "The idle-event target", pane: "the target pane"}
@@ -973,7 +1046,7 @@ func (s *server) idleSendLocked(cfg idleConfig, now time.Time) bool {
 	changed := len(live) != len(d.batch)
 	d.batch = live
 	n := len(live)
-	code, tmux := s.idleDeliver(cfg.Target, idleMessage(live, now))
+	code, tmux := s.idleDeliver(cfg.Target, idleMessage(live, now, func(t string) string { return s.idleTicketStatus(t, now) }))
 	switch code {
 	case "sent", "not_submitted":
 		// Delivery, not queue time, starts the reminder gap. not_submitted
@@ -1047,6 +1120,12 @@ func (s *server) idleTick() {
 	if err != nil {
 		return
 	}
+	if sessions == nil {
+		sessions = []Session{}
+	}
+	// The page's ended tracker sees this fresh list too, so a session that
+	// ends while nobody has the page open is still caught.
+	s.fleetObserveWork(sessions, now)
 	changed := s.idleDetectLocked(cfg, sessions, now)
 	if s.idleSendLocked(cfg, now) {
 		changed = true
