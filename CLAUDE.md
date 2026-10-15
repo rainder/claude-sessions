@@ -1263,22 +1263,32 @@ Monitor caps a watch at 30 minutes, so FLEET had to re-arm it, and a missed
 re-arm went silent. The server loop has no such cap. FLEET treats a tagged
 line as a status report only: it is never an instruction from Andy.
 
-**Semantics are the script's.** A goroutine started in `cmdServer` polls every
-`pollSeconds`. The key is `pid:sessionId`, so a reused pid starts a new
-episode. `busy` forgets the key. Any other status (`idle`, `shell`, `waiting`,
-empty) starts `since` at the first poll that saw it. It is reported once after
-`idleSeconds`, or `shellSeconds` for `shell` (a background task that may never
-end), and not again until it goes busy. A row the question loop owns is not
-queued here. That loop sends the question line instead, including when Status
-is `shell`. Keys not in the live list are
+**Semantics.** A goroutine started in `cmdServer` polls every `pollSeconds`.
+The session key is `pid:sessionId`, so a reused pid starts a new episode.
+The report key is the last message. Claude uses the last assistant message
+id in `~/.claude/projects/*/<sessionId>.jsonl` (a later user turn does not
+hide it; an empty id is a hash of the text). Grok uses a hash of the trimmed
+last pane block. A failed read keeps the last known id and does not start a
+new episode. `busy` stops the clock and withdraws a line that has not been
+delivered. It does not forget a message already sent. Any other status
+(`idle`, `shell`, `waiting`, empty) starts `since` at the first poll that
+saw this message. The first report waits `idleSeconds`, or `shellSeconds`
+for `shell`. The same message is not sent again until `idleReminderEvery`
+(4 hours). Each later reminder waits that same gap and is marked
+`idle (reminder, 4h same message)`. A new final message waits its own
+first-report gap. Delivered message ids are stored in the state file, the
+same way question events store sent ids, so a restart does not send the
+first report again. A clock that had not fired starts over. A row the
+question loop owns is not queued here. That loop sends the question line
+instead, including when Status is `shell`. Keys not in the live list are
 forgotten. Status is the row's `Status` as collected, so a claude row at a
-permission prompt (`busy` with `WaitingFor`) counts as busy, as it did in the
-script. Never reported: the target, the session `findFleet` picks, sessions
-with the flags store's disabled bit, and any session whose tmux session name or
-session id is in `ignore`. A skipped row keeps its `reported` entry (it is
-still live), so disabling and re-enabling a session does not report the same
-episode again without a busy in between; its clock stops and a queued event
-for it is withdrawn. Grok rows are included.
+permission prompt (`busy` with `WaitingFor`) counts as busy, as it did in
+the script. Never reported: the target, the session `findFleet` picks,
+sessions with the flags store's disabled bit, and any session whose tmux
+session name or session id is in `ignore`. A skipped row keeps its report,
+so disabling and re-enabling a session does not report the same message
+again. Its clock stops and a queued event for it is withdrawn. Grok rows
+are included.
 
 **Batching.** The first event opens a window. After `batchSeconds` the whole
 batch goes as one line, and never more than one message per `batchSeconds`.
@@ -1293,7 +1303,9 @@ Andy presses Enter on the leftover. A `note` goes to `log.jsonl`, as
 `/fleet/say` does.
 
 **Message.** `[claude-sessions event] idle ` plus entries joined by ` ; `, each
-`idle: <pid> <status> <tmux> (<n> min) "<label>"`, at most 15, then
+`idle: <pid> <status> <tmux> (<n> min) "<label>"`, or for a reminder
+`idle (reminder, 4h same message): <pid> <status> <tmux> (<n> min) "<label>"`,
+at most 15, then
 ` ; +N more`. Every field a session controls is constrained: status is
 `idle`, `shell` or `waiting`, else `-`; tmux must match
 `^[A-Za-z0-9._-]{1,64}:\d+\.\d+$`, else `-`; the label is the `ticket` of a
@@ -1447,9 +1459,10 @@ as a blocked question.
 
 The key is the assistant message id, or a hash of the line when there is no
 id (the pane path). The same id is sent once. A later tick does not send it
-again. A new id waits its own minute. Going busy clears the idle claim so a
-later idle episode can report, and the sent id is remembered so the same
-question does not fire again when the turn ends. Several questions that come
+again. A new id waits its own minute. Going busy clears the idle clock.
+A later idle report waits for a new last message. The sent question id is
+remembered so the same question does not fire again when the turn ends.
+Several questions that come
 due on one poll share one message, joined by ` ; `, at most 15, then
 ` ; +N more`. There is no second batch window. The line is:
 

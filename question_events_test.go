@@ -307,6 +307,18 @@ func TestQuestionEventsPrefersQuestionOverIdle(t *testing.T) {
 	if len(asked) != 1 || len(rig.typed) != 0 {
 		t.Fatalf("double report asked %q typed %q batch %+v", asked, rig.typed, rig.s.idle.batch)
 	}
+	// A new final message is a new idle report. It waits its own minute.
+	writeQuestionTranscript(t, home, sid, "msg_next", "The checks passed.")
+	both(time.Second) // clock starts
+	both(59 * time.Second)
+	if len(rig.typed) != 0 {
+		t.Fatalf("idle before the new message waited: %q", rig.typed)
+	}
+	both(60 * time.Second) // queued, then the batch window sends on the next minute
+	both(60 * time.Second)
+	if len(asked) != 1 || len(rig.typed) != 1 || !strings.Contains(rig.typed[0], "idle: 42 idle work:0.0") {
+		t.Fatalf("new message asked %q typed %q", asked, rig.typed)
+	}
 }
 
 func TestQuestionEventsSkipsFleetAndBatchesOneTick(t *testing.T) {

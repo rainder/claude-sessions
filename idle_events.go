@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,10 +21,12 @@ import (
 // Idle events for FLEET. The server watches this host's sessions and, when
 // one has sat non-busy long enough, types one tagged status line into FLEET's
 // pane — the job FLEET's Monitor loop over idle-stream.sh used to do, minus
-// the 30-minute re-arm. Semantics follow that script: one report per idle
-// episode, again only after the session goes busy and idle again. Delivery
-// goes through the page's own send pipeline (fleetTypeInto), so every guard
-// that protects a page send protects this one: it types only into an empty,
+// the 30-minute re-arm. One report per last message: a later busy blip does
+// not send it again. The same message sends one reminder after
+// idleReminderEvery, then again after each further gap. A new final message
+// sends a new report after the normal idle or shell wait. Delivery goes
+// through the page's own send pipeline (fleetTypeInto), so every guard that
+// protects a page send protects this one: it types only into an empty,
 // visible input box and presses Enter only once the box holds the text.
 //
 // Fail closed everywhere: off by default, off on a bad config, nothing sent
@@ -33,11 +37,12 @@ import (
 // text.
 
 const (
-	idleBatchMax    = 100 // events kept in a pending batch; later ones wait for room
-	idleMessageMax  = 15  // entries in one message; the rest are "+N more"
-	idleLabelMax    = 40
-	idleLogEvery    = 10 * time.Minute // one log line per repeated refusal code
-	idleTestMessage = fleetEventTag + " test: delivery check, no action needed"
+	idleBatchMax      = 100 // events kept in a pending batch; later ones wait for room
+	idleMessageMax    = 15  // entries in one message; the rest are "+N more"
+	idleLabelMax      = 40
+	idleLogEvery      = 10 * time.Minute // one log line per repeated refusal code
+	idleReminderEvery = 4 * time.Hour    // same last message: one reminder, then again each gap
+	idleTestMessage   = fleetEventTag + " test: delivery check, no action needed"
 )
 
 type idleConfig struct {
@@ -108,36 +113,56 @@ func parseIdleConfig(data []byte) (idleConfig, error) {
 
 // idleEvent is one reported episode waiting in the batch. Key and Since
 // name the episode, so a send can drop one that ended (went busy, went away,
-// or became a new episode) while it waited, and compute minutes at send time.
-// Status, Tmux and Label are already sanitized.
+// or became a new message) while it waited, and compute minutes at send time.
+// MsgID is the last message this line is about. Reminder marks a repeat of
+// a message already sent. Status, Tmux and Label are already sanitized.
 type idleEvent struct {
-	Key    string    `json:"key"`
-	PID    int       `json:"pid"`
-	Status string    `json:"status"`
-	Tmux   string    `json:"tmux"`
-	Since  time.Time `json:"since"`
-	Label  string    `json:"label"`
+	Key      string    `json:"key"`
+	MsgID    string    `json:"msgId,omitempty"`
+	Reminder bool      `json:"reminder,omitempty"`
+	PID      int       `json:"pid"`
+	Status   string    `json:"status"`
+	Tmux     string    `json:"tmux"`
+	Since    time.Time `json:"since"`
+	Label    string    `json:"label"`
+}
+
+// idleSent is one delivered message for a session key. SentAt is the last
+// delivery, so the next reminder is one gap later.
+type idleSent struct {
+	MsgID  string
+	SentAt time.Time
+}
+
+type idleSentFile struct {
+	Key    string `json:"key"`
+	MsgID  string `json:"msgId"`
+	SentAt string `json:"sentAt,omitempty"`
 }
 
 // idleStateFile is what survives a restart: the reported episodes (so a
-// restart does not report them again), the pending batch, and when the last
-// message went out. `since` is not kept: a restart starts the clock again.
+// restart does not report them again), the delivered message ids, the
+// pending batch, and when the last message went out. `since` is not kept:
+// a restart starts a clock that had not fired again.
 type idleStateFile struct {
-	Reported    []string    `json:"reported"`
-	Batch       []idleEvent `json:"batch"`
-	BatchOpened string      `json:"batchOpened,omitempty"`
-	LastSent    string      `json:"lastSent,omitempty"`
+	Reported    []string       `json:"reported"`
+	Sent        []idleSentFile `json:"sent,omitempty"`
+	Batch       []idleEvent    `json:"batch"`
+	BatchOpened string         `json:"batchOpened,omitempty"`
+	LastSent    string         `json:"lastSent,omitempty"`
 }
 
 // idleDeps is the idle-event loop's seams and state. The zero value is the
 // production configuration.
 type idleDeps struct {
-	configPath string                // "" → ~/.config/claude-sessions/idle-events.json
-	statePath  string                // "" → <state dir>/idle-events-state.json
-	logPath    string                // "" → <state dir>/idle-events.log
-	now        func() time.Time      // nil → time.Now
-	disabled   func(sid string) bool // nil → the flags store's disabled bit
-	sleep      func(time.Duration)   // nil → time.Sleep
+	configPath  string                              // "" → ~/.config/claude-sessions/idle-events.json
+	statePath   string                              // "" → <state dir>/idle-events-state.json
+	logPath     string                              // "" → <state dir>/idle-events.log
+	now         func() time.Time                    // nil → time.Now
+	disabled    func(sid string) bool               // nil → the flags store's disabled bit
+	sleep       func(time.Duration)                 // nil → time.Sleep
+	lastMessage func(Session) (string, bool)        // nil → idleMessageID; tests pin an id
+	capture     func(target string) (string, error) // nil → capturePane; grok pane reads
 
 	mu         sync.Mutex // one tick at a time; guards everything below
 	cfg        idleConfig
@@ -147,7 +172,9 @@ type idleDeps struct {
 	cfgSize    int64
 	loaded     bool // state file read
 	since      map[string]time.Time
+	timing     map[string]string // session key → message id the clock is for; not persisted
 	reported   map[string]bool
+	sent       map[string]idleSent // delivered message id; persisted
 	batch      []idleEvent
 	opened     time.Time
 	lastSent   time.Time
@@ -286,6 +313,8 @@ func (d *idleDeps) loadStateLocked() {
 	}
 	d.loaded = true
 	d.since, d.reported = map[string]time.Time{}, map[string]bool{}
+	d.sent = map[string]idleSent{}
+	d.timing = map[string]string{}
 	_, path, _ := d.paths()
 	st, err := loadIdleState(path)
 	if err != nil {
@@ -293,6 +322,13 @@ func (d *idleDeps) loadStateLocked() {
 	}
 	for _, k := range st.Reported {
 		d.reported[k] = true
+	}
+	for _, e := range st.Sent {
+		if e.Key == "" {
+			continue
+		}
+		at, _ := time.Parse(time.RFC3339, e.SentAt)
+		d.sent[e.Key] = idleSent{MsgID: e.MsgID, SentAt: at}
 	}
 	d.batch = st.Batch
 	d.opened, _ = time.Parse(time.RFC3339, st.BatchOpened)
@@ -309,6 +345,22 @@ func (d *idleDeps) saveStateLocked() {
 		st.Reported = append(st.Reported, k)
 	}
 	sort.Strings(st.Reported)
+	if len(d.sent) > 0 {
+		keys := make([]string, 0, len(d.sent))
+		for k := range d.sent {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		st.Sent = make([]idleSentFile, 0, len(keys))
+		for _, k := range keys {
+			e := d.sent[k]
+			at := ""
+			if !e.SentAt.IsZero() {
+				at = e.SentAt.UTC().Format(time.RFC3339)
+			}
+			st.Sent = append(st.Sent, idleSentFile{Key: k, MsgID: e.MsgID, SentAt: at})
+		}
+	}
 	if st.Batch == nil {
 		st.Batch = []idleEvent{}
 	}
@@ -424,48 +476,264 @@ func (s *server) idleSkipped(cfg idleConfig, row Session, fleet Session, fleetFo
 	return false
 }
 
-// idleDetectLocked runs one poll of idle-stream.sh's state machine over the
-// live rows and queues an event per newly reported episode. It reports
-// whether the persisted state changed.
+// idleMessageID is the last message of a row. Claude is the last assistant
+// message id in the transcript. An empty id is a hash of that text. Grok is
+// a hash of the trimmed last pane block. ok is false when the read fails.
+// A missing home does not scan the real home: tests build rows with no home,
+// and a scan there would key off Andy's live transcripts.
+func (s *server) idleMessageID(row Session) (string, bool) {
+	if s.idle.lastMessage != nil {
+		return s.idle.lastMessage(row)
+	}
+	if row.IsGrok() {
+		if row.Tmux == "" {
+			return "", false
+		}
+		capFn := s.idle.capture
+		if capFn == nil {
+			capFn = capturePane
+		}
+		text, err := capFn(row.Tmux)
+		if err != nil {
+			return "", false
+		}
+		block := idlePaneBlock(questionPaneText(text))
+		if block == "" {
+			return "", false
+		}
+		return questionHash(block), true
+	}
+	if row.Home == "" || row.SessionID == "" {
+		return "", false
+	}
+	path := findTranscript(row.Home, row.SessionID)
+	if path == "" {
+		return "", false
+	}
+	id, text, ok := idleAssistantID(path)
+	if !ok {
+		return "", false
+	}
+	if id == "" {
+		id = questionHash(strings.TrimSpace(text))
+	}
+	return id, true
+}
+
+// idlePaneBlock is the last non-empty paragraph of a cleaned pane. Text
+// above that paragraph is scrollback. A change there must not look like a
+// new final message.
+func idlePaneBlock(cleaned string) string {
+	var last, cur []string
+	flush := func() {
+		if len(cur) == 0 {
+			return
+		}
+		last = cur
+		cur = nil
+	}
+	for _, ln := range strings.Split(cleaned, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			flush()
+			continue
+		}
+		cur = append(cur, ln)
+	}
+	flush()
+	return strings.Join(last, "\n")
+}
+
+// idleAssistantID reads the tail of a Claude transcript and returns the last
+// assistant message id and text. A later user turn does not hide it. Tool-only
+// lines are skipped, matching lastAssistantText.
+func idleAssistantID(path string) (id, text string, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", "", false
+	}
+	defer f.Close()
+	seeked := false
+	if st, err := f.Stat(); err == nil && st.Size() > infoTailBytes {
+		if _, err := f.Seek(st.Size()-infoTailBytes, io.SeekStart); err == nil {
+			seeked = true
+		}
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	if seeked {
+		scanner.Scan()
+	}
+	var foundID, foundText string
+	found := false
+	for scanner.Scan() {
+		var e transcriptLine
+		if json.Unmarshal(scanner.Bytes(), &e) != nil {
+			continue
+		}
+		if e.IsMeta || e.IsCompactSummary || e.Type != "assistant" {
+			continue
+		}
+		turn, turnOK := extractTurnText(e.Message.Content)
+		if !turnOK {
+			continue
+		}
+		foundID, foundText, found = e.Message.ID, turn, true
+	}
+	if !found || strings.TrimSpace(foundText) == "" {
+		return "", "", false
+	}
+	return foundID, foundText, true
+}
+
+// messageIDLocked is the row's last message. A failed read keeps the id
+// already delivered, so a torn transcript does not start a new episode.
+func (d *idleDeps) messageIDLocked(s *server, row Session) string {
+	id, ok := s.idleMessageID(row)
+	if ok {
+		return id
+	}
+	if prev, has := d.sent[idleKey(row)]; has {
+		return prev.MsgID
+	}
+	return ""
+}
+
+func (d *idleDeps) sentCoversLocked(key, msgID string) bool {
+	prev, ok := d.sent[key]
+	return ok && prev.MsgID == msgID && !prev.SentAt.IsZero()
+}
+
+func (d *idleDeps) inBatchLocked(key string) bool {
+	for _, e := range d.batch {
+		if e.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// idleReminderPhrase is the marker on a repeat of the same message. The
+// hour count comes from idleReminderEvery, so the line and the wait agree.
+func idleReminderPhrase() string {
+	if idleReminderEvery%time.Hour == 0 {
+		return fmt.Sprintf("idle (reminder, %dh same message)", int(idleReminderEvery/time.Hour))
+	}
+	return fmt.Sprintf("idle (reminder, %s same message)", idleReminderEvery)
+}
+
+// idleDetectLocked runs one poll over the live rows and queues an event per
+// newly reported message. It reports whether the persisted state changed.
+//
+// A report is once per last message. busy withdraws a line that has not been
+// delivered and stops the clock. It does not forget a message already sent.
+// The same message queues one reminder after idleReminderEvery, then again
+// after each further gap. A new last message waits the normal idle or shell
+// gap.
 func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.Time) bool {
 	d := &s.idle
 	changed := false
 	fleet, reason := findFleet(sessions)
 	var cards map[string]fleetCardInfo
 	live := map[string]bool{}
+	if d.timing == nil {
+		d.timing = map[string]string{}
+	}
+	if d.sent == nil {
+		d.sent = map[string]idleSent{}
+	}
 	for _, row := range sessions {
 		key := idleKey(row)
 		live[key] = true
 		if s.idleSkipped(cfg, row, fleet, reason == "") {
 			// A skipped row keeps its report, so un-skipping it does not
-			// report the same episode again without a busy in between. Its
-			// clock stops, and a queued event for it is withdrawn.
+			// report the same message again. Its clock stops, and a queued
+			// event for it is withdrawn.
 			delete(d.since, key)
+			delete(d.timing, key)
 			if d.dropFromBatchLocked(key) {
 				changed = true
 			}
 			continue
 		}
+		msgID := d.messageIDLocked(s, row)
 		if row.Status == "busy" {
 			delete(d.since, key)
+			delete(d.timing, key)
+			if d.dropFromBatchLocked(key) {
+				changed = true
+				// The line was only queued. A delivered message stays.
+				if !d.sentCoversLocked(key, msgID) && d.reported[key] {
+					delete(d.reported, key)
+				}
+			}
+			continue
+		}
+		// A question event owns this row, including a shell row whose idle
+		// report would otherwise wait shellSeconds. Drop a line that was
+		// queued before the question loop claimed the row.
+		if s.question.ownsIdle(key) {
+			delete(d.since, key)
+			delete(d.timing, key)
+			if d.dropFromBatchLocked(key) {
+				changed = true
+			}
+			continue
+		}
+		// A report with no stored id (a question line, or a state file from
+		// before message ids) covers the message we see now. Bind it once,
+		// so a later message can still start a new report. A line that is
+		// only queued stays unbound until it is delivered.
+		if d.reported[key] && !d.inBatchLocked(key) {
+			if _, ok := d.sent[key]; !ok {
+				d.sent[key] = idleSent{MsgID: msgID, SentAt: now}
+				changed = true
+			}
+		}
+		if d.sentCoversLocked(key, msgID) {
+			prev := d.sent[key]
+			if now.Sub(prev.SentAt) >= idleReminderEvery && !d.inBatchLocked(key) {
+				if cards == nil {
+					cards = s.fleetSessionCards()
+				}
+				since := prev.SentAt
+				if t, ok := d.since[key]; ok {
+					since = t
+				}
+				if d.queueLocked(idleEvent{
+					Key:      key,
+					MsgID:    msgID,
+					Reminder: true,
+					PID:      row.PID,
+					Status:   idleStatus(row.Status),
+					Tmux:     idleTmux(row.Tmux),
+					Since:    since,
+					Label:    idleLabel(row, cards),
+				}, now) {
+					changed = true
+				}
+			}
+			continue
+		}
+		// A different delivered message starts one fresh wait. Later ticks
+		// of that same new id must not restart the clock.
+		if prev, ok := d.sent[key]; ok && prev.MsgID != msgID && d.timing[key] != msgID {
 			if d.reported[key] {
 				delete(d.reported, key)
 				changed = true
 			}
-			continue
-		}
-		// A question event owns this episode, including a shell row whose
-		// idle report would otherwise wait shellSeconds. Drop a line that
-		// was queued before the question loop claimed the row.
-		if s.question.ownsIdle(key) {
-			delete(d.since, key)
 			if d.dropFromBatchLocked(key) {
 				changed = true
 			}
-			continue
+			delete(d.since, key)
+			d.timing[key] = msgID
 		}
 		if d.reported[key] {
 			continue
+		}
+		if d.timing[key] != msgID {
+			delete(d.since, key)
+			d.timing[key] = msgID
 		}
 		since, ok := d.since[key]
 		if !ok {
@@ -484,6 +752,7 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 		}
 		if !d.queueLocked(idleEvent{
 			Key:    key,
+			MsgID:  msgID,
 			PID:    row.PID,
 			Status: idleStatus(row.Status),
 			Tmux:   idleTmux(row.Tmux),
@@ -500,9 +769,20 @@ func (s *server) idleDetectLocked(cfg idleConfig, sessions []Session, now time.T
 			delete(d.since, k)
 		}
 	}
+	for k := range d.timing {
+		if !live[k] {
+			delete(d.timing, k)
+		}
+	}
 	for k := range d.reported {
 		if !live[k] {
 			delete(d.reported, k)
+			changed = true
+		}
+	}
+	for k := range d.sent {
+		if !live[k] {
+			delete(d.sent, k)
 			changed = true
 		}
 	}
@@ -576,8 +856,12 @@ func idleMessage(events []idleEvent, now time.Time) string {
 		if i == idleMessageMax {
 			break
 		}
-		parts = append(parts, fmt.Sprintf("idle: %d %s %s (%d min) \"%s\"",
-			e.PID, e.Status, e.Tmux, int(now.Sub(e.Since)/time.Minute), e.Label))
+		head := "idle:"
+		if e.Reminder {
+			head = idleReminderPhrase() + ":"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d %s %s (%d min) \"%s\"",
+			head, e.PID, e.Status, e.Tmux, int(now.Sub(e.Since)/time.Minute), e.Label))
 	}
 	body := strings.Join(parts, " ; ")
 	if extra := len(events) - idleMessageMax; extra > 0 {
@@ -692,6 +976,18 @@ func (s *server) idleSendLocked(cfg idleConfig, now time.Time) bool {
 	code, tmux := s.idleDeliver(cfg.Target, idleMessage(live, now))
 	switch code {
 	case "sent", "not_submitted":
+		// Delivery, not queue time, starts the reminder gap. not_submitted
+		// counts as delivered: the text is already in the box.
+		if d.sent == nil {
+			d.sent = map[string]idleSent{}
+		}
+		if d.reported == nil {
+			d.reported = map[string]bool{}
+		}
+		for _, e := range d.batch {
+			d.sent[e.Key] = idleSent{MsgID: e.MsgID, SentAt: now}
+			d.reported[e.Key] = true
+		}
 		if code == "sent" {
 			d.idleLog("sent n=%d target=%s", n, tmux)
 			d.logMu.Lock()

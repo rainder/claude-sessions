@@ -613,10 +613,12 @@ func (d *questionDeps) livePendingLocked() []questionEvent {
 // questionSyncIdleLocked keeps the idle loop from also reporting a row this
 // loop owns. Caller holds idle.mu. owners are rows whose last turn currently
 // asks a decision. reset are rows that went busy or went away after this
-// loop had claimed them: their idle episode starts over. A row that stops
-// asking before a line was sent releases the claim. A row that already got
-// a question line keeps the idle "reported" bit so the idle loop does not
-// send a second line for the same episode.
+// loop had claimed them: the idle clock stops, and a queued idle line is
+// withdrawn. A delivered idle message stays delivered. idleDetect starts a
+// new report only when the last message id changes. A row that stops asking
+// before a line was sent releases the claim. A row that already got a
+// question line keeps the idle "reported" bit so the idle loop does not
+// send a second line for the same message.
 func (s *server) questionSyncIdleLocked(owners, reset map[string]bool) {
 	q := &s.question
 	d := &s.idle
@@ -650,7 +652,6 @@ func (s *server) questionSyncIdleLocked(owners, reset map[string]bool) {
 	}
 	for key := range reset {
 		clearClock(key)
-		setReported(key, false)
 	}
 	for key := range q.owners {
 		if owners[key] || reset[key] {
@@ -680,17 +681,30 @@ func (s *server) questionMarkSentLocked(keys []string) {
 	if d.reported == nil {
 		d.reported = map[string]bool{}
 	}
+	if d.sent == nil {
+		d.sent = map[string]idleSent{}
+	}
 	for _, key := range keys {
 		if _, ok := d.since[key]; ok {
 			delete(d.since, key)
 			changed = true
 		}
+		delete(d.timing, key)
 		if d.dropFromBatchLocked(key) {
 			changed = true
 		}
 		if !d.reported[key] {
 			d.reported[key] = true
 			changed = true
+		}
+		// Claude's question id is the assistant message id. Recording it
+		// here, not on a later idle tick, keeps a new message from being
+		// bound as "already sent".
+		if qid := s.question.sent[key]; qid != "" {
+			if prev, ok := d.sent[key]; !ok || prev.MsgID != qid {
+				d.sent[key] = idleSent{MsgID: qid, SentAt: d.clock()}
+				changed = true
+			}
 		}
 	}
 	if changed {

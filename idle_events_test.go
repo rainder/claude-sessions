@@ -146,7 +146,7 @@ func TestIdleEventsWaitingCountsAsNotBusy(t *testing.T) {
 	}
 }
 
-func TestIdleEventsBusyResetsAndALaterIdleReportsAgain(t *testing.T) {
+func TestIdleEventsBusyDoesNotRepeatTheSameMessage(t *testing.T) {
 	rig := newIdleRig(t, idleCfgOn)
 	rig.rows = []Session{fleetRow(), worker(9, "w9", "idle", "w9:0.0")}
 	rig.tick(0)
@@ -156,18 +156,13 @@ func TestIdleEventsBusyResetsAndALaterIdleReportsAgain(t *testing.T) {
 	}
 	rig.rows[1].Status = "busy"
 	rig.tick(30 * time.Second)
-	if rig.s.idle.reported["9:w9"] {
-		t.Fatal("busy must forget the report")
+	if !rig.s.idle.reported["9:w9"] {
+		t.Fatal("busy must keep a delivered report")
 	}
 	rig.rows[1].Status = "idle"
-	rig.tick(30 * time.Second) // since restarts here
-	rig.tick(30 * time.Second)
-	if len(rig.s.idle.batch) != 0 {
-		t.Fatal("re-reported before 60 s of the new episode")
-	}
-	rig.run(2 * time.Minute)
-	if len(rig.typed) != 2 || !strings.Contains(rig.typed[1], "idle: 9 idle w9:0.0") {
-		t.Fatalf("second episode: %q", rig.typed)
+	rig.run(3 * time.Minute)
+	if len(rig.typed) != 1 {
+		t.Fatalf("same message after busy: %q", rig.typed)
 	}
 }
 
@@ -697,13 +692,16 @@ func TestIdleEventsSkippedRowsKeepTheirReport(t *testing.T) {
 	if len(rig.typed) != 1 {
 		t.Fatalf("re-enabled row reported again: %q", rig.typed)
 	}
-	// A queued event for a row that becomes skipped is withdrawn.
-	rig.rows[2].Status = "busy"
-	rig.tick(30 * time.Second)
-	rig.rows[2].Status = "idle"
-	rig.tick(30 * time.Second)
-	rig.tick(60 * time.Second) // b reported again, queued
-	if len(rig.s.idle.batch) != 1 {
+	// A new message queues one line. Skipping the row withdraws it.
+	rig.s.idle.lastMessage = func(row Session) (string, bool) {
+		if row.PID == 98 {
+			return "msg-new", true
+		}
+		return "", true
+	}
+	rig.tick(30 * time.Second) // clock starts for the new message
+	rig.tick(60 * time.Second) // queued; the batch window has not run
+	if len(rig.s.idle.batch) != 1 || rig.s.idle.batch[0].MsgID != "msg-new" {
 		t.Fatalf("batch %+v", rig.s.idle.batch)
 	}
 	off["b"] = true
@@ -730,5 +728,160 @@ func TestIdleConfigDefaultIgnoreList(t *testing.T) {
 	}
 	if d := defaultIdleConfig(); &d.Ignore[0] == &idleDefaultIgnore[0] {
 		t.Error("defaultIdleConfig shares the package slice")
+	}
+}
+
+func TestIdleEventsSameMessageWaitsForTheReminder(t *testing.T) {
+	if idleReminderEvery != 4*time.Hour {
+		t.Fatalf("reminder gap = %s, want 4h", idleReminderEvery)
+	}
+	rig := newIdleRig(t, idleCfgOn)
+	home := t.TempDir()
+	sid := "idle-same-msg"
+	writeQuestionTranscript(t, home, sid, "msg-1", "Watching Slack. Nothing new.")
+	row := worker(4242, sid, "idle", "slack:0.0")
+	row.Home = home
+	rig.rows = []Session{fleetRow(), row}
+	rig.tick(0)
+	rig.run(2 * time.Minute)
+	want := `[claude-sessions event] idle idle: 4242 idle slack:0.0 (2 min) "-"`
+	if len(rig.typed) != 1 || rig.typed[0] != want {
+		t.Fatalf("first: %q", rig.typed)
+	}
+	// A later user turn is not a new assistant message.
+	path := writeQuestionTranscript(t, home, sid, "msg-1", "Watching Slack. Nothing new.")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userLine := []byte("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"ok\"}}\n")
+	if err := os.WriteFile(path, append(raw, userLine...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rig.run(30 * time.Minute)
+	if len(rig.typed) != 1 {
+		t.Fatalf("repeated before 4h: %q", rig.typed)
+	}
+	rig.tick(idleReminderEvery)
+	if len(rig.typed) != 1 || len(rig.s.idle.batch) != 1 || !rig.s.idle.batch[0].Reminder {
+		t.Fatalf("reminder not queued: typed %q batch %+v", rig.typed, rig.s.idle.batch)
+	}
+	rig.tick(60 * time.Second)
+	mark := idleReminderPhrase() + ":"
+	if len(rig.typed) != 2 || !strings.Contains(rig.typed[1], mark+" 4242 idle slack:0.0") {
+		t.Fatalf("4h reminder: %q", rig.typed)
+	}
+	rig.tick(idleReminderEvery)
+	rig.tick(60 * time.Second)
+	if len(rig.typed) != 3 || !strings.Contains(rig.typed[2], mark+" 4242 idle slack:0.0") {
+		t.Fatalf("8h reminder: %q", rig.typed)
+	}
+}
+
+func TestIdleEventsNewMessageReportsAgain(t *testing.T) {
+	rig := newIdleRig(t, idleCfgOn)
+	home := t.TempDir()
+	sid := "idle-new-msg"
+	writeQuestionTranscript(t, home, sid, "msg-1", "Still watching the PR.")
+	row := worker(7, sid, "idle", "pr:0.0")
+	row.Home = home
+	rig.rows = []Session{fleetRow(), row}
+	rig.tick(0)
+	rig.run(2 * time.Minute)
+	if len(rig.typed) != 1 || !strings.Contains(rig.typed[0], "idle: 7 idle pr:0.0") {
+		t.Fatalf("first: %q", rig.typed)
+	}
+	writeQuestionTranscript(t, home, sid, "msg-2", "Checks passed.")
+	rig.tick(30 * time.Second) // new clock
+	rig.tick(30 * time.Second)
+	if len(rig.typed) != 1 {
+		t.Fatalf("sent the new message before 60s: %q", rig.typed)
+	}
+	rig.run(2 * time.Minute)
+	if len(rig.typed) != 2 || !strings.Contains(rig.typed[1], "idle: 7 idle pr:0.0") || strings.Contains(rig.typed[1], "reminder") {
+		t.Fatalf("new message: %q", rig.typed)
+	}
+}
+
+func TestIdleEventsGrokUsesTheLastPaneBlock(t *testing.T) {
+	rig := newIdleRig(t, idleCfgOn)
+	row := worker(9, "grok-idle", "idle", "g:0.0")
+	row.Tool = toolGrok
+	rig.rows = []Session{fleetRow(), row}
+	pane := "older turn\n\nStill waiting on the PR.\n❯ \n"
+	rig.s.idle.capture = func(target string) (string, error) {
+		if target != "g:0.0" {
+			return "", fmt.Errorf("unexpected target %s", target)
+		}
+		return pane, nil
+	}
+	rig.tick(0)
+	rig.run(2 * time.Minute)
+	if len(rig.typed) != 1 || !strings.Contains(rig.typed[0], "idle: 9 idle g:0.0") {
+		t.Fatalf("first: %q", rig.typed)
+	}
+	// Scrollback above the last paragraph is not a new message.
+	pane = "a different scrollback line\n\nStill waiting on the PR.\n❯ \n"
+	rig.run(2 * time.Minute)
+	if len(rig.typed) != 1 {
+		t.Fatalf("same block repeated: %q", rig.typed)
+	}
+	// A failed read keeps the last id.
+	rig.s.idle.capture = func(string) (string, error) { return "", fmt.Errorf("miss") }
+	rig.run(2 * time.Minute)
+	if len(rig.typed) != 1 {
+		t.Fatalf("failed read started a new episode: %q", rig.typed)
+	}
+	pane = "older turn\n\nThe PR checks passed.\n❯ \n"
+	rig.s.idle.capture = func(string) (string, error) { return pane, nil }
+	rig.tick(30 * time.Second)
+	rig.tick(30 * time.Second)
+	if len(rig.typed) != 1 {
+		t.Fatalf("sent the new block before 60s: %q", rig.typed)
+	}
+	rig.run(2 * time.Minute)
+	if len(rig.typed) != 2 || !strings.Contains(rig.typed[1], "idle: 9 idle g:0.0") {
+		t.Fatalf("new block: %q", rig.typed)
+	}
+	if idlePaneBlock(questionPaneText(pane)) != "The PR checks passed." {
+		t.Fatalf("block %q", idlePaneBlock(questionPaneText(pane)))
+	}
+}
+
+func TestIdleEventsRestartSendsOnlyWhenNotSent(t *testing.T) {
+	// Not yet sent: a restart starts the clock again, and the event still fires.
+	rig := newIdleRig(t, idleCfgOn)
+	rig.rows = []Session{fleetRow(), worker(21, "x", "idle", "x:0.0")}
+	rig.tick(0)
+	rig.tick(30 * time.Second)
+	if len(rig.s.idle.batch) != 0 {
+		t.Fatal("queued before 60s")
+	}
+	rig.s.idle = idleDeps{}
+	rig.useDir(rig.s)
+	rig.tick(30 * time.Second)
+	if len(rig.s.idle.batch) != 0 || len(rig.typed) != 0 {
+		t.Fatalf("restart kept the old clock: batch %+v typed %q", rig.s.idle.batch, rig.typed)
+	}
+	rig.tick(60 * time.Second)
+	rig.tick(60 * time.Second)
+	if len(rig.typed) != 1 || !strings.Contains(rig.typed[0], "idle: 21 idle x:0.0") {
+		t.Fatalf("unsent restart: %q", rig.typed)
+	}
+
+	// Already sent: a restart must not send that message again.
+	rig.s.idle = idleDeps{}
+	rig.useDir(rig.s)
+	rig.run(2 * time.Minute)
+	if len(rig.typed) != 1 {
+		t.Fatalf("sent again after restart: %q", rig.typed)
+	}
+	data, err := os.ReadFile(filepath.Join(rig.dir, "state", "idle-events-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st idleStateFile
+	if json.Unmarshal(data, &st) != nil || len(st.Sent) != 1 || st.Sent[0].Key != "21:x" {
+		t.Fatalf("state %s", data)
 	}
 }
