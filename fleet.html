@@ -96,6 +96,9 @@ header.top {
 /* A card opened from a notification: a short accent ring. */
 .card.flash, .row.flash { animation: flash 1.6s ease-out; }
 @keyframes flash { 0%, 40% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 0 0 3px transparent; } }
+/* The quota and account chips. A phone and the fold place them one by one,
+   so the box is not there; a wide screen puts it on the brand row. */
+.hdr-meters { display: contents; }
 .chips { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 44px; margin: 4px 0 0; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; overflow-x: auto; scrollbar-width: none; font: inherit; color: inherit; }
 .chips[hidden] { display: none; }
 .chip { display: block; }
@@ -168,7 +171,9 @@ main { max-width: 1600px; margin: 0 auto; padding: 12px max(env(safe-area-inset-
 .banner .b-title { display: block; font-weight: 650; }
 .banner .b-note { display: block; margin-top: 1px; font-size: 13px; font-weight: 450; color: var(--muted); }
 .banner.act .btn { flex: none; min-height: 44px; }
-.now { margin: 0 0 14px; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+/* One line; a tap or Enter shows the whole note (the title has it too). */
+.now { margin: 0 0 14px; font-size: 14px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.now.open { white-space: normal; overflow-wrap: anywhere; }
 .now b { color: var(--text); font-weight: 600; margin-right: 4px; }
 .layout { display: flex; flex-direction: column; gap: 22px; }
 .col { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
@@ -534,6 +539,29 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   .filters { flex-wrap: wrap; overflow: visible; }
 }
 
+/* Tablet and wider: the quota and account chips sit on the brand row,
+   between the status and the controls. The chip box takes the free width
+   (basis 0, so it never pushes the row to wrap); when its chips do not fit,
+   the account chips flow to a second line inside it and the controls stay
+   at the right end. The quota details stay a full-width row under it. */
+@media (min-width: 761px) {
+  .hdr-inner { display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; }
+  .hdr-row { display: contents; }
+  .hdr-meters { order: 1; flex: 1 1 0; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: 6px; }
+  .hdr-ago { order: 2; margin-left: 0; flex: 0 1 auto; }
+  .bell, .refresh { order: 3; }
+  .quota { order: 4; flex: 1 1 100%; }
+  .chips { flex: 0 1 auto; width: auto; min-width: 0; min-height: 36px; margin: 0; }
+  /* Label and value on one line, as on a wide screen (undoes the phone's
+     stacked chip, which reaches up to 1099px). */
+  .chip { flex: none; padding: 3px 8px 4px; min-width: 76px; white-space: nowrap; }
+  .chip .lbl, .chip .val { display: inline; font-size: inherit; line-height: inherit; }
+  .chip .lbl { margin-right: 5px; }
+  .chip .bar { margin-top: 3px; }
+  .accts { flex: 0 1 auto; flex-wrap: nowrap; margin: 0; }
+  .acct-chip { min-height: 32px; padding: 3px 9px; }
+}
+
 /* Wide screens: three columns in one screen. The page does not scroll;
    each column does, so the chat composer is always in view. */
 @media (min-width: 1100px) {
@@ -560,15 +588,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <button class="bell" id="bell" type="button" hidden aria-pressed="false" title="Notifications" aria-label="Notifications"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="bell-body" d="M6 9a6 6 0 0 1 12 0c0 5 2 6.5 2 6.5H4S6 14 6 9"/><path d="M10 19a2 2 0 0 0 4 0"/><path class="bell-slash" d="M4 3l16 18"/></svg></span></button>
       <button class="refresh" id="refresh" type="button" title="Refresh now" aria-label="Refresh now"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></span></button>
     </div>
-    <button class="chips" id="chips" type="button" aria-expanded="false" aria-controls="quota" aria-label="Quota. Show details." hidden></button>
-    <div class="accts" id="accts" hidden></div>
+    <div class="hdr-meters">
+      <button class="chips" id="chips" type="button" aria-expanded="false" aria-controls="quota" aria-label="Quota. Show details." hidden></button>
+      <div class="accts" id="accts" hidden></div>
+    </div>
     <div class="quota" id="quota" hidden></div>
   </div>
 </header>
 
 <main>
   <div class="banners" id="banners" role="status" aria-live="polite"></div>
-  <p class="now" id="now" hidden></p>
+  <p class="now" id="now" role="button" tabindex="0" aria-expanded="false" hidden></p>
 
   <div class="layout">
     <div class="col col-decide">
@@ -1891,8 +1921,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const note = str(state && state.cycleNote);
     const p = $("now");
     p.hidden = !note;
+    p.title = note ? "Now: " + note : "";
     p.replaceChildren(el("b", "", "Now:"), note);
   }
+  function toggleNow() {
+    const p = $("now"), open = !p.classList.contains("open");
+    p.classList.toggle("open", open);
+    p.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  $("now").addEventListener("click", e => { if (!e.target.closest("a")) toggleNow(); });
+  $("now").addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleNow(); } });
 
   function applyState(text) {
     let st;
