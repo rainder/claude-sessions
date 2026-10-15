@@ -204,7 +204,7 @@ section { min-width: 0; }
 .icon-btn { flex: none; width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface2); cursor: pointer; font-size: 17px; line-height: 1; }
 .lean-line { margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
 .lean-line b { color: var(--text); }
-.opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; margin-top: 12px; }
+.opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; margin-top: 12px; }
 .opt { display: flex; align-items: flex-start; gap: 9px; min-height: 46px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .opt:hover:not(:disabled) { border-color: var(--muted); }
 /* Disabled dims only the key and label: the effect line must stay readable,
@@ -344,7 +344,7 @@ body.sv-open { overflow: hidden; }
 .sv-warn { justify-content: flex-start; text-align: left; margin: 0 2px 8px; }
 .sv-note { margin: 6px 2px 0; }
 @media (min-width: 1100px) {
-  .sv { left: auto; bottom: 0; height: auto; width: min(760px, 62vw); border-left: 1px solid var(--line); box-shadow: var(--shadow); }
+  .sv { left: auto; bottom: 0; height: auto; width: min(760px, max(480px, calc(100vw - 720px))); border-left: 1px solid var(--line); box-shadow: var(--shadow); }
 }
 
 /* Chat */
@@ -409,7 +409,7 @@ body.sv-open { overflow: hidden; }
 .ty { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 5px; font-size: 11.5px; font-weight: 650; background: var(--surface2); color: var(--muted); vertical-align: 1px; }
 .ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say, .ty-web-start, .ty-web-switch { color: var(--accent); } .ty-clickup { color: var(--green); }
 .hent .tk { font-family: var(--mono); font-size: 12px; margin-right: 6px; }
-.hent a.open { margin-left: 6px; white-space: nowrap; }
+.hent a.open { margin-left: 2px; white-space: nowrap; }
 .more-row { padding: 10px 12px; border-top: 1px solid var(--line); text-align: center; }
 
 /* Confirm sheet */
@@ -2313,13 +2313,20 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
   // replaceKeepingFocus swaps a transcript's turns. A focused link or button
   // inside a turn is found again by the turn's uuid and its place in it.
+  // A turn is found by data-uuid (transcript) or data-local (a bubble not
+  // yet confirmed). Tables and code blocks keep their sideways scroll.
   function replaceKeepingFocus(log, nodes, after) {
-    const a = document.activeElement, t = a && a !== log && log.contains(a) ? a.closest(".turn[data-uuid]") : null;
-    const uuid = t ? t.dataset.uuid : null, idx = t ? [...t.querySelectorAll("a, button")].indexOf(a) : -1;
+    const key = w => w.dataset.uuid ? '[data-uuid="' + CSS.escape(w.dataset.uuid) + '"]' : w.dataset.local ? '[data-local="' + CSS.escape(w.dataset.local) + '"]' : null;
+    const turnOf = n => n.closest("[data-uuid], [data-local]");
+    const a = document.activeElement, t = a && a !== log && log.contains(a) ? turnOf(a) : null;
+    const fk = t ? key(t) : null, idx = t ? [...t.querySelectorAll("a, button")].indexOf(a) : -1;
+    const sx = [];
+    for (const b of log.querySelectorAll(".tbl, pre")) if (b.scrollLeft) { const w = turnOf(b); if (w && key(w)) sx.push([key(w), [...w.querySelectorAll(".tbl, pre")].indexOf(b), b.scrollLeft]); }
     log.replaceChildren(...nodes);
     after();
-    if (uuid === null || idx < 0) return;
-    const nt = log.querySelector('.turn[data-uuid="' + CSS.escape(uuid) + '"]');
+    for (const [k, i, x] of sx) { const w = log.querySelector(k), b = w && w.querySelectorAll(".tbl, pre")[i]; if (b) b.scrollLeft = x; }
+    if (!fk || idx < 0) return;
+    const nt = log.querySelector(fk);
     const f = nt && nt.querySelectorAll("a, button")[idx];
     if (f) f.focus({preventScroll: true});
   }
@@ -2655,7 +2662,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       const c = el("div", "c", el("span", "ty ty-" + type.replace(/[^a-z-]/g, ""), type || "entry"));
       if (str(e.ticket)) c.append(linkText(el("span", "tk"), str(e.ticket)));
       if (str(e.text)) linkText(c, str(e.text));
-      if (str(e.url)) { const a = safeLink(str(e.url), "Open ↗"); if (a.tagName === "A") a.className = "open"; c.append(a); }
+      if (str(e.url)) { const a = safeLink(str(e.url), "Open ↗"); if (a.tagName === "A") a.className = "open"; c.append(" ", a); }
       nodes.push(el("div", "hent", el("span", "t", t === null ? "" : clock(e.at)), c));
     }
     if (!nodes.length) {
