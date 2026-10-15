@@ -308,6 +308,12 @@ section { min-width: 0; }
 /* Fleet rows that open a session view */
 a.row-link { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 9px 12px; color: inherit; text-decoration: none; cursor: pointer; }
 a.row-link:hover { background: var(--surface2); }
+/* A working card shows its summary under the header. The header is the
+   link. The rest of the card opens the same session, so it uses the
+   same pointer. Real links inside the summary keep their own color. */
+.row-open { cursor: pointer; }
+.row-open:hover { background: var(--surface2); }
+a.row-open-hit { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 9px 12px; color: inherit; text-decoration: none; }
 
 /* Session view: a tmux session's transcript (or pane) and a send box.
    Phone: fills the space between the header and the nav. Wide: a panel. */
@@ -433,7 +439,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 .sheet-note { margin: 0; font-size: 14px; color: var(--red); font-weight: 550; }
 .sheet-actions { display: grid; gap: 8px; margin-top: 4px; }
 .sheet-actions .btn { width: 100%; min-height: 50px; padding: 8px 16px; overflow-wrap: anywhere; }
-.readok { margin: 0; padding: 12px; text-align: center; font-size: 14px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
+/* The confirm button stays off for a short time. The bar fills over that
+   time and the number counts down, so a stray tap has nowhere to land. */
+.armbar { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.armbar i { position: relative; flex: 1; height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.armbar i::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 0; background: var(--accent); }
+.armbar.run i::before { animation: sheet-arm var(--arm, 1.2s) linear forwards; }
+@keyframes sheet-arm { to { width: 100%; } }
+.armbar span { flex: none; min-width: 3.2em; text-align: right; font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--muted); }
 .acct-list { display: grid; gap: 8px; max-height: 50vh; overflow-y: auto; }
 .acct-opt { display: grid; gap: 3px; width: 100%; min-height: 50px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .acct-opt:hover:not(:disabled) { border-color: var(--muted); }
@@ -709,7 +722,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   </div>
 </section>
 
-<dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
+<dialog class="sheet" id="sheet" aria-labelledby="sheet-title" tabindex="-1">
   <div class="sheet-in">
     <p class="kicker" id="sheet-kicker"></p>
     <h2 id="sheet-title"></h2>
@@ -718,8 +731,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     <p class="sheet-raw">FLEET gets: <span class="mono" id="sheet-text"></span></p>
     <p class="sheet-note" id="sheet-note" hidden>FLEET reads this as your explicit approval of a write.</p>
     <div class="sheet-actions">
-      <button class="btn" id="sheet-read" type="button" hidden>I read this</button>
-      <p class="readok" id="sheet-readok" hidden>&#10003; You read the text. Approve it below.</p>
+      <div class="armbar" id="sheet-arm" hidden><i></i><span id="sheet-arm-t">1.2s</span></div>
       <button class="btn btn-danger" id="sheet-approve" type="button" hidden>Yes, I approve this write</button>
       <button class="btn btn-primary" id="sheet-send" type="button" hidden>Send</button>
       <button class="btn" id="sheet-cancel" type="button">Cancel</button>
@@ -1499,8 +1511,18 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
 
   // A held key repeats: the Enter that opened a sheet must not go on to
-  // press the button that gets the focus in it.
-  for (const id of ["sheet", "start-sheet", "acct-sheet"]) $(id).addEventListener("keydown", e => { if (e.repeat) { e.preventDefault(); e.stopPropagation(); } }, true);
+  // press the button that gets the focus in it. On the confirm sheet,
+  // Enter and Space do nothing until the confirm button is armed, except
+  // on Cancel and on a real link.
+  for (const id of ["sheet", "start-sheet", "acct-sheet"]) $(id).addEventListener("keydown", e => {
+    if (e.repeat) { e.preventDefault(); e.stopPropagation(); return; }
+    if (id !== "sheet" || sheet.armed || (e.key !== "Enter" && e.key !== " ")) return;
+    const t = e.target;
+    if (t && t.id === "sheet-cancel") return;
+    if (t && t.closest && t.closest("a[href]")) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
 
   $("start-go").addEventListener("click", () => { $("start-go").disabled = true; closeStartSheet(); startFleet(); });
   $("start-cancel").addEventListener("click", closeStartSheet);
@@ -1817,9 +1839,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return box;
   }
 
-  // A working or waiting card with a session opens the session view; its
-  // summary and links show there. Other rows expand in place when they
-  // have details.
+  // A working or waiting card with a session opens the session view.
+  // A working card also shows its summary and its links on the row. That
+  // body is not inside the header link: renderRich and linksNode emit
+  // real <a> tags and a Copy button, and an <a> cannot contain those.
+  // A click on the row opens the session. A click on a link or a button
+  // does not. Other rows expand in place when they have details.
   const SV_NAME = /^[A-Za-z0-9._-]{1,128}$/;
   const sessOf = v => str(v).split(":")[0].trim();
   // liveBadge reads liveSessions, which the server adds to /fleet/state from
@@ -1854,13 +1879,36 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (str(c.waitingOn)) l2.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
     if (str(c.updatedAt)) l2.append(relSpan(c.updatedAt));
     const tm = sessOf(c.session);
+    const sum = str(c.summary), links = linksNode(c);
     if (tm && SV_NAME.test(tm) && str(c.kind) !== "done") {
-      const a = el("a", "row row-link", el("div", "row-main", l1, l2.childNodes.length ? l2 : null), el("span", "chev"));
-      a.href = "#session/" + encodeURIComponent(tm);
+      const href = "#session/" + encodeURIComponent(tm);
+      const main = el("div", "row-main", l1, l2.childNodes.length ? l2 : null);
+      // Working cards show the summary on the row. The header stays a
+      // real link, so Enter on it opens the session. The row click covers
+      // the summary text. Links and buttons inside the summary win.
+      if (str(c.kind) === "working" && (sum || links)) {
+        const row = el("div", "row row-open");
+        const hit = el("a", "row-open-hit", main, el("span", "chev"));
+        hit.href = href;
+        hit.title = "Open session " + tm;
+        const body = el("div", "row-body");
+        if (sum) body.append(el("div", "summary rich", renderRich(sum)));
+        if (links) body.append(links);
+        row.append(hit, body);
+        row.addEventListener("click", e => {
+          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          if (e.target.closest("a, button, textarea, input, select")) return;
+          const sel = window.getSelection();
+          if (sel && !sel.isCollapsed && row.contains(sel.anchorNode)) return;
+          location.hash = href;
+        });
+        return row;
+      }
+      const a = el("a", "row row-link", main, el("span", "chev"));
+      a.href = href;
       a.title = "Open session " + tm;
       return a;
     }
-    const sum = str(c.summary), links = linksNode(c);
     if (!sum && !links) {
       const row = el("div", "row");
       row.append(el("div", "row-head", l1, l2.childNodes.length ? l2 : null));
@@ -2059,8 +2107,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
 
   // ---- confirm sheet -----------------------------------------------------
-  // armed: an explicit yes had its "I read this" tap and the 600 ms wait.
-  const sheet = {card: null, opt: null, lean: false, text: "", explicit: false, busy: false, armed: false, armTimer: 0};
+  // armed: the confirm button has finished its short wait and can send.
+  // Both needs-you and explicit-yes open on that button. It stays off for
+  // SHEET_ARM_MS so one stray tap cannot send.
+  const SHEET_ARM_MS = 1200;
+  const sheet = {card: null, opt: null, lean: false, text: "", explicit: false, busy: false, armed: false, armTimer: 0, armGen: 0};
 
   const currentCard = id => arr(state && state.cards).map(obj).find(c => c && str(c.id) === id) || null;
 
@@ -2102,37 +2153,68 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("sheet-line").hidden = !str(o.line);
     $("sheet-text").textContent = sheet.text;
     $("sheet-note").hidden = !explicit;
-    $("sheet-read").hidden = !explicit;
-    $("sheet-readok").hidden = true;
-    $("sheet-approve").hidden = true;
+    $("sheet-approve").hidden = !explicit;
     $("sheet-send").hidden = explicit;
-    for (const b of ["sheet-read", "sheet-approve", "sheet-send", "sheet-cancel"]) $(b).disabled = false;
+    $("sheet-cancel").disabled = false;
+    // Off before the dialog opens, so the browser cannot focus it.
+    $("sheet-approve").disabled = true;
+    $("sheet-send").disabled = true;
     $("sheet-approve").textContent = "Approve: " + label;
     $("sheet-send").textContent = "Send: " + label;
     if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
-    (explicit ? $("sheet-read") : $("sheet-send")).focus();
+    // Focus stays on the dialog, not on the confirm button. A key still
+    // held from the option tap must not land on that button, and Enter
+    // must not confirm while the button is off.
+    armSheet(explicit ? $("sheet-approve") : $("sheet-send"));
+    d.focus();
+  }
+
+  function stopArm() {
+    sheet.armGen++;
+    clearTimeout(sheet.armTimer);
+    const bar = $("sheet-arm");
+    bar.hidden = true;
+    bar.classList.remove("run");
+  }
+
+  // armSheet shows the confirm button at once and keeps it off for
+  // SHEET_ARM_MS. The bar and the seconds show the wait. The button
+  // turns on only when that wait ends, and only if this sheet is still
+  // the one that started it.
+  function armSheet(btn) {
+    stopArm();
+    const gen = ++sheet.armGen;
+    sheet.armed = false;
+    btn.disabled = true;
+    const bar = $("sheet-arm");
+    const fill = bar.querySelector("i");
+    fill.style.setProperty("--arm", SHEET_ARM_MS + "ms");
+    bar.hidden = false;
+    bar.classList.remove("run");
+    void fill.offsetWidth;
+    bar.classList.add("run");
+    const t0 = Date.now();
+    const tick = () => {
+      if (gen !== sheet.armGen || !sheet.card) return;
+      const left = SHEET_ARM_MS - (Date.now() - t0);
+      if (left <= 0) {
+        if (!sheet.busy) { sheet.armed = true; btn.disabled = false; }
+        bar.hidden = true;
+        bar.classList.remove("run");
+        return;
+      }
+      $("sheet-arm-t").textContent = (Math.ceil(left / 100) / 10).toFixed(1) + "s";
+      sheet.armTimer = setTimeout(tick, 100);
+    };
+    tick();
   }
 
   function closeSheet() {
-    clearTimeout(sheet.armTimer);
+    stopArm();
     const d = $("sheet");
     if (d.open) { if (typeof d.close === "function") d.close(); else d.removeAttribute("open"); }
     sheet.card = null; sheet.busy = false; sheet.armed = false;
   }
-
-  // First tap of an explicit yes. The approve button shows in a new place and
-  // stays off for a moment, so one fast double tap cannot approve.
-  $("sheet-read").addEventListener("click", () => {
-    $("sheet-read").hidden = true;
-    $("sheet-readok").hidden = false;
-    const ap = $("sheet-approve");
-    ap.hidden = false;
-    ap.disabled = true;
-    clearTimeout(sheet.armTimer);
-    // No focus move: a key still held from the first tap must not land on
-    // the approve button.
-    sheet.armTimer = setTimeout(() => { if (!sheet.busy) { sheet.armed = true; ap.disabled = false; } }, 600);
-  });
 
   const optLabel = o => str(o.label) || str(o.send) || str(o.key);
 
@@ -2144,9 +2226,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // reached FLEET, so the card says delivery is not confirmed and keeps its
   // options locked.
   async function sheetSend(btn) {
-    if (sheet.busy || !sheet.card) return;
-    // An explicit yes sends only from the armed approve button.
-    if (sheet.explicit && (!sheet.armed || btn !== $("sheet-approve"))) return;
+    if (sheet.busy || !sheet.card || !sheet.armed || btn.disabled) return;
+    // Each kind sends only from its own confirm button.
+    if (btn !== (sheet.explicit ? $("sheet-approve") : $("sheet-send"))) return;
     if (!alive || expired) { closeSheet(); toast("FLEET is not running. You cannot send now.", true); return; }
     if (!sheetValid()) { closeSheet(); toast("The card changed. Check it again.", true); return; }
     sheet.busy = true;
@@ -2192,7 +2274,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   $("sheet-cancel").addEventListener("click", closeSheet);
   $("sheet").addEventListener("cancel", e => { if (sheet.busy) e.preventDefault(); });
   $("sheet").addEventListener("close", () => {
-    clearTimeout(sheet.armTimer);
+    stopArm();
     if (!sheet.busy) sheet.card = null;
     // Runs for Cancel, Escape and a send alike. Focus may still sit in the
     // closed dialog here, and the dialog's own return finds nothing when a
