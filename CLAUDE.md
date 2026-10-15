@@ -1215,7 +1215,9 @@ sets it.
 **Rich text.** Card summaries and chat turns go through `renderRich` in
 `fleet.html`, a small markdown renderer: paragraphs (single newline = `<br>`),
 `-`/`*` and numbered lists, ``` fenced blocks, `#`–`###` lines as a bold
-line, and inline `code`, **bold**, *italic*, `[label](url)`. It builds nodes
+line, pipe tables (`tableCells` splits on `|` but not `\|` or a `|` in
+`code`; a wide table scrolls in its own `.tbl` box), and inline `code`,
+**bold**, *italic*, `[label](url)`. It builds nodes
 only with `createElement` and text nodes, so raw HTML in the text shows as
 text, and links go through `safeLink` (http and https only; anything else is
 the plain label). `fleet_page_test.go` forbids the HTML sinks.
