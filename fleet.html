@@ -251,8 +251,8 @@ section { min-width: 0; }
 .rich ul, .rich ol { margin: 0 0 .5em; padding-left: 1.4em; }
 /* Pipe tables: a wide table scrolls in its own box, never the page. */
 .rich .tbl { max-width: 100%; overflow-x: auto; margin: 0 0 .5em; scrollbar-width: thin; }
-.rich table { border-collapse: collapse; font-size: .92em; line-height: 1.35; }
-.rich th, .rich td { padding: 4px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.rich table { width: max-content; border-collapse: collapse; font-size: .92em; line-height: 1.35; }
+.rich th, .rich td { padding: 4px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; white-space: nowrap; overflow-wrap: normal; }
 .rich th { background: var(--surface2); font-weight: 650; white-space: nowrap; }
 .rich li { margin: 0 0 .2em; }
 .rich > :last-child, .rich li:last-child { margin-bottom: 0; }
@@ -811,7 +811,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     }
     cells.push(cur.trim());
     if (t.startsWith("|")) cells.shift();
-    if (t.endsWith("|") && !code && cells.length) cells.pop();
+    if (cells.length > 1 && cells[cells.length - 1] === "") cells.pop();
     return cells;
   }
   // richTable builds the table node by node; a wide one scrolls in its box.
@@ -2303,13 +2303,25 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     }
     if (!nodes.length && !shown.length) nodes.push(el("p", "chat-empty", reasonText[chat.reason] || (chat.reason ? "No chat to show (" + chat.reason + ")." : "No messages yet.")));
     for (const m of shown) nodes.push(localBubble(m));
-    log.replaceChildren(...nodes);
-    addFolds(log, chat.open, () => guard(renderChat));
+    replaceKeepingFocus(log, nodes, () => addFolds(log, chat.open, () => guard(renderChat)));
     chat.rev = rev;
     if (first || chat.follow) { log.scrollTop = log.scrollHeight; chat.unseen = false; }
     else if (grew) chat.unseen = true;
     $("newmsg").hidden = !chat.unseen;
     markCode(log);
+  }
+
+  // replaceKeepingFocus swaps a transcript's turns. A focused link or button
+  // inside a turn is found again by the turn's uuid and its place in it.
+  function replaceKeepingFocus(log, nodes, after) {
+    const a = document.activeElement, t = a && a !== log && log.contains(a) ? a.closest(".turn[data-uuid]") : null;
+    const uuid = t ? t.dataset.uuid : null, idx = t ? [...t.querySelectorAll("a, button")].indexOf(a) : -1;
+    log.replaceChildren(...nodes);
+    after();
+    if (uuid === null || idx < 0) return;
+    const nt = log.querySelector('.turn[data-uuid="' + CSS.escape(uuid) + '"]');
+    const f = nt && nt.querySelectorAll("a, button")[idx];
+    if (f) f.focus({preventScroll: true});
   }
 
   // addFolds folds only turns that really overflow 12 lines, with a
@@ -2829,7 +2841,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const sv = {open: false, tmux: "", gen: 0, timer: 0, busyGen: -1, target: null, source: "", turns: new Map(),
     pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", sumKey: "", follow: true, unseen: false, rev: 0,
     foldOpen: new Set(), loadingOlder: false, confirm: false, confirmTimer: 0, sending: false,
-    drafts: new Map(), warned: new Set()}; // per tmux name, kept for the page's life
+    drafts: new Map(), warned: new Set(), pending: new Set(), // per tmux name, kept for the page's life
+    textRev: 0}; // bumps when a turn's text changes, even to the same length
   const SV_POLL = 3000;
   const svCard = t => arr(state && state.cards).map(obj).find(c => c && sessOf(c.session) === t) || null;
   const svOpenErrors = {
@@ -2862,7 +2875,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const opener = document.activeElement !== document.body ? document.activeElement : null;
     closeSessionView();
     Object.assign(sv, {opener, open: true, tmux: t, target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
-      key: "", sumKey: "", follow: true, unseen: false, rev: 0, loadingOlder: false, confirm: false, sending: false});
+      key: "", sumKey: "", follow: true, unseen: false, rev: 0, loadingOlder: false, confirm: false, sending: sv.pending.has(t)});
     sv.turns = new Map(); sv.foldOpen = new Set();
     sv.gen++;
     setView("fleet", false);
@@ -2885,7 +2898,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // Wide: the panel sits beside the columns, which stay usable. Narrower:
   // it covers them, so they leave the tab order.
   const wideMQ = window.matchMedia("(min-width: 1100px)");
-  wideMQ.addEventListener("change", () => { if (sv.open) document.querySelector("main").inert = !wideMQ.matches; });
+  wideMQ.addEventListener("change", () => {
+    if (!sv.open) return;
+    document.querySelector("main").inert = !wideMQ.matches;
+    const a = document.activeElement;
+    if (!wideMQ.matches && a && !$("sv").contains(a) && (document.querySelector("main").contains(a) || !a.offsetParent)) $("sv-back").focus({preventScroll: true});
+  });
   function closeSessionView() {
     if (!sv.open) return;
     const draft = $("sv-say").value;
@@ -2982,7 +3000,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     } else {
       const full = sv.pos === null || d.reset === true || sv.source !== "transcript";
       if (full) sv.turns.clear();
-      for (const x of arr(d.turns)) { const o = svTurn(x); if (o) sv.turns.set(o.uuid, o); }
+      for (const x of arr(d.turns)) {
+        const o = svTurn(x);
+        if (!o) continue;
+        const was = sv.turns.get(o.uuid);
+        if (!was || was.text !== o.text) sv.textRev++;
+        sv.turns.set(o.uuid, o);
+      }
       if (num(d.pos)) sv.pos = d.pos;
       if (full) sv.older = num(d.older) && d.older > 0 ? d.older : 0;
     }
@@ -3037,7 +3061,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const log = $("sv-log");
     let rev = 0, tk = "";
     for (const t of sv.turns.values()) { rev += t.text.length + 1; tk += t.uuid + ":" + t.text.length + ","; }
-    const key = [sv.error, sv.source, sv.older, sv.loadFail, sv.loadingOlder, tk, sv.source === "pane" ? sv.pane : "", [...sv.foldOpen].join(",")].join("|");
+    const key = [sv.error, sv.source, sv.older, sv.loadFail, sv.loadingOlder, tk, sv.textRev, sv.source === "pane" ? sv.pane : "", [...sv.foldOpen].join(",")].join("|");
     if (!force && key === sv.key) return;
     sv.key = key;
     const fromBottom = log.scrollHeight - log.scrollTop;
@@ -3071,8 +3095,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       }
       if (!sv.turns.size) nodes.push(el("p", "chat-empty", "No messages yet."));
     }
-    log.replaceChildren(...nodes);
-    addFolds(log, sv.foldOpen, () => guard(() => svRender(true)));
+    replaceKeepingFocus(log, nodes, () => addFolds(log, sv.foldOpen, () => guard(() => svRender(true))));
     markCode(log);
     const grew = rev > sv.rev || (sv.source === "pane" && !first);
     sv.rev = rev;
@@ -3110,7 +3133,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("sv-comp").hidden = !sv.open || !!sv.error || !t;
     const ta = $("sv-say"), btn = $("sv-send");
     ta.disabled = !can;
-    ta.placeholder = can ? "Write to " + sv.tmux : "Send is not available.";
+    ta.placeholder = !can ? "Send is not available." : window.innerWidth < 600 ? "Write to this session" : "Write to " + sv.tmux;
     btn.disabled = !can || sv.sending || !ta.value.trim();
     btn.classList.toggle("confirm", sv.confirm && !sv.sending);
     btn.textContent = sv.sending ? "Sending…" : sv.confirm ? "Tap again to send to " + sv.tmux : "Send";
@@ -3131,19 +3154,26 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     sv.confirm = false;
     svSend(text);
   }
+  // The answer belongs to tmux, whichever view is open when it lands: a
+  // closed view's draft and warning are settled in the maps, an open view
+  // of tmux (even one reopened since) in the composer.
   async function svSend(text) {
-    const tmux = sv.tmux, gen = sv.gen;
-    sv.sending = true;
+    const tmux = sv.tmux;
+    sv.sending = true; sv.pending.add(tmux);
     svApplySend();
     const res = await postSay("/fleet/session/say", {target: tmux, text}, svSendErrors);
-    const here = gen === sv.gen;
-    if (here) sv.sending = false; // a newer view reset it; this answer is not its own
+    sv.pending.delete(tmux);
+    const here = sv.open && sv.tmux === tmux, gen = sv.gen;
+    if (here) sv.sending = false;
     if (res.ok) {
       if (here && $("sv-say").value.trim() === text) { $("sv-say").value = ""; svGrow(); }
+      if (!here && str(sv.drafts.get(tmux)).trim() === text) sv.drafts.delete(tmux);
+      sv.warned.delete(tmux);
       if (here) $("sv-warn").hidden = true;
       toast("Sent to " + tmux + "." + (res.queued ? " It is busy and reads this next." : ""));
       if (here) setTimeout(() => { if (gen === sv.gen) svPoll(); }, 600);
     } else if (res.unclear) {
+      sv.warned.add(tmux);
       if (here) $("sv-warn").hidden = false;
       toast("Delivery not confirmed. Check the transcript before you send again.", true);
     } else {
