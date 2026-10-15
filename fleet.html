@@ -2084,6 +2084,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!base) return;
     const head = cardHead(c);
     sheet.card = c; sheet.opt = o; sheet.lean = lean; sheet.explicit = explicit; sheet.busy = false; sheet.armed = false;
+    // The dialog gives focus back to its opener on close, unless a state
+    // update replaced that button: then the key finds its successor.
+    const op = document.activeElement, oh = op && op !== document.body ? op.closest("[data-fkey]") : null;
+    sheet.openerKey = oh ? oh.dataset.fkey : ""; sheet.openerIdx = oh ? focusablesIn(oh).indexOf(op) : -1;
     sheet.text = lean ? base + " (lean)" : base;
     const label = optLabel(o);
     const d = $("sheet");
@@ -2187,7 +2191,19 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   $("sheet-send").addEventListener("click", e => sheetSend(e.currentTarget));
   $("sheet-cancel").addEventListener("click", closeSheet);
   $("sheet").addEventListener("cancel", e => { if (sheet.busy) e.preventDefault(); });
-  $("sheet").addEventListener("close", () => { clearTimeout(sheet.armTimer); if (!sheet.busy) sheet.card = null; });
+  $("sheet").addEventListener("close", () => {
+    clearTimeout(sheet.armTimer);
+    if (!sheet.busy) sheet.card = null;
+    // Runs for Cancel, Escape and a send alike. Focus may still sit in the
+    // closed dialog here, and the dialog's own return finds nothing when a
+    // state update replaced the opener.
+    const ae = document.activeElement;
+    if ((!ae || ae === document.body || $("sheet").contains(ae)) && sheet.openerIdx >= 0) {
+      const h = fkeyHost(sheet.openerKey), f = h && focusablesIn(h)[sheet.openerIdx];
+      if (f) f.focus({preventScroll: true});
+    }
+    sheet.openerKey = ""; sheet.openerIdx = -1;
+  });
   $("sheet").addEventListener("click", e => { if (e.target === $("sheet") && !sheet.busy) closeSheet(); });
 
   // ---- send --------------------------------------------------------------
@@ -2660,7 +2676,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     renderOffline();
   }
 
-  function renderFilters() { keepFocus(renderFiltersNow); }
+  // The phone row scrolls sideways; a rebuild must not jump it back to "All".
+  function renderFilters() {
+    const box = $("filters"), x = box.scrollLeft;
+    keepFocus(renderFiltersNow);
+    box.scrollLeft = x;
+  }
   function renderFiltersNow() {
     const mk = (label, val) => {
       const b = fkey(el("button", "fchip", label), "filter:" + val);
@@ -2672,7 +2693,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("filters").replaceChildren(mk("All", ""), ...TYPES.map(t => mk(t, t)));
   }
 
-  function renderHistory() {
+  function renderHistory() { keepFocus(renderHistoryNow); }
+  function renderHistoryNow() {
     const box = $("hist");
     const list = hist.entries.filter(e => !hist.filter || str(e.type) === hist.filter);
     const nodes = [];
@@ -2686,7 +2708,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (str(e.ticket)) c.append(linkText(el("span", "tk"), str(e.ticket)));
       if (str(e.text)) linkText(c, str(e.text));
       if (str(e.url)) { const a = safeLink(str(e.url), "Open ↗"); if (a.tagName === "A") a.className = "open"; c.append(" ", a); }
-      nodes.push(el("div", "hent", el("span", "t", t === null ? "" : clock(e.at)), c));
+      nodes.push(fkey(el("div", "hent", el("span", "t", t === null ? "" : clock(e.at)), c), "hist:" + entryKey(e)));
     }
     if (!nodes.length) {
       const msg = !hist.loaded ? "Loading history…" : hist.entries.length ? "No " + hist.filter + " entries in the loaded history." : "No history yet.";
@@ -2699,7 +2721,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       const b = el("button", "btn", "Load more");
       b.type = "button";
       b.addEventListener("click", () => loadHistory(true));
-      nodes.push(el("div", "more-row", b));
+      nodes.push(fkey(el("div", "more-row", b), "hist:more"));
     }
     box.replaceChildren(...nodes);
   }
