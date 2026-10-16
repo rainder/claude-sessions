@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -193,4 +195,141 @@ func repeatRune(r rune, n int) string {
 		out[i] = r
 	}
 	return string(out)
+}
+
+// TestGrokPaneInputTextFixtures runs every captured grok pane state (real
+// `capture-pane -p -e` dumps of grok 1.0.60).
+func TestGrokPaneInputTextFixtures(t *testing.T) {
+	cases := []struct {
+		file  string
+		text  string
+		found bool
+	}{
+		{"grok-idle-empty.ansi", "", true},
+		{"grok-idle-after-turn.ansi", "", true},
+		{"grok-typed.ansi", "-hello draft from probe", true},
+		// A busy turn still draws an empty box: the screen cannot tell busy,
+		// which is why fleetTypeInto refuses a busy grok row first.
+		{"grok-busy-empty.ansi", "", true},
+		// "Queued · Enter to send now" sits above the box, outside it.
+		{"grok-busy-queued.ansi", "", true},
+		{"grok-shell-commands-running.ansi", "", true},
+		{"grok-renamed-title.ansi", "", true}, // /rename puts the title in the top border
+		// ask_user_question hides the composer entirely.
+		{"grok-question-dialog.ansi", "", false},
+	}
+	for _, c := range cases {
+		text, found := grokPaneInputText(readFixture(t, c.file))
+		if text != c.text || found != c.found {
+			t.Errorf("%s: got (%q, %v), want (%q, %v)", c.file, text, found, c.text, c.found)
+		}
+	}
+}
+
+// Long text wraps inside the box on indented continuation lines; the box
+// text joins them, and the landed check still sees it as our text.
+func TestGrokPaneInputTextWrapped(t *testing.T) {
+	text, found := grokPaneInputText(readFixture(t, "grok-typed-wrapped.ansi"))
+	if !found || !strings.HasPrefix(text, "word word") {
+		t.Fatalf("got (%q, %v)", text, found)
+	}
+	if n := strings.Count(text, "word"); n != 60 {
+		t.Fatalf("got %d words, want 60 (three wrapped lines)", n)
+	}
+	sent := strings.TrimSpace(strings.Repeat("word ", 80))
+	if !fleetTextLanded(text, sent) {
+		t.Fatal("wrapped grok box text must read as landed for the text sent")
+	}
+	if fleetTextLanded(text, "other text") {
+		t.Fatal("box text that is not ours must not read as landed")
+	}
+}
+
+// Grok caps its composer at about 30 lines and scrolls it: a 4 KB text
+// shows only a later part, with ❯ on the top visible line. That still reads
+// as landed for grok, never by claude's prefix rule.
+func TestGrokPaneInputTextScrolled(t *testing.T) {
+	text, found := grokPaneInputText(readFixture(t, "grok-typed-scrolled.ansi"))
+	if !found || !strings.HasPrefix(text, "w0208 ") {
+		t.Fatalf("got (%q, %v)", text[:min(len(text), 40)], found)
+	}
+	words := make([]string, 680)
+	for i := range words {
+		words[i] = fmt.Sprintf("w%04d", i)
+	}
+	sent := strings.Join(words, " ")
+	grok := Session{Tool: toolGrok}
+	if !fleetTextLandedFor(grok, text, sent) {
+		t.Fatal("scrolled grok box must read as landed")
+	}
+	if fleetTextLanded(text, sent) || fleetTextLandedFor(Session{}, text, sent) {
+		t.Fatal("claude's prefix rule must not accept a middle piece")
+	}
+	if fleetTextLandedFor(grok, text, "w0000 w0001") || fleetTextLandedFor(grok, "", sent) {
+		t.Fatal("text that is not ours, or an empty box, must not read as landed")
+	}
+}
+
+func grokBox(interior ...string) string {
+	top := " ╭" + repeatRune('─', 40) + "╮\n"
+	bottom := " ╰" + repeatRune('─', 30) + " Grok 4.7 (low) ─╯\n"
+	var b strings.Builder
+	b.WriteString("output\n" + top)
+	for _, l := range interior {
+		b.WriteString(" " + l + "\n")
+	}
+	b.WriteString(bottom + "\n Ctrl+.:shortcuts\n")
+	return b.String()
+}
+
+func TestGrokPaneInputTextSynthetic(t *testing.T) {
+	if text, found := grokPaneInputText(grokBox("│ ❯ first    │", "│   second   │")); !found || text != "first second" {
+		t.Fatalf("two lines: got (%q, %v)", text, found)
+	}
+	if _, found := grokPaneInputText(grokBox("│ ❯ first    │", "    broken   │")); found {
+		t.Fatal("a broken side line is not a box")
+	}
+	if _, found := grokPaneInputText(grokBox("│ Select one │")); found {
+		t.Fatal("a box whose first line is not ❯ is not the composer")
+	}
+	if _, found := grokPaneInputText(grokBox()); found {
+		t.Fatal("a box with no interior is not the composer")
+	}
+	// A bottom border with two labels is not grok's border.
+	two := strings.Replace(grokBox("│ ❯          │"), " Grok 4.7 (low) ─╯", " a ─ b ─╯", 1)
+	if _, found := grokPaneInputText(two); found {
+		t.Fatal("a bottom border with two labels is not the composer")
+	}
+	// No top border within reach.
+	var tall []string
+	tall = append(tall, "│ ❯          │")
+	for i := 0; i < grokBoxMaxLines+5; i++ {
+		tall = append(tall, "│            │")
+	}
+	if _, found := grokPaneInputText(grokBox(tall...)); found {
+		t.Fatal("a box taller than grokBoxMaxLines is not the composer")
+	}
+	// Claude's screen is not a grok box.
+	if _, found := grokPaneInputText(readFixture(t, "pane-idle-empty.ansi")); found {
+		t.Fatal("a claude pane read as a grok composer")
+	}
+}
+
+// paneInputTextFor picks the parser by the row's tool, so claude fixtures
+// keep their answers and grok fixtures get the grok parser.
+func TestPaneInputTextForDispatch(t *testing.T) {
+	claude, grok := Session{}, Session{Tool: toolGrok}
+	for _, f := range []string{"pane-typed.ansi", "pane-idle-empty.ansi", "pane-slash-menu.ansi", "pane-synth-permission-dialog.ansi"} {
+		screen := readFixture(t, f)
+		wt, wf := paneInputText(screen)
+		if gt, gf := paneInputTextFor(claude, screen); gt != wt || gf != wf {
+			t.Errorf("%s: claude dispatch (%q, %v), want (%q, %v)", f, gt, gf, wt, wf)
+		}
+	}
+	if text, found := paneInputTextFor(grok, readFixture(t, "grok-typed.ansi")); !found || text != "-hello draft from probe" {
+		t.Errorf("grok dispatch: (%q, %v)", text, found)
+	}
+	if _, found := paneInputTextFor(claude, readFixture(t, "grok-idle-empty.ansi")); found {
+		t.Error("a grok pane must not read as a claude box")
+	}
 }

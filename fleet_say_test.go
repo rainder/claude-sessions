@@ -98,6 +98,52 @@ func TestFleetSayQueuedWhenBusy(t *testing.T) {
 	}
 }
 
+// useGrokScreens makes the rig's pane a grok one: empty is the fixture shown
+// before typing, and once text is typed (and Enter not yet pressed) the
+// composer holds it.
+func useGrokScreens(t *testing.T, rig *sayRig, empty string) {
+	t.Helper()
+	before := readFixture(t, empty)
+	rig.s.fleet.capture = func(string) (string, error) {
+		if len(rig.typed) > rig.enters {
+			return grokBox("│ ❯ " + rig.typed[len(rig.typed)-1] + " │"), nil
+		}
+		return before, nil
+	}
+}
+
+func TestFleetSayGrokFleet(t *testing.T) {
+	row := Session{PID: 7, Tool: toolGrok, Name: "FLEET", NameSource: "user", SessionID: "gsid", Status: "idle", Tmux: "gfleet:0.0"}
+	rig := newSayRig(t, []Session{row})
+	useGrokScreens(t, rig, "grok-idle-empty.ansi")
+	code, res := rig.post(t, `{"text":"Andy decides: yes"}`, nil)
+	if code != 200 || !res.OK || res.Queued {
+		t.Fatalf("%d %+v", code, res)
+	}
+	if len(rig.typed) != 1 || rig.typed[0] != "Andy decides: yes" || rig.enters != 1 {
+		t.Fatalf("typed %q enters %d", rig.typed, rig.enters)
+	}
+
+	row.Status = "busy"
+	rig = newSayRig(t, []Session{row})
+	useGrokScreens(t, rig, "grok-busy-empty.ansi")
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "busy" || len(rig.typed) != 0 || rig.enters != 0 {
+		t.Fatalf("busy: %+v typed %q enters %d", res, rig.typed, rig.enters)
+	}
+
+	// An unknown status (no readable events.jsonl) fails closed as busy;
+	// shell (turn over, background work open) types.
+	for st, ok := range map[string]bool{"": false, "waiting": false, "shell": true} {
+		row.Status = st
+		rig = newSayRig(t, []Session{row})
+		useGrokScreens(t, rig, "grok-shell-commands-running.ansi")
+		_, res := rig.post(t, `{"text":"hi"}`, nil)
+		if res.OK != ok || (!ok && len(rig.typed) != 0) {
+			t.Fatalf("status %q: %+v typed %q", st, res, rig.typed)
+		}
+	}
+}
+
 func TestFleetSayFlattensNewlinesAndRefusesControl(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
 	if _, res := rig.post(t, `{"text":"line one\r\nline two\nthree"}`, nil); !res.OK {

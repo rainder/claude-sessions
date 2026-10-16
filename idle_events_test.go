@@ -506,17 +506,53 @@ func TestIdleEventsDeliveryRefusalsKeepTheBatch(t *testing.T) {
 	}
 }
 
-func TestIdleEventsGrokTargetIsRefused(t *testing.T) {
+func grokFleetRow(status string) Session {
+	return Session{PID: 60, Tool: toolGrok, Name: "FLEET", NameSource: "user", SessionID: "g-fleet", Status: status, Tmux: "gfleet:0.0"}
+}
+
+// A grok FLEET is a target like a claude one: the empty target resolves to
+// it, and the text is typed into its composer and submitted.
+func TestIdleEventsGrokFleetIsDelivered(t *testing.T) {
 	rig := newIdleRig(t, "")
-	g := worker(60, "g", "idle", "fleet:0.0")
-	g.Tool = toolGrok
-	rig.rows = []Session{g}
-	if code, _ := rig.s.idleDeliver("fleet", idleTestMessage); code != "send_unsupported" || len(rig.typed) != 0 {
-		t.Fatalf("code %q typed %q", code, rig.typed)
+	useGrokScreens(t, rig.sayRig, "grok-idle-empty.ansi")
+	rig.rows = []Session{grokFleetRow("idle")}
+	code, tmux := rig.s.idleDeliver("", idleTestMessage)
+	if code != "sent" || tmux != "gfleet" {
+		t.Fatalf("code %q tmux %q", code, tmux)
 	}
-	// "" is the FLEET row, and a grok row is never FLEET.
-	if code, _ := rig.s.idleDeliver("", idleTestMessage); code != "target_missing" {
-		t.Fatalf("empty target %q", code)
+	if len(rig.typed) != 1 || rig.typed[0] != idleTestMessage || rig.enters != 1 {
+		t.Fatalf("typed %q enters %d", rig.typed, rig.enters)
+	}
+	if len(rig.targets) != 1 || rig.targets[0] != "=gfleet:0.0" {
+		t.Fatalf("typed into %v", rig.targets)
+	}
+}
+
+// A busy grok turn can be cancelled by Enter, and its empty box looks the
+// same as an idle one, so a busy grok FLEET refuses before any key.
+func TestIdleEventsGrokFleetBusyRefuses(t *testing.T) {
+	rig := newIdleRig(t, "")
+	useGrokScreens(t, rig.sayRig, "grok-busy-empty.ansi")
+	rig.rows = []Session{grokFleetRow("busy")}
+	if code, _ := rig.s.idleDeliver("", idleTestMessage); code != "busy" || len(rig.typed) != 0 || rig.enters != 0 {
+		t.Fatalf("code %q typed %q enters %d", code, rig.typed, rig.enters)
+	}
+}
+
+// ask_user_question hides grok's composer. Whether the row already says
+// waiting or not yet, nothing is typed.
+func TestIdleEventsGrokFleetQuestionDialogRefuses(t *testing.T) {
+	for _, row := range []Session{grokFleetRow("idle"), func() Session {
+		r := grokFleetRow("waiting")
+		r.WaitingFor = "input"
+		return r
+	}()} {
+		rig := newIdleRig(t, "")
+		useGrokScreens(t, rig.sayRig, "grok-question-dialog.ansi")
+		rig.rows = []Session{row}
+		if code, _ := rig.s.idleDeliver("", idleTestMessage); code != "dialog" || len(rig.typed) != 0 || rig.enters != 0 {
+			t.Fatalf("%s: code %q typed %q enters %d", row.Status, code, rig.typed, rig.enters)
+		}
 	}
 }
 

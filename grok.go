@@ -43,6 +43,9 @@ type grokActiveSession struct {
 type grokSummary struct {
 	SessionSummary string `json:"session_summary"`
 	GeneratedTitle string `json:"generated_title"`
+	// TitleIsManual is set by grok's /rename: generated_title then holds the
+	// title the user typed, not one grok made up.
+	TitleIsManual  bool   `json:"title_is_manual"`
 	CurrentModelID string `json:"current_model_id"`
 	LastActiveAt   string `json:"last_active_at"`
 	UpdatedAt      string `json:"updated_at"`
@@ -130,9 +133,13 @@ func grokSessionFrom(home string, e grokActiveSession, scanUpdates bool) (Sessio
 	// row with its pid, cwd and age.
 	if sum, ok := readGrokSummary(home, e.CWD, e.SessionID); ok {
 		s.Name = grokSummaryName(sum)
-		// The title is grok's own generated one, never something the user
-		// typed, so it takes claude's "derived" marker and renders dimmed.
-		if s.Name != "" {
+		// A title grok made up takes claude's "derived" marker and renders
+		// dimmed. One the user set with /rename (title_is_manual) is a
+		// user-set name, like claude's -n: findFleet only counts those.
+		switch {
+		case sum.TitleIsManual && sum.GeneratedTitle != "":
+			s.Name, s.NameSource = sum.GeneratedTitle, "user"
+		case s.Name != "":
 			s.NameSource = "derived"
 		}
 		s.Model = sum.CurrentModelID
@@ -267,6 +274,17 @@ func readGrokSignals(home, cwd, sessionID string) (grokSignals, bool) {
 // grokChatHistoryFile is the per-session transcript grok writes beside
 // summary.json. Resume-picker prompts come from here, not from summary.json.
 const grokChatHistoryFile = "chat_history.jsonl"
+
+// grokChatHistoryPath is the session's chat_history.jsonl, found through
+// grokSummaryPath (so the scan fallback applies). ok is false when the
+// session has no summary on disk; the file itself may still be missing.
+func grokChatHistoryPath(home, cwd, sessionID string) (string, bool) {
+	p, ok := grokSummaryPath(home, cwd, sessionID)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(filepath.Dir(p), grokChatHistoryFile), true
+}
 
 // grokEventsFile is the append-only phase log grok writes beside summary.json.
 // It is the only on-disk signal this tool can map onto Session.Status.

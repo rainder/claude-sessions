@@ -780,7 +780,13 @@ func ResumeGrokSession(sessionID, cwd string) (string, error) {
 	if _, ok := readGrokSummary(home, cwd, sessionID); !ok {
 		return "", fmt.Errorf("no grok session %s", sessionID)
 	}
-	return resumeCommon(sessionID, cwd, "grok --resume "+sessionID)
+	return resumeCommon(sessionID, cwd, grokResumeCommand(sessionID))
+}
+
+// grokResumeCommand is the shell command that resumes a grok session. It is
+// typed into a shell, so the caller must have validated sessionID.
+func grokResumeCommand(sessionID string) string {
+	return "grok --resume " + sessionID
 }
 
 func validateResumeSessionID(sessionID string) error {

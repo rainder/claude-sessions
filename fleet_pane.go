@@ -100,6 +100,115 @@ func paneInputText(capture string) (text string, found bool) {
 	return strings.Join(parts, " "), true
 }
 
+// grokBoxMaxLines bounds how far grokPaneInputText walks up from the bottom
+// border looking for the top one. A composer taller than this is not one
+// FLEET would type into.
+const grokBoxMaxLines = 40
+
+// isGrokScrollbar reports a block element (U+2580–U+259F), which grok's
+// composer scrollbar draws at the right edge of an interior line once a long
+// text scrolls (█ and the partial ▇ seen live).
+func isGrokScrollbar(r rune) bool { return r >= 0x2580 && r <= 0x259f }
+
+// paneInputTextFor reads the input box of row's tool: grok draws a rounded
+// box, claude two rule lines around a ❯ prompt.
+func paneInputTextFor(row Session, capture string) (text string, found bool) {
+	if row.IsGrok() {
+		return grokPaneInputText(capture)
+	}
+	return paneInputText(capture)
+}
+
+// grokPaneInputText finds the Grok CLI's composer in a capture-pane -e dump
+// and returns the text typed into it. The composer is a rounded box:
+//
+//	╭──────────────────────╮
+//	│ ❯ typed text         │
+//	│   wrapped line       │
+//	╰──── Grok 4.7 (low) ─╯
+//
+// It is anchored on the LAST bottom border (╰…╯, which carries a model label),
+// then walked up: every line must be a │…│ side line until the ╭…╮ top
+// border. Any other line, or no top within grokBoxMaxLines, is not a box.
+// Notices grok draws above the box ("Queued · Enter to send now") sit outside
+// it and are ignored. The first interior line must start with ❯; an empty box
+// is that glyph and spaces. Dim runs are dropped as for claude. An
+// ask_user_question dialog hides the composer entirely, so it reads as not
+// found and a send refuses. Grok also shows an empty box during a busy turn,
+// so the screen alone cannot tell busy: fleetTypeInto refuses a busy grok row
+// before it looks.
+func grokPaneInputText(capture string) (text string, found bool) {
+	lines := strings.Split(strings.TrimRight(capture, "\n"), "\n")
+	bottom := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if isGrokBorder(paneBoxLine(lines[i]), "╰", "╯") {
+			bottom = i
+			break
+		}
+	}
+	if bottom < 0 {
+		return "", false
+	}
+	top := -1
+	for i := bottom - 1; i >= 0 && bottom-i <= grokBoxMaxLines; i-- {
+		l := paneBoxLine(lines[i])
+		if isGrokBorder(l, "╭", "╮") {
+			top = i
+			break
+		}
+		if !strings.HasPrefix(l, "│") || !strings.HasSuffix(l, "│") || utf8.RuneCountInString(l) < 2 {
+			return "", false
+		}
+	}
+	if top < 0 || top+1 == bottom {
+		return "", false
+	}
+	var parts []string
+	for i := top + 1; i < bottom; i++ {
+		l := paneBoxLine(lines[i])
+		l = strings.TrimSuffix(strings.TrimPrefix(l, "│"), "│")
+		// A text taller than the composer scrolls, and grok draws the
+		// scrollbar thumb inside the right border.
+		l = strings.TrimSpace(strings.TrimRightFunc(strings.TrimSpace(l), isGrokScrollbar))
+		if i == top+1 {
+			if !strings.HasPrefix(l, "❯") {
+				return "", false
+			}
+			l = strings.TrimSpace(strings.TrimPrefix(l, "❯"))
+		}
+		if l != "" {
+			parts = append(parts, l)
+		}
+	}
+	return strings.Join(parts, " "), true
+}
+
+// paneBoxLine is one captured line's visible text, NBSP as space, trimmed.
+func paneBoxLine(line string) string {
+	return strings.TrimSpace(strings.ReplaceAll(visibleText(line), "\u00a0", " "))
+}
+
+// isGrokBorder reports a top (╭…╮) or bottom (╰…╯) border of grok's
+// composer: the corners around at least 10 ─, with at most one label of at
+// most 80 runes between ─ runs, in isRuleLine's spirit. The bottom one carries
+// the model ("Grok 4.7 (high) · always-approve"); the top one carries the
+// session title once it was set with /rename ("FLEET"), which is exactly the
+// session FLEET is.
+func isGrokBorder(s, left, right string) bool {
+	if !strings.HasPrefix(s, left) || !strings.HasSuffix(s, right) {
+		return false
+	}
+	mid := strings.TrimSuffix(strings.TrimPrefix(s, left), right)
+	if strings.Count(mid, "─") < 10 || !strings.HasPrefix(mid, "─") || !strings.HasSuffix(mid, "─") {
+		return false
+	}
+	inner := strings.Trim(mid, "─")
+	if inner == "" {
+		return true
+	}
+	return !strings.Contains(inner, "─") && utf8.RuneCountInString(inner) <= 80
+}
+
 // isRuleLine reports the border Claude Code draws above and below its input
 // box: at least 10 ─ in all, starting and ending with ─. A named session puts
 // its name into the rule ("──────── FLEET ─"), so one contiguous label of at

@@ -2324,7 +2324,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // 2xx body that is not JSON with a boolean ok): the text may have reached
   // FLEET, so the caller must not act as if it did not.
   const SAY_TIMEOUT = 15000;
-  const say = (text, cardId) => postSay("/fleet/say", {text, cardId}, null);
+  // A busy grok session refuses a send: Enter can cancel its running turn.
+  const GROK_BUSY = "The Grok session is busy. Try again when its turn ends.";
+  const say = (text, cardId) => postSay("/fleet/say", {text, cardId}, {busy: GROK_BUSY});
   // postSay is say for any send endpoint with the /fleet/say envelope.
   // codeText maps a refusal code to Andy's words before the server text.
   async function postSay(url, payload, codeText) {
@@ -3017,6 +3019,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     gone: svOpenErrors.gone,
     ambiguous: svOpenErrors.ambiguous,
     send_unsupported: "Send is not available for Grok sessions.",
+    busy: GROK_BUSY,
     dialog: "The session shows a dialog. Answer it in the terminal.",
     input_busy: "The session's input box has text in it. Clear it in the terminal, then send again.",
     not_submitted: "The text was typed but not sent. Check the terminal.",

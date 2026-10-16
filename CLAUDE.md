@@ -215,7 +215,10 @@ scan uses `os.ReadDir` and never `filepath.Glob`, for the same reason
 
 NAME prefers `generated_title`, then `session_summary`, and is marked
 `nameSource: "derived"` — grok generated it, the user did not type it — so it
-renders dimmed like claude's own derived names. A session whose summary has not
+renders dimmed like claude's own derived names. The exception is
+`title_is_manual: true`, which grok's `/rename <title>` writes beside the
+typed title in `generated_title`: that name is `nameSource: "user"`, like
+claude's `-n`, and it is what lets a grok session be FLEET. A session whose summary has not
 been written yet still renders as a row. A row with no parseable `opened_at`
 **and** no summary has nothing on disk to date it by, so `grokSessionFrom`
 stamps collection time rather than leave `StartedAt` at zero — `Session.Updated`
@@ -909,15 +912,19 @@ same. The page sends `Referrer-Policy: same-origin`,
 and the CSRF guard would refuse every send. `/fleet/usage` exists only because
 the cookie path cannot reach `/usage/numbers`.
 
-**Discovery.** Exactly one local claude row (`Tool == ""`) with a user-set
-`Name == "FLEET"` (exact match: other rows contain the word; a derived title or
-a grok row is not counted). 0 → not running, 2+ → `ambiguous`; both refuse
-sends. `fleet.code` in `/fleet/state` is the machine form of the reason:
+**Discovery.** Exactly one local row, claude or grok, with a user-set
+`Name == "FLEET"` (exact match: other rows contain the word; a derived title
+is not counted, and a grok name is user-set only after `/rename`). 0 → not
+running, 2+ → `ambiguous`; both refuse sends. One claude FLEET plus one grok
+FLEET is `ambiguous` too: nothing says which the user meant, so neither gets
+a send. `fleet.tool` is `grok` for a grok FLEET, omitted for claude. `fleet.code` in `/fleet/state` is the machine form of the reason:
 `not_live`, `ambiguous`, `list_failed` (empty when alive).
 
 **fleet-last.json** (`~/.config/claude-sessions/fleet-last.json`,
-`{sessionId, cwd, tmux, seenAt}`) is the FLEET discovery last saw alive. It is
-written (temp + rename, 0600) only when the id or cwd differ from the copy in
+`{sessionId, cwd, tmux, tool, seenAt}`) is the FLEET discovery last saw alive.
+`tool` is `grok` for a grok FLEET and omitted for claude, so a file written
+before the field existed reads as claude. It is
+written (temp + rename, 0600) only when the id, cwd or tool differ from the copy in
 memory (a new tmux name alone is stored with the next write, not written), and the first discovery loads that copy from the file, so
 neither a state poll nor a restart rewrites an unchanged file; `seenAt` moves
 only on a write. Any read or parse error is "no last session", and the id must
@@ -926,7 +933,11 @@ shell command and a transcript glob, and the looser resume id check admits
 `--dangerously-skip-permissions`. `fleet.hasLast` is true when FLEET is down
 and a start would resume it. The transcript lookup behind that and the
 read-only chat (`fleetTranscript`) runs on every poll while FLEET is down, so
-it is memoized per id: a hit until the file disappears, a miss for 30 s.
+it is memoized per id: a hit until the file disappears, a miss for 30 s. For
+a grok last session the "transcript" is `chat_history.jsonl` beside its
+`summary.json` (`grokChatHistoryPath`, so the scan fallback applies), and its
+folder is fleet-last.json's cwd: grok files a session under the cwd it started
+in, and that cwd never moves.
 
 **Start FLEET** (`POST /fleet/start`, fleet_start.go). Guards, in order, and
 why: fleet auth, cookie needs `sameOrigin` (it starts a process); one attempt
@@ -959,7 +970,10 @@ running `/fleet`; when fleet-last.json named a session that could not be
 resumed, the 200 carries `lastMissing: true` and the log line says so.
 The command is the `Opus` preset (`claude --model=opus` when missing) plus
 `--resume <id> -n FLEET` or `-n FLEET '/fleet'`; `-n` makes the name
-user-set, so discovery matches the new session. A success logs a `web-start`
+user-set, so discovery matches the new session. A grok last session resumes
+with `grok --resume <id>` (`grokResumeCommand`, as the resume picker) in its
+cwd, with no preset and no `-n`: grok keeps the `/rename` title on resume.
+Fresh is always claude. A success logs a `web-start`
 line, invalidates the session cache, and sets `fleet.starting` for 90 s or
 until FLEET is seen alive. `fleet.canStart` is `not_live`, not `lastLive`,
 no start in flight or pending, and the 60 s free. Errors never carry paths;
@@ -1004,12 +1018,25 @@ running sessions (2026-10-14, Claude Code 2.1.299, grok 1.0.52): claude stats
 it uses the new login on its next request with no restart; grok keeps its
 in-memory token until its own refresh (`expires_at` − 300 s; tokens live
 ~6 h), then adopts the disk token. Neither wrote its old token back. Re-test
-when either CLI changes major behaviour.
+when either CLI changes major behaviour. The grok note also says never to
+restart FLEET itself: FLEET may be a grok session.
 
 **Read-only chat.** When the code is `not_live` and fleet-last.json names a
 session whose transcript exists, `/fleet/chat` answers that transcript with
 the same cursor rules plus `readOnly: true`, so the page still shows what FLEET
 said last. `ambiguous` gets the empty answer: nothing says which one to show.
+A grok FLEET, live or last, answers from its `chat_history.jsonl`. The line
+decoder is the only difference (`fleetTurnDecode`; `claudeTurns` and
+`grokChatTurn`): a user line counts only with a `prompt_index` and no
+`synthetic_reason`, cleaned by the resume picker's `grokPromptText`; an
+assistant line counts when its content holds text; reasoning, tool results and
+system lines are skipped. Grok lines have no uuid or timestamp, so the uuid is
+`g` plus the line's byte offset plus a crc32 of the line, and `at` is empty
+(the page shows no time and cannot confirm a reloaded unknown send against a
+grok turn). Grok appends to the file but can also rewrite it whole (the binary
+holds a `chat_history.jsonl.sync.tmp` path): the hash keeps a rewritten line
+from taking an old turn's uuid, and `extractTurns` resets any cursor whose
+previous byte is not `\n` — every `pos` it hands out is one.
 
 **Installable app.** `/fleet/manifest.webmanifest`, `/fleet/sw.js` and the
 icons (`fleet_assets/`, embedded) need no auth: they hold nothing secret and a
@@ -1086,9 +1113,10 @@ and capture pipeline (and the inspector's `sendKeys`) goes through
 keys for an ended session would land in another; `=` errors instead. The say path resolves from a fresh `collectLocal`
 and a fresh state.json stat, then runs the same pipeline as `/fleet/say`
 (`fleetCleanSayText`, `fleetSayGateLocked`, `fleetTypeInto`): the 1 s gap is
-shared with `/fleet/say`, the 10 s double-tap key is target plus text. Grok is
-view-only (409 `send_unsupported`, `canSend: false`): the input-box parser
-knows only Claude Code's screen. The transcript filter (`fleetSessionText`)
+shared with `/fleet/say`, the 10 s double-tap key is target plus text. A grok
+row takes a send too (`canSend: true`), through its own composer parser and
+the busy refusal below. The page still maps the old `send_unsupported` code for
+an older server. The transcript filter (`fleetSessionText`)
 keeps text blocks only — never thinking or tool_use — skips compact summaries
 and any user line that carries a tool_result, and removes the wrapper blocks
 in `fleetSessionTags` (reminders, slash-command, `!` bash, hook and
@@ -1148,7 +1176,40 @@ is not visible" (`pane-named-session-busy.ansi`). If Claude Code changes how it
 draws the prompt, the parser finds no box and every send is refused (fails
 closed). Refresh `testdata/fleet/*.ansi` from a real pane when that happens;
 `pane-synth-*` are hand-built in the same escape style for states that cannot
-be produced on demand. A `dialog`, `input_busy` or `not_submitted` refusal
+be produced on demand.
+
+**Grok composer** (`grokPaneInputText`; `paneInputTextFor` picks the parser by
+the row's tool, for the first check and the land poll alike). Grok draws a
+rounded box: anchored on the **last** `╰─…─╯` bottom border (one label of at
+most 80 runes allowed, `Grok 4.7 (high) · always-approve`), then walked up
+through `│ … │` side lines to a `╭─…─╮` top border, which may hold one label
+too: after `/rename` grok writes the title there (`FLEET`), and a top border
+of `─` only refused every send to a renamed session; any other line, or no top
+within 40 lines, is no box. The first interior line must start with `❯`;
+continuation lines of wrapped text join with spaces, and grok shows a long
+text wrapped, never as `[Pasted text`. Notices above the box (`Queued · Enter
+to send now`, `Input cleared`, `◉ 2 commands still running`) sit outside it.
+An `ask_user_question` dialog hides the composer, so it reads as not found
+(`dialog`). A busy grok turn still draws an empty box, so the screen cannot
+tell busy, and Enter there is not safe: while a turn waits on background work
+or a subagent, Enter with text cancels it, and a bare Enter can force-send a
+queued message. So `fleetTypeInto` types into a grok row only when its Status
+is `idle` or `shell` (turn over, background work open — checked live: the line
+starts a new turn and the background command keeps running); anything else,
+including an empty status (no readable `events.jsonl`), refuses with code
+`busy` before it reads the pane (a claude busy row still types and queues).
+Residual, accepted: a `shell` grok can start a turn by itself when its
+background work ends, between the status read and Enter — the same window as
+the dialog race below. Grok caps the composer at about 30 lines and scrolls
+it: the top visible line keeps `❯` but shows a later part of the text, and a
+block-element scrollbar (`█`, `▇`, U+2580–U+259F) sits inside the right
+border and is dropped. So for grok the land check is `fleetTextLandedFor`: the
+box text is any non-empty piece of the sent text, not a prefix (the box was
+empty before typing). No fixture shows grok's tool-approval dialog
+(always-approve hid it); `WaitingFor` is the guard there. Fixtures:
+`testdata/fleet/grok-*.ansi`, real grok 1.0.60 panes.
+
+A `dialog`, `input_busy` or `not_submitted` refusal
 that read the pane appends an entry to
 `$XDG_STATE_HOME/claude-sessions/fleet-say.log` (default
 `~/.local/state/claude-sessions/fleet-say.log`; dir 0700, file 0600) — never
@@ -1399,10 +1460,11 @@ session id is `target`; none or two refuse and nothing is typed. An empty
 `target_missing`, two → `target_ambiguous`). That is the parity fix with
 FLEET's old `idle-stream.sh`, which ran inside FLEET and so always reached the
 current one: a pinned tmux name goes stale the moment Start FLEET opens a new
-tmux session, and every event then refuses as `target_missing` for good. A grok target
-is refused: the input-box parser knows only Claude Code's screen. Then the
+tmux session, and every event then refuses as `target_missing` for good. A
+grok target (or a grok FLEET) is a target like a claude one; a busy grok row
+refuses as `busy` and the event waits for a later poll. Then the
 shared 1 s gap and `fleetTypeInto`: the exact `=` pane target, the dialog,
-copy-mode and empty-box checks, and Enter only once the box holds the text.
+busy-grok, copy-mode and empty-box checks, and Enter only once the box holds the text.
 Typing only into an empty prompt is what keeps it from answering a dialog or
 mixing into a half-typed message. It skips `fleetCleanSayText` on purpose,
 because that refuses the tag.

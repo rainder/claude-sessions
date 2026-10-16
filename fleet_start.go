@@ -165,7 +165,8 @@ func (s *server) fleetStartPrefix() string {
 
 // fleetStart is POST /fleet/start: start FLEET in a new tmux session. It
 // resumes the session in fleet-last.json when its transcript and folder still
-// exist, else starts a fresh one running /fleet. Guards, in order: auth
+// exist (with grok when that session was grok's), else starts a fresh claude
+// one running /fleet. Guards, in order: auth
 // (cookie needs same origin), one attempt per minute, a fresh (uncached)
 // discovery that refuses when FLEET runs or two sessions claim the name, a
 // still-pending earlier start, and the last session running under another
@@ -243,13 +244,18 @@ func (s *server) fleetStart(w http.ResponseWriter, r *http.Request) {
 	f.lastStartAt = now
 	f.startStateMu.Unlock()
 
-	prefix := s.fleetStartPrefix()
 	mode, cwd, command, sid := "fresh", "", "", ""
 	if resumable {
 		// l.SessionID is a UUID (readFleetLast), so it is safe to put in a
 		// shell command unquoted.
 		mode, cwd, sid = "resume", resumeCwd, l.SessionID
-		command = prefix + " --resume " + sid + " -n " + fleetSessionName
+		if l.Tool == toolGrok {
+			// grok keeps a /rename title on resume, so discovery still finds
+			// FLEET; it has no -n.
+			command = grokResumeCommand(sid)
+		} else {
+			command = s.fleetStartPrefix() + " --resume " + sid + " -n " + fleetSessionName
+		}
 	} else {
 		cwd, err = s.fleetDefaultCwd()
 		if err != nil {
@@ -261,7 +267,7 @@ func (s *server) fleetStart(w http.ResponseWriter, r *http.Request) {
 				Error: "the default FLEET folder does not exist"})
 			return
 		}
-		command = prefix + " -n " + fleetSessionName + " " + shellQuote("/fleet")
+		command = s.fleetStartPrefix() + " -n " + fleetSessionName + " " + shellQuote("/fleet")
 	}
 	lastMissing := valid && !resumable
 

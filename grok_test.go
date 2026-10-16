@@ -700,6 +700,34 @@ func TestGrokSummaryNamePrefersGeneratedTitle(t *testing.T) {
 	}
 }
 
+// /rename sets title_is_manual and writes the typed title into
+// generated_title. That is a user-set name, so it must not carry the
+// "derived" marker: findFleet only counts user-set names.
+func TestGrokManualTitleIsUserSet(t *testing.T) {
+	cases := []struct {
+		name, body, wantName, wantSource string
+	}{
+		{"manual title", `{"generated_title": "FLEET", "title_is_manual": true, "session_summary": "x"}`, "FLEET", "user"},
+		{"generated title", `{"generated_title": "FLEET", "session_summary": "x"}`, "FLEET", "derived"},
+		{"manual flag with no title", `{"title_is_manual": true, "session_summary": "Summary"}`, "Summary", "derived"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			allPIDsAlive(t)
+			home := t.TempDir()
+			grokFixture(t, home, grokActiveOne)
+			grokSummaryFixture(t, home, "/work/trecs-brain", grokActiveOneID, c.body)
+			rows := collectGrokLocal(home)
+			if len(rows) != 1 {
+				t.Fatalf("got %d rows, want 1", len(rows))
+			}
+			if rows[0].Name != c.wantName || rows[0].NameSource != c.wantSource {
+				t.Errorf("Name/NameSource = %q/%q, want %q/%q", rows[0].Name, rows[0].NameSource, c.wantName, c.wantSource)
+			}
+		})
+	}
+}
+
 // The per-cwd directory name is url.PathEscape of the absolute path — verified
 // against the live ~/.grok/sessions directories, including a worktree path
 // whose "." and "-" are left unescaped and whose every "/" becomes %2F.

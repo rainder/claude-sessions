@@ -110,6 +110,40 @@ func TestFleetStartResumesLast(t *testing.T) {
 	}
 }
 
+// A grok last session resumes with grok in its own cwd: no claude preset, no
+// -n (grok keeps a /rename title on resume).
+func TestFleetStartResumesGrokLast(t *testing.T) {
+	s, calls, _ := fleetStartServer(t, nil)
+	cwd := t.TempDir()
+	sid := fleetUUID(46)
+	writeFleetLast(t, s, fleetLast{SessionID: sid, CWD: cwd, Tmux: "old", Tool: toolGrok})
+	putGrokChat(t, s.fleet.home, cwd, sid, `{"type":"assistant","content":"hi"}`)
+	w, out := postFleetStart(s, nil)
+	if w.Code != http.StatusOK || !out.OK || out.Mode != "resume" {
+		t.Fatalf("%d %+v", w.Code, out)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("calls %v", *calls)
+	}
+	if c := (*calls)[0]; c.cwd != cwd || c.display != "FLEET" || c.command != "grok --resume "+sid {
+		t.Fatalf("spawn = %+v", c)
+	}
+}
+
+// A grok last session whose folder is gone starts a fresh claude FLEET.
+func TestFleetStartGrokLastMissingStartsFresh(t *testing.T) {
+	s, calls, _ := fleetStartServer(t, nil)
+	sid := fleetUUID(47)
+	writeFleetLast(t, s, fleetLast{SessionID: sid, CWD: filepath.Join(t.TempDir(), "gone"), Tool: toolGrok})
+	w, out := postFleetStart(s, nil)
+	if w.Code != http.StatusOK || out.Mode != "fresh" || !out.LastMissing {
+		t.Fatalf("%d %+v", w.Code, out)
+	}
+	if c := (*calls)[0]; c.command != "claude --model=opus --x -n FLEET '/fleet'" {
+		t.Fatalf("spawn = %+v", c)
+	}
+}
+
 func TestFleetStartFresh(t *testing.T) {
 	cases := []struct {
 		name        string

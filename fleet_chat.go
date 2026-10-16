@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"os"
@@ -19,8 +21,8 @@ type fleetChatTurn struct {
 	Text string `json:"text"`
 }
 
-// fleetTurnText decides what one transcript line shows as a turn, and its
-// text; ok false skips the line.
+// fleetTurnText decides what one claude transcript line shows as a turn, and
+// its text; ok false skips the line.
 type fleetTurnText func(e *transcriptLine) (string, bool)
 
 // fleetChatText is FLEET's own chat: text blocks only, and no user line that
@@ -36,6 +38,89 @@ func fleetChatText(e *transcriptLine) (string, bool) {
 	return text, true
 }
 
+// fleetTurnDecode turns one raw transcript line, which starts at file offset
+// off, into a turn; ok false skips the line. merge, when not empty, folds a
+// later line with the same key into the turn that key started: claude writes
+// one assistant message over several lines. The decoder is what differs
+// between claude transcripts and grok's chat_history.jsonl; the byte cursors,
+// tail limits and paging around it are shared.
+type fleetTurnDecode func(line []byte, off int64) (t fleetChatTurn, merge string, ok bool)
+
+// claudeTurns decodes a claude transcript line, with text deciding what
+// shows. An assistant line's key is its message id plus request id.
+func claudeTurns(text fleetTurnText) fleetTurnDecode {
+	return func(line []byte, _ int64) (fleetChatTurn, string, bool) {
+		var e transcriptLine
+		if json.Unmarshal(line, &e) != nil || e.IsMeta {
+			return fleetChatTurn{}, "", false
+		}
+		if e.Type != "user" && e.Type != "assistant" {
+			return fleetChatTurn{}, "", false
+		}
+		t, ok := text(&e)
+		if !ok {
+			return fleetChatTurn{}, "", false
+		}
+		merge := ""
+		if e.Type == "assistant" {
+			merge = e.Message.ID + "\x00" + e.RequestID
+		}
+		return fleetChatTurn{UUID: e.UUID, Role: e.Type, At: e.Timestamp, Text: t}, merge, true
+	}
+}
+
+// grokChatTurn decodes one line of grok's chat_history.jsonl. A user line is
+// shown only when it is a real prompt (a prompt_index and no
+// synthetic_reason: grok writes context dumps and reminders as type=user
+// too), with the resume picker's cleaner (grokPromptText). An assistant line
+// is shown when its content holds text; tool calls, reasoning, tool results
+// and system lines are not. Grok lines carry no uuid or timestamp, so the
+// uuid is "g" plus the line's byte offset plus a hash of the line, and at is
+// empty. Each line is its own turn. Grok appends to the file but can also
+// rewrite it whole (it ships a chat_history.jsonl.sync.tmp path, likely
+// /compact or rewind): the hash keeps a rewritten line from taking an old
+// turn's uuid, and extractTurns resets a cursor that no longer sits on a
+// line boundary.
+func grokChatTurn(line []byte, off int64) (fleetChatTurn, string, bool) {
+	var e struct {
+		Type            string          `json:"type"`
+		Content         json.RawMessage `json:"content"`
+		SyntheticReason string          `json:"synthetic_reason"`
+		PromptIndex     *int            `json:"prompt_index"`
+	}
+	if json.Unmarshal(line, &e) != nil {
+		return fleetChatTurn{}, "", false
+	}
+	var text string
+	switch e.Type {
+	case "user":
+		if e.SyntheticReason != "" || e.PromptIndex == nil {
+			return fleetChatTurn{}, "", false
+		}
+		text = grokPromptText(e.Content)
+	case "assistant":
+		text, _ = extractTurnText(e.Content)
+	}
+	if text == "" {
+		return fleetChatTurn{}, "", false
+	}
+	uuid := fmt.Sprintf("g%d-%08x", off, crc32.ChecksumIEEE(line))
+	return fleetChatTurn{UUID: uuid, Role: e.Type, Text: text}, "", true
+}
+
+// atLineStart reports whether the byte before off is a '\n', which every pos
+// this file hands out is. A read error answers true: the old behaviour.
+func atLineStart(f *os.File, off int64) bool {
+	if off <= 0 {
+		return true
+	}
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], off-1); err != nil {
+		return true
+	}
+	return b[0] == '\n'
+}
+
 // fleetTurnRec is one turn plus where it sits in the file: first is the
 // offset of its first line (what `older` points at), changedAt of the line
 // that last set its text.
@@ -47,7 +132,7 @@ type fleetTurnRec struct {
 // scanFleetTurns reads whole lines from rd, starting at file offset off, and
 // folds them into turns. A line without '\n' is mid-write and ends the scan.
 // end is the offset just past the last whole line read.
-func scanFleetTurns(rd *bufio.Reader, off int64, text fleetTurnText) (turns []fleetTurnRec, end int64) {
+func scanFleetTurns(rd *bufio.Reader, off int64, decode fleetTurnDecode) (turns []fleetTurnRec, end int64) {
 	idx := map[string]int{}
 	end = off
 	for {
@@ -58,33 +143,25 @@ func scanFleetTurns(rd *bufio.Reader, off int64, text fleetTurnText) (turns []fl
 		lineOff := off
 		off += int64(len(line))
 		end = off
-		var e transcriptLine
-		if json.Unmarshal(line, &e) != nil || e.IsMeta {
-			continue
-		}
-		if e.Type != "user" && e.Type != "assistant" {
-			continue
-		}
-		t, ok := text(&e)
+		t, merge, ok := decode(line, lineOff)
 		if !ok {
 			continue
 		}
-		if e.Type == "assistant" {
-			key := e.Message.ID + "\x00" + e.RequestID
-			if i, ok := idx[key]; ok {
-				turns[i].Text = t
+		if merge != "" {
+			if i, ok := idx[merge]; ok {
+				turns[i].Text = t.Text
 				turns[i].changedAt = lineOff
 				continue
 			}
-			idx[key] = len(turns)
+			idx[merge] = len(turns)
 		}
-		turns = append(turns, fleetTurnRec{fleetChatTurn{UUID: e.UUID, Role: e.Type, At: e.Timestamp, Text: t}, lineOff, lineOff})
+		turns = append(turns, fleetTurnRec{t, lineOff, lineOff})
 	}
 }
 
 // extractChatTurns is extractTurns with FLEET's chat filter.
 func extractChatTurns(path string, since int64, n int, tailBytes int64) ([]fleetChatTurn, int64, bool, error) {
-	turns, pos, reset, _, err := extractTurns(path, since, n, tailBytes, fleetChatText)
+	turns, pos, reset, _, err := extractTurns(path, since, n, tailBytes, claudeTurns(fleetChatText))
 	return turns, pos, reset, err
 }
 
@@ -95,7 +172,7 @@ func extractChatTurns(path string, since int64, n int, tailBytes int64) ([]fleet
 // reset tells the page to replace its list instead of merging. older, on a
 // reset answer, is the offset to pass as `before` for the turns ahead of the
 // ones returned (0 = none known); an incremental answer leaves it 0.
-func extractTurns(path string, since int64, n int, tailBytes int64, text fleetTurnText) ([]fleetChatTurn, int64, bool, int64, error) {
+func extractTurns(path string, since int64, n int, tailBytes int64, decode fleetTurnDecode) ([]fleetChatTurn, int64, bool, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, 0, true, 0, err
@@ -126,9 +203,11 @@ func extractTurns(path string, since int64, n int, tailBytes int64, text fleetTu
 		}
 	}
 	windowStart := off
-	turns, pos := scanFleetTurns(rd, off, text)
+	turns, pos := scanFleetTurns(rd, off, decode)
 
-	reset := since <= 0 || since > size || since < windowStart
+	// A cursor not just past a '\n' is not one this file handed out: the
+	// file was rewritten (grok can) and then grew past it. Start over.
+	reset := since <= 0 || since > size || since < windowStart || !atLineStart(f, since)
 	var out []fleetTurnRec
 	for _, t := range turns {
 		if reset || t.changedAt >= since {
@@ -148,7 +227,7 @@ func extractTurns(path string, since int64, n int, tailBytes int64, text fleetTu
 // extractTurnsBefore pages backward: up to n turns whose first line starts
 // before byte offset before, read in growing chunks, and older for the page
 // ahead of them (0 = none). Only whole lines before `before` count.
-func extractTurnsBefore(path string, before int64, n int, text fleetTurnText) ([]fleetChatTurn, int64, error) {
+func extractTurnsBefore(path string, before int64, n int, decode fleetTurnDecode) ([]fleetChatTurn, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, 0, err
@@ -175,7 +254,7 @@ func extractTurnsBefore(path string, before int64, n int, text fleetTurnText) ([
 				continue
 			}
 		}
-		turns, _ := scanFleetTurns(rd, off, text)
+		turns, _ := scanFleetTurns(rd, off, decode)
 		if len(turns) < n && start > 0 && chunk < fleetLogMaxScan {
 			continue
 		}
@@ -227,9 +306,9 @@ func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 	empty := func(sid, reason string) {
 		writeJSON(w, http.StatusOK, map[string]any{"turns": []fleetChatTurn{}, "pos": 0, "reset": true, "sessionId": sid, "reason": reason})
 	}
-	_, fl := s.discoverFleet()
+	row, fl := s.discoverFleet()
 	home, homeErr := s.fleetHome()
-	sid, readOnly, path := fl.SessionID, false, ""
+	sid, readOnly, path, tool := fl.SessionID, false, "", row.Tool
 	if !fl.Alive {
 		// FLEET is down: mirror the last session read-only, so the page
 		// still shows what FLEET said last. Only for not_live: when two
@@ -240,22 +319,34 @@ func (s *server) fleetChat(w http.ResponseWriter, r *http.Request) {
 			empty("", fl.Reason)
 			return
 		}
-		if path, _, ok = s.fleetTranscript(l.SessionID); !ok {
+		if path, _, ok = s.fleetTranscript(l); !ok {
 			empty("", fl.Reason)
 			return
 		}
-		sid, readOnly = l.SessionID, true
+		sid, readOnly, tool = l.SessionID, true, l.Tool
 	} else {
 		if homeErr != nil {
 			empty(sid, "no home dir")
 			return
 		}
-		if path = findTranscript(home, sid); path == "" {
+		if tool == toolGrok {
+			// A grok FLEET's transcript is its chat_history.jsonl.
+			if p, ok := grokChatHistoryPath(home, row.CWD, sid); ok {
+				path = p
+			}
+		} else {
+			path = findTranscript(home, sid)
+		}
+		if path == "" {
 			empty(sid, "transcript not found")
 			return
 		}
 	}
-	turns, pos, reset, err := extractChatTurns(path, since, n, fleetChatTailBytes)
+	decode := claudeTurns(fleetChatText)
+	if tool == toolGrok {
+		decode = grokChatTurn
+	}
+	turns, pos, reset, _, err := extractTurns(path, since, n, fleetChatTailBytes, decode)
 	if err != nil {
 		empty(sid, "transcript unreadable")
 		return

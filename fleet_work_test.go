@@ -43,7 +43,7 @@ func TestSessionTickets(t *testing.T) {
 func workRows() []Session {
 	return []Session{
 		{PID: 7, Name: "FLEET", NameSource: "user", SessionID: "fleet-sid", Status: "shell", Tmux: "fleet:0.0"},
-		{PID: 8, Tool: toolGrok, Name: "FLEET", SessionID: "g-fleet", Status: "idle", Tmux: "named-fleet:0.0"},
+		{PID: 8, Tool: toolGrok, Name: "FLEET", NameSource: "derived", SessionID: "g-fleet", Status: "idle", Tmux: "named-fleet:0.0"},
 		{PID: 9, SessionID: "off", Status: "idle", Tmux: "off:0.0"},
 		{PID: 10, SessionID: "no-tmux", Status: "idle"},
 		{PID: 11, SessionID: "remote", Status: "idle", Tmux: "r:0.0", Host: "pi"},

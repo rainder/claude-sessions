@@ -31,9 +31,10 @@ func fleetSessionRows(workerSID string) []Session {
 		{PID: 7, Name: "FLEET", NameSource: "user", SessionID: "fleet-sid", Status: "shell", Tmux: "fleet:0.0"},
 		{PID: 11, Name: "DR-1 fix", SessionID: workerSID, Status: "busy", Model: "claude-opus-x", Tmux: "spawn-dr-1-fix:0.0"},
 		{PID: 12, Tool: toolGrok, SessionID: "grok-sid", Status: "idle", Tmux: "grok-dr-2:0.0"},
-		// A grok row titled FLEET is not FLEET for findFleet, but its tmux
-		// session still must not be typed into from here.
-		{PID: 13, Tool: toolGrok, Name: "FLEET", SessionID: "g2", Tmux: "named-fleet:0.0"},
+		// A grok row whose derived title reads FLEET is not FLEET for
+		// findFleet, but its tmux session still must not be typed into from
+		// here.
+		{PID: 13, Tool: toolGrok, Name: "FLEET", NameSource: "derived", SessionID: "g2", Tmux: "named-fleet:0.0"},
 		{PID: 14, SessionID: "dup-a", Tmux: "dup:0.0"},
 		{PID: 15, SessionID: "dup-b", Tmux: "dup:1.0"},
 		{PID: 16, SessionID: fleetUUID(199), Tmux: "spawn-dr-4:0.0"}, // no transcript on disk
@@ -239,7 +240,7 @@ func TestFleetSessionPaneSource(t *testing.T) {
 		t.Fatalf("captured %v, want the resolved row's pane", asked)
 	}
 	tg := out["target"].(map[string]any)
-	if tg["tool"] != "grok" || tg["canSend"] != false || tg["sendNote"] != "Send is not available for Grok sessions" || tg["ticket"] != "" {
+	if tg["tool"] != "grok" || tg["canSend"] != true || tg["sendNote"] != nil || tg["ticket"] != "" {
 		t.Fatalf("target %v", tg)
 	}
 	// A claude row whose transcript is not on disk falls back to the pane.
@@ -322,7 +323,6 @@ func TestFleetSessionSayRefusals(t *testing.T) {
 		{"cookie without origin", `{"target":"spawn-dr-1-fix","text":"hi"}`, func(r *http.Request) { r.Header.Del("Origin") }, 403, "origin"},
 		{"cross origin", `{"target":"spawn-dr-1-fix","text":"hi"}`, func(r *http.Request) { r.Header.Set("Origin", "http://evil.test") }, 403, "origin"},
 		{"no auth", `{"target":"spawn-dr-1-fix","text":"hi"}`, func(r *http.Request) { r.Header.Del("Cookie") }, 401, "unauthorized"},
-		{"grok", `{"target":"grok-dr-2","text":"hi"}`, nil, 409, "send_unsupported"},
 		{"not on a card and disabled", `{"target":"off","text":"hi"}`, nil, 403, "not_allowed"},
 		{"fleet itself", `{"target":"fleet","text":"hi"}`, nil, 403, "fleet_self"},
 		{"gone", `{"target":"ended-dr-3","text":"hi"}`, nil, 404, "gone"},
@@ -343,6 +343,22 @@ func TestFleetSessionSayRefusals(t *testing.T) {
 				t.Fatalf("typed into %v", *targets)
 			}
 		})
+	}
+}
+
+// A grok session takes a send like a claude one, through its composer.
+func TestFleetSessionSayGrok(t *testing.T) {
+	rig, targets := sessionSayRig(t)
+	useGrokScreens(t, rig, "grok-idle-empty.ansi")
+	code, out := rig.postSession(t, `{"target":"grok-dr-2","text":"please rebase"}`, nil)
+	if code != 200 || out["ok"] != true {
+		t.Fatalf("%d %v", code, out)
+	}
+	if len(rig.typed) != 1 || rig.typed[0] != "please rebase" || rig.enters != 1 {
+		t.Fatalf("typed %q enters %d", rig.typed, rig.enters)
+	}
+	if strings.Join(*targets, ",") != "=grok-dr-2:0.0,=grok-dr-2:0.0" {
+		t.Fatalf("keys went to %v", *targets)
 	}
 }
 

@@ -151,11 +151,11 @@ func TestFindFleet(t *testing.T) {
 	if _, reason := findFleet(two); reason != "ambiguous" {
 		t.Fatalf("two: %q", reason)
 	}
-	// A derived name or a grok row is not the user's FLEET, and does not
-	// make the real one ambiguous.
+	// A derived name, claude's or grok's, is not the user's FLEET, and does
+	// not make the real one ambiguous.
 	others := []Session{
 		{PID: 4, Name: "FLEET", NameSource: "derived"},
-		{PID: 5, Name: "FLEET", Tool: toolGrok},
+		{PID: 5, Name: "FLEET", Tool: toolGrok, NameSource: "derived"},
 		{PID: 1, Name: "FLEET", NameSource: "user"},
 	}
 	if got, reason := findFleet(others); reason != "" || got.PID != 1 {
@@ -163,6 +163,33 @@ func TestFindFleet(t *testing.T) {
 	}
 	if _, reason := findFleet(others[:2]); reason != "not running" {
 		t.Fatalf("only others: %q", reason)
+	}
+}
+
+// FLEET may be a grok session renamed to FLEET (/rename sets a user-set
+// name). One claude FLEET and one grok FLEET is ambiguous: nothing says which
+// the user meant, so both refuse.
+func TestFindFleetEitherTool(t *testing.T) {
+	claude := Session{PID: 1, Name: "FLEET", NameSource: "user", SessionID: "c"}
+	grok := Session{PID: 2, Name: "FLEET", NameSource: "user", Tool: toolGrok, SessionID: "g"}
+	if got, reason := findFleet([]Session{claude}); reason != "" || got.PID != 1 {
+		t.Fatalf("claude: %+v %q", got, reason)
+	}
+	if got, reason := findFleet([]Session{grok}); reason != "" || got.PID != 2 || got.Tool != toolGrok {
+		t.Fatalf("grok: %+v %q", got, reason)
+	}
+	if _, reason := findFleet([]Session{claude, grok}); reason != "ambiguous" {
+		t.Fatalf("claude+grok: %q, want ambiguous", reason)
+	}
+	derived := grok
+	derived.NameSource = "derived"
+	if _, reason := findFleet([]Session{derived}); reason != "not running" {
+		t.Fatalf("derived grok: %q, want not running", reason)
+	}
+	// Another tool's row is never FLEET.
+	other := Session{PID: 3, Name: "FLEET", NameSource: "user", Tool: "codex"}
+	if _, reason := findFleet([]Session{other}); reason != "not running" {
+		t.Fatalf("other tool: %q", reason)
 	}
 }
 
