@@ -305,6 +305,22 @@ section { min-width: 0; }
 .tk-st { padding: 0 6px; border: 1px solid var(--line); border-radius: 99px; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .row-l1 .tt.dim { font-weight: 450; color: var(--muted); }
 .row-l2 .mdl { white-space: nowrap; }
+/* Model summary beside the Working count: one muted line, wraps under the
+   heading on a narrow screen. A group button filters the list. */
+#h-working { flex-wrap: wrap; row-gap: 2px; }
+.msum { flex: 1 1 0; min-width: 14em; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 2px; font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
+.msum:empty { display: none; }
+.msum .sep { opacity: .6; }
+.mgrp { max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 0 3px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
+.mgrp:hover { background: var(--surface2); }
+.mgrp[aria-pressed="true"] { background: var(--accent-tint); color: var(--text); }
+.mgrp .pp { margin-left: 5px; }
+/* Pips: busy filled, idle half filled, shell hollow; drawn, since the
+   glyphs render at odd sizes in some fonts. Other statuses are "?n". */
+.pp:not(.p-other)::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 2px; border: 1.5px solid currentColor; border-radius: 50%; box-sizing: border-box; }
+.pp.p-busy { color: var(--accent); } .pp.p-busy::before { background: currentColor; }
+.pp.p-idle { color: var(--amber); } .pp.p-idle::before { background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
+.pp.p-shell, .pp.p-other { color: var(--muted); }
 .row-body.note-body { padding-top: 0; margin-top: -4px; font-size: 13px; overflow-wrap: anywhere; }
 .ended { margin-top: 8px; }
 .ended > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 2px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
@@ -685,7 +701,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
     <div class="col col-lists">
       <section class="sec-fleet" aria-labelledby="h-working">
-        <h2 class="sec-h" id="h-working">Working <span class="n" id="n-working">0</span></h2>
+        <h2 class="sec-h" id="h-working">Working <span class="n" id="n-working">0</span><span class="msum" id="msum-working"></span></h2>
         <div id="list-working"></div>
         <div id="list-ended"></div>
       </section>
@@ -1958,9 +1974,45 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     l2.append(se);
     return el("div", "row", el("div", "row-head", el("div", "row-main", workL1(r, tm), l2)));
   }
+  // modelFamily groups a row for the model summary: Fable/Opus/Sonnet/Haiku
+  // by substring, any grok row as Grok, else the raw model or "?".
+  const FAMILIES = ["Fable", "Opus", "Sonnet", "Haiku", "Grok"];
+  function modelFamily(r) {
+    if (str(r.tool) === "grok") return "Grok";
+    const m = str(r.model), lm = m.toLowerCase();
+    return FAMILIES.slice(0, 4).find(f => lm.includes(f.toLowerCase())) || m || "?";
+  }
+  let workModel = "";
+  const PIPS = [["busy", ""], ["idle", ""], ["shell", ""], ["other", "?"]];
+  function renderModelSummary(rows) {
+    const g = new Map();
+    for (const r of rows) {
+      const f = modelFamily(r), st = str(r.status), k = st === "busy" || st === "idle" || st === "shell" ? st : "other";
+      const c = g.get(f) || { n: 0, busy: 0, idle: 0, shell: 0, other: 0 };
+      c.n++; c[k]++; g.set(f, c);
+    }
+    const rank = f => { const i = FAMILIES.indexOf(f); return i < 0 ? FAMILIES.length : i; };
+    const out = [];
+    [...g.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).forEach(f => {
+      const c = g.get(f);
+      const b = fkey(el("button", "mgrp", f + " " + c.n, ...PIPS.filter(([k]) => c[k]).map(([k, ch]) => el("span", "pp p-" + k, ch + c[k]))), "msum:" + f);
+      b.type = "button";
+      b.title = f + ": " + c.n + " session" + (c.n === 1 ? "" : "s") + " — " +
+        PIPS.filter(([k]) => c[k]).map(([k]) => c[k] + " " + k).join(", ") + (workModel === f ? " (click to show all)" : "");
+      b.setAttribute("aria-label", b.title);
+      b.setAttribute("aria-pressed", workModel === f ? "true" : "false");
+      b.addEventListener("click", () => { workModel = workModel === f ? "" : f; keepFocus(renderWork); });
+      if (out.length) out.push(el("span", "sep", "·"));
+      out.push(b);
+    });
+    $("msum-working").replaceChildren(...out);
+  }
   function renderWork() {
     const raw = state ? state.sessions : undefined;
-    const rows = arr(raw).map(obj).filter(r => r && str(r.tmux));
+    const all = arr(raw).map(obj).filter(r => r && str(r.tmux));
+    if (workModel && !all.some(r => modelFamily(r) === workModel)) workModel = "";
+    renderModelSummary(all);
+    const rows = workModel ? all.filter(r => modelFamily(r) === workModel) : all;
     $("n-working").textContent = rows.length;
     const box = $("list-working");
     if (raw === null) box.replaceChildren(el("p", "empty", "Session list unavailable."));
