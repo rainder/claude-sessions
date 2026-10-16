@@ -1015,8 +1015,9 @@ func (d *idleDeps) logGateLocked(key string) bool {
 // whose tmux session or session id is target — or, for an empty target, the
 // one FLEET row findFleet picks on that same list — else target_missing /
 // target_ambiguous, nothing typed; then the shared 1 s gap, and fleetTypeInto
-// (exact "=" pane, dialog and copy-mode refusals, an empty input box, Enter
-// only when the box holds the text). It skips fleetCleanSayText on purpose:
+// (exact "=" pane, dialog, busy-grok and copy-mode refusals, an empty input
+// box, Enter only when the box holds the text). A claude or a grok row is a
+// target alike. It skips fleetCleanSayText on purpose:
 // that refuses the event tag. code is "sent" or the refusal code; tmux names
 // the target row when one was resolved.
 func (s *server) idleDeliver(target, text string) (code, tmux string) {
@@ -1055,9 +1056,6 @@ func (s *server) idleDeliver(target, text string) (code, tmux string) {
 		row = hits[0]
 	}
 	tmux = tmuxSessionPart(row.Tmux)
-	if row.IsGrok() { // the input-box parser knows only Claude Code's screen
-		return "send_unsupported", tmux
-	}
 	key := "\x00idle-events\x00" + text
 	if res := s.fleetSayGateLocked(key); res != nil {
 		return res.Code, tmux

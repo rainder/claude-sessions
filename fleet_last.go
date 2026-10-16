@@ -16,7 +16,10 @@ type fleetLast struct {
 	SessionID string `json:"sessionId"`
 	CWD       string `json:"cwd"`
 	Tmux      string `json:"tmux"`
-	SeenAt    string `json:"seenAt"` // refreshed only on a write
+	// Tool is "grok" for a grok FLEET. Omitted is claude, so a file written
+	// before the field existed still reads as the claude session it was.
+	Tool   string `json:"tool,omitempty"`
+	SeenAt string `json:"seenAt"` // refreshed only on a write
 }
 
 func (s *server) fleetLastPath() string {
@@ -37,10 +40,10 @@ func (s *server) fleetHome() (string, error) {
 	return os.UserHomeDir()
 }
 
-// fleetSessionIDRe is the only id shape fleet-last.json may hold: a Claude
-// Code session UUID. The resume id check alone (resumeSessionIDRe) admits
-// "--dangerously-skip-permissions", which would turn into a flag in the
-// command a start types.
+// fleetSessionIDRe is the only id shape fleet-last.json may hold: a UUID,
+// which both Claude Code and grok session ids are. The resume id check alone
+// (resumeSessionIDRe) admits "--dangerously-skip-permissions", which would
+// turn into a flag in the command a start types.
 var fleetSessionIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func validFleetSessionID(id string) bool {
@@ -65,7 +68,7 @@ func readFleetLast(path string) (fleetLast, bool) {
 	return l, true
 }
 
-// rememberFleet writes fleet-last.json when the alive FLEET's id or cwd
+// rememberFleet writes fleet-last.json when the alive FLEET's id, cwd or tool
 // differ from the copy in memory (a new tmux name alone is not worth a
 // write; it is stored with the next one). State polls run every few seconds,
 // so an unchanged FLEET must cost nothing. The first call loads the file, so
@@ -84,10 +87,10 @@ func (s *server) rememberFleet(sess Session) {
 		f.lastLoaded = true
 	}
 	m := f.lastMem
-	if m.SessionID == sess.SessionID && m.CWD == sess.CWD {
+	if m.SessionID == sess.SessionID && m.CWD == sess.CWD && m.Tool == sess.Tool {
 		return
 	}
-	l := fleetLast{SessionID: sess.SessionID, CWD: sess.CWD, Tmux: sess.Tmux,
+	l := fleetLast{SessionID: sess.SessionID, CWD: sess.CWD, Tmux: sess.Tmux, Tool: sess.Tool,
 		SeenAt: s.fleetNow().UTC().Format(time.RFC3339)}
 	f.lastMem = l
 	if path == "" {
@@ -114,13 +117,18 @@ type fleetScript struct {
 	missAt    time.Time
 }
 
-// fleetTranscript finds sid's transcript and the cwd its head records. A hit
-// is reused until the file disappears; a miss for fleetScriptMissTTL.
-func (s *server) fleetTranscript(sid string) (path, cwd string, ok bool) {
+// fleetTranscript finds the last session's transcript and the cwd it started
+// in. A hit is reused until the file disappears; a miss for
+// fleetScriptMissTTL. For claude that is the transcript and the cwd its head
+// records. For grok it is chat_history.jsonl beside the session's
+// summary.json, and l.CWD: grok files a session under the cwd it was
+// started in, and its registry cwd never moves.
+func (s *server) fleetTranscript(l fleetLast) (path, cwd string, ok bool) {
 	f := &s.fleet
 	now := s.fleetNow()
+	key := l.Tool + "\x00" + l.SessionID
 	f.scriptMu.Lock()
-	c, hit := f.scripts[sid]
+	c, hit := f.scripts[key]
 	f.scriptMu.Unlock()
 	if hit {
 		if c.path != "" {
@@ -133,7 +141,13 @@ func (s *server) fleetTranscript(sid string) (path, cwd string, ok bool) {
 	}
 	c = fleetScript{missAt: now}
 	if home, err := s.fleetHome(); err == nil {
-		if p := findTranscript(home, sid); p != "" {
+		if l.Tool == toolGrok {
+			if p, ok := grokChatHistoryPath(home, l.CWD, l.SessionID); ok {
+				if _, err := os.Stat(p); err == nil {
+					c = fleetScript{path: p, cwd: l.CWD}
+				}
+			}
+		} else if p := findTranscript(home, l.SessionID); p != "" {
 			head, _ := readResumableHeadFn(p)
 			c = fleetScript{path: p, cwd: head.cwd}
 		}
@@ -142,7 +156,7 @@ func (s *server) fleetTranscript(sid string) (path, cwd string, ok bool) {
 	if f.scripts == nil {
 		f.scripts = map[string]fleetScript{}
 	}
-	f.scripts[sid] = c
+	f.scripts[key] = c
 	f.scriptMu.Unlock()
 	return c.path, c.cwd, c.path != ""
 }
@@ -152,13 +166,14 @@ func (s *server) fleetTranscript(sid string) (path, cwd string, ok bool) {
 // exists and its folder is still a directory. cwd is the folder the session
 // started in, from the transcript head: claude keys a transcript to that
 // folder, and the session's own cwd moves when it enters a worktree.
-// fleet-last.json's cwd is only the fallback for a head that has none.
+// fleet-last.json's cwd is only the fallback for a head that has none, and
+// the answer for a grok session (fleetTranscript).
 func (s *server) fleetLastPlan() (l fleetLast, cwd string, valid, ok bool) {
 	l, valid = readFleetLast(s.fleetLastPath())
 	if !valid {
 		return fleetLast{}, "", false, false
 	}
-	_, cwd, found := s.fleetTranscript(l.SessionID)
+	_, cwd, found := s.fleetTranscript(l)
 	if !found {
 		return l, "", true, false
 	}

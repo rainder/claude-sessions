@@ -173,7 +173,9 @@ type fleetSession struct {
 	SessionID string `json:"sessionId"`
 	PID       int    `json:"pid"`
 	Status    string `json:"status"`
-	Reason    string `json:"reason,omitempty"`
+	// Tool is "grok" for a grok FLEET, omitted for claude.
+	Tool   string `json:"tool,omitempty"`
+	Reason string `json:"reason,omitempty"`
 	// Code is the machine form of Reason; empty when alive.
 	Code string `json:"code,omitempty"`
 	// HasLast: FLEET is not alive and fleet-last.json names a session that
@@ -204,14 +206,17 @@ var fleetReasonCodes = map[string]string{
 	"session list failed": "list_failed",
 }
 
-// findFleet picks the one local claude session the user named exactly FLEET.
+// findFleet picks the one local session the user named exactly FLEET. It may
+// be a claude or a grok session. One of each is "ambiguous", like two of one:
+// nothing says which the user meant, so both refuse rather than guess.
 func findFleet(sessions []Session) (Session, string) {
 	var hit Session
 	n := 0
 	for _, sess := range sessions {
-		// Only a claude row with a user-set name: a derived title or a grok
-		// row that happens to read "FLEET" is not the user's FLEET.
-		if sess.Name == fleetSessionName && sess.Tool == "" && sess.NameSource != "derived" {
+		// Only a user-set name counts: a title claude or grok derived that
+		// happens to read "FLEET" is not the user's FLEET. A grok name is
+		// user-set only after /rename (title_is_manual, grokSessionFrom).
+		if sess.Name == fleetSessionName && (sess.Tool == "" || sess.Tool == toolGrok) && sess.NameSource != "derived" {
 			hit = sess
 			n++
 		}
@@ -262,7 +267,7 @@ func (s *server) discoverFleetList() (Session, fleetSession, []Session) {
 		return Session{}, fleetSessionDown(reason), sessions
 	}
 	s.rememberFleet(sess)
-	return sess, fleetSession{Alive: true, SessionID: sess.SessionID, PID: sess.PID, Status: fleetStatus(sess)}, sessions
+	return sess, fleetSession{Alive: true, SessionID: sess.SessionID, PID: sess.PID, Status: fleetStatus(sess), Tool: sess.Tool}, sessions
 }
 
 func fleetSessionDown(reason string) fleetSession {

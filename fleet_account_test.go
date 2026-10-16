@@ -184,8 +184,15 @@ func TestFleetAccountSwitchFallsBackToFleetRow(t *testing.T) {
 	if len(*events) != 1 || (*events)[0].target != "" {
 		t.Fatalf("events %v", *events)
 	}
-	if !strings.HasPrefix((*events)[0].text, "[claude-sessions event] account grok switched from - to gy; ") {
+	if !strings.HasPrefix((*events)[0].text, "[claude-sessions event] account grok switched from - to gy; ") ||
+		!strings.HasSuffix((*events)[0].text, fleetSwitchEventNote("grok")) {
 		t.Fatalf("event text %q", (*events)[0].text)
+	}
+	// FLEET may be grok: the note must say never to restart FLEET, and it
+	// must stay one plain line FLEET reads as a status report.
+	note := fleetSwitchEventNote("grok")
+	if !strings.Contains(note, "never restart FLEET itself") || fleetHasEventPhrase(note) || strings.ContainsAny(note, "\"[]\n") {
+		t.Fatalf("grok note %q", note)
 	}
 	if lines := readFleetLogLines(t, s); len(lines) != 1 || lines[0].Text != "grok account - -> gy" {
 		t.Fatalf("log %+v", lines)

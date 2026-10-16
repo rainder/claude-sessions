@@ -95,10 +95,24 @@ func tmuxTypeLiteral(target, text string) error {
 	return exec.Command("tmux", "send-keys", "-t", tmuxExactTarget(target), "-l", "--", text).Run()
 }
 
+// fleetTextLandedFor is fleetTextLanded for row's tool. Grok caps its
+// composer at about 30 lines and scrolls it, so a long text shows only a
+// later part of it: for grok the box text has to be a non-empty piece of the
+// sent text, anywhere in it, whitespace ignored. The box was empty before
+// the text was typed, so whatever it holds now came from this send.
+func fleetTextLandedFor(row Session, box, sent string) bool {
+	if row.IsGrok() {
+		b := stripSpace(box)
+		return b != "" && strings.Contains(stripSpace(sent), b)
+	}
+	return fleetTextLanded(box, sent)
+}
+
 // fleetTextLanded reports whether the input box holds what was just typed.
-// Claude may wrap a long line or still be drawing it, so the box text only
-// has to be a non-empty prefix of the sent text, whitespace ignored. A long
-// paste shows as a "[Pasted text ...]" placeholder instead.
+// Claude or grok may wrap a long line or still be drawing it, so the box
+// text only has to be a non-empty prefix of the sent text, whitespace
+// ignored. A long paste shows in Claude Code as a "[Pasted text ...]"
+// placeholder instead; grok wraps it inside the box (fleetTextLandedFor).
 func fleetTextLanded(box, sent string) bool {
 	if strings.HasPrefix(box, "[Pasted text") {
 		return true
@@ -327,9 +341,10 @@ type fleetSayWho struct {
 var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane", paneLog: true}
 
 // fleetTypeInto is the pane half of every page send: refuse a session that
-// waits on a dialog, has no pane, shows no empty input box, or is in copy
-// mode; type the text; press Enter only once the box holds it. row must be a
-// freshly resolved session: its Tmux is the only pane address used. Caller
+// waits on a dialog, is a busy grok session, has no pane, shows no empty
+// input box (claude's or grok's, paneInputTextFor), or is in copy mode; type
+// the text; press Enter only once the box holds it. row must be a freshly
+// resolved session: its Tmux is the only pane address used. Caller
 // holds sayMu. The result is the response envelope; ok false with code
 // not_submitted means the text was typed but Enter was not pressed.
 func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetSayResult {
@@ -337,6 +352,15 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 	refuse := func(code, msg string) fleetSayResult { return fleetSayResult{Code: code, Error: msg} }
 	if row.Waiting() {
 		return refuse("dialog", who.subject+" shows a dialog. Answer it in the terminal.")
+	}
+	// Claude queues a message typed mid-turn. Grok does not always: while
+	// its turn waits on background work or a subagent, Enter with text
+	// cancels that turn, and a bare Enter can force-send a queued one. Its
+	// box looks the same idle or busy, so the status is the only guard, and
+	// it fails closed: only idle, or shell (turn over, background work open),
+	// types. An empty status (no readable events.jsonl yet) refuses too.
+	if row.IsGrok() && row.Status != "idle" && row.Status != "shell" {
+		return refuse("busy", who.subject+" is busy. Grok can cancel a running turn on Enter, so wait until its turn ends.")
 	}
 	if row.Tmux == "" {
 		return refuse("no_pane", who.subject+" has no tmux pane")
@@ -350,7 +374,7 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 	if err != nil {
 		return refuse("no_pane", "cannot read "+who.pane)
 	}
-	if typed, found := paneInputText(screen); !found {
+	if typed, found := paneInputTextFor(row, screen); !found {
 		s.logFleetSendRefusal(who, "dialog", row.Tmux, screen, text)
 		return refuse("dialog", who.subject+" input box is not visible")
 	} else if typed != "" {
@@ -395,11 +419,11 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 			continue
 		}
 		lastScreen = screen
-		typed, found := paneInputText(screen)
+		typed, found := paneInputTextFor(row, screen)
 		if !found {
 			break
 		}
-		landed = fleetTextLanded(typed, text)
+		landed = fleetTextLandedFor(row, typed, text)
 	}
 	if !landed {
 		s.logFleetSendRefusal(who, "not_submitted", row.Tmux, lastScreen, text)

@@ -26,7 +26,6 @@ const (
 	fleetSessionTurnsDefault = 100
 	fleetSessionPaneMax      = 64 << 10
 	fleetSessionPaneLines    = 200
-	fleetGrokSendNote        = "Send is not available for Grok sessions"
 )
 
 var fleetSessionNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -186,7 +185,7 @@ func contentHasBlock(raw json.RawMessage, typ string) bool {
 // thinking or tool_use); no compact summary and no user line carrying a
 // tool_result; wrapper blocks removed; a turn empty after that, or a user
 // turn still starting with "<", is skipped. isMeta lines are skipped by
-// scanFleetTurns.
+// claudeTurns.
 func fleetSessionText(e *transcriptLine) (string, bool) {
 	user := e.Type == "user"
 	if e.IsCompactSummary || (user && contentHasBlock(e.Message.Content, "tool_result")) {
@@ -257,14 +256,13 @@ type fleetSessionTarget struct {
 	Tool      string `json:"tool"`
 	SessionID string `json:"sessionId"`
 	CanSend   bool   `json:"canSend"`
-	SendNote  string `json:"sendNote,omitempty"`
 }
 
 func fleetSessionTargetOf(name string, row Session, card fleetCardInfo) fleetSessionTarget {
 	t := fleetSessionTarget{Tmux: name, Ticket: card.Ticket, Title: card.Title, Kind: card.Kind,
 		Model: row.Model, Status: fleetStatus(row), Tool: "claude", SessionID: row.SessionID, CanSend: true}
 	if row.IsGrok() {
-		t.Tool, t.CanSend, t.SendNote = "grok", false, fleetGrokSendNote
+		t.Tool = "grok"
 	}
 	return t
 }
@@ -318,10 +316,10 @@ func (s *server) fleetSessionGet(w http.ResponseWriter, r *http.Request) {
 		var turns []fleetChatTurn
 		var err error
 		if before > 0 {
-			turns, out.Older, err = extractTurnsBefore(path, before, int(n), fleetSessionText)
+			turns, out.Older, err = extractTurnsBefore(path, before, int(n), claudeTurns(fleetSessionText))
 			out.Reset = false
 		} else {
-			turns, out.Pos, out.Reset, out.Older, err = extractTurns(path, since, int(n), fleetChatTailBytes, fleetSessionText)
+			turns, out.Pos, out.Reset, out.Older, err = extractTurns(path, since, int(n), fleetChatTailBytes, claudeTurns(fleetSessionText))
 		}
 		if err == nil {
 			out.Source = "transcript"
@@ -422,11 +420,6 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 	row, _, rerr := s.fleetResolveSession(name, sessions)
 	if rerr != nil {
 		writeFleetSessionErr(w, rerr, name)
-		return
-	}
-	if row.IsGrok() {
-		// fleetTypeInto's input-box parser knows only Claude Code's screen.
-		writeFleetSessionErr(w, &fleetSessionErr{http.StatusConflict, "send_unsupported", fleetGrokSendNote}, name)
 		return
 	}
 	res := s.fleetTypeInto(row, text, fleetSayOther)

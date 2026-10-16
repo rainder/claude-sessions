@@ -29,7 +29,9 @@ const (
 	fleetSwitchHintClaude = "Running Claude sessions switch to the new login on their next message. No restart needed."
 	fleetSwitchHintGrok   = "Running Grok sessions keep the old login for up to 6 h. Restart them to switch now."
 	fleetSwitchNoteClaude = "running sessions use the new login on their next message; resume the ones the old limit blocked"
-	fleetSwitchNoteGrok   = "running grok sessions keep the old login up to 6 h; restart them to move now"
+	// FLEET may itself be a grok session; restarting it would end the very
+	// session reading this line, so the note says not to.
+	fleetSwitchNoteGrok = "running grok sessions keep the old login up to 6 h; restart them to move now, but never restart FLEET itself"
 )
 
 // fleetSwitchEventNote is the provider's closing note on the event line.

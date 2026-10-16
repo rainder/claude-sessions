@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -222,29 +223,93 @@ func TestFleetTranscriptMemo(t *testing.T) {
 	readResumableHeadFn = func(p string) (resumableHead, bool) { reads++; return real(p) }
 	t.Cleanup(func() { readResumableHeadFn = real })
 
-	if _, _, ok := s.fleetTranscript(sid); ok {
+	if _, _, ok := s.fleetTranscript(fleetLast{SessionID: sid}); ok {
 		t.Fatal("no transcript yet")
 	}
 	// A miss is reused for 30 s, even once the file exists.
 	path := putFleetTranscript(t, s.fleet.home, sid, `{"type":"user","cwd":"/started/here"}`)
 	now = now.Add(29 * time.Second)
-	if _, _, ok := s.fleetTranscript(sid); ok {
+	if _, _, ok := s.fleetTranscript(fleetLast{SessionID: sid}); ok {
 		t.Fatal("a miss must be reused for 30 s")
 	}
 	now = now.Add(time.Second)
-	got, cwd, ok := s.fleetTranscript(sid)
+	got, cwd, ok := s.fleetTranscript(fleetLast{SessionID: sid})
 	if !ok || got != path || cwd != "/started/here" || reads != 1 {
 		t.Fatalf("after 30 s: %q %q %v reads %d", got, cwd, ok, reads)
 	}
 	// A hit is reused (no new head read) for as long as the file exists.
 	now = now.Add(time.Hour)
-	if _, _, ok := s.fleetTranscript(sid); !ok || reads != 1 {
+	if _, _, ok := s.fleetTranscript(fleetLast{SessionID: sid}); !ok || reads != 1 {
 		t.Fatalf("hit: %v reads %d", ok, reads)
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := s.fleetTranscript(sid); ok {
+	if _, _, ok := s.fleetTranscript(fleetLast{SessionID: sid}); ok {
 		t.Fatal("a removed transcript must stop resolving")
+	}
+}
+
+// A grok FLEET is remembered with its tool, and a change of tool alone is a
+// change worth writing.
+func TestFleetLastRecordsTool(t *testing.T) {
+	sid := fleetUUID(42)
+	sessions := []Session{{PID: 7, Tool: toolGrok, Name: "FLEET", NameSource: "user", SessionID: sid, CWD: "/w", Tmux: "t"}}
+	s := fleetTestServer(t, nil)
+	s.collect = func() ([]Session, error) { return sessions, nil }
+	getFleetJSON(t, s, "/fleet/state")
+	if got, ok := readFleetLastFile(t, s); !ok || got.Tool != toolGrok || got.SessionID != sid {
+		t.Fatalf("grok FLEET = %+v %v", got, ok)
+	}
+	sessions = []Session{{PID: 7, Name: "FLEET", NameSource: "user", SessionID: sid, CWD: "/w", Tmux: "t"}}
+	s.invalidateSessions()
+	getFleetJSON(t, s, "/fleet/state")
+	data, _ := os.ReadFile(s.fleet.lastPath)
+	if got, _ := readFleetLastFile(t, s); got.Tool != "" || strings.Contains(string(data), `"tool"`) {
+		t.Fatalf("claude FLEET must omit tool: %s", data)
+	}
+}
+
+// A fleet-last.json written before the tool field existed is claude's.
+func TestFleetLastWithoutToolIsClaude(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	sid := fleetUUID(43)
+	if err := os.MkdirAll(filepath.Dir(s.fleet.lastPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"sessionId":"` + sid + `","cwd":"/w","tmux":"t","seenAt":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(s.fleet.lastPath, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, ok := readFleetLast(s.fleet.lastPath)
+	if !ok || l.Tool != "" {
+		t.Fatalf("%+v %v", l, ok)
+	}
+	path := putFleetTranscript(t, s.fleet.home, sid, `{"type":"user","cwd":"/head"}`)
+	if got, cwd, ok := s.fleetTranscript(l); !ok || got != path || cwd != "/head" {
+		t.Fatalf("claude transcript = %q %q %v", got, cwd, ok)
+	}
+}
+
+// A grok last session's transcript is its chat_history.jsonl, and its cwd
+// is fleet-last.json's own.
+func TestFleetTranscriptGrok(t *testing.T) {
+	s := fleetTestServer(t, nil)
+	sid := fleetUUID(44)
+	l := fleetLast{SessionID: sid, CWD: "/w/grok", Tool: toolGrok}
+	if _, _, ok := s.fleetTranscript(l); ok {
+		t.Fatal("no grok session on disk yet")
+	}
+	path := putGrokChat(t, s.fleet.home, "/w/grok", sid, `{"type":"assistant","content":"hi"}`)
+	s.fleet.now = func() time.Time { return time.Now().Add(time.Minute) } // past the miss memo
+	got, cwd, ok := s.fleetTranscript(l)
+	if !ok || got != path || cwd != "/w/grok" {
+		t.Fatalf("grok transcript = %q %q %v", got, cwd, ok)
+	}
+	// A claude transcript of the same id does not stand in for grok's.
+	sid2 := fleetUUID(45)
+	putFleetTranscript(t, s.fleet.home, sid2, `{"type":"user"}`)
+	if _, _, ok := s.fleetTranscript(fleetLast{SessionID: sid2, CWD: "/w/grok", Tool: toolGrok}); ok {
+		t.Fatal("a claude transcript must not resolve a grok last session")
 	}
 }

@@ -232,3 +232,132 @@ func TestFleetChatNoFallback(t *testing.T) {
 		})
 	}
 }
+
+// putGrokChat writes a grok session's summary.json and chat_history.jsonl
+// under home and returns the chat_history path.
+func putGrokChat(t *testing.T, home, cwd, sid string, lines ...string) string {
+	t.Helper()
+	grokSummaryFixture(t, home, cwd, sid, `{"generated_title": "FLEET", "title_is_manual": true}`)
+	p, ok := grokChatHistoryPath(home, cwd, sid)
+	if !ok {
+		t.Fatal("no grok summary")
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// grokChatFixture is the shape of a real chat_history.jsonl: a system line,
+// a synthetic reminder, a real prompt, reasoning, an assistant line with a
+// tool call and text, a tool result, and a final answer.
+var grokChatFixture = []string{
+	`{"type":"system","content":"You are Grok"}`,
+	`{"type":"user","content":[{"type":"text","text":"<system-reminder>ctx</system-reminder>"}],"synthetic_reason":"project_instructions"}`,
+	`{"type":"user","content":[{"type":"text","text":"<user_query>\nhello   fleet\n</user_query>"}],"prompt_index":0}`,
+	`{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}]}`,
+	`{"type":"assistant","content":"I will check.","tool_calls":[{"id":"c1","name":"run"}]}`,
+	`{"type":"tool_result","tool_call_id":"c1","content":"exit: 0"}`,
+	`{"type":"assistant","content":"","tool_calls":[{"id":"c2","name":"run"}]}`,
+	`{"type":"user","content":"no prompt index: not a real prompt"}`,
+	`{"type":"assistant","content":"all quiet"}`,
+}
+
+func TestGrokChatTurns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat_history.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(grokChatFixture, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turns, pos, reset, older, err := extractTurns(path, 0, 50, 1<<20, grokChatTurn)
+	if err != nil || !reset || older != 0 {
+		t.Fatalf("err %v reset %v older %d", err, reset, older)
+	}
+	want := []struct{ role, text string }{{"user", "hello fleet"}, {"assistant", "I will check."}, {"assistant", "all quiet"}}
+	if len(turns) != len(want) {
+		t.Fatalf("turns %+v", turns)
+	}
+	for i, w := range want {
+		if turns[i].Role != w.role || turns[i].Text != w.text || turns[i].At != "" || !strings.HasPrefix(turns[i].UUID, "g") {
+			t.Errorf("turn %d = %+v, want %s %q", i, turns[i], w.role, w.text)
+		}
+	}
+	// The uuid is the line's byte offset plus a hash of the line: stable,
+	// so the page can upsert, and a rewritten line gets a new one.
+	off := int64(len(strings.Join(grokChatFixture[:2], "\n")) + 1)
+	if !strings.HasPrefix(turns[0].UUID, "g"+strconv.FormatInt(off, 10)+"-") {
+		t.Fatalf("uuid %q, want g%d-<hash>", turns[0].UUID, off)
+	}
+	// Same since cursor: an unchanged file returns nothing, an append
+	// returns only the new turn.
+	if again, p2, r2, _, _ := extractTurns(path, pos, 50, 1<<20, grokChatTurn); len(again) != 0 || p2 != pos || r2 {
+		t.Fatalf("unchanged: %+v %d %v", again, p2, r2)
+	}
+	appendChat(t, path, `{"type":"user","content":"next","prompt_index":1}`)
+	if more, _, r3, _, _ := extractTurns(path, pos, 50, 1<<20, grokChatTurn); len(more) != 1 || more[0].Text != "next" || r3 {
+		t.Fatalf("append: %+v %v", more, r3)
+	}
+	// Paging backward uses the same decoder and offsets.
+	back, _, err := extractTurnsBefore(path, pos, 2, grokChatTurn)
+	if err != nil || len(back) != 2 || back[1].UUID != turns[2].UUID {
+		t.Fatalf("before: %+v %v", back, err)
+	}
+}
+
+func TestFleetChatGrokAlive(t *testing.T) {
+	sid := fleetUUID(40)
+	row := Session{PID: 1, Tool: toolGrok, Name: "FLEET", NameSource: "user", SessionID: sid, CWD: "/w/grok"}
+	s := fleetTestServer(t, []Session{row})
+	putGrokChat(t, s.fleet.home, "/w/grok", sid, grokChatFixture...)
+	out := getFleetJSON(t, s, "/fleet/chat")
+	turns := out["turns"].([]any)
+	if len(turns) != 3 || out["sessionId"] != sid || turns[2].(map[string]any)["text"] != "all quiet" {
+		t.Fatalf("got %v", out)
+	}
+	if _, ok := out["readOnly"]; ok {
+		t.Fatalf("alive grok FLEET must not be read-only: %v", out)
+	}
+	if fl := getFleetJSON(t, s, "/fleet/state")["fleet"].(map[string]any); fl["tool"] != "grok" {
+		t.Fatalf("state fleet = %v", fl)
+	}
+}
+
+func TestFleetChatGrokReadOnlyFallback(t *testing.T) {
+	sid := fleetUUID(41)
+	s := fleetTestServer(t, nil)
+	writeFleetLast(t, s, fleetLast{SessionID: sid, CWD: "/w/grok", Tool: toolGrok})
+	path := putGrokChat(t, s.fleet.home, "/w/grok", sid, grokChatFixture...)
+	out := getFleetJSON(t, s, "/fleet/chat")
+	if len(out["turns"].([]any)) != 3 || out["sessionId"] != sid || out["readOnly"] != true {
+		t.Fatalf("got %v", out)
+	}
+	pos := int64(out["pos"].(float64))
+	appendChat(t, path, `{"type":"assistant","content":"one more"}`)
+	out = getFleetJSON(t, s, "/fleet/chat?since="+strconv.FormatInt(pos, 10))
+	if turns := out["turns"].([]any); len(turns) != 1 || out["reset"] != false {
+		t.Fatalf("since: %v", out)
+	}
+}
+
+// Grok can rewrite chat_history.jsonl whole. A cursor that then lands inside
+// a line was not handed out by this file: the answer resets.
+func TestGrokChatRewriteResetsCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat_history.jsonl")
+	write := func(lines []string) {
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(grokChatFixture)
+	_, pos, _, _, err := extractTurns(path, 0, 50, 1<<20, grokChatTurn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rewritten with a longer first line: the old pos now sits mid-line.
+	rewritten := append([]string{`{"type":"system","content":"` + strings.Repeat("x", 7) + `"}`}, grokChatFixture[1:]...)
+	rewritten = append(rewritten, `{"type":"assistant","content":"after rewrite"}`)
+	write(rewritten)
+	turns, _, reset, _, err := extractTurns(path, pos, 50, 1<<20, grokChatTurn)
+	if err != nil || !reset || len(turns) != 4 {
+		t.Fatalf("err %v reset %v turns %+v", err, reset, turns)
+	}
+}
