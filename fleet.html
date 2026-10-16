@@ -311,7 +311,7 @@ section { min-width: 0; }
 .msum { flex: 1 1 0; min-width: 14em; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 2px; font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
 .msum:empty { display: none; }
 .msum .sep { opacity: .6; }
-.mgrp { padding: 0 3px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
+.mgrp { max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 0 3px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
 .mgrp:hover { background: var(--surface2); }
 .mgrp[aria-pressed="true"] { background: var(--accent-tint); color: var(--text); }
 .mgrp .pp { margin-left: 5px; }
@@ -1995,13 +1995,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const out = [];
     [...g.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).forEach(f => {
       const c = g.get(f);
-      const b = el("button", "mgrp", f + " " + c.n, ...PIPS.filter(([k]) => c[k]).map(([k, ch]) => el("span", "pp p-" + k, ch + c[k])));
+      const b = fkey(el("button", "mgrp", f + " " + c.n, ...PIPS.filter(([k]) => c[k]).map(([k, ch]) => el("span", "pp p-" + k, ch + c[k]))), "msum:" + f);
       b.type = "button";
       b.title = f + ": " + c.n + " session" + (c.n === 1 ? "" : "s") + " — " +
         PIPS.filter(([k]) => c[k]).map(([k]) => c[k] + " " + k).join(", ") + (workModel === f ? " (click to show all)" : "");
       b.setAttribute("aria-label", b.title);
       b.setAttribute("aria-pressed", workModel === f ? "true" : "false");
-      b.addEventListener("click", () => { workModel = workModel === f ? "" : f; renderWork(); });
+      b.addEventListener("click", () => { workModel = workModel === f ? "" : f; keepFocus(renderWork); });
       if (out.length) out.push(el("span", "sep", "·"));
       out.push(b);
     });
