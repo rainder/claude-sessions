@@ -454,12 +454,6 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 .sheet-actions .btn { width: 100%; min-height: 50px; padding: 8px 16px; overflow-wrap: anywhere; }
 /* The confirm button stays off for a short time. The bar fills over that
    time and the number counts down, so a stray tap has nowhere to land. */
-.armbar { display: flex; align-items: center; gap: 8px; min-height: 28px; }
-.armbar i { position: relative; flex: 1; height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; }
-.armbar i::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 0; background: var(--accent); }
-.armbar.run i::before { animation: sheet-arm var(--arm, 0.4s) linear forwards; }
-@keyframes sheet-arm { to { width: 100%; } }
-.armbar span { flex: none; min-width: 3.2em; text-align: right; font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--muted); }
 .acct-list { display: grid; gap: 8px; max-height: 50vh; overflow-y: auto; }
 .acct-opt { display: grid; gap: 3px; width: 100%; min-height: 50px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .acct-opt:hover:not(:disabled) { border-color: var(--muted); }
@@ -741,7 +735,6 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     <p class="sheet-raw">FLEET gets: <span class="mono" id="sheet-text"></span></p>
     <p class="sheet-note" id="sheet-note" hidden>FLEET reads this as your explicit approval of a write.</p>
     <div class="sheet-actions">
-      <div class="armbar" id="sheet-arm" hidden><i></i><span id="sheet-arm-t">0.4s</span></div>
       <button class="btn btn-danger" id="sheet-approve" type="button" hidden>Yes, I approve this write</button>
       <button class="btn btn-primary" id="sheet-send" type="button" hidden>Send</button>
       <button class="btn" id="sheet-cancel" type="button">Cancel</button>
@@ -2224,41 +2217,20 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   function stopArm() {
     sheet.armGen++;
     clearTimeout(sheet.armTimer);
-    const bar = $("sheet-arm");
-    bar.hidden = true;
-    bar.classList.remove("run");
   }
 
   // armSheet shows the confirm button at once and keeps it off for
-  // SHEET_ARM_MS. The bar and the seconds show the wait. The button
-  // turns on only when that wait ends, and only if this sheet is still
-  // the one that started it.
+  // SHEET_ARM_MS. The button turns on only when that wait ends, and only
+  // if this sheet is still the one that started it.
   function armSheet(btn) {
     stopArm();
     const gen = ++sheet.armGen;
     sheet.armed = false;
     btn.disabled = true;
-    const bar = $("sheet-arm");
-    const fill = bar.querySelector("i");
-    fill.style.setProperty("--arm", SHEET_ARM_MS + "ms");
-    bar.hidden = false;
-    bar.classList.remove("run");
-    void fill.offsetWidth;
-    bar.classList.add("run");
-    const t0 = Date.now();
-    const tick = () => {
+    sheet.armTimer = setTimeout(() => {
       if (gen !== sheet.armGen || !sheet.card) return;
-      const left = SHEET_ARM_MS - (Date.now() - t0);
-      if (left <= 0) {
-        if (!sheet.busy) { sheet.armed = true; btn.disabled = false; }
-        bar.hidden = true;
-        bar.classList.remove("run");
-        return;
-      }
-      $("sheet-arm-t").textContent = (Math.ceil(left / 100) / 10).toFixed(1) + "s";
-      sheet.armTimer = setTimeout(tick, 100);
-    };
-    tick();
+      if (!sheet.busy) { sheet.armed = true; btn.disabled = false; }
+    }, SHEET_ARM_MS);
   }
 
   function closeSheet() {
