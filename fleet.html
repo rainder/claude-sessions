@@ -319,8 +319,9 @@ section { min-width: 0; }
    glyphs render at odd sizes in some fonts. Other statuses are "?n". */
 .pp:not(.p-other)::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 2px; border: 1.5px solid currentColor; border-radius: 50%; box-sizing: border-box; }
 .pp.p-busy { color: var(--accent); } .pp.p-busy::before { background: currentColor; }
-.pp.p-idle { color: var(--amber); } .pp.p-idle::before { background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
-.pp.p-shell, .pp.p-other { color: var(--muted); }
+.pp.p-idle { color: var(--green); } .pp.p-idle::before { background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
+/* Same colors as the row dots (.live-*): shell is the accent at .6. */
+.pp.p-shell { color: var(--accent); opacity: .6; } .pp.p-other { color: var(--muted); }
 .row-body.note-body { padding-top: 0; margin-top: -4px; font-size: 13px; overflow-wrap: anywhere; }
 .ended { margin-top: 8px; }
 .ended > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 2px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
