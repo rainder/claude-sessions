@@ -2336,6 +2336,31 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // (network error, timeout, a 2xx the page cannot read) may still have
   // reached FLEET, so the card says delivery is not confirmed and keeps its
   // options locked.
+  // nextOpenKey: the data-fkey of the first card after this one, in screen
+  // order, that still waits for an answer. "" when none is left.
+  function nextOpenKey(id) {
+    const nodes = [...document.querySelectorAll("#list-yes > [data-fkey], #list-needs > [data-fkey]")].filter(n => n.getClientRects().length);
+    const i = nodes.findIndex(n => n.dataset.fkey === "card:" + id);
+    if (i < 0) return "";
+    const open = nodes.slice(i + 1).find(n => {
+      const cur = currentCard(n.dataset.fkey.slice(5));
+      return cur && !answered(cur);
+    });
+    return open ? open.dataset.fkey : "";
+  }
+
+  // scrollToCard brings the card with this key to the top of its scroll
+  // view, below the sticky header. It runs after the render, so the node
+  // is the new one. No key: the view stays where it is.
+  function scrollToCard(key) {
+    if (!key) return;
+    const node = [...document.querySelectorAll("#list-yes > [data-fkey], #list-needs > [data-fkey]")].find(n => n.dataset.fkey === key);
+    const v = node && scrollViews().find(v => v.root.contains(node));
+    if (!v) return;
+    const d = node.getBoundingClientRect().top - v.top - 8;
+    if (Math.abs(d) >= 1) v.s.scrollTo({top: v.s.scrollTop + d, behavior: "smooth"});
+  }
+
   async function sheetSend(btn) {
     if (sheet.busy || !sheet.card || !sheet.armed || btn.disabled) return;
     // Each kind sends only from its own confirm button.
@@ -2347,6 +2372,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     btn.textContent = "Sending…";
     const c = sheet.card, o = sheet.opt, text = sheet.text;
     const id = str(c.id);
+    const nextKey = nextOpenKey(id);
     const att = {key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", inflight: true, cardAt: str(c.updatedAt),
       csig: cardSig(c), title: cardTitle(c), ts: Date.now()};
     let p = pending.get(id);
@@ -2379,6 +2405,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     savePending();
     prunePending();
     guard(renderCards);
+    if (res.ok) guard(() => scrollToCard(nextKey));
   }
   $("sheet-approve").addEventListener("click", e => sheetSend(e.currentTarget));
   $("sheet-send").addEventListener("click", e => sheetSend(e.currentTarget));
