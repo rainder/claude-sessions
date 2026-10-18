@@ -2090,7 +2090,41 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
   const fkey = (node, key) => { if (key) node.dataset.fkey = key; return node; };
 
-  function renderCards() { keepFocus(renderCardsNow); }
+  // keepScroll runs a render that replaces the card and row nodes, and
+  // keeps the view still. The browser's own scroll anchoring loses its
+  // anchor when the node is replaced (iOS Safari has none at all), so a
+  // card that left or came in above the view moved the whole list. The
+  // first item in view (data-fkey) is found again by its key and put back
+  // at the same height. If it left, the next item after it takes its
+  // place, else the one before it. Wide screens scroll each column, a
+  // phone scrolls the page; at the very top nothing is held, so a new
+  // card at the top shows.
+  function scrollViews() {
+    const cols = [...document.querySelectorAll(".col")].filter(c => c.getClientRects().length);
+    if (cols.length && getComputedStyle(cols[0]).overflowY !== "visible")
+      return cols.map(c => ({s: c, top: c.getBoundingClientRect().top, root: c}));
+    return [{s: document.scrollingElement, top: Math.max(0, $("top").getBoundingClientRect().bottom), root: document.querySelector("main")}];
+  }
+  const viewItems = root => [...root.querySelectorAll(".col [data-fkey], .col[data-fkey]")].filter(e => e.getClientRects().length);
+  function keepScroll(render) {
+    const marks = [];
+    for (const v of scrollViews()) {
+      if (v.s.scrollTop <= 0) continue;
+      const items = viewItems(v.root), i = items.findIndex(e => e.getBoundingClientRect().bottom > v.top);
+      if (i >= 0) marks.push({v, keys: items.map(e => e.dataset.fkey), i, y: items[i].getBoundingClientRect().top});
+    }
+    render();
+    for (const m of marks) {
+      const now = new Map(viewItems(m.v.root).map(e => [e.dataset.fkey, e]));
+      const order = [...m.keys.slice(m.i), ...m.keys.slice(0, m.i).reverse()];
+      const k = order.find(k => now.has(k));
+      if (!k) continue;
+      const d = now.get(k).getBoundingClientRect().top - m.y;
+      if (Math.abs(d) >= 1) m.v.s.scrollTop += d;
+    }
+  }
+
+  function renderCards() { keepScroll(() => keepFocus(renderCardsNow)); }
   function renderCardsNow() {
     const cards = arr(state && state.cards).map(obj).filter(Boolean);
     // Working and waiting cards are no longer shown: the working list comes
