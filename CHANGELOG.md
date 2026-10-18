@@ -333,6 +333,8 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The `/fleet` page scrolls to the next open decision card after a send
+  is confirmed. It stays where it is when no open card is left.
 - A Grok row sitting on `ask_user_question` no longer shows STATUS `busy`.
   Grok auto-allows the tool (`permission_resolved`, `wait_ms:0`) and then
   waits for the answer; that allow is not the answer. STATUS is
