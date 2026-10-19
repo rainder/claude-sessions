@@ -331,6 +331,8 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The `/fleet` page header is one row on a phone; a tap on the quota
+  values shows the rest.
 - STATUS now shows `waiting` with no reason suffix. A blocked session used
   to render as `waiting:permission prompt` or `waiting:input`. The color
   and sort rank are unchanged.

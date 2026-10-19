@@ -557,12 +557,47 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   .toast { top: calc(var(--hdr) + 10px); bottom: auto; transform: translate(-50%, -12px); }
 }
 @media (max-width: 480px) { .ago-pre { display: none; } }
+/* Phone: the header is one row. The brand goes (the app is FLEET); the quota
+   chips join the status row as values with bars. A tap on the chips opens
+   the account chips, the quota details and the state age under the row.
+   Without quota chips the account chips and the age stay in view; a state
+   age over 30 min (amber) stays on the row. */
+@media (max-width: 599.98px) {
+  header.top { padding-top: calc(env(safe-area-inset-top, 0px) + 8px); padding-bottom: 8px; }
+  .hdr-inner { display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; }
+  .hdr-row { display: contents; }
+  .brand { display: none; }
+  header.top .pill { padding: 2px 8px; gap: 5px; }
+  .hdr-ago { order: 2; flex: 1 1 0; text-align: right; }
+  .bell, .refresh { order: 3; }
+  .accts { order: 4; flex: 1 1 100%; }
+  .quota { order: 5; flex: 1 1 100%; }
+  header.top:has(#chips:not([hidden])[aria-expanded="false"]) .accts { display: none; }
+  header.top:has(#chips:not([hidden])) .hdr-ago:not(.late) { display: none; }
+  header.top:has(#chips:not([hidden])) .hdr-ago.late { flex: none; }
+  header.top:has(#chips:not([hidden])[aria-expanded="true"]) .hdr-ago { display: block; order: 6; flex: 1 1 100%; margin-top: 6px; text-align: left; }
+  header.top:has(#chips:not([hidden])[aria-expanded="true"]) .ago-pre { display: inline; }
+  /* A 44px target on a 32px row, as refresh does. A zero basis keeps the
+     row from wrapping: the chips take the free width up to their own width.
+     On a crowded row ("not running", "offline") the chips that do not fit
+     wrap inside the button, below its clip, so no chip shows cut off.
+     The auto right margin keeps the bell and refresh at the right end. */
+  .chips { order: 1; flex: 1000 1 0; width: auto; max-width: max-content; min-width: 0; height: 44px; min-height: 0; margin: -6px auto -6px 0; padding: 7px 0 0; flex-wrap: wrap; align-content: flex-start; gap: 20px 3px; overflow: hidden; }
+  /* An empty first item as tall as a chip, so even the first chip wraps
+     when it does not fit. */
+  .chips::before { content: ""; width: 0; height: 30px; margin-right: -3px; }
+  .chip { flex: none; min-width: 0; padding: 3px 5px 4px; border-radius: 7px; }
+  .chip .lbl { display: none; }
+  .chip .val { font-size: 12.5px; }
+  .chip .bar { margin-top: 2px; }
+  .chips-more { width: 14px; }
+}
 /* Below 360px (a 320px phone) "not running", "offline", the bell and refresh
    do not fit one row: "offline" shrinks to its dot (the word stays for
    screen readers, the title explains it) and the row gaps tighten. 360px and
    up are unchanged. */
 @media (max-width: 359.98px) {
-  .hdr-row { gap: 6px; }
+  .hdr-inner { column-gap: 6px; }
   .pill.offline { font-size: 0; gap: 0; padding: 7px; }
 }
 /* Tablet widths: one view at a time in a readable column, nav centered. */
