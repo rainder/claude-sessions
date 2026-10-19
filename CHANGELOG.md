@@ -333,6 +333,9 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The `/fleet` page no longer shows a success toast after a card answer is
+  sent. The card moving to the Sent strip is the signal. Errors, an
+  unconfirmed delivery and the busy-FLEET notice still show a toast.
 - The `/fleet` page scrolls to the next open decision card after a send
   is confirmed. It stays where it is when no open card is left.
 - A Grok row sitting on `ask_user_question` no longer shows STATUS `busy`.
