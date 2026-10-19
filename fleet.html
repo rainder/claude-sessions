@@ -2388,7 +2388,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       // Confirmed: the card leaves Decide for the "Sent" strip.
       att.state = "sent";
       p.inStrip = true;
-      toast(res.queued ? "Sent. FLEET is busy. It reads your answer next." : "Sent to FLEET.");
+      // A plain success is silent: the card moving to the strip is the signal.
+      if (res.queued) toast("Sent. FLEET is busy. It reads your answer next.");
       afterSend();
     } else if (res.unclear) {
       // Unknown: back in Decide, so Andy checks it.
