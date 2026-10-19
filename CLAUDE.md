@@ -1355,6 +1355,34 @@ status pass's list; never a failed one. Only the ended list is saved:
 `$XDG_STATE_HOME/claude-sessions/fleet-ended.json` (0600, atomic), written
 only when it changed. `cmdServer` sets the path; tests keep it in memory.
 
+**Dependencies** (`fleet_deps.go`). state.json may hold top-level `deps`,
+FLEET's waits-for graph, rewritten each cycle: `nodes` (`{id, label, kind}`,
+kind `person`/`pr`/`event`/`ticket`) and `edges` (`{from, to, label?}`,
+"from waits for to"). An edge end is a node id, else a tmux session name.
+`fleet-state.py` rejects a bad draft; the server still cleans what it reads
+(`fleetDependencies`) and serves it as `deps` in place of FLEET's own (server
+key wins; null when state.json has none): a node with a bad id
+(`^[A-Za-z0-9._#-]{1,100}$`, `#` so a PR can use its number), kind or label is
+dropped; labels are trimmed and cut to 60 runes; an edge is dropped when an
+end is neither a node nor a session name, for a self-loop, a repeat, or a
+session end with no live working row (an ended session's edges vanish without
+FLEET). With the session list failed (`sessions` null) session ends are kept,
+as for `liveSessions`. Only the nodes a kept edge names are served; at most
+100 nodes and 200 edges are read. The page draws it in the Fleet view's
+Dependencies section (`renderDeps`, `depLayout`): fixed-size boxes, so nothing
+is measured and a graph built while the view is hidden is right. A node's
+layer is the longest waits-for path out of it, so what is only waited on sits
+on the right; an edge that crosses layers gets a virtual node per layer, and
+four barycenter sweeps order the layers. A DFS marks each edge that closes a
+cycle; it does not count for layers and runs right to left, dashed red. A
+session node takes its status border, live badge and model from the working
+row and opens `#session/<tmux>`; a node waited on by two or more is amber with
+a count. PR labels `#N`/`PR #N` link to the trecs-brain pull, `repo#N` or
+`owner/repo#N` to that repo, any other label is plain; a ticket links to
+ClickUp by its `DR-N`. A wide graph scrolls inside `.deps-scroll` only. The
+redraw is skipped while the input signature is unchanged (the poll would reset
+the scroll), and a redraw keeps `scrollLeft`.
+
 **Ticket status** (`fleet_ticket_status.go`). `cu` has no JSON status, so the
 server runs `cu fetch <ticket>` and reads the `Status:` line, lower case,
 only `^[a-z0-9][a-z0-9 /_-]{0,31}$`. Only the header block counts: the

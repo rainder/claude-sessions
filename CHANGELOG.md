@@ -9,6 +9,13 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The FLEET page's Fleet view has a Dependencies section. It draws the
+  waits-for graph that FLEET writes to state.json (`deps`) as a left-to-right
+  chart. The graph shows the people, PRs, events and tickets that sessions
+  wait for. Session nodes show their live status and model and open the
+  session. A node that two or more wait on is highlighted. The server drops
+  edges to ended sessions.
+
 - The FLEET page's empty Decide view now shows how many live sessions are
   busy and how many are idle (plus shell sessions, when there are any) under
   "Nothing needs you now."

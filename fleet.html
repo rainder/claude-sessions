@@ -333,6 +333,38 @@ section { min-width: 0; }
 .ended > summary .chev { transform: rotate(-45deg); }
 .ended[open] > summary .chev { transform: rotate(45deg); }
 .ended .rows { margin-top: 2px; }
+/* Dependencies: FLEET's waits-for graph (state.deps). Nodes are fixed-size
+   boxes placed by renderDeps (layers left to right, what is waited on to the
+   right) over one SVG of edges. A wide graph scrolls inside .deps-scroll,
+   never the page. */
+.deps-box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); }
+.deps-scroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: thin; padding: 12px; }
+.deps-g { position: relative; }
+.deps-g > svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.dep-e { fill: none; stroke: var(--muted); stroke-width: 1.4; opacity: .75; }
+.dep-e.hot { stroke: var(--amber); opacity: 1; }
+.dep-e.cyc { stroke: var(--red); stroke-dasharray: 4 3; opacity: 1; }
+.dep-ah { fill: var(--muted); } .dep-ah.hot { fill: var(--amber); } .dep-ah.cyc { fill: var(--red); }
+.dep-el { pointer-events: auto; font: 500 10.5px var(--sans); fill: var(--muted); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.dn { position: absolute; box-sizing: border-box; display: flex; align-items: center; gap: 7px; padding: 5px 8px; border: 1px solid var(--line); border-left-width: 3px; border-radius: 9px; background: var(--surface); color: inherit; text-decoration: none; font-size: 12.5px; }
+a.dn:hover { background: var(--surface2); }
+.dn-main { flex: 1; min-width: 0; }
+.dn-l1, .dn-l2 { display: flex; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; overflow: hidden; }
+.dn-l1 { font-weight: 600; }
+.dn-l1 .tt, .dn-l2 .tt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dn-l2 { margin-top: 1px; font-size: 11px; color: var(--muted); }
+.dn-l2 .mdl, .dn-l2 .live { flex: none; }
+.dn-ic { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--surface2); color: var(--muted); font-size: 10px; font-weight: 700; }
+.dn-s-busy { border-left-color: var(--accent); } .dn-s-idle { border-left-color: var(--green); }
+.dn-s-shell { border-left-color: color-mix(in srgb, var(--accent) 60%, transparent); } .dn-s-waiting { border-left-color: var(--amber); }
+.dn-k-person { border-left-color: var(--amber); } .dn-k-person .dn-ic { background: var(--amber-tint); color: var(--amber); }
+.dn-k-pr { border-left-color: var(--accent); } .dn-k-pr .dn-ic { border-radius: 6px; background: var(--accent-tint); color: var(--accent); }
+.dn-k-event .dn-ic { border-radius: 6px; }
+.dn-k-ticket { border-left-color: var(--green); } .dn-k-ticket .dn-ic { border-radius: 6px; }
+/* Waited on by two or more: the bottleneck. */
+.dn.hot { border-color: var(--amber-line); border-left-color: var(--amber); background: var(--amber-tint); box-shadow: 0 0 0 1px var(--amber-line); }
+.dn .wait-n { flex: none; padding: 0 5px; border-radius: 99px; background: var(--amber); color: var(--on-accent); font-weight: 700; }
+.deps-legend { margin: 0; padding: 0 12px 10px; font-size: 11.5px; color: var(--muted); }
 .sec-sent { margin-top: 18px; }
 .sent-row .row-l1 .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 .sent-row .row-l2 .pick { color: var(--accent); }
@@ -745,6 +777,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         <h2 class="sec-h" id="h-working">Working <span class="n" id="n-working">0</span><span class="msum" id="msum-working"></span></h2>
         <div id="list-working"></div>
         <div id="list-ended"></div>
+      </section>
+      <section class="sec-fleet sec-deps" aria-labelledby="h-deps">
+        <h2 class="sec-h" id="h-deps">Dependencies <span class="n" id="n-deps">0</span></h2>
+        <div id="deps"></div>
       </section>
       <section class="sec-fleet" aria-labelledby="h-done">
         <h2 class="sec-h" id="h-done">Done today <span class="n" id="n-done">0</span></h2>
@@ -2070,6 +2106,237 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     host.replaceChildren(fkey(d, "ended"));
   }
 
+  // ---- dependencies ------------------------------------------------------
+  // state.deps is FLEET's waits-for graph, cleaned by the server: external
+  // nodes {id, label, kind} (person, pr, event, ticket) and edges {from, to,
+  // label}, "from waits for to". An end that is not a node id is a live
+  // session's tmux name; the server already dropped edges to ended sessions.
+  // A node's layer is the longest waits-for path out of it, so the things
+  // only waited on sit in the right-hand layer, and a few barycenter sweeps
+  // order each layer. An edge that closes a cycle is drawn dashed red and
+  // does not count for layers. Sizes are fixed, so nothing is measured, and
+  // a graph drawn while the Fleet view is hidden is still right.
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  function svgEl(tag, attrs) {
+    const e = document.createElementNS(SVG_NS, tag);
+    for (const k of Object.keys(attrs || {})) e.setAttribute(k, attrs[k]);
+    for (let i = 2; i < arguments.length; i++) {
+      const k = arguments[i];
+      if (k) e.append(typeof k === "string" ? document.createTextNode(k) : k);
+    }
+    return e;
+  }
+  const depsNarrowMQ = window.matchMedia("(max-width: 599.98px)");
+  const DEP_KIND_WORD = {person: "person", pr: "PR", event: "event", ticket: "ticket"};
+  // A PR node links only from its label: "#3049" or "PR #3049" is a
+  // trecs-brain pull; "repo#12" or "owner/repo#12" (GitHub's own reference
+  // form) is that repo's. Any other label is plain text.
+  const DEP_PR_BRAIN = /^(?:PR ?)?#(\d{1,6})(?![\w-])/i;
+  const DEP_PR_REPO = /^(?:([\w.-]+)\/)?([\w.-]+)#(\d{1,6})(?![\w-])/;
+  const DEP_TICKET = /\b(DR-\d{1,7})(?![\w-])/;
+  function depURL(kind, label, id) {
+    if (kind === "pr") {
+      let m = DEP_PR_BRAIN.exec(label);
+      if (m) return TRECS_PR + m[1];
+      m = DEP_PR_REPO.exec(label);
+      if (m) return "https://github.com/" + (m[1] || "TRECS-SOFTWARE-LABS") + "/" + m[2] + "/pull/" + m[3];
+    }
+    if (kind === "ticket") {
+      const m = DEP_TICKET.exec(label) || DEP_TICKET.exec(id);
+      if (m) return CLICKUP_TASK + m[1];
+    }
+    return "";
+  }
+  // depAnchor: an <a> for an http(s) URL that opens in a new tab, as
+  // safeLink makes; null for anything else.
+  function depAnchor(url) {
+    let u;
+    try { u = new URL(url); } catch { return null; }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    const a = document.createElement("a");
+    a.href = u.href; a.target = "_blank"; a.rel = "noopener noreferrer";
+    return a;
+  }
+  function depIcon(kind, label) {
+    if (kind === "person") return el("span", "dn-ic", (label.trim()[0] || "?").toUpperCase());
+    if (kind === "pr") return el("span", "dn-ic", "PR");
+    const a = {"viewBox": "0 0 24 24", "width": "14", "height": "14", "fill": "none", "stroke": "currentColor",
+      "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true"};
+    const ic = kind === "event"
+      ? svgEl("svg", a, svgEl("circle", {cx: "12", cy: "12", r: "8.5"}), svgEl("path", {d: "M12 7.5V12l3 2"}))
+      : svgEl("svg", a, svgEl("path", {d: "M3.5 12.5 11 5h8v8l-7.5 7.5a1.5 1.5 0 0 1-2.1 0l-5.9-5.9a1.5 1.5 0 0 1 0-2.1Z"}), svgEl("circle", {cx: "15", cy: "9", r: "1.3"}));
+    return el("span", "dn-ic", ic);
+  }
+  const waitBadge = n => n >= 2 ? el("span", "wait-n", n + " wait") : null;
+  // One live session: its live status and model from the working list,
+  // and it opens the session view like a Working row.
+  function depSessionNode(tm, r, waiters) {
+    const st = r ? str(r.status) : "";
+    const tickets = r ? arr(r.tickets).map(str).filter(Boolean) : [];
+    const name = r ? str(r.name) : "";
+    const head = tickets.length ? tickets[0] + (tickets.length > 1 ? " +" + (tickets.length - 1) : "") : (name || tm);
+    const l2 = el("div", "dn-l2", waitBadge(waiters));
+    const lv = r ? liveBadgeOf(st, str(r.since), tm) : null;
+    if (lv) l2.append(lv);
+    if (r && str(r.model)) l2.append(el("span", "mdl", modelLabel(str(r.model), str(r.tool))));
+    l2.append(el("span", "tt", tm));
+    const box = SV_NAME.test(tm) ? el("a") : el("div");
+    if (box.tagName === "A") box.href = "#session/" + encodeURIComponent(tm);
+    box.className = "dn dn-sess dn-s-" + (LIVE_LABEL[st] ? st : "none");
+    box.title = [tm, name, tickets.join(", "), r ? modelLabel(str(r.model), str(r.tool)) : "", st || (r ? "" : "status unknown")].filter(Boolean).join(" · ");
+    box.append(el("div", "dn-main", el("div", "dn-l1", el("span", "tt", head)), l2));
+    return box;
+  }
+  function depExtNode(n, waiters) {
+    const url = depURL(n.kind, n.label, n.id);
+    const box = (url && depAnchor(url)) || el("div");
+    box.className = "dn dn-k-" + n.kind;
+    box.title = DEP_KIND_WORD[n.kind] + ": " + n.label + (url ? " (opens " + url + ")" : "");
+    box.append(depIcon(n.kind, n.label), el("div", "dn-main", el("div", "dn-l1", el("span", "tt", n.label)),
+      el("div", "dn-l2", waitBadge(waiters), el("span", "tt", DEP_KIND_WORD[n.kind]))));
+    return box;
+  }
+  // depLayout places n nodes joined by edges [{a, b}] (a waits for b). An
+  // edge that crosses layers gets one virtual node in each layer it
+  // crosses, so it runs between the boxes and the sweeps order it like a
+  // node. A cycle edge always points to a lower layer: the edges kept for
+  // layers give a path from its target to its source. Returns col and row per node, real then virtual (row may be a
+  // half step, to center a short layer), each edge's chain of nodes, the
+  // layer count, the longest layer, and the edges that close a cycle.
+  function depLayout(n, edges) {
+    const out = Array.from({length: n}, () => []);
+    edges.forEach((e, i) => out[e.a].push(i));
+    const back = new Set(), mark = new Array(n).fill(0);
+    const visit = v => {
+      mark[v] = 1;
+      for (const i of out[v]) {
+        const w = edges[i].b;
+        if (mark[w] === 1) back.add(i);
+        else if (!mark[w]) visit(w);
+      }
+      mark[v] = 2;
+    };
+    for (let v = 0; v < n; v++) if (!mark[v]) visit(v);
+    const rank = new Array(n).fill(-1);
+    const rk = v => {
+      if (rank[v] < 0) rank[v] = Math.max(0, ...out[v].filter(i => !back.has(i)).map(i => rk(edges[i].b) + 1));
+      return rank[v];
+    };
+    let maxR = 0;
+    for (let v = 0; v < n; v++) maxR = Math.max(maxR, rk(v));
+    const col = rank.map(r => maxR - r);
+    const chains = edges.map((e, i) => {
+      const c = [e.a];
+      const step = back.has(i) ? -1 : 1;
+      for (let k = col[e.a] + step; k !== col[e.b]; k += step) { c.push(col.length); col.push(k); }
+      c.push(e.b);
+      return c;
+    });
+    const adj = col.map(() => []);
+    for (const c of chains) for (let j = 1; j < c.length; j++) { adj[c[j - 1]].push(c[j]); adj[c[j]].push(c[j - 1]); }
+    const layers = Array.from({length: maxR + 1}, () => []);
+    col.forEach((c, v) => layers[c].push(v));
+    const longest = Math.max(1, ...layers.map(L => L.length));
+    const row = new Array(col.length);
+    const place = c => layers[c].forEach((v, i) => { row[v] = i + (longest - layers[c].length) / 2; });
+    layers.forEach((_, c) => place(c));
+    // Barycenter sweeps: order a layer by the mean row of its neighbours on
+    // one side; a node with none there keeps its own row.
+    for (let it = 0; it < 4; it++) {
+      const left = it % 2 === 0;
+      for (let k = 1; k <= maxR; k++) {
+        const c = left ? k : maxR - k;
+        const key = new Map();
+        for (const v of layers[c]) {
+          const ns = adj[v].filter(w => left ? col[w] < c : col[w] > c);
+          key.set(v, ns.length ? ns.reduce((s, w) => s + row[w], 0) / ns.length : row[v]);
+        }
+        layers[c].sort((x, y) => key.get(x) - key.get(y));
+        place(c);
+      }
+    }
+    return {col, row, chains, cols: maxR + 1, longest, back};
+  }
+  let depsSig = "";
+  function renderDeps() {
+    const host = $("deps");
+    const d = obj(state && state.deps);
+    const nodes = arr(d && d.nodes).map(obj).filter(n => n && str(n.id) && str(n.label) && DEP_KIND_WORD[str(n.kind)]);
+    const raw = arr(d && d.edges).map(obj).filter(e => e && str(e.from) && str(e.to) && str(e.from) !== str(e.to));
+    const rows = arr(state && state.sessions).map(obj).filter(r => r && str(r.tmux));
+    const narrow = depsNarrowMQ.matches;
+    const sig = JSON.stringify([nodes, raw, rows.map(r => [r.tmux, r.status, r.since, r.model, r.tool, r.tickets, r.name]), narrow]);
+    if (sig === depsSig && host.firstChild) return;
+    depsSig = sig;
+    $("n-deps").textContent = raw.length;
+    if (!raw.length) { host.replaceChildren(el("p", "empty", "No dependencies.")); return; }
+    // Node keys: "n:" an external node, "s:" a session.
+    const ext = new Map(nodes.map(n => [str(n.id), {id: str(n.id), label: str(n.label), kind: str(n.kind)}]));
+    const keyOf = id => ext.has(id) ? "n:" + id : "s:" + id;
+    const keys = [], idx = new Map();
+    const at = k => { if (!idx.has(k)) { idx.set(k, keys.length); keys.push(k); } return idx.get(k); };
+    const edges = raw.map(e => ({a: at(keyOf(str(e.from))), b: at(keyOf(str(e.to))), label: str(e.label)}));
+    const waiters = keys.map(() => new Set());
+    for (const e of edges) waiters[e.b].add(e.a);
+    const L = depLayout(keys.length, edges);
+    const labels = edges.some(e => e.label);
+    const W = narrow ? 148 : 184, H = 46, GY = 12;
+    const GX = labels ? (narrow ? 96 : 132) : (narrow ? 40 : 56);
+    const xOf = v => L.col[v] * (W + GX), yOf = v => L.row[v] * (H + GY);
+    const width = L.cols * W + (L.cols - 1) * GX;
+    const height = L.longest * (H + GY) - GY;
+    const byTmux = new Map(rows.map(r => [str(r.tmux), r]));
+    const g = el("div", "deps-g");
+    g.style.width = width + "px";
+    g.style.height = height + "px";
+    const marker = (id, cls) => svgEl("marker", {id, viewBox: "0 0 8 8", refX: "8", refY: "4", markerWidth: "8", markerHeight: "8", markerUnits: "userSpaceOnUse", orient: "auto"},
+      svgEl("path", {d: "M0 0L8 4L0 8z", class: "dep-ah" + cls}));
+    const svg = svgEl("svg", {width: String(width), height: String(height), "aria-hidden": "true"},
+      svgEl("defs", {}, marker("dep-ah", ""), marker("dep-ah-hot", " hot"), marker("dep-ah-cyc", " cyc")));
+    const maxChars = Math.max(4, Math.floor((GX - 10) / 6));
+    edges.forEach((e, i) => {
+      const cyc = L.back.has(i), hot = waiters[e.b].size >= 2;
+      const cls = cyc ? " cyc" : hot ? " hot" : "";
+      const ch = L.chains[i];
+      // Right side of the waiter to left side of what it waits for, one
+      // curve per gap, straight through each virtual node. A cycle edge runs
+      // right to left, a few pixels low, so it does not hide an edge back.
+      const segs = [], dy = H / 2 + (cyc ? 7 : 0), fw = cyc ? 0 : W, bw = cyc ? W : 0;
+      for (let j = 1; j < ch.length; j++) {
+        const x1 = xOf(ch[j - 1]) + fw, y1 = yOf(ch[j - 1]) + dy, x2 = xOf(ch[j]) + bw, y2 = yOf(ch[j]) + dy, m = (x1 + x2) / 2;
+        segs.push([[x1, y1], [m, y1], [m, y2], [x2, y2]]);
+      }
+      const d = segs.map((q, j) => (j ? " L" : "M") + q[0].join(" ") + " C" + q.slice(1).map(pt => pt.join(" ")).join(" ")).join("");
+      svg.append(svgEl("path", {class: "dep-e" + cls, d, "marker-end": "url(#dep-ah" + (cyc ? "-cyc" : hot ? "-hot" : "") + ")"}));
+      if (!e.label) return;
+      // The label sits at the middle of the first gap after the waiter:
+      // above the curve, or below it for a cycle edge (an edge back runs
+      // just above).
+      const p = segs[0];
+      const mid = j => (p[0][j] + 3 * p[1][j] + 3 * p[2][j] + p[3][j]) / 8;
+      const short = e.label.length > maxChars ? e.label.slice(0, maxChars - 1) + "…" : e.label;
+      svg.append(svgEl("text", {class: "dep-el", x: String(mid(0)), y: String(mid(1) + (cyc ? 13 : -4)), "text-anchor": "middle"}, svgEl("title", {}, e.label), short));
+    });
+    g.append(svg);
+    keys.forEach((k, v) => {
+      const id = k.slice(2), n = waiters[v].size;
+      const box = k[0] === "n" ? depExtNode(ext.get(id), n) : depSessionNode(id, byTmux.get(id), n);
+      if (n >= 2) box.classList.add("hot");
+      box.style.left = xOf(v) + "px";
+      box.style.top = yOf(v) + "px";
+      box.style.width = W + "px";
+      box.style.height = H + "px";
+      g.append(box);
+    });
+    const old = host.querySelector(".deps-scroll");
+    const scroll = el("div", "deps-scroll", g);
+    const legend = "Arrows point from a session to what it waits for. Amber: waited on by two or more." +
+      (L.back.size ? " Dashed red: a cycle." : "");
+    host.replaceChildren(el("div", "deps-box", scroll, el("p", "deps-legend", legend)));
+    if (old) scroll.scrollLeft = old.scrollLeft;
+  }
+  depsNarrowMQ.addEventListener("change", () => renderDeps());
+
   // cardSig: a short hash of what FLEET shows and asks on a card: kind,
   // status, title, ticket, summary, lean and every option's key, label,
   // line and send text. A change means FLEET asks again. Two 32-bit FNV-1a
@@ -2209,6 +2476,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("n-yes").textContent = openYes;
     $("n-needs").textContent = openNeeds;
     renderWork();
+    renderDeps();
     $("n-done").textContent = g.done.length;
     if (!g.done.length) $("list-done").replaceChildren(el("p", "empty", "Nothing done today."));
     else $("list-done").replaceChildren(el("div", "rows", ...g.done.map(c => fkey(compactRow(c), cid(c) && "row:" + cid(c)))));

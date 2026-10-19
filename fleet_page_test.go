@@ -25,7 +25,12 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// Autolinks: ClickUp custom ids and trecs-brain PR numbers.
 		"https://app.clickup.com/t/90181100858/", "https://github.com/TRECS-SOFTWARE-LABS/trecs-brain/pull/", "function linkText(",
 		// The empty Decide view shows the fleet's busy and idle counts.
-		`id="zero-fleet"`, "function renderFleetState("} {
+		`id="zero-fleet"`, "function renderFleetState(",
+		// The Dependencies section draws state.deps as SVG, built with
+		// createElementNS (never markup), and joins sessions to the
+		// working list.
+		`id="deps"`, `id="n-deps"`, "function renderDeps(", "state.deps", "state.sessions", "createElementNS(", "function depLayout(",
+		"#session/"} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}
