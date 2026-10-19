@@ -9,6 +9,10 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The FLEET page's empty Decide view now shows how many live sessions are
+  busy and how many are idle (plus shell sessions, when there are any) under
+  "Nothing needs you now."
+
 - The live session table now shows AGE and SEEN as two columns. AGE is time
   since the session started. SEEN is time since last activity (what AGE
   used to show). Created sort marks AGE. Updated sort marks SEEN.

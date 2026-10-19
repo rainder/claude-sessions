@@ -150,6 +150,10 @@ body.kb .chips, body.kb .quota, body.kb .accts { display: none !important; }
 .zero-rays { stroke: var(--accent); transform-box: view-box; transform-origin: 60px 50px; animation: zero-breathe 3.6s ease-in-out infinite; }
 .zero-sea { stroke: var(--muted); opacity: .55; }
 .zero-text { margin: 0; font-size: 14px; color: var(--muted); }
+/* Fleet state under the empty Decide text: busy and idle sessions from the
+   server's session list, the same statuses as the Working list. */
+.zero-fleet { display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline; gap: 4px 18px; margin-top: 2px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.zero-fleet .zf-n { margin-right: 4px; font-size: 22px; font-weight: 650; color: var(--text); }
 @keyframes zero-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @keyframes zero-breathe { 0%, 100% { opacity: .55; transform: scale(.97); } 50% { opacity: 1; transform: scale(1.03); } }
 @media (prefers-reduced-motion: reduce) {
@@ -674,6 +678,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
           <path class="zero-sea" d="M8 50h104M30 62h60M46 73h28" stroke-width="3" stroke-linecap="round"/>
         </svg>
         <p class="zero-text">Nothing needs you now.</p>
+        <div class="zero-fleet" id="zero-fleet" hidden></div>
       </div>
       <section class="sec-sent" id="sec-sent" aria-labelledby="h-sent" hidden>
         <h2 class="sec-h" id="h-sent">Sent - waiting for FLEET <span class="n" id="n-sent">0</span></h2>
@@ -2124,6 +2129,24 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     }
   }
 
+  // renderFleetState: the busy and idle counts under the empty Decide text,
+  // from the whole session list (not the Working list's model filter). A
+  // shell count shows only when there is one. Hidden when a card shows or
+  // the session list failed.
+  function renderFleetState(show) {
+    const box = $("zero-fleet");
+    const raw = state ? state.sessions : null;
+    if (!show || !Array.isArray(raw)) { box.hidden = true; box.replaceChildren(); return; }
+    const n = {busy: 0, idle: 0, shell: 0};
+    for (const r of raw.map(obj)) {
+      const st = r && str(r.tmux) ? str(r.status) : "";
+      if (st === "busy" || st === "idle" || st === "shell") n[st]++;
+    }
+    const item = (k, big) => el("span", "zf", big ? el("span", "zf-n", String(n[k])) : String(n[k]) + " ", el("span", "live live-" + k, k));
+    box.replaceChildren(item("busy", true), item("idle", true), n.shell ? item("shell", false) : null);
+    box.title = n.busy + " busy, " + n.idle + " idle" + (n.shell ? ", " + n.shell + " shell" : "") + " (from this server, not FLEET)";
+    box.hidden = false;
+  }
   function renderCards() { keepScroll(() => keepFocus(renderCardsNow)); }
   function renderCardsNow() {
     const cards = arr(state && state.cards).map(obj).filter(Boolean);
@@ -2143,6 +2166,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("sec-yes").hidden = !g.yes.length;
     $("sec-needs").hidden = !g.needs.length;
     $("no-decisions").hidden = !!(g.yes.length || g.needs.length) || !state;
+    renderFleetState(!(g.yes.length || g.needs.length || g.sent.length));
     $("list-sent").replaceChildren(...g.sent.map(c => fkey(sentRow(c), cid(c) && "sent:" + cid(c))));
     $("sec-sent").hidden = !g.sent.length;
     $("n-sent").textContent = g.sent.length;
