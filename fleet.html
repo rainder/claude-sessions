@@ -2166,8 +2166,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
   // renderFleetState: the busy and idle counts under the empty Decide text,
   // from the whole session list (not the Working list's model filter). A
-  // shell count shows only when there is one. Hidden when a card shows or
-  // the session list failed.
+  // shell count shows only when there is one. Hidden when a decision card
+  // shows or the session list failed; sent rows do not hide it.
   function renderFleetState(show) {
     const box = $("zero-fleet");
     const raw = state ? state.sessions : null;
@@ -2201,7 +2201,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("sec-yes").hidden = !g.yes.length;
     $("sec-needs").hidden = !g.needs.length;
     $("no-decisions").hidden = !!(g.yes.length || g.needs.length) || !state;
-    renderFleetState(!(g.yes.length || g.needs.length || g.sent.length));
+    renderFleetState(!(g.yes.length || g.needs.length));
     $("list-sent").replaceChildren(...g.sent.map(c => fkey(sentRow(c), cid(c) && "sent:" + cid(c))));
     $("sec-sent").hidden = !g.sent.length;
     $("n-sent").textContent = g.sent.length;
