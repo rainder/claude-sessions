@@ -30,7 +30,10 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// createElementNS (never markup), and joins sessions to the
 		// working list.
 		`id="deps"`, `id="n-deps"`, "function renderDeps(", "state.deps", "state.sessions", "createElementNS(", "function depLayout(",
-		"#session/"} {
+		"#session/",
+		// The graph also opens full page: a modal dialog drawn by the same
+		// drawDeps, spread over the space it measures.
+		`id="deps-expand"`, `id="deps-full"`, `id="deps-full-g"`, `id="deps-close"`, "function drawDeps(", "function openDepsFull("} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}

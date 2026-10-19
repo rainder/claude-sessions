@@ -334,7 +334,7 @@ section { min-width: 0; }
 .ended[open] > summary .chev { transform: rotate(45deg); }
 .ended .rows { margin-top: 2px; }
 /* Dependencies: FLEET's waits-for graph (state.deps). Nodes are fixed-size
-   boxes placed by renderDeps (layers left to right, what is waited on to the
+   boxes placed by drawDeps (layers left to right, what is waited on to the
    right) over one SVG of edges. A wide graph scrolls inside .deps-scroll,
    never the page. */
 .deps-box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); }
@@ -365,6 +365,27 @@ a.dn:hover { background: var(--surface2); }
 .dn.hot { border-color: var(--amber-line); border-left-color: var(--amber); background: var(--amber-tint); box-shadow: 0 0 0 1px var(--amber-line); }
 .dn .wait-n { flex: none; padding: 0 5px; border-radius: 99px; background: var(--amber); color: var(--on-accent); font-weight: 700; }
 .deps-legend { margin: 0; padding: 0 12px 10px; font-size: 11.5px; color: var(--muted); }
+/* The expand button sits at the right end of the section heading row. */
+.deps-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.deps-head .sec-h { flex: 1; min-width: 0; margin: 0; }
+.deps-x { flex: none; display: grid; place-items: center; width: 36px; height: 36px; margin: -6px 0; border: 0; border-radius: 9px; background: none; color: var(--muted); cursor: pointer; }
+.deps-x:hover { background: var(--surface2); color: var(--text); }
+.deps-x svg { width: 18px; height: 18px; }
+/* Full page: the same graph in a modal dialog that covers the viewport,
+   spread to fill it. The graph sits centered while it fits and scrolls on
+   both axes when it does not. */
+dialog.deps-full { position: fixed; inset: 0; width: 100%; max-width: none; height: var(--vvh, 100dvh); max-height: none; margin: 0; padding: 0; border: 0; background: var(--bg); color: var(--text); }
+dialog.deps-full[open] { display: flex; flex-direction: column; }
+dialog.deps-full::backdrop { background: var(--bg); }
+.dfull-bar { flex: none; display: flex; align-items: center; gap: 8px; padding: max(env(safe-area-inset-top), 6px) max(env(safe-area-inset-right), 12px) 6px max(env(safe-area-inset-left), 16px); border-bottom: 1px solid var(--line); background: var(--surface); }
+.dfull-bar .sec-h { flex: 1; min-width: 0; margin: 0; }
+.dfull-bar .deps-x { width: 44px; height: 44px; margin: 0; }
+.dfull-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 12px max(env(safe-area-inset-right), 12px) max(env(safe-area-inset-bottom), 12px) max(env(safe-area-inset-left), 12px); }
+#deps-full-g { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#deps-full-g .deps-box { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#deps-full-g .deps-scroll { flex: 1; min-height: 0; display: flex; overflow: auto; overscroll-behavior: contain; }
+#deps-full-g .deps-g { flex: none; margin: auto; }
+#deps-full-g .deps-legend { padding-top: 8px; }
 .sec-sent { margin-top: 18px; }
 .sent-row .row-l1 .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 .sent-row .row-l2 .pick { color: var(--accent); }
@@ -779,7 +800,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         <div id="list-ended"></div>
       </section>
       <section class="sec-fleet sec-deps" aria-labelledby="h-deps">
-        <h2 class="sec-h" id="h-deps">Dependencies <span class="n" id="n-deps">0</span></h2>
+        <div class="deps-head">
+          <h2 class="sec-h" id="h-deps">Dependencies <span class="n" id="n-deps">0</span></h2>
+          <button class="deps-x" id="deps-expand" type="button" aria-label="Show the dependencies full page" title="Full page" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg></button>
+        </div>
         <div id="deps"></div>
       </section>
       <section class="sec-fleet" aria-labelledby="h-done">
@@ -861,6 +885,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <button class="btn" id="acct-cancel" type="button">Cancel</button>
     </div>
   </div>
+</dialog>
+
+<dialog class="deps-full" id="deps-full" aria-labelledby="deps-full-title">
+  <div class="dfull-bar">
+    <h2 class="sec-h" id="deps-full-title">Dependencies <span class="n" id="n-deps-full">0</span></h2>
+    <button class="deps-x" id="deps-close" type="button" aria-label="Close the full page dependencies" title="Close (Esc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <div class="dfull-body"><div id="deps-full-g"></div></div>
 </dialog>
 
 <nav class="tabbar" id="tabbar" aria-label="Views">
@@ -2114,8 +2146,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // A node's layer is the longest waits-for path out of it, so the things
   // only waited on sit in the right-hand layer, and a few barycenter sweeps
   // order each layer. An edge that closes a cycle is drawn dashed red and
-  // does not count for layers. Sizes are fixed, so nothing is measured, and
-  // a graph drawn while the Fleet view is hidden is still right.
+  // does not count for layers.
   const SVG_NS = "http://www.w3.org/2000/svg";
   function svgEl(tag, attrs) {
     const e = document.createElementNS(SVG_NS, tag);
@@ -2257,18 +2288,31 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     }
     return {col, row, chains, cols: maxR + 1, longest, back};
   }
-  let depsSig = "";
+  // renderDeps draws the graph in the section and, while it is open, in the
+  // full page dialog. Each host keeps its own signature; the full page one
+  // also holds the space it had, so a resize draws it again.
+  const depsSigs = new Map();
   function renderDeps() {
-    const host = $("deps");
     const d = obj(state && state.deps);
     const nodes = arr(d && d.nodes).map(obj).filter(n => n && str(n.id) && str(n.label) && DEP_KIND_WORD[str(n.kind)]);
     const raw = arr(d && d.edges).map(obj).filter(e => e && str(e.from) && str(e.to) && str(e.from) !== str(e.to));
     const rows = arr(state && state.sessions).map(obj).filter(r => r && str(r.tmux));
+    const sig = JSON.stringify([nodes, raw, rows.map(r => [r.tmux, r.status, r.since, r.model, r.tool, r.tickets, r.name]), depsNarrowMQ.matches]);
+    $("n-deps").textContent = $("n-deps-full").textContent = raw.length;
+    drawDeps($("deps"), false, sig, nodes, raw, rows);
+    if ($("deps-full").open) drawDeps($("deps-full-g"), true, sig, nodes, raw, rows);
+  }
+  // drawDeps lays the graph out in host. In the section the sizes are
+  // fixed, so nothing is measured, and a graph drawn while the Fleet view
+  // is hidden is still right. Full page (fill) measures the space the
+  // graph has and spreads the layers and rows over it, within limits, so a
+  // small graph does not stretch into a thin web.
+  function drawDeps(host, fill, sig, nodes, raw, rows) {
     const narrow = depsNarrowMQ.matches;
-    const sig = JSON.stringify([nodes, raw, rows.map(r => [r.tmux, r.status, r.since, r.model, r.tool, r.tickets, r.name]), narrow]);
-    if (sig === depsSig && host.firstChild) return;
-    depsSig = sig;
-    $("n-deps").textContent = raw.length;
+    const space = fill ? [host.clientWidth, host.clientHeight] : [];
+    const hsig = sig + space.join("x");
+    if (hsig === depsSigs.get(host) && host.firstChild) return;
+    depsSigs.set(host, hsig);
     if (!raw.length) { host.replaceChildren(el("p", "empty", "No dependencies.")); return; }
     // Node keys: "n:" an external node, "s:" a session.
     const ext = new Map(nodes.map(n => [str(n.id), {id: str(n.id), label: str(n.label), kind: str(n.kind)}]));
@@ -2280,8 +2324,23 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     for (const e of edges) waiters[e.b].add(e.a);
     const L = depLayout(keys.length, edges);
     const labels = edges.some(e => e.label);
-    const W = narrow ? 148 : 184, H = 46, GY = 12;
-    const GX = labels ? (narrow ? 96 : 132) : (narrow ? 40 : 56);
+    // The box and legend go in first: full page measures what is left for
+    // the graph inside them.
+    const old = host.querySelector(".deps-scroll");
+    const scroll = el("div", "deps-scroll");
+    const legend = "Arrows point from a session to what it waits for. Amber: waited on by two or more." +
+      (L.back.size ? " Dashed red: a cycle." : "");
+    host.replaceChildren(el("div", "deps-box", scroll, el("p", "deps-legend", legend)));
+    const H = 46, minGX = labels ? (narrow ? 96 : 132) : (narrow ? 40 : 56);
+    let W = narrow ? 148 : 184, GX = minGX, GY = 12;
+    if (fill) {
+      // 24: the scroll box padding.
+      const aw = scroll.clientWidth - 24, ah = scroll.clientHeight - 24;
+      const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.floor(v)));
+      W = clamp((aw - (L.cols - 1) * minGX) / L.cols, W, 240);
+      if (L.cols > 1) GX = clamp((aw - L.cols * W) / (L.cols - 1), minGX, 280);
+      if (L.longest > 1) GY = clamp((ah - L.longest * H) / (L.longest - 1), 12, 40);
+    }
     const xOf = v => L.col[v] * (W + GX), yOf = v => L.row[v] * (H + GY);
     const width = L.cols * W + (L.cols - 1) * GX;
     const height = L.longest * (H + GY) - GY;
@@ -2291,8 +2350,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     g.style.height = height + "px";
     const marker = (id, cls) => svgEl("marker", {id, viewBox: "0 0 8 8", refX: "8", refY: "4", markerWidth: "8", markerHeight: "8", markerUnits: "userSpaceOnUse", orient: "auto"},
       svgEl("path", {d: "M0 0L8 4L0 8z", class: "dep-ah" + cls}));
+    // Marker ids carry the host id: two graphs are in the page at once, and
+    // a url(#id) that finds the other one draws no arrowhead while that one
+    // is hidden.
+    const ah = host.id + "-ah";
     const svg = svgEl("svg", {width: String(width), height: String(height), "aria-hidden": "true"},
-      svgEl("defs", {}, marker("dep-ah", ""), marker("dep-ah-hot", " hot"), marker("dep-ah-cyc", " cyc")));
+      svgEl("defs", {}, marker(ah, ""), marker(ah + "-hot", " hot"), marker(ah + "-cyc", " cyc")));
     const maxChars = Math.max(4, Math.floor((GX - 10) / 6));
     edges.forEach((e, i) => {
       const cyc = L.back.has(i), hot = waiters[e.b].size >= 2;
@@ -2307,7 +2370,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         segs.push([[x1, y1], [m, y1], [m, y2], [x2, y2]]);
       }
       const d = segs.map((q, j) => (j ? " L" : "M") + q[0].join(" ") + " C" + q.slice(1).map(pt => pt.join(" ")).join(" ")).join("");
-      svg.append(svgEl("path", {class: "dep-e" + cls, d, "marker-end": "url(#dep-ah" + (cyc ? "-cyc" : hot ? "-hot" : "") + ")"}));
+      svg.append(svgEl("path", {class: "dep-e" + cls, d, "marker-end": "url(#" + ah + (cyc ? "-cyc" : hot ? "-hot" : "") + ")"}));
       if (!e.label) return;
       // The label sits at the middle of the first gap after the waiter:
       // above the curve, or below it for a cycle edge (an edge back runs
@@ -2328,14 +2391,38 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       box.style.height = H + "px";
       g.append(box);
     });
-    const old = host.querySelector(".deps-scroll");
-    const scroll = el("div", "deps-scroll", g);
-    const legend = "Arrows point from a session to what it waits for. Amber: waited on by two or more." +
-      (L.back.size ? " Dashed red: a cycle." : "");
-    host.replaceChildren(el("div", "deps-box", scroll, el("p", "deps-legend", legend)));
-    if (old) scroll.scrollLeft = old.scrollLeft;
+    scroll.append(g);
+    if (old) { scroll.scrollLeft = old.scrollLeft; scroll.scrollTop = old.scrollTop; }
   }
   depsNarrowMQ.addEventListener("change", () => renderDeps());
+
+  // Full page dependencies: a modal dialog, so Esc closes it and focus goes
+  // back to the expand button. A session box opens the session view, which
+  // the dialog would cover, so a click on one closes the dialog first.
+  function openDepsFull() {
+    const d = $("deps-full");
+    if (d.open) return;
+    if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
+    renderDeps();
+    $("deps-close").focus();
+  }
+  function closeDepsFull() {
+    const d = $("deps-full");
+    if (d.open) { if (typeof d.close === "function") d.close(); else d.removeAttribute("open"); }
+  }
+  $("deps-expand").addEventListener("click", openDepsFull);
+  $("deps-close").addEventListener("click", closeDepsFull);
+  $("deps-full").addEventListener("click", e => { if (e.target.closest("a[href^='#session/']")) closeDepsFull(); });
+  $("deps-full").addEventListener("close", () => {
+    $("deps-full-g").replaceChildren();
+    depsSigs.delete($("deps-full-g"));
+    const a = document.activeElement;
+    if (!a || a === document.body || $("deps-full").contains(a)) $("deps-expand").focus({preventScroll: true});
+  });
+  // A resize of the open dialog (window, rotation, on-screen keyboard)
+  // spreads the graph over the new space.
+  if (typeof ResizeObserver === "function") new ResizeObserver(() => { if ($("deps-full").open) renderDeps(); }).observe($("deps-full-g"));
+  else window.addEventListener("resize", () => { if ($("deps-full").open) renderDeps(); });
 
   // cardSig: a short hash of what FLEET shows and asks on a card: kind,
   // status, title, ticket, summary, lean and every option's key, label,
