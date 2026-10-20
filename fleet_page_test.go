@@ -8,7 +8,9 @@ import (
 
 func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 	page := string(fleetPageHTML)
-	for _, bad := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "src=\"http", "href=\"http", "@import", "eval("} {
+	for _, bad := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "src=\"http", "href=\"http", "@import", "eval(",
+		// FLEET's pick is a tag on its option, not a button of its own.
+		"Use FLEET's pick"} {
 		if strings.Contains(page, bad) {
 			t.Errorf("fleet.html must not contain %q", bad)
 		}
@@ -33,7 +35,13 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		"#session/",
 		// The graph also opens full page: a modal dialog drawn by the same
 		// drawDeps, spread over the space it measures.
-		`id="deps-expand"`, `id="deps-full"`, `id="deps-full-g"`, `id="deps-close"`, "function drawDeps(", "function openDepsFull("} {
+		`id="deps-expand"`, `id="deps-full"`, `id="deps-full-g"`, `id="deps-close"`, "function drawDeps(", "function openDepsFull(",
+		// A decision card ends its options with Other (a free-text answer in
+		// the FLEET chat, prefixed with the card id). A Chat button at the top
+		// opens the card's live session (by its tmux field), else the FLEET
+		// chat.
+		`"opt other-btn"`, `"Other"`, `"Andy decides on "`, "function chatBtn(", `"btn chat-btn", "Chat"`,
+		"function cardSession(", "sessOf(c.tmux)", `"About card "`} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}

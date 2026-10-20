@@ -205,7 +205,9 @@ section { min-width: 0; }
 .card-meta .sess { font-family: var(--mono); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta .wo { color: var(--amber); }
 .card .summary { margin: 10px 0 0; font-size: 14.5px; }
-.icon-btn { flex: none; width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface2); cursor: pointer; font-size: 17px; line-height: 1; }
+/* Chat: opens the card's session, or the FLEET chat when none is live. */
+.btn.chat-btn { flex: none; min-height: 44px; padding: 0 14px; }
+.row > .row-head.has-act { display: flex; align-items: center; gap: 10px; }
 .lean-line { margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
 .lean-line b { color: var(--text); }
 .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; margin-top: 12px; }
@@ -222,8 +224,9 @@ section { min-width: 0; }
 /* FLEET's recommended option gets a tag, not an outline: selection styling
    is kept for Andy's own choice (.chosen). */
 .opt .rec { align-self: flex-start; margin-bottom: 2px; padding: 1px 7px; border-radius: 99px; background: var(--accent-tint); color: var(--accent); font-size: 11px; font-weight: 650; letter-spacing: .01em; }
-.opt.lean-btn { background: transparent; border-style: dashed; color: var(--accent); font-weight: 620; }
-.opt.lean-btn .k { border-color: var(--accent); color: var(--accent); background: transparent; }
+/* Other: Andy's own answer, written in the chat. Last in the list. */
+.opt.other-btn { background: transparent; border-style: dashed; }
+.opt.other-btn .k { background: transparent; }
 .opt.chosen, .opt.chosen:disabled { border: 2px solid var(--accent); border-style: solid; background: var(--accent-tint); padding: 7px 11px; }
 .opt.chosen:disabled .k, .opt.chosen:disabled .ol { opacity: 1; }
 .opt.chosen .k { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
@@ -1847,12 +1850,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
     if (str(c.updatedAt)) meta.append(relSpan(c.updatedAt));
     if (meta.childNodes.length) title.append(meta);
-    const talk = el("button", "icon-btn", "💬");
-    talk.type = "button";
-    talk.title = "Write about this in the chat";
-    talk.setAttribute("aria-label", "Write about " + head.name + " in the chat");
-    talk.addEventListener("click", () => prefillChat(head.name));
-    card.append(el("div", "card-top", title, talk));
+    card.append(el("div", "card-top", title, chatBtn(c)));
 
     // Andy's answers, once sent: shown by the title until FLEET drops or
     // rewrites the card. The options lock while they stand. "Send a
@@ -1905,35 +1903,33 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (lean && !leanOpt) card.append(el("p", "lean-line", "Lean: ", el("b", "", lean)));
 
     const canSend = canSendNow() && !!id;
-    if (opts.length) {
-      const box = el("div", "opts");
-      for (const o of opts) {
-        const key = str(o.key), label = str(o.label) || str(o.send) || key, line = str(o.line);
-        const chosen = !!(last && last.key === key && !last.lean);
-        const btn = el("button", "opt" + (chosen ? " chosen" : ""), key ? el("span", "k", key) : null,
-          el("span", "ob", leanOpt === o ? el("span", "rec", "FLEET recommends") : null,
-            el("span", "ol", label), line ? el("span", "oline", line) : null));
-        btn.type = "button";
-        btn.disabled = !canSend || !str(o.send) || locked;
-        if (chosen) btn.setAttribute("aria-pressed", "true");
-        btn.addEventListener("click", () => openSheet(c, o, false, explicit));
-        box.append(btn);
-      }
-      // FLEET never lets a lean stand in for an explicit-yes item, so the
-      // Lean button is for needs-you cards only.
-      if (!explicit && leanOpt && str(leanOpt.send)) {
-        const chosen = !!(last && last.lean);
-        const lb = el("button", "opt lean-btn" + (chosen ? " chosen" : ""), el("span", "k", lean), el("span", "ob", el("span", "ol", "Use FLEET's pick")));
-        lb.type = "button";
-        lb.disabled = !canSend || locked;
-        lb.addEventListener("click", () => openSheet(c, leanOpt, true, explicit));
-        box.append(lb);
-      }
-      card.append(box);
-      // Without an id the page cannot tie an answer to the card, lock it or
-      // track its delivery, so the options only show.
-      if (!id) card.append(el("p", "noid-note", "This card has no id, so the page cannot track an answer. Answer in the chat."));
+    const box = el("div", "opts");
+    for (const o of opts) {
+      const key = str(o.key), label = str(o.label) || str(o.send) || key, line = str(o.line);
+      // An answer sent with the old "FLEET's pick" button marks its option.
+      const chosen = !!(last && last.key === key);
+      const btn = el("button", "opt" + (chosen ? " chosen" : ""), key ? el("span", "k", key) : null,
+        el("span", "ob", leanOpt === o ? el("span", "rec", "FLEET recommends") : null,
+          el("span", "ol", label), line ? el("span", "oline", line) : null));
+      btn.type = "button";
+      btn.disabled = !canSend || !str(o.send) || locked;
+      if (chosen) btn.setAttribute("aria-pressed", "true");
+      btn.addEventListener("click", () => openSheet(c, o, false, explicit));
+      box.append(btn);
     }
+    // Other, last: Andy writes his own answer in the FLEET chat, prefixed
+    // with the card id. It goes as a plain chat line, so the card does not
+    // lock or track it, and it stays on while the options are locked.
+    const other = el("button", "opt other-btn", el("span", "k", "…"),
+      el("span", "ob", el("span", "ol", "Other"), el("span", "oline", "Write your own answer in the chat")));
+    other.type = "button";
+    other.setAttribute("aria-label", "Other: write your own answer about " + head.name + " in the chat");
+    other.addEventListener("click", () => prefillChat(id ? "Andy decides on " + id + ": " : "About " + head.name + ": "));
+    box.append(other);
+    card.append(box);
+    // Without an id the page cannot tie an answer to the card, lock it or
+    // track its delivery, so the options only show.
+    if (opts.length && !id) card.append(el("p", "noid-note", "This card has no id, so the page cannot track an answer. Answer in the chat."));
 
     const links = linksNode(c);
     if (links) card.append(links);
@@ -1970,6 +1966,48 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // Session names the page may open (#session/<tmux>).
   const SV_NAME = /^[A-Za-z0-9._-]{1,128}$/;
   const sessOf = v => str(v).split(":")[0].trim();
+  // cardSession: the live tmux session a card names, or "" when none is
+  // live. The card's tmux field (the key notes use) decides when it is set:
+  // a tmux that is not live means the session ended. A card without it
+  // falls back to its session (display or tmux name), and only when
+  // exactly one live row matches. FLEET is not in state.sessions, so a
+  // card FLEET owns never resolves.
+  function cardSession(c) {
+    const rows = arr(state && state.sessions).map(obj).filter(r => r && SV_NAME.test(str(r.tmux)));
+    const tm = sessOf(c.tmux);
+    if (tm) return rows.some(r => str(r.tmux) === tm) ? tm : "";
+    const name = str(c.session).trim();
+    if (!name) return "";
+    const hits = new Set(rows.filter(r => str(r.name) === name || str(r.tmux) === sessOf(name)).map(r => str(r.tmux)));
+    return hits.size === 1 ? [...hits][0] : "";
+  }
+  // Card ids FLEET was told about an opened chat, kept for the page's life,
+  // so a second open does not repeat the line.
+  const chatTold = new Set();
+  // openCardChat: the card's live session opens in the session view (the
+  // route a Working row takes), and FLEET gets one line so it can re-read
+  // that session and close the card. With no live session the FLEET chat
+  // opens with the card prefilled.
+  function openCardChat(c) {
+    const id = str(c.id), tm = cardSession(c);
+    if (!tm) { prefillChat(id ? "About card " + id + ": " : "About " + cardHead(c).name + ": "); return; }
+    if (id && canSendNow() && !chatTold.has(id)) {
+      chatTold.add(id);
+      say("Andy opened chat on card " + id + " (" + tm + ")", id);
+    }
+    location.hash = "#session/" + encodeURIComponent(tm);
+  }
+  // chatBtn: the Chat button at the top of a card that names a session.
+  function chatBtn(c) {
+    if (!str(c.tmux) && !str(c.session)) return null;
+    const head = cardHead(c), tm = cardSession(c);
+    const b = el("button", "btn chat-btn", "Chat");
+    b.type = "button";
+    b.title = tm ? "Chat with " + tm : "No live session: write about this card in the FLEET chat";
+    b.setAttribute("aria-label", tm ? "Chat with the session of " + head.name : "Write about " + head.name + " in the FLEET chat");
+    b.addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); openCardChat(c); });
+    return b;
+  }
   // liveBadgeOf: a session row's live status (from the server's own session
   // list, not FLEET), with "idle 12 min" from since.
   const LIVE_LABEL = {busy: "busy", idle: "idle", shell: "shell", waiting: "waiting"};
@@ -1993,10 +2031,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const l2 = el("div", "row-l2");
     if (str(c.session)) { const s = el("span", "sess", str(c.session)); s.title = str(c.session); l2.append(s); }
     if (str(c.updatedAt)) l2.append(relSpan(c.updatedAt));
-    const sum = str(c.summary), links = linksNode(c);
+    const sum = str(c.summary), links = linksNode(c), chat = chatBtn(c);
     if (!sum && !links) {
       const row = el("div", "row");
-      row.append(el("div", "row-head", l1, l2.childNodes.length ? l2 : null));
+      row.append(chat ? el("div", "row-head has-act", el("div", "row-main", l1, l2.childNodes.length ? l2 : null), chat)
+        : el("div", "row-head", l1, l2.childNodes.length ? l2 : null));
       return row;
     }
     const row = el("details", "row");
@@ -2007,7 +2046,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (!id) return;
       if (row.open) expanded.add("row:" + id); else expanded.delete("row:" + id);
     });
-    row.append(el("summary", "", el("div", "row-main", l1, l2.childNodes.length ? l2 : null), el("span", "chev")));
+    // Chat stops its click, so a tap does not also toggle the row.
+    row.append(el("summary", "", el("div", "row-main", l1, l2.childNodes.length ? l2 : null), chat, el("span", "chev")));
     const body = el("div", "row-body");
     if (sum) body.append(el("div", "summary rich", renderRich(sum)));
     if (links) body.append(links);
@@ -3197,9 +3237,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     guard(renderChat);
   }
 
-  function prefillChat(name) {
+  // prefillChat starts the FLEET chat input with prefix (e.g. "About card
+  // <id>: "), keeps any draft after it and focuses the input.
+  function prefillChat(prefix) {
     const ta = $("say");
-    const prefix = "About " + name + ": ";
     if (!ta.value.startsWith(prefix)) ta.value = prefix + ta.value.replace(/^\s+/, "");
     grow();
     if (isPhone()) setView("chat", true);
@@ -3533,7 +3574,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     drafts: new Map(), warned: new Set(), pending: new Set(), // per tmux name, kept for the page's life
     textRev: 0}; // bumps when a turn's text changes, even to the same length
   const SV_POLL = 3000;
-  const svCard = t => arr(state && state.cards).map(obj).find(c => c && sessOf(c.session) === t) || null;
+  const svCard = t => arr(state && state.cards).map(obj).find(c => c && (sessOf(c.tmux) === t || sessOf(c.session) === t)) || null;
   const svOpenErrors = {
     bad_target: "This is not a valid session name.",
     not_allowed: "This session is not on a FLEET card or in the session list.",
