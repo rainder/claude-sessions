@@ -36,6 +36,9 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// The graph also opens full page: a modal dialog drawn by the same
 		// drawDeps, spread over the space it measures.
 		`id="deps-refresh"`, "function refreshDeps(", `id="deps-expand"`, `id="deps-full"`, `id="deps-full-g"`, `id="deps-close"`, "function drawDeps(", "function openDepsFull(",
+		// Below 1100px Dependencies is a view of its own in the bottom nav,
+		// not a section of the Fleet view.
+		`data-view="deps"`, `"fleet", "deps", "history"]`, "body.v-fleet .sec-deps", "body.v-deps .sec-fleet:not(.sec-deps)",
 		// A decision card ends its options with Other (a free-text answer in
 		// the FLEET chat, prefixed with the card id). A Chat button at the top
 		// opens the card's live session (by its tmux field), else the FLEET
