@@ -35,7 +35,7 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		"#session/",
 		// The graph also opens full page: a modal dialog drawn by the same
 		// drawDeps, spread over the space it measures.
-		`id="deps-expand"`, `id="deps-full"`, `id="deps-full-g"`, `id="deps-close"`, "function drawDeps(", "function openDepsFull(",
+		`id="deps-refresh"`, "function refreshDeps(", `id="deps-expand"`, `id="deps-full"`, `id="deps-full-g"`, `id="deps-close"`, "function drawDeps(", "function openDepsFull(",
 		// A decision card ends its options with Other (a free-text answer in
 		// the FLEET chat, prefixed with the card id). A Chat button at the top
 		// opens the card's live session (by its tmux field), else the FLEET

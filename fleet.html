@@ -374,6 +374,7 @@ a.dn:hover { background: var(--surface2); }
 .deps-x { flex: none; display: grid; place-items: center; width: 36px; height: 36px; margin: -6px 0; border: 0; border-radius: 9px; background: none; color: var(--muted); cursor: pointer; }
 .deps-x:hover { background: var(--surface2); color: var(--text); }
 .deps-x svg { width: 18px; height: 18px; }
+.deps-x:disabled { opacity: .5; cursor: default; }
 /* Full page: the same graph in a modal dialog that covers the viewport,
    spread to fill it. The graph sits centered while it fits and scrolls on
    both axes when it does not. */
@@ -805,6 +806,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <section class="sec-fleet sec-deps" aria-labelledby="h-deps">
         <div class="deps-head">
           <h2 class="sec-h" id="h-deps">Dependencies <span class="n" id="n-deps">0</span></h2>
+          <button class="deps-x" id="deps-refresh" type="button" aria-label="Ask FLEET to regenerate the dependencies graph" title="Refresh (ask FLEET)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5"/></svg></button>
           <button class="deps-x" id="deps-expand" type="button" aria-label="Show the dependencies full page" title="Full page" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg></button>
         </div>
         <div id="deps"></div>
@@ -2450,6 +2452,22 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const d = $("deps-full");
     if (d.open) { if (typeof d.close === "function") d.close(); else d.removeAttribute("open"); }
   }
+  // Refresh asks FLEET, through the chat, to rebuild state.deps from the
+  // live sessions; the new graph arrives with the next state poll.
+  async function refreshDeps() {
+    const b = $("deps-refresh");
+    if (b.disabled) return;
+    b.disabled = true;
+    try {
+      const res = await say("Andy asks: regenerate the dependencies graph (state.deps) from the live sessions and cards, then publish it.", null);
+      if (res.ok) toast(res.queued ? "Sent. FLEET is busy. It rebuilds the graph next." : "Sent. FLEET rebuilds the graph.");
+      else toast(res.error, true);
+      if (res.ok || res.unclear) afterSend();
+    } finally {
+      b.disabled = false;
+    }
+  }
+  $("deps-refresh").addEventListener("click", refreshDeps);
   $("deps-expand").addEventListener("click", openDepsFull);
   $("deps-close").addEventListener("click", closeDepsFull);
   $("deps-full").addEventListener("click", e => { if (e.target.closest("a[href^='#session/']")) closeDepsFull(); });
@@ -2893,7 +2911,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // 2xx body that is not JSON with a boolean ok): the text may have reached
   // FLEET, so the caller must not act as if it did not.
   const SAY_TIMEOUT = 15000;
-  // A busy grok session refuses a send: Enter can cancel its running turn.
+  // A busy Grok turn accepts a send: Enter queues it. This text is for a
+  // Grok session whose status is unknown or waiting.
   const GROK_BUSY = "The Grok session is busy. Try again when its turn ends.";
   const say = (text, cardId) => postSay("/fleet/say", {text, cardId}, {busy: GROK_BUSY});
   // postSay is say for any send endpoint with the /fleet/say envelope.
