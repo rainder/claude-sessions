@@ -368,6 +368,12 @@ a.dn:hover { background: var(--surface2); }
 .dn.hot { border-color: var(--amber-line); border-left-color: var(--amber); background: var(--amber-tint); box-shadow: 0 0 0 1px var(--amber-line); }
 .dn .wait-n { flex: none; padding: 0 5px; border-radius: 99px; background: var(--amber); color: var(--on-accent); font-weight: 700; }
 .deps-legend { margin: 0; padding: 0 12px 10px; font-size: 11.5px; color: var(--muted); }
+/* Plain-words reading of the graph, above it: one line per thing that is
+   waited on, the most-waited first. */
+.deps-sum { margin: 0; padding: 10px 12px 0; list-style: none; font-size: 12.5px; line-height: 1.45; }
+.deps-sum li { margin: 0 0 4px; }
+.deps-sum b { font-weight: 600; }
+.deps-sum .why { color: var(--muted); }
 /* The expand button sits at the right end of the section heading row. */
 .deps-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
 .deps-head .sec-h { flex: 1; min-width: 0; margin: 0; }
@@ -2334,6 +2340,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // full page dialog. Each host keeps its own signature; the full page one
   // also holds the space it had, so a resize draws it again.
   const depsSigs = new Map();
+  const DEPS_SCROLL_QUIET = 4000;
+  const depsScrollAt = new Map(), depsLater = new Map();
   function renderDeps() {
     const d = obj(state && state.deps);
     const nodes = arr(d && d.nodes).map(obj).filter(n => n && str(n.id) && str(n.label) && DEP_KIND_WORD[str(n.kind)]);
@@ -2354,6 +2362,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const space = fill ? [host.clientWidth, host.clientHeight] : [];
     const hsig = sig + space.join("x");
     if (hsig === depsSigs.get(host) && host.firstChild) return;
+    // A redraw in the middle of a scroll gesture throws the gesture away
+    // (a poll lands every few seconds), so wait until the user lets go.
+    const busyFor = DEPS_SCROLL_QUIET - (Date.now() - (depsScrollAt.get(host) || 0));
+    if (busyFor > 0 && host.firstChild) {
+      clearTimeout(depsLater.get(host));
+      depsLater.set(host, setTimeout(renderDeps, busyFor + 50));
+      return;
+    }
     depsSigs.set(host, hsig);
     if (!raw.length) { host.replaceChildren(el("p", "empty", "No dependencies.")); return; }
     // Node keys: "n:" an external node, "s:" a session.
@@ -2368,11 +2384,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const labels = edges.some(e => e.label);
     // The box and legend go in first: full page measures what is left for
     // the graph inside them.
+    // Read the old scroll offsets before the old box leaves the page: a
+    // detached element reports 0.
     const old = host.querySelector(".deps-scroll");
+    const keep = old ? [old.scrollLeft, old.scrollTop] : null;
     const scroll = el("div", "deps-scroll");
+    const mark = () => depsScrollAt.set(host, Date.now());
+    for (const t of ["scroll", "pointerdown", "touchstart", "wheel"]) scroll.addEventListener(t, mark, {passive: true});
+    const byTmux = new Map(rows.map(r => [str(r.tmux), r]));
     const legend = "Arrows point from a session to what it waits for. Amber: waited on by two or more." +
       (L.back.size ? " Dashed red: a cycle." : "");
-    host.replaceChildren(el("div", "deps-box", scroll, el("p", "deps-legend", legend)));
+    host.replaceChildren(el("div", "deps-box", depsSummary(keys, edges, ext, byTmux), scroll, el("p", "deps-legend", legend)));
     const H = 46, minGX = labels ? (narrow ? 96 : 132) : (narrow ? 40 : 56);
     let W = narrow ? 148 : 184, GX = minGX, GY = 12;
     if (fill) {
@@ -2386,7 +2408,6 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const xOf = v => L.col[v] * (W + GX), yOf = v => L.row[v] * (H + GY);
     const width = L.cols * W + (L.cols - 1) * GX;
     const height = L.longest * (H + GY) - GY;
-    const byTmux = new Map(rows.map(r => [str(r.tmux), r]));
     const g = el("div", "deps-g");
     g.style.width = width + "px";
     g.style.height = height + "px";
@@ -2434,7 +2455,38 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       g.append(box);
     });
     scroll.append(g);
-    if (old) { scroll.scrollLeft = old.scrollLeft; scroll.scrollTop = old.scrollTop; }
+    if (keep) { scroll.scrollLeft = keep[0]; scroll.scrollTop = keep[1]; }
+  }
+  // depsSummary reads the graph in words: one line per node that something
+  // waits for, the most-waited first, people before the rest, e.g.
+  // "Andy blocks 2: DR-5478 (design A/B/C), DR-5480 (approval)".
+  function depsSummary(keys, edges, ext, byTmux) {
+    const name = k => {
+      const id = k.slice(2);
+      if (k[0] === "n") return ext.get(id).label;
+      const r = byTmux.get(id);
+      const t = r ? arr(r.tickets).map(str).filter(Boolean) : [];
+      return t.length ? t.join(" + ") : (r && str(r.name)) || id;
+    };
+    const by = new Map();
+    for (const e of edges) {
+      if (!by.has(e.b)) by.set(e.b, []);
+      by.get(e.b).push(e);
+    }
+    const kindRank = v => keys[v][0] === "n" && ext.get(keys[v].slice(2)).kind === "person" ? 0 : 1;
+    const order = [...by.keys()].sort((x, y) => kindRank(x) - kindRank(y) || by.get(y).length - by.get(x).length);
+    const ul = el("ul", "deps-sum");
+    for (const v of order) {
+      const es = by.get(v);
+      const li = el("li", "", el("b", "", name(keys[v])), " blocks " + es.length + ": ");
+      es.forEach((e, i) => {
+        if (i) li.append(", ");
+        li.append(name(keys[e.a]));
+        if (e.label) li.append(el("span", "why", " (" + e.label + ")"));
+      });
+      ul.append(li);
+    }
+    return ul;
   }
   depsNarrowMQ.addEventListener("change", () => renderDeps());
 
