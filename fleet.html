@@ -367,10 +367,18 @@ a.dn:hover { background: var(--surface2); }
 /* Waited on by two or more: the bottleneck. */
 .dn.hot { border-color: var(--amber-line); border-left-color: var(--amber); background: var(--amber-tint); box-shadow: 0 0 0 1px var(--amber-line); }
 .dn .wait-n { flex: none; padding: 0 5px; border-radius: 99px; background: var(--amber); color: var(--on-accent); font-weight: 700; }
-.deps-legend { margin: 0; padding: 0 12px 10px; font-size: 11.5px; color: var(--muted); }
-/* Plain-words reading of the graph, above it: one line per thing that is
-   waited on, the most-waited first. */
-.deps-sum { margin: 0; padding: 10px 12px 0; list-style: none; font-size: 12.5px; line-height: 1.45; }
+.deps-legend { margin: 0; padding: 4px 0 0; font-size: 11.5px; color: var(--muted); }
+/* FLEET's own words above the graph (deps.story): what is happening, at
+   most three short lines. */
+.deps-story { margin: 0; padding: 8px 12px 0 28px; font-size: 13px; line-height: 1.4; }
+.deps-story li { margin: 0 0 2px; }
+/* The per-blocker list and the legend fold under the graph, closed. */
+.deps-who { padding: 0 12px 8px; font-size: 12px; }
+.deps-who > summary { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; list-style: none; cursor: pointer; color: var(--muted); font-weight: 600; }
+.deps-who > summary::-webkit-details-marker { display: none; }
+.deps-who > summary .chev { transform: rotate(-45deg); }
+.deps-who[open] > summary .chev { transform: rotate(45deg); }
+.deps-sum { margin: 0; padding: 0; list-style: none; font-size: 12.5px; line-height: 1.45; }
 .deps-sum li { margin: 0 0 4px; }
 .deps-sum b { font-weight: 600; }
 .deps-sum .why { color: var(--muted); }
@@ -2351,17 +2359,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const nodes = arr(d && d.nodes).map(obj).filter(n => n && str(n.id) && str(n.label) && DEP_KIND_WORD[str(n.kind)]);
     const raw = arr(d && d.edges).map(obj).filter(e => e && str(e.from) && str(e.to) && str(e.from) !== str(e.to));
     const rows = arr(state && state.sessions).map(obj).filter(r => r && str(r.tmux));
-    const sig = JSON.stringify([nodes, raw, rows.map(r => [r.tmux, r.status, r.since, r.model, r.tool, r.tickets, r.name]), depsNarrowMQ.matches]);
+    const sig = JSON.stringify([nodes, raw, (d && d.story), rows.map(r => [r.tmux, r.status, r.since, r.model, r.tool, r.tickets, r.name]), depsNarrowMQ.matches]);
     $("n-deps").textContent = $("n-deps-full").textContent = raw.length;
-    drawDeps($("deps"), false, sig, nodes, raw, rows);
-    if ($("deps-full").open) drawDeps($("deps-full-g"), true, sig, nodes, raw, rows);
+    drawDeps($("deps"), false, sig, nodes, raw, rows, (d && d.story));
+    if ($("deps-full").open) drawDeps($("deps-full-g"), true, sig, nodes, raw, rows, (d && d.story));
   }
   // drawDeps lays the graph out in host. In the section the sizes are
   // fixed, so nothing is measured, and a graph drawn while the Fleet view
   // is hidden is still right. Full page (fill) measures the space the
   // graph has and spreads the layers and rows over it, within limits, so a
   // small graph does not stretch into a thin web.
-  function drawDeps(host, fill, sig, nodes, raw, rows) {
+  function drawDeps(host, fill, sig, nodes, raw, rows, story) {
     const narrow = depsNarrowMQ.matches;
     const space = fill ? [host.clientWidth, host.clientHeight] : [];
     const hsig = sig + space.join("x");
@@ -2398,7 +2406,16 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const byTmux = new Map(rows.map(r => [str(r.tmux), r]));
     const legend = "Arrows point from a session to what it waits for. Amber: waited on by two or more." +
       (L.back.size ? " Dashed red: a cycle." : "");
-    host.replaceChildren(el("div", "deps-box", depsSummary(keys, edges, ext, byTmux), scroll, el("p", "deps-legend", legend)));
+    // FLEET's story goes first; the generated per-blocker list and the
+    // legend fold under the graph, so the card stays short. The fold keeps
+    // its open state across redraws.
+    const lines = arr(story).map(str).filter(Boolean);
+    const storyEl = lines.length ? el("ul", "deps-story", ...lines.map(t => el("li", "", t))) : null;
+    const oldWho = host.querySelector(".deps-who");
+    const who = el("details", "deps-who", el("summary", "", el("span", "chev"), "Who waits on what"),
+      depsSummary(keys, edges, ext, byTmux), el("p", "deps-legend", legend));
+    if (oldWho && oldWho.open) who.open = true;
+    host.replaceChildren(el("div", "deps-box", storyEl, scroll, who));
     const H = 46, minGX = labels ? (narrow ? 96 : 132) : (narrow ? 40 : 56);
     let W = narrow ? 148 : 184, GX = minGX, GY = 12;
     if (fill) {

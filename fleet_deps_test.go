@@ -115,6 +115,24 @@ func TestFleetDependenciesCaps(t *testing.T) {
 	}
 }
 
+func TestFleetDependenciesStory(t *testing.T) {
+	long := strings.Repeat("x", fleetDepStoryLen+20)
+	raw := `{"story":["  Four dev checks wait for the dev queue. ", 7, "bad\u0007", "", "` + long + `", "third kept line", "past the cap"]}`
+	g := fleetDependencies(map[string]json.RawMessage{"deps": json.RawMessage(raw)}, nil)
+	want := []string{"Four dev checks wait for the dev queue.", strings.Repeat("x", fleetDepStoryLen), "third kept line"}
+	if len(g.Story) != len(want) {
+		t.Fatalf("story = %q, want %q", g.Story, want)
+	}
+	for i := range want {
+		if g.Story[i] != want[i] {
+			t.Fatalf("story[%d] = %q, want %q", i, g.Story[i], want[i])
+		}
+	}
+	if g = fleetDependencies(map[string]json.RawMessage{"deps": json.RawMessage(`{}`)}, nil); g.Story != nil {
+		t.Fatalf("no story must stay nil, got %q", g.Story)
+	}
+}
+
 func TestFleetStateServesDeps(t *testing.T) {
 	s := fleetTestServer(t, []Session{
 		{PID: 20, SessionID: "a", Status: "busy", Tmux: "a-busy:0.0"},

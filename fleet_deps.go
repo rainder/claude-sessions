@@ -20,6 +20,8 @@ const (
 	fleetDepNodesMax = 100
 	fleetDepEdgesMax = 200
 	fleetDepLabelMax = 60 // runes
+	fleetDepStoryMax = 3   // lines
+	fleetDepStoryLen = 160 // runes per line
 )
 
 // fleetDepNodeIDRe: a node id. "#" is allowed so a PR node can use its
@@ -42,15 +44,24 @@ type fleetDepEdge struct {
 
 // fleetDepGraph is what /fleet/state serves as "deps". Nodes holds only the
 // external nodes a kept edge names; a session end is not a node here.
+// Story is FLEET's own plain-words reading of the graph: what is actually
+// happening and what would unblock it, not a repeat of the edges.
 type fleetDepGraph struct {
 	Nodes []fleetDepNode `json:"nodes"`
 	Edges []fleetDepEdge `json:"edges"`
+	Story []string       `json:"story,omitempty"`
 }
 
 // fleetDepLabel cleans one label: trimmed, cut to fleetDepLabelMax runes.
 // ok is false for a value that is not a string or holds a control
 // character.
 func fleetDepLabel(raw json.RawMessage) (string, bool) {
+	return fleetDepText(raw, fleetDepLabelMax)
+}
+
+// fleetDepText cleans one string: trimmed, cut to max runes. ok is false for
+// a value that is not a string or holds a control character.
+func fleetDepText(raw json.RawMessage, max int) (string, bool) {
 	if raw == nil {
 		return "", true
 	}
@@ -59,8 +70,8 @@ func fleetDepLabel(raw json.RawMessage) (string, bool) {
 		return "", false
 	}
 	s = strings.TrimSpace(s)
-	if utf8.RuneCountInString(s) > fleetDepLabelMax {
-		s = strings.TrimSpace(string([]rune(s)[:fleetDepLabelMax]))
+	if utf8.RuneCountInString(s) > max {
+		s = strings.TrimSpace(string([]rune(s)[:max]))
 	}
 	return s, true
 }
@@ -75,6 +86,7 @@ func fleetDependencies(state map[string]json.RawMessage, rows []fleetWorkRow) *f
 	var raw struct {
 		Nodes []map[string]json.RawMessage `json:"nodes"`
 		Edges []map[string]json.RawMessage `json:"edges"`
+		Story []json.RawMessage            `json:"story"`
 	}
 	if state["deps"] == nil || json.Unmarshal(state["deps"], &raw) != nil {
 		return nil
@@ -135,6 +147,14 @@ func fleetDependencies(state map[string]json.RawMessage, rows []fleetWorkRow) *f
 		seen[k] = true
 		used[from], used[to] = true, true
 		g.Edges = append(g.Edges, fleetDepEdge{From: from, To: to, Label: label})
+	}
+	for _, line := range raw.Story {
+		if len(g.Story) >= fleetDepStoryMax {
+			break
+		}
+		if t, ok := fleetDepText(line, fleetDepStoryLen); ok && t != "" {
+			g.Story = append(g.Story, t)
+		}
 	}
 	// Nodes in FLEET's order, only those a kept edge names.
 	for _, n := range raw.Nodes {
