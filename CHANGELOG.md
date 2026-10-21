@@ -9,6 +9,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The FLEET page's Dependencies heading shows the age of the graph
+  ("generated 12 min ago"), with the time in a tooltip. It turns amber after
+  2 h. The server sends the age as `deps.generatedAt`: FLEET's `depsAt`
+  from state.json, or `writtenAt` for an older state. fleet-state.py moves
+  `depsAt` only when `deps` changes or FLEET passes `--deps-fresh`.
+
 - The FLEET page's Fleet view has a Dependencies section. It draws the
   waits-for graph that FLEET writes to state.json (`deps`) as a left-to-right
   chart. The graph shows the people, PRs, events and tickets that sessions

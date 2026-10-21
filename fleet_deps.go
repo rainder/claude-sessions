@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -19,7 +20,7 @@ import (
 const (
 	fleetDepNodesMax = 100
 	fleetDepEdgesMax = 200
-	fleetDepLabelMax = 60 // runes
+	fleetDepLabelMax = 60  // runes
 	fleetDepStoryMax = 3   // lines
 	fleetDepStoryLen = 160 // runes per line
 )
@@ -46,10 +47,29 @@ type fleetDepEdge struct {
 // external nodes a kept edge names; a session end is not a node here.
 // Story is FLEET's own plain-words reading of the graph: what is actually
 // happening and what would unblock it, not a repeat of the edges.
+// GeneratedAt is when FLEET built the graph (see fleetDepsGeneratedAt).
 type fleetDepGraph struct {
-	Nodes []fleetDepNode `json:"nodes"`
-	Edges []fleetDepEdge `json:"edges"`
-	Story []string       `json:"story,omitempty"`
+	Nodes       []fleetDepNode `json:"nodes"`
+	Edges       []fleetDepEdge `json:"edges"`
+	Story       []string       `json:"story,omitempty"`
+	GeneratedAt string         `json:"generatedAt,omitempty"`
+}
+
+// fleetDepsGeneratedAt is the age stamp of the graph, in UTC RFC 3339:
+// state.json's depsAt, which fleet-state.py moves only when deps changes or
+// FLEET rebuilt it. A state from before depsAt falls back to writtenAt, the
+// last publish. Empty when neither is a valid time.
+func fleetDepsGeneratedAt(state map[string]json.RawMessage) string {
+	for _, k := range []string{"depsAt", "writtenAt"} {
+		var at string
+		if json.Unmarshal(state[k], &at) != nil {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339, at); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
 }
 
 // fleetDepLabel cleans one label: trimmed, cut to fleetDepLabelMax runes.
@@ -125,7 +145,7 @@ func fleetDependencies(state map[string]json.RawMessage, rows []fleetWorkRow) *f
 		}
 		return fleetSessionNameRe.MatchString(id) && (live == nil || live[id])
 	}
-	g := &fleetDepGraph{Nodes: []fleetDepNode{}, Edges: []fleetDepEdge{}}
+	g := &fleetDepGraph{Nodes: []fleetDepNode{}, Edges: []fleetDepEdge{}, GeneratedAt: fleetDepsGeneratedAt(state)}
 	seen := map[[2]string]bool{}
 	used := map[string]bool{}
 	for i, e := range raw.Edges {

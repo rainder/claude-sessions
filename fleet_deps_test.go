@@ -133,12 +133,37 @@ func TestFleetDependenciesStory(t *testing.T) {
 	}
 }
 
+func TestFleetDependenciesGeneratedAt(t *testing.T) {
+	deps := json.RawMessage(`{"edges":[{"from":"s","to":"t"}]}`)
+	for _, c := range []struct {
+		name, depsAt, writtenAt, want string
+	}{
+		{"depsAt wins", `"2026-10-20T08:00:00Z"`, `"2026-10-21T09:00:00Z"`, "2026-10-20T08:00:00Z"},
+		{"depsAt in UTC", `"2026-10-20T11:00:00+03:00"`, ``, "2026-10-20T08:00:00Z"},
+		{"old state: writtenAt", ``, `"2026-10-21T09:00:00Z"`, "2026-10-21T09:00:00Z"},
+		{"bad depsAt string: writtenAt", `"yesterday"`, `"2026-10-21T09:00:00Z"`, "2026-10-21T09:00:00Z"},
+		{"depsAt not a string: writtenAt", `7`, `"2026-10-21T09:00:00Z"`, "2026-10-21T09:00:00Z"},
+		{"neither", ``, `"soon"`, ""},
+	} {
+		st := map[string]json.RawMessage{"deps": deps}
+		if c.depsAt != "" {
+			st["depsAt"] = json.RawMessage(c.depsAt)
+		}
+		if c.writtenAt != "" {
+			st["writtenAt"] = json.RawMessage(c.writtenAt)
+		}
+		if g := fleetDependencies(st, nil); g.GeneratedAt != c.want {
+			t.Errorf("%s: generatedAt = %q, want %q", c.name, g.GeneratedAt, c.want)
+		}
+	}
+}
+
 func TestFleetStateServesDeps(t *testing.T) {
 	s := fleetTestServer(t, []Session{
 		{PID: 20, SessionID: "a", Status: "busy", Tmux: "a-busy:0.0"},
 		{PID: 21, SessionID: "b", Status: "idle", Tmux: "b-idle:0.0"},
 	})
-	writeFleetFile(t, s, "state.json", `{"version":1,"cards":[],"deps":{
+	writeFleetFile(t, s, "state.json", `{"version":1,"writtenAt":"2026-10-21T09:00:00Z","depsAt":"2026-10-21T07:30:00Z","cards":[],"deps":{
 		"nodes":[{"id":"andy","label":"Andy","kind":"person"}],
 		"edges":[{"from":"a-busy","to":"b-idle"},{"from":"b-idle","to":"andy"},{"from":"ended-one","to":"andy"}]}}`)
 	out := getFleetJSON(t, s, "/fleet/state")
@@ -148,6 +173,14 @@ func TestFleetStateServesDeps(t *testing.T) {
 	}
 	if edges := deps["edges"].([]any); len(edges) != 2 {
 		t.Fatalf("served edges = %v (the ended session's edge must go)", edges)
+	}
+	if deps["generatedAt"] != "2026-10-21T07:30:00Z" {
+		t.Fatalf("generatedAt = %v, want depsAt", deps["generatedAt"])
+	}
+	// A state from before depsAt: the age is the last publish.
+	writeFleetFile(t, s, "state.json", `{"version":1,"writtenAt":"2026-10-21T09:00:00Z","cards":[],"deps":{"edges":[]}}`)
+	if deps := getFleetJSON(t, s, "/fleet/state")["deps"].(map[string]any); deps["generatedAt"] != "2026-10-21T09:00:00Z" {
+		t.Fatalf("generatedAt = %v, want the writtenAt fallback", deps["generatedAt"])
 	}
 	writeFleetFile(t, s, "state.json", `{"version":1,"cards":[]}`)
 	if out := getFleetJSON(t, s, "/fleet/state"); out["deps"] != nil {

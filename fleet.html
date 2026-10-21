@@ -384,11 +384,15 @@ a.dn:hover { background: var(--surface2); }
 .deps-sum .why { color: var(--muted); }
 /* The expand button sits at the right end of the section heading row. */
 .deps-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
-.deps-head .sec-h { flex: 1; min-width: 0; margin: 0; }
+.deps-head .sec-h { flex: 1 0 auto; margin: 0; }
 .deps-x { flex: none; display: grid; place-items: center; width: 36px; height: 36px; margin: -6px 0; border: 0; border-radius: 9px; background: none; color: var(--muted); cursor: pointer; }
 .deps-x:hover { background: var(--surface2); color: var(--text); }
 .deps-x svg { width: 18px; height: 18px; }
 .deps-x:disabled { opacity: .5; cursor: default; }
+/* The graph's age beside the buttons; it gives way first when the row is
+   short. Over 2 h it turns amber, like the header stamp. */
+.deps-age { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.deps-age.late { color: var(--amber); }
 /* Full page: the same graph in a modal dialog that covers the viewport,
    spread to fill it. The graph sits centered while it fits and scrolls on
    both axes when it does not. */
@@ -396,7 +400,7 @@ dialog.deps-full { position: fixed; inset: 0; width: 100%; max-width: none; heig
 dialog.deps-full[open] { display: flex; flex-direction: column; }
 dialog.deps-full::backdrop { background: var(--bg); }
 .dfull-bar { flex: none; display: flex; align-items: center; gap: 8px; padding: max(env(safe-area-inset-top), 6px) max(env(safe-area-inset-right), 12px) 6px max(env(safe-area-inset-left), 16px); border-bottom: 1px solid var(--line); background: var(--surface); }
-.dfull-bar .sec-h { flex: 1; min-width: 0; margin: 0; }
+.dfull-bar .sec-h { flex: 1 0 auto; margin: 0; }
 .dfull-bar .deps-x { width: 44px; height: 44px; margin: 0; }
 .dfull-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 12px max(env(safe-area-inset-right), 12px) max(env(safe-area-inset-bottom), 12px) max(env(safe-area-inset-left), 12px); }
 #deps-full-g { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -824,6 +828,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <section class="sec-fleet sec-deps" aria-labelledby="h-deps">
         <div class="deps-head">
           <h2 class="sec-h" id="h-deps">Dependencies <span class="n" id="n-deps">0</span></h2>
+          <span class="deps-age" id="deps-age"></span>
           <button class="deps-x" id="deps-refresh" type="button" aria-label="Ask FLEET to regenerate the dependencies graph" title="Refresh (ask FLEET)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5"/></svg></button>
           <button class="deps-x" id="deps-expand" type="button" aria-label="Show the dependencies full page" title="Full page" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg></button>
         </div>
@@ -915,6 +920,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 <dialog class="deps-full" id="deps-full" aria-labelledby="deps-full-title">
   <div class="dfull-bar">
     <h2 class="sec-h" id="deps-full-title">Dependencies <span class="n" id="n-deps-full">0</span></h2>
+    <span class="deps-age" id="deps-age-full"></span>
     <button class="deps-x" id="deps-close" type="button" aria-label="Close the full page dependencies" title="Close (Esc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
   </div>
   <div class="dfull-body"><div id="deps-full-g"></div></div>
@@ -1229,6 +1235,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     for (const s of document.querySelectorAll(".rel")) s.textContent = (s.dataset.prefix || "") + ago(s.dataset.at);
     for (const s of document.querySelectorAll(".live[data-since]")) s.textContent = liveText(s.dataset.label, s.dataset.since);
     renderAgo();
+    renderDepsAge();
   }
   // "idle 12 min": how long the session has been in its state.
   function liveText(label, since) {
@@ -2357,8 +2364,23 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const depsSigs = new Map();
   const DEPS_SCROLL_QUIET = 4000;
   const depsScrollAt = new Map(), depsLater = new Map();
+  // The graph's age: deps.generatedAt, when FLEET last built the graph (for
+  // an older state the server sends the last publish). It is not part of
+  // the draw signature, so a new stamp alone does not draw the graph again.
+  const DEPS_AGE_LATE_MIN = 120;
+  function renderDepsAge() {
+    const d = obj(state && state.deps);
+    const at = d ? str(d.generatedAt) : "";
+    const a = ago(at), m = minsSince(at);
+    for (const s of [$("deps-age"), $("deps-age-full")]) {
+      s.textContent = a ? "generated " + a : "";
+      s.title = a ? "Graph generated " + clockWithDay(at) : "";
+      s.classList.toggle("late", m !== null && m > DEPS_AGE_LATE_MIN);
+    }
+  }
   function renderDeps() {
     const d = obj(state && state.deps);
+    renderDepsAge();
     const nodes = arr(d && d.nodes).map(obj).filter(n => n && str(n.id) && str(n.label) && DEP_KIND_WORD[str(n.kind)]);
     const raw = arr(d && d.edges).map(obj).filter(e => e && str(e.from) && str(e.to) && str(e.from) !== str(e.to));
     const rows = arr(state && state.sessions).map(obj).filter(r => r && str(r.tmux));

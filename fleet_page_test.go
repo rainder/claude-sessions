@@ -39,6 +39,9 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// Below 1100px Dependencies is a view of its own in the bottom nav,
 		// not a section of the Fleet view.
 		`data-view="deps"`, `"fleet", "deps", "history"]`, "body.v-fleet .sec-deps", "body.v-deps .sec-fleet:not(.sec-deps)",
+		// The heading shows the graph's age (deps.generatedAt), amber after
+		// 2 h, and ticks with the other ages.
+		`id="deps-age"`, `id="deps-age-full"`, "function renderDepsAge(", "d.generatedAt", "renderDepsAge();\n",
 		// A decision card ends its options with Other (a free-text answer in
 		// the FLEET chat, prefixed with the card id). A Chat button at the top
 		// opens the card's live session (by its tmux field), else the FLEET
