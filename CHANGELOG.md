@@ -9,6 +9,15 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The FLEET page's Working section opens with a capacity strip: one tile
+  per model family (Fable, Opus + Sonnet, Haiku, Grok, then any other
+  model). A tile shows the busy sessions against FLEET's cap with a bar,
+  and the idle, shell, waiting and total counts. One free slot is amber;
+  at or over the cap is red. A family with no cap shows only its busy
+  count. A tile still filters the list, and "Show all" clears the filter.
+  fleet-state.py stamps the caps (`CAPS`) into state.json as `caps`; the
+  server serves the valid entries in /fleet/state.
+
 - The FLEET page's Dependencies heading shows the age of the graph
   ("generated 12 min ago"), with the time in a tooltip. It turns amber after
   2 h. The server sends the age as `deps.generatedAt`: FLEET's `depsAt`

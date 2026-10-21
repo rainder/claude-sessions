@@ -28,6 +28,11 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		"https://app.clickup.com/t/90181100858/", "https://github.com/TRECS-SOFTWARE-LABS/trecs-brain/pull/", "function linkText(",
 		// The empty Decide view shows the fleet's busy and idle counts.
 		`id="zero-fleet"`, "function renderFleetState(",
+		// The capacity strip under the Working heading: a tile per model
+		// family (Sonnet shares Opus's tile), busy against FLEET's cap
+		// (state.caps), counted with the same helper as the Decide view.
+		`id="caps-working"`, "function renderCaps(", "function capTile(", "function fleetCounts(", "fleetCounts(workingRows()).all",
+		"state.caps", `{Opus: "Opus + Sonnet"}`, `"Show all"`, `"1 slot left"`, `"At limit"`, `"Over limit"`,
 		// The Dependencies section draws state.deps as SVG, built with
 		// createElementNS (never markup), and joins sessions to the
 		// working list.

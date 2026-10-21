@@ -312,23 +312,31 @@ section { min-width: 0; }
 .tk-st { padding: 0 6px; border: 1px solid var(--line); border-radius: 99px; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .row-l1 .tt.dim { font-weight: 450; color: var(--muted); }
 .row-l2 .mdl { white-space: nowrap; }
-/* Model summary beside the Working count: one muted line, wraps under the
-   heading on a narrow screen. A group button filters the list. */
-#h-working { flex-wrap: wrap; row-gap: 2px; }
-.msum { flex: 1 1 0; min-width: 14em; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 2px; font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
-.msum:empty { display: none; }
-.msum .sep { opacity: .6; }
-.mgrp { max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 0 3px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
-.mgrp:hover { background: var(--surface2); }
-.mgrp[aria-pressed="true"] { background: var(--accent-tint); color: var(--text); }
-.mgrp .pp { margin-left: 5px; }
-/* Pips: busy filled, idle half filled, shell hollow; drawn, since the
-   glyphs render at odd sizes in some fonts. Other statuses are "?n". */
-.pp:not(.p-other)::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 2px; border: 1.5px solid currentColor; border-radius: 50%; box-sizing: border-box; }
-.pp.p-busy { color: var(--accent); } .pp.p-busy::before { background: currentColor; }
-.pp.p-idle { color: var(--green); } .pp.p-idle::before { background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
-/* Same colors as the row dots (.live-*): shell is the accent at .6. */
-.pp.p-shell { color: var(--accent); opacity: .6; } .pp.p-other { color: var(--muted); }
+/* Capacity strip under the Working heading: one tile per model family,
+   counted over the whole working list. The bar is busy / FLEET's cap: only
+   busy sessions take a slot. A family with no cap has no bar. A tile
+   filters the list; "Show all" clears the filter. */
+.caps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 0 16px; }
+.caps:empty { display: none; }
+.caps-filter { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px 8px; margin: -6px 0 -10px; font-size: 13px; color: var(--muted); }
+.caps-filter .link-btn { margin-left: -8px; }
+.cap { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 10px 12px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-align: left; cursor: pointer; font-variant-numeric: tabular-nums; }
+.cap:hover { border-color: var(--muted); }
+.cap[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-tint); box-shadow: inset 0 0 0 1px var(--accent); }
+.cap-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0 8px; min-width: 0; }
+.cap-name { min-width: 0; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+.cap-st { font-size: 12px; font-weight: 650; white-space: nowrap; }
+.cap-n { font-size: 14px; line-height: 1.2; }
+.cap-n b { font-size: 24px; font-weight: 700; }
+.cap-of { color: var(--muted); }
+.cap-bar { display: block; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.cap-bar i { display: block; height: 100%; width: 0; border-radius: 3px; background: var(--accent); }
+.cap-meta { font-size: 12px; color: var(--muted); }
+.cap-meta span { white-space: nowrap; }
+.cap.warn .cap-st { color: var(--amber); } .cap.warn .cap-bar i { background: var(--amber); }
+.cap.full { border-color: var(--red-line); } .cap.full .cap-st { color: var(--red); } .cap.full .cap-bar i { background: var(--red); }
+.cap.full[aria-pressed="true"] { border-color: var(--accent); }
+@media (max-width: 359.98px) { .caps { grid-template-columns: minmax(0, 1fr); } }
 .row-body.note-body { padding-top: 0; margin-top: -4px; font-size: 13px; overflow-wrap: anywhere; }
 .ended { margin-top: 8px; }
 .ended > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 2px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
@@ -821,7 +829,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
     <div class="col col-lists">
       <section class="sec-fleet" aria-labelledby="h-working">
-        <h2 class="sec-h" id="h-working">Working <span class="n" id="n-working">0</span><span class="msum" id="msum-working"></span></h2>
+        <h2 class="sec-h" id="h-working">Working <span class="n" id="n-working">0</span></h2>
+        <div class="caps" id="caps-working" role="group" aria-label="Busy sessions by model"></div>
         <div id="list-working"></div>
         <div id="list-ended"></div>
       </section>
@@ -2153,44 +2162,93 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     l2.append(se);
     return el("div", "row", el("div", "row-head", el("div", "row-main", workL1(r, tm), l2)));
   }
-  // modelFamily groups a row for the model summary: Fable/Opus/Sonnet/Haiku
-  // by substring, any grok row as Grok, else the raw model or "?".
-  const FAMILIES = ["Fable", "Opus", "Sonnet", "Haiku", "Grok"];
+  // modelFamily groups a row for the capacity strip, as FLEET's caps do:
+  // Fable, Opus (Sonnet counts as Opus) and Haiku by substring, any grok row
+  // as Grok, else the raw model or "?". FAMILIES is the strip order; another
+  // model comes after these.
+  const FAMILIES = ["Fable", "Opus", "Haiku", "Grok"];
+  const FAMILY_NAME = {Opus: "Opus + Sonnet"};
+  const familyName = f => FAMILY_NAME[f] || f;
   function modelFamily(r) {
     if (str(r.tool) === "grok") return "Grok";
     const m = str(r.model), lm = m.toLowerCase();
-    return FAMILIES.slice(0, 4).find(f => lm.includes(f.toLowerCase())) || m || "?";
+    if (lm.includes("fable")) return "Fable";
+    if (lm.includes("opus") || lm.includes("sonnet")) return "Opus";
+    if (lm.includes("haiku")) return "Haiku";
+    return m || "?";
+  }
+  // workingRows: the server's working list (state.sessions), rows with a
+  // tmux name only.
+  const workingRows = () => arr(state && state.sessions).map(obj).filter(r => r && str(r.tmux));
+  // fleetCounts buckets rows by status (busy, idle, shell, waiting, other)
+  // for the whole list and per model family. The capacity strip and the
+  // empty Decide view both count with it.
+  const STATUS_BUCKETS = ["busy", "idle", "shell", "waiting"];
+  function fleetCounts(rows) {
+    const zero = () => ({n: 0, busy: 0, idle: 0, shell: 0, waiting: 0, other: 0});
+    const all = zero(), fam = new Map();
+    for (const r of rows) {
+      const st = str(r.status), k = STATUS_BUCKETS.includes(st) ? st : "other", f = modelFamily(r);
+      const c = fam.get(f) || zero();
+      c.n++; c[k]++; all.n++; all[k]++;
+      fam.set(f, c);
+    }
+    return {all, fam};
+  }
+  // capOf: FLEET's busy-session cap for a family (state.caps, which the
+  // server cleans), or 0 when there is none. 0 means "no cap", never a cap
+  // of 0.
+  function capOf(f) {
+    const v = (obj(state && state.caps) || {})[f];
+    return Number.isInteger(v) && v > 0 ? v : 0;
   }
   let workModel = "";
-  const PIPS = [["busy", ""], ["idle", ""], ["shell", ""], ["other", "?"]];
-  function renderModelSummary(rows) {
-    const g = new Map();
-    for (const r of rows) {
-      const f = modelFamily(r), st = str(r.status), k = st === "busy" || st === "idle" || st === "shell" ? st : "other";
-      const c = g.get(f) || { n: 0, busy: 0, idle: 0, shell: 0, other: 0 };
-      c.n++; c[k]++; g.set(f, c);
-    }
+  // capTile: one family's tile. "<busy> busy of <cap>", a bar of busy / cap
+  // (idle and shell take no slot, so they never fill it), and the other
+  // counts, which add up to the total. One slot left is amber; at or over
+  // the cap is red. A family with no cap shows only "<busy> busy".
+  function capTile(f, c) {
+    const cap = capOf(f), name = familyName(f), left = cap - c.busy;
+    const st = !cap ? "" : left < 0 ? "Over limit" : left === 0 ? "At limit" : left === 1 ? "1 slot left" : "";
+    const level = !cap ? "" : left <= 0 ? " full" : left === 1 ? " warn" : "";
+    const meta = [c.idle + " idle", c.shell + " shell", c.waiting ? c.waiting + " waiting" : "", c.other ? c.other + " other" : "", c.n + " total"].filter(Boolean);
+    const fill = el("i");
+    fill.style.width = cap ? Math.min(100, c.busy / cap * 100) + "%" : "0";
+    const on = workModel === f;
+    const b = fkey(el("button", "cap" + level,
+      el("span", "cap-top", el("span", "cap-name", name), st ? el("span", "cap-st", st) : null),
+      el("span", "cap-n", el("b", "", String(c.busy)), " busy", cap ? el("span", "cap-of", " of " + cap) : null),
+      cap ? el("span", "cap-bar", fill) : null,
+      el("span", "cap-meta", ...meta.flatMap((m, i) => [i ? " · " : "", el("span", "", m)]))), "cap:" + f);
+    b.type = "button";
+    const label = name + ": " + (cap ? c.busy + " of " + cap + " busy" : c.busy + " busy") + ", " + meta.join(", ") + (st ? ", " + st.toLowerCase() : "");
+    b.setAttribute("aria-label", label);
+    b.title = label + (on ? " (click to show all)" : " (click to show only " + name + ")");
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.addEventListener("click", () => { workModel = on ? "" : f; keepFocus(renderWork); });
+    return b;
+  }
+  // renderCaps: the capacity strip, always from the whole working list
+  // (the filter changes the list, not the counts). While a filter is on, a
+  // "Show all" control clears it.
+  function renderCaps(rows) {
+    const {fam} = fleetCounts(rows);
     const rank = f => { const i = FAMILIES.indexOf(f); return i < 0 ? FAMILIES.length : i; };
     const out = [];
-    [...g.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).forEach(f => {
-      const c = g.get(f);
-      const b = fkey(el("button", "mgrp", f + " " + c.n, ...PIPS.filter(([k]) => c[k]).map(([k, ch]) => el("span", "pp p-" + k, ch + c[k]))), "msum:" + f);
-      b.type = "button";
-      b.title = f + ": " + c.n + " session" + (c.n === 1 ? "" : "s") + " — " +
-        PIPS.filter(([k]) => c[k]).map(([k]) => c[k] + " " + k).join(", ") + (workModel === f ? " (click to show all)" : "");
-      b.setAttribute("aria-label", b.title);
-      b.setAttribute("aria-pressed", workModel === f ? "true" : "false");
-      b.addEventListener("click", () => { workModel = workModel === f ? "" : f; keepFocus(renderWork); });
-      if (out.length) out.push(el("span", "sep", "·"));
-      out.push(b);
-    });
-    $("msum-working").replaceChildren(...out);
+    if (workModel) {
+      const reset = fkey(el("button", "link-btn", "Show all"), "cap:reset");
+      reset.type = "button";
+      reset.addEventListener("click", () => { workModel = ""; keepFocus(renderWork); });
+      out.push(el("div", "caps-filter", el("span", "", "Only " + familyName(workModel)), reset));
+    }
+    [...fam.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).forEach(f => out.push(capTile(f, fam.get(f))));
+    $("caps-working").replaceChildren(...out);
   }
   function renderWork() {
     const raw = state ? state.sessions : undefined;
-    const all = arr(raw).map(obj).filter(r => r && str(r.tmux));
+    const all = workingRows();
     if (workModel && !all.some(r => modelFamily(r) === workModel)) workModel = "";
-    renderModelSummary(all);
+    renderCaps(all);
     const rows = workModel ? all.filter(r => modelFamily(r) === workModel) : all;
     $("n-working").textContent = rows.length;
     const box = $("list-working");
@@ -2680,13 +2738,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // shows or the session list failed; sent rows do not hide it.
   function renderFleetState(show) {
     const box = $("zero-fleet");
-    const raw = state ? state.sessions : null;
-    if (!show || !Array.isArray(raw)) { box.hidden = true; box.replaceChildren(); return; }
-    const n = {busy: 0, idle: 0, shell: 0};
-    for (const r of raw.map(obj)) {
-      const st = r && str(r.tmux) ? str(r.status) : "";
-      if (st === "busy" || st === "idle" || st === "shell") n[st]++;
-    }
+    if (!show || !Array.isArray(state && state.sessions)) { box.hidden = true; box.replaceChildren(); return; }
+    const n = fleetCounts(workingRows()).all;
     const item = (k, big) => el("span", "zf", big ? el("span", "zf-n", String(n[k])) : String(n[k]) + " ", el("span", "live live-" + k, k));
     box.replaceChildren(item("busy", true), item("idle", true), n.shell ? item("shell", false) : null);
     box.title = n.busy + " busy, " + n.idle + " idle" + (n.shell ? ", " + n.shell + " shell" : "") + " (from this server, not FLEET)";

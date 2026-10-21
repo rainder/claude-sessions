@@ -432,6 +432,8 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	out["ended"] = s.fleetEndedRows(now)
 	// FLEET's waits-for graph, cleaned, with edges to ended sessions dropped.
 	out["deps"] = fleetDependencies(state, rows)
+	// FLEET's busy-session caps per model family, valid entries only.
+	out["caps"] = fleetCaps(state)
 	if stateErr != "" {
 		out["stateError"] = stateErr
 	} else {
