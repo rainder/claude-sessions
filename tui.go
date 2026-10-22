@@ -194,6 +194,12 @@ func RunTUI(interval time.Duration) error {
 	})
 	defer remoteUsageHub.Shutdown()
 
+	// FLEET badge: polled on the hub's own goroutine (fleetLocal.State holds a
+	// lock across a network call); the render path reads only Snapshot.
+	fleetSrc := &fleetLocal{}
+	fleetBadgeHub := NewFleetBadgeHub(fleetSrc.State, fleetBadgeInterval)
+	defer fleetBadgeHub.Shutdown()
+
 	hostUsageHub := NewHostUsageHub(interval)
 	defer hostUsageHub.Shutdown()
 	localName := shortHostname()
@@ -492,7 +498,7 @@ func RunTUI(interval time.Duration) error {
 			Grok:              grokUsageHub.Snapshot(),
 			KnownAccounts:     derefKnownAccounts(knownAccountsHub.Snapshot()),
 			KnownGrokAccounts: derefKnownGrokAccounts(knownGrokAccountsHub.Snapshot()),
-		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled, groupSort: groupSortOn})
+		}, cols, 0, sortMode, groupView{groups: groups, filter: groupFilterState, query: textFilter.effectiveQuery(), hideDisabled: hideDisabled, groupSort: groupSortOn, fleetBadge: fleetBadgeText(fleetBadgeHub.Snapshot())})
 		toastActive := rows > 0 && time.Now().Before(toastUntil)
 		viewRows := rows
 		if rows > 0 {
@@ -568,6 +574,7 @@ func RunTUI(interval time.Duration) error {
 				knownAccountsHub.Pause()
 				knownGrokAccountsHub.Pause()
 				remoteUsageHub.Pause()
+				fleetBadgeHub.Pause()
 				hostUsageHub.Pause()
 			},
 			resume: func() {
@@ -578,6 +585,7 @@ func RunTUI(interval time.Duration) error {
 				knownAccountsHub.Resume()
 				knownGrokAccountsHub.Resume()
 				remoteUsageHub.Resume()
+				fleetBadgeHub.Resume()
 				hostUsageHub.Resume()
 			},
 			// killInFlight reports whether a background kill is already

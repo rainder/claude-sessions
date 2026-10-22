@@ -3670,3 +3670,18 @@ func TestSelectedGroupedRowRestoresSelectionBackground(t *testing.T) {
 		t.Fatalf("selected grouped badge did not restore bg after reset: %q", row)
 	}
 }
+
+func TestRenderHeaderShowsFleetBadge(t *testing.T) {
+	local := testLocalHost(Session{PID: 1, Name: "galpha", CWD: "/w", SessionID: "sid-a"})
+	badge := "FLEET 1 approve · 0 decide"
+	frame := BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{fleetBadge: badge})
+	line := stripANSI(frame.lines[0])
+	i, j := strings.Index(line, badge), strings.Index(line, "[full]")
+	if i < 0 || j < 0 || i > j {
+		t.Fatalf("badge not before [full]: %q", line)
+	}
+	frame = BuildTableFrame("1", local, nil, "", nil, 0, 0, "dir", groupView{})
+	if strings.Contains(stripANSI(frame.lines[0]), "FLEET") {
+		t.Fatalf("empty badge drew FLEET: %q", frame.lines[0])
+	}
+}

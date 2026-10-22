@@ -195,6 +195,9 @@ type groupView struct {
 	showBadge    bool
 	showRail     bool
 	showNoTmux   bool
+	// fleetBadge is the ready-to-draw FLEET badge for the header (see
+	// fleetBadgeText); empty draws nothing.
+	fleetBadge string
 }
 
 // groupOf returns the group assigned to s (1..9), or 0 for an ungrouped session
@@ -1835,7 +1838,7 @@ func groupFilterIndicator(filter groupFilter) string {
 	return b.String()
 }
 
-func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, grokAccounts []grokAccountLine, cols int, filter groupFilter, groupSort bool, query string) {
+func renderHeader(w io.Writer, sections []section, mode string, accounts []accountUsageLine, codexAccounts []codexAccountLine, grokAccounts []grokAccountLine, cols int, filter groupFilter, groupSort bool, query, fleetBadge string) {
 	live, busy := 0, 0
 	for _, sec := range sections {
 		for _, s := range sec.rows {
@@ -1863,6 +1866,11 @@ func renderHeader(w io.Writer, sections []section, mode string, accounts []accou
 	}
 	if query != "" {
 		filterStr += "  " + dim("/"+query) + ansiBold
+	}
+	// The FLEET badge carries its own colors and ends each in a reset, so
+	// re-assert bold after it like the segments above.
+	if fleetBadge != "" {
+		filterStr += "  " + fleetBadge + ansiBold
 	}
 	fmt.Fprintf(w, "%sClaude sessions  %s  (%s, %s)%s  %s%s\n",
 		ansiBold, time.Now().Format("15:04:05"),
@@ -2185,7 +2193,7 @@ func renderAllFull(w *frameWriter, sections []section, sel string, accounts []ac
 	}
 	nameW = min(nameW, maxNameCellWidth)
 
-	renderHeader(w, sections, "full", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query)
+	renderHeader(w, sections, "full", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query, gv.fleetBadge)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -2305,7 +2313,7 @@ func renderAllIntermediate(w *frameWriter, sections []section, sel string, accou
 		statusW = max(statusW, len(r.statusStr))
 	}
 
-	renderHeader(w, sections, "intermediate", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query)
+	renderHeader(w, sections, "intermediate", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query, gv.fleetBadge)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
@@ -2443,7 +2451,7 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 		nameW = max(nameW, nameCellTextWidth(r.display, r.badgeStr))
 	}
 
-	renderHeader(w, sections, "minimal", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query)
+	renderHeader(w, sections, "minimal", accounts, codexAccounts, grokAccounts, cols, gv.filter, gv.groupSort, gv.query, gv.fleetBadge)
 
 	buildHdr := func() string {
 		return fmt.Sprintf(
