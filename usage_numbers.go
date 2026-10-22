@@ -502,13 +502,7 @@ func (s *server) serveUsageNumbers(w http.ResponseWriter) {
 
 // usageNumbersServiceConfig names the local service the CLI asks first. A
 // seam so tests can point it at an httptest server.
-var usageNumbersServiceConfig = func() (ServerConfig, error) {
-	tok, err := readServerToken()
-	if err != nil {
-		return ServerConfig{}, err
-	}
-	return ServerConfig{Host: localServerHost, Port: localServerPort, Token: tok}, nil
-}
+var usageNumbersServiceConfig = localServiceConfig
 
 // usageNumbersAttempt makes one GET /usage/numbers. status is the HTTP status
 // when a response arrived, 0 when none did.
@@ -566,15 +560,17 @@ func fetchServiceUsageNumbers() (usageNumbersResponse, usageNumbersFallback, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), usageNumbersServiceTimeout)
 	defer cancel()
-	resp, status, err := usageNumbersAttempt(ctx, srv)
 	// A --bind tailscale service answers loopback only for /paste-request,
-	// so a 404 there is that listener, not an older server: try Tailscale.
-	if err != nil && (status == 0 || status == http.StatusNotFound) && !isTimeoutErr(err) {
-		if ts := localTailscaleIPv4(ctx); ts != "" {
-			srv.Host = ts
+	// so a 404 there is that listener, not an older server: tryLocalService
+	// retries on Tailscale.
+	var resp usageNumbersResponse
+	_, status, err := tryLocalService(ctx, srv, localTailscaleIPv4,
+		func(ctx context.Context, srv ServerConfig) (int, error) {
+			var status int
+			var err error
 			resp, status, err = usageNumbersAttempt(ctx, srv)
-		}
-	}
+			return status, err
+		})
 	switch {
 	case err == nil:
 		return resp, usageNumbersFallbackFull, nil

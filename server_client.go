@@ -134,12 +134,37 @@ var listSessionsFromService = fetchListSessionsFromService
 
 // listSessionsServiceConfig reads the existing server token. It does not
 // create one: a missing token means there is no service to ask.
-var listSessionsServiceConfig = func() (ServerConfig, error) {
+var listSessionsServiceConfig = localServiceConfig
+
+// localServiceConfig names this host's own service on loopback with the
+// token already on disk. It does not create a token: a missing one means
+// there is no service to ask.
+func localServiceConfig() (ServerConfig, error) {
 	tok, err := readServerToken()
 	if err != nil {
 		return ServerConfig{}, err
 	}
 	return ServerConfig{Host: localServerHost, Port: localServerPort, Token: tok}, nil
+}
+
+// tryLocalService runs attempt against srv, then against this host's
+// Tailscale address when the loopback answer says the service may live
+// there. A --bind tailscale service answers loopback only for
+// /paste-request, so a status of 0 or 404 there retries; the retry is
+// skipped after a timeout (the deadline is spent), when tailscale yields no
+// address, and when that address is the host just tried. attempt returns the
+// HTTP status (0 when no response arrived). The result is the config that
+// was last tried (its Host is the host that answered), that status and error.
+func tryLocalService(ctx context.Context, srv ServerConfig, tailscale func(context.Context) string,
+	attempt func(context.Context, ServerConfig) (int, error)) (ServerConfig, int, error) {
+	status, err := attempt(ctx, srv)
+	if err != nil && (status == 0 || status == http.StatusNotFound) && !isTimeoutErr(err) {
+		if ts := tailscale(ctx); ts != "" && ts != srv.Host {
+			srv.Host = ts
+			status, err = attempt(ctx, srv)
+		}
+	}
+	return srv, status, err
 }
 
 // listSessionsAttempt is one GET /sessions. status is the HTTP status when
@@ -188,13 +213,14 @@ func fetchListSessionsFromService() (sessions []Session, usage HostUsage, ok boo
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), listSessionsServerTimeout)
 	defer cancel()
-	data, status, err := listSessionsAttempt(ctx, srv)
-	if err != nil && (status == 0 || status == http.StatusNotFound) && !isTimeoutErr(err) {
-		if ts := listSessionsTailscaleIPv4(ctx); ts != "" && ts != srv.Host {
-			srv.Host = ts
+	var data []byte
+	_, _, err = tryLocalService(ctx, srv, listSessionsTailscaleIPv4,
+		func(ctx context.Context, srv ServerConfig) (int, error) {
+			var status int
+			var err error
 			data, status, err = listSessionsAttempt(ctx, srv)
-		}
-	}
+			return status, err
+		})
 	if err != nil {
 		return nil, HostUsage{}, false
 	}

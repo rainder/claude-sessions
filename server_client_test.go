@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -428,5 +429,52 @@ func TestFetchListSessionsEmptySessionsIsSlice(t *testing.T) {
 	}
 	if usage.NumCPU != 2 {
 		t.Fatalf("numCPU = %d, want 2", usage.NumCPU)
+	}
+}
+
+func TestTryLocalService(t *testing.T) {
+	timeoutErr := fmt.Errorf("dial: %w", context.DeadlineExceeded)
+	cases := []struct {
+		name      string
+		status    int
+		err       error
+		tailscale string
+		want      []string
+	}{
+		{"200", 200, nil, "100.64.0.1", []string{"127.0.0.1"}},
+		{"no response", 0, errors.New("refused"), "100.64.0.1", []string{"127.0.0.1", "100.64.0.1"}},
+		{"404", 404, errors.New("HTTP 404"), "100.64.0.1", []string{"127.0.0.1", "100.64.0.1"}},
+		{"401", 401, errors.New("HTTP 401"), "100.64.0.1", []string{"127.0.0.1"}},
+		{"500", 500, errors.New("HTTP 500"), "100.64.0.1", []string{"127.0.0.1"}},
+		{"timeout", 0, timeoutErr, "100.64.0.1", []string{"127.0.0.1"}},
+		{"no tailscale address", 0, errors.New("refused"), "", []string{"127.0.0.1"}},
+		{"tailscale is loopback", 0, errors.New("refused"), "127.0.0.1", []string{"127.0.0.1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tried []string
+			srv, status, err := tryLocalService(context.Background(),
+				ServerConfig{Host: "127.0.0.1", Port: 8765},
+				func(context.Context) string { return tc.tailscale },
+				func(_ context.Context, s ServerConfig) (int, error) {
+					tried = append(tried, s.Host)
+					if s.Host == "127.0.0.1" {
+						return tc.status, tc.err
+					}
+					return 200, nil
+				})
+			if !reflect.DeepEqual(tried, tc.want) {
+				t.Errorf("hosts tried = %v, want %v", tried, tc.want)
+			}
+			if srv.Host != tc.want[len(tc.want)-1] {
+				t.Errorf("returned host = %q, want %q", srv.Host, tc.want[len(tc.want)-1])
+			}
+			if len(tc.want) == 2 && (status != 200 || err != nil) {
+				t.Errorf("status, err = %d, %v; want the retry's 200, nil", status, err)
+			}
+			if len(tc.want) == 1 && (status != tc.status || err != tc.err) {
+				t.Errorf("status, err = %d, %v; want %d, %v", status, err, tc.status, tc.err)
+			}
+		})
 	}
 }
