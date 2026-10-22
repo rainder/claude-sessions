@@ -2878,9 +2878,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
     const dropped = prunePending(seq);
     // An open sheet must not send an answer to a card that has moved on.
-    if (sheet.card && !sheet.busy && $("sheet").open && !sheetValid()) {
-      closeSheet();
-      toast("The card changed. Check it again.", true);
+    if (sheet.card && !sheet.busy && $("sheet").open) {
+      if (!sheetValid()) {
+        closeSheet();
+        toast("The card changed. Check it again.", true);
+      } else if (sheetAnsweredElsewhere()) {
+        closeSheet();
+        toast("Already answered on another device.", true);
+      }
     }
     if (changed) {
       guard(renderStatus);
@@ -2938,7 +2943,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // Both needs-you and explicit-yes open on that button. It stays off for
   // SHEET_ARM_MS so one stray tap cannot send.
   const SHEET_ARM_MS = 400;
-  const sheet = {card: null, opt: null, hash: "", lean: false, text: "", explicit: false, busy: false, armed: false, armTimer: 0, armGen: 0};
+  // correction: fixed when the sheet opens (see openSheet).
+  const sheet = {card: null, opt: null, hash: "", correction: false, lean: false, text: "", explicit: false, busy: false, armed: false, armTimer: 0, armGen: 0};
 
   const currentCard = id => arr(state && state.cards).map(obj).find(c => c && str(c.id) === id) || null;
 
@@ -2957,11 +2963,24 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return hashOf(cur) === sheet.hash;
   }
 
+  // sheetAnsweredElsewhere: the sheet opened on an unanswered card and an
+  // answer has landed since (another device, or the TUI). Sending now
+  // would be a second answer.
+  function sheetAnsweredElsewhere() {
+    return !!sheet.card && !sheet.correction && answerOf(str(sheet.card.id)) !== null;
+  }
+
   function openSheet(c, o, lean, explicit) {
     if (!alive || expired || !str(c.id)) return;
     const base = str(o.send);
     if (!base) return;
     const head = cardHead(c);
+    // The send is a correction only when Andy asked for one or an answer was
+    // already on record as the sheet opened. Worked out at send time, an
+    // answer from another device that landed meanwhile would make this send
+    // a correction and slip past the server's already_answered guard.
+    const id = str(c.id);
+    sheet.correction = correcting.has(id) || answerOf(id) !== null;
     sheet.card = c; sheet.opt = o; sheet.hash = hashOf(c); sheet.lean = lean; sheet.explicit = explicit; sheet.busy = false; sheet.armed = false;
     // The dialog gives focus back to its opener on close, unless a state
     // update replaced that button: then the key finds its successor.
@@ -3065,15 +3084,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (btn !== (sheet.explicit ? $("sheet-approve") : $("sheet-send"))) return;
     if (!alive || expired) { closeSheet(); toast("FLEET is not running. You cannot send now.", true); return; }
     if (!sheetValid()) { closeSheet(); toast("The card changed. Check it again.", true); return; }
+    if (sheetAnsweredElsewhere()) { closeSheet(); toast("Already answered on another device.", true); return; }
     sheet.busy = true;
     for (const b of ["sheet-approve", "sheet-send", "sheet-cancel"]) $(b).disabled = true;
     btn.textContent = "Sending…";
-    const c = sheet.card, o = sheet.opt, text = sheet.text, hash = sheet.hash;
+    const c = sheet.card, o = sheet.opt, text = sheet.text, hash = sheet.hash, correction = sheet.correction;
     const id = str(c.id);
     const nextKey = nextOpenKey(id);
-    // Any answer on record makes this a correction; without the flag the
-    // server refuses a second answer to an unchanged card.
-    const correction = answerOf(id) !== null;
     const p = {att: {key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", at: new Date().toISOString()},
       inflight: true, settled: null};
     pending.set(id, p);

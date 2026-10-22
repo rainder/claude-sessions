@@ -13,7 +13,12 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		"Use FLEET's pick",
 		// Answers live in the server store: the page never writes its old
 		// localStorage store, and the Chat note is never sent as an answer.
-		"savePending(", `" + tm + ")", id)`} {
+		"savePending(", `" + tm + ")", id)`,
+		// The correction flag is fixed when the sheet opens: worked out at
+		// send time, an answer from another device that landed while the
+		// sheet was open would turn this send into a correction and slip
+		// past the server's already_answered guard.
+		"correction = answerOf(", "correction: answerOf("} {
 		if strings.Contains(page, bad) {
 			t.Errorf("fleet.html must not contain %q", bad)
 		}
@@ -62,7 +67,8 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// read once for the deploy migration.
 		"/fleet/card/dismiss", "state.answered", "state.cardHashes", "optionKey:", "correction:",
 		"already_answered:", "card_changed:", "card_gone:", "Already answered on another device",
-		"function loadLegacyPending(", "function answerOf(", "function hashOf(", `" + tm + ")", null)`} {
+		"function loadLegacyPending(", "function answerOf(", "function hashOf(", `" + tm + ")", null)`,
+		"sheet.correction = correcting.has(id) || answerOf(id) !== null", "correction = sheet.correction;", "sayCard(text, id, str(o.key), hash, correction)", "!sheet.correction && answerOf(", `"Already answered on another device.", true)`} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}
