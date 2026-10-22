@@ -129,7 +129,7 @@ func TestFleetSayGrokFleet(t *testing.T) {
 	row.Status = "busy"
 	rig = newSayRig(t, []Session{row})
 	useGrokScreens(t, rig, "grok-busy-empty.ansi")
-	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "busy" || len(rig.typed) != 0 || rig.enters != 0 {
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); !res.OK || !res.Queued || len(rig.typed) != 1 || rig.typed[0] != "hi" || rig.enters != 1 {
 		t.Fatalf("busy: %+v typed %q enters %d", res, rig.typed, rig.enters)
 	}
 

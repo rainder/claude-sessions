@@ -282,6 +282,19 @@ func grokBox(interior ...string) string {
 	return b.String()
 }
 
+func TestGrokPaneInputTextDropsItalicSuggestion(t *testing.T) {
+	// Captured 2026-10-18: an empty FLEET box shows the last send as an
+	// italic grey suggestion. That is not typed text.
+	ghost := "\x1b[38;5;239m│\x1b[38;5;254m \x1b[38;5;251m❯ \x1b[3m\x1b[38;5;240mAndy decides: move DR-5266 to done\x1b[0m\x1b[38;5;254m    \x1b[38;5;239m│"
+	if text, found := grokPaneInputText(grokBox(ghost)); !found || text != "" {
+		t.Fatalf("suggestion: got (%q, %v)", text, found)
+	}
+	typed := "\x1b[38;5;239m│\x1b[38;5;254m \x1b[38;5;251m❯ \x1b[38;5;254mhello\x1b[38;5;239m│"
+	if text, found := grokPaneInputText(grokBox(typed)); !found || text != "hello" {
+		t.Fatalf("typed: got (%q, %v)", text, found)
+	}
+}
+
 func TestGrokPaneInputTextSynthetic(t *testing.T) {
 	if text, found := grokPaneInputText(grokBox("│ ❯ first    │", "│   second   │")); !found || text != "first second" {
 		t.Fatalf("two lines: got (%q, %v)", text, found)

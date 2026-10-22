@@ -991,7 +991,7 @@ func (s *server) idleTicketStatus(ticket string, now time.Time) string {
 	return s.fleet.tickets.get(ticket, now)
 }
 
-var fleetSayIdle = fleetSayWho{subject: "The idle-event target", pane: "the target pane"}
+var fleetSayIdle = fleetSayWho{subject: "The idle-event target", pane: "the target pane", refuseBusyGrok: true}
 
 // logGateLocked reports whether a line under key may be logged now: one per
 // key per idleLogEvery, so a target that refuses every poll for an hour
@@ -1015,7 +1015,7 @@ func (d *idleDeps) logGateLocked(key string) bool {
 // whose tmux session or session id is target — or, for an empty target, the
 // one FLEET row findFleet picks on that same list — else target_missing /
 // target_ambiguous, nothing typed; then the shared 1 s gap, and fleetTypeInto
-// (exact "=" pane, dialog, busy-grok and copy-mode refusals, an empty input
+// (exact "=" pane, dialog, idle-event busy-grok and copy-mode refusals, an empty input
 // box, Enter only when the box holds the text). A claude or a grok row is a
 // target alike. It skips fleetCleanSayText on purpose:
 // that refuses the event tag. code is "sent" or the refusal code; tmux names

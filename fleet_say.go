@@ -364,31 +364,33 @@ type fleetSayWho struct {
 	// at all; the idle-event sender uses it to write a repeated refusal
 	// once per 10 minutes rather than on every poll.
 	logGate func(code string) bool
+	// refuseBusyGrok keeps an automatic sender from pressing Enter into a
+	// busy Grok turn. A page send leaves it false: Enter queues the text.
+	refuseBusyGrok bool
 }
 
 var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane", paneLog: true}
 
 // fleetTypeInto is the pane half of every page send: refuse a session that
-// waits on a dialog, is a busy grok session, has no pane, shows no empty
-// input box (claude's or grok's, paneInputTextFor), or is in copy mode; type
-// the text; press Enter only once the box holds it. row must be a freshly
-// resolved session: its Tmux is the only pane address used. Caller
-// holds sayMu. The result is the response envelope; ok false with code
-// not_submitted means the text was typed but Enter was not pressed.
+// waits on a dialog, is a grok session this sender must not type into, has
+// no pane, shows no empty input box (claude's or grok's, paneInputTextFor),
+// or is in copy mode; type the text; press Enter only once the box holds it.
+// row must be a freshly resolved session: its Tmux is the only pane address
+// used. Caller holds sayMu. The result is the response envelope; ok false
+// with code not_submitted means the text was typed but Enter was not pressed.
 func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetSayResult {
 	f := &s.fleet
 	refuse := func(code, msg string) fleetSayResult { return fleetSayResult{Code: code, Error: msg} }
 	if row.Waiting() {
 		return refuse("dialog", who.subject+" shows a dialog. Answer it in the terminal.")
 	}
-	// Claude queues a message typed mid-turn. Grok does not always: while
-	// its turn waits on background work or a subagent, Enter with text
-	// cancels that turn, and a bare Enter can force-send a queued one. Its
-	// box looks the same idle or busy, so the status is the only guard, and
-	// it fails closed: only idle, or shell (turn over, background work open),
-	// types. An empty status (no readable events.jsonl yet) refuses too.
-	if row.IsGrok() && row.Status != "idle" && row.Status != "shell" {
-		return refuse("busy", who.subject+" is busy. Grok can cancel a running turn on Enter, so wait until its turn ends.")
+	// Enter queues a message in the Grok composer. A page send may do that
+	// while the turn is busy. The box looks the same idle or busy, so an
+	// empty status (no readable events.jsonl yet) and waiting still refuse.
+	// Idle events set refuseBusyGrok: an automatic Enter stays out of a
+	// busy turn.
+	if row.IsGrok() && row.Status != "idle" && row.Status != "shell" && (row.Status != "busy" || who.refuseBusyGrok) {
+		return refuse("busy", who.subject+" is busy. Wait until its turn ends.")
 	}
 	if row.Tmux == "" {
 		return refuse("no_pane", who.subject+" has no tmux pane")

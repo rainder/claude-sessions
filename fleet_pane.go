@@ -132,11 +132,14 @@ func paneInputTextFor(row Session, capture string) (text string, found bool) {
 // border. Any other line, or no top within grokBoxMaxLines, is not a box.
 // Notices grok draws above the box ("Queued · Enter to send now") sit outside
 // it and are ignored. The first interior line must start with ❯; an empty box
-// is that glyph and spaces. Dim runs are dropped as for claude. An
+// is that glyph and spaces. Dim runs are dropped as for claude. Grok's
+// empty-box suggestion is not dim: it is italic (SGR 3) in a faint grey
+// (38;5;240). composerText drops that too, so a ghost does not read as
+// typed text. An
 // ask_user_question dialog hides the composer entirely, so it reads as not
 // found and a send refuses. Grok also shows an empty box during a busy turn,
-// so the screen alone cannot tell busy: fleetTypeInto refuses a busy grok row
-// before it looks.
+// so the screen alone cannot tell busy. A page send still types: Enter
+// queues. An idle event refuses a busy grok row before it looks.
 func grokPaneInputText(capture string) (text string, found bool) {
 	lines := strings.Split(strings.TrimRight(capture, "\n"), "\n")
 	bottom := -1
@@ -165,10 +168,11 @@ func grokPaneInputText(capture string) (text string, found bool) {
 	}
 	var parts []string
 	for i := top + 1; i < bottom; i++ {
-		l := paneBoxLine(lines[i])
-		l = strings.TrimSuffix(strings.TrimPrefix(l, "│"), "│")
 		// A text taller than the composer scrolls, and grok draws the
-		// scrollbar thumb inside the right border.
+		// scrollbar thumb inside the right border. composerText also drops
+		// the italic grey suggestion an empty box shows.
+		l := composerText(lines[i])
+		l = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(l), "│"), "│")
 		l = strings.TrimSpace(strings.TrimRightFunc(strings.TrimSpace(l), isGrokScrollbar))
 		if i == top+1 {
 			if !strings.HasPrefix(l, "❯") {
@@ -230,6 +234,12 @@ func isRuleLine(s string) bool {
 // every rune printed while the dim attribute (SGR 2) is on.
 func visibleText(line string) string { return paneLineText(line, true) }
 
+// composerText is visibleText for Grok's composer. It also drops the empty-box
+// suggestion: italic (SGR 3) and faint grey (SGR 90, or 38;5;232–249). Typed
+// text is a bright colour (254) and stays. The box border is faint too, so
+// call this only on an interior line, after the box shape is already known.
+func composerText(line string) string { return paneLineStyled(line, true, true) }
+
 // stripPaneEscapes strips CSI escape sequences and other control bytes from
 // one captured line but keeps dim text: for a log a person reads, where the
 // placeholder is part of what the screen showed. C1 controls (U+0080..U+009F)
@@ -245,8 +255,15 @@ func stripPaneEscapes(line string) string {
 }
 
 func paneLineText(line string, dropDim bool) string {
+	return paneLineStyled(line, dropDim, false)
+}
+
+// paneLineStyled strips CSI sequences. dropGhost also drops Grok's empty-box
+// suggestion: italic and faint grey. Borders use paneLineText, which keeps
+// faint grey so a grey rule still parses.
+func paneLineStyled(line string, dropDim, dropGhost bool) string {
 	var b strings.Builder
-	dim := false
+	var st sgrStyle
 	for i := 0; i < len(line); {
 		if line[i] == 0x1b && i+1 < len(line) && line[i+1] == '[' {
 			j := i + 2
@@ -254,7 +271,7 @@ func paneLineText(line string, dropDim bool) string {
 				j++
 			}
 			if j < len(line) && line[j] == 'm' {
-				dim = applySGRDim(line[i+2:j], dim)
+				st.apply(line[i+2 : j])
 			}
 			i = j + 1
 			continue
@@ -263,7 +280,8 @@ func paneLineText(line string, dropDim bool) string {
 		if line[i] >= 0x80 {
 			r, size = utf8.DecodeRuneInString(line[i:])
 		}
-		if !dim || !dropDim {
+		ghost := (dropDim && st.dim) || (dropGhost && (st.italic || st.faint))
+		if !ghost {
 			b.WriteRune(r)
 		}
 		i += size
@@ -271,12 +289,15 @@ func paneLineText(line string, dropDim bool) string {
 	return b.String()
 }
 
-// applySGRDim folds one SGR parameter list into the dim state: 2 sets it,
-// 0 / empty (reset) and 22 (normal intensity) clear it. 38;5;N and 38;2;R;G;B
-// arguments are skipped so a colour index of 2 is not read as dim.
-func applySGRDim(params string, dim bool) bool {
+// sgrStyle is the part of an SGR state this parser needs.
+type sgrStyle struct {
+	dim, italic, faint bool
+}
+
+func (s *sgrStyle) apply(params string) {
 	if params == "" {
-		return false
+		*s = sgrStyle{}
+		return
 	}
 	fields := strings.Split(params, ";")
 	for i := 0; i < len(fields); i++ {
@@ -286,16 +307,29 @@ func applySGRDim(params string, dim bool) bool {
 		}
 		switch {
 		case n == 38 || n == 48 || n == 58:
-			if i+1 < len(fields) && fields[i+1] == "5" {
+			if i+1 < len(fields) && fields[i+1] == "5" && i+2 < len(fields) {
+				c, err := strconv.Atoi(fields[i+2])
+				if err == nil && n == 38 {
+					s.faint = c >= 232 && c <= 249
+				}
 				i += 2
 			} else if i+1 < len(fields) && fields[i+1] == "2" {
 				i += 4
 			}
-		case n == 0 || n == 22:
-			dim = false
+		case n == 0:
+			*s = sgrStyle{}
+		case n == 22:
+			s.dim = false
+		case n == 23:
+			s.italic = false
+		case n == 39:
+			s.faint = false
 		case n == 2:
-			dim = true
+			s.dim = true
+		case n == 3:
+			s.italic = true
+		case n == 90:
+			s.faint = true
 		}
 	}
-	return dim
 }

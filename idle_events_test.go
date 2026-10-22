@@ -528,8 +528,8 @@ func TestIdleEventsGrokFleetIsDelivered(t *testing.T) {
 	}
 }
 
-// A busy grok turn can be cancelled by Enter, and its empty box looks the
-// same as an idle one, so a busy grok FLEET refuses before any key.
+// A page send queues into a busy grok turn. An idle event does not: its
+// Enter is automatic, and the empty box looks the same as an idle one.
 func TestIdleEventsGrokFleetBusyRefuses(t *testing.T) {
 	rig := newIdleRig(t, "")
 	useGrokScreens(t, rig.sayRig, "grok-busy-empty.ansi")
