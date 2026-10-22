@@ -751,7 +751,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   main { flex: 1; min-height: 0; width: 100%; max-width: none; display: flex; flex-direction: column; padding-bottom: 16px; padding-left: max(env(safe-area-inset-left), 24px); padding-right: max(env(safe-area-inset-right), 24px); }
   .hdr-inner { max-width: none; }
   .banners, .now { flex: none; }
-  .layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "decide lists chat"; gap: 22px; }
+  .layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "lists decide chat"; gap: 22px; }
   .col-decide { grid-area: decide; } .col-lists { grid-area: lists; } .chat { grid-area: chat; }
   .col { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 2px 6px 12px 2px; margin: -2px -6px 0 -2px; }
   .chat { min-height: 0; }
