@@ -1,19 +1,25 @@
 # Archive
 
+## Week of 2026-10-12
+FLEET page v1–v8 shipped: login, fleet cookie, send-keys guard, PWA, tailnet HTTPS :8443, session view, read-only chat, Start FLEET, live badges, inbox-zero glyph, spoof guard. Idle and finished events added (idle off by default; idle target follows FLEET name); daemon working list, auto-retire, 48h done-card prune, confirm delay 1.2→0.4s; header compacted 143→57px. ClickUp: `cu backlog --json` and 60s watcher sends ticket new/urgent to FLEET; FLEET on Grok (findFleet, /fleet say/chat/start) merged c404428, deployed. Sec reviews clean; open: grok worker may self-edit summary.json to impersonate FLEET; feat/fleet-derived unmerged; gitignore `.remember/tmp/` suggested.
+
+## Week of 2026-10-05
+Usage cmd and GET /usage/numbers added for Claude, Grok, Codex quotas. Hermetic test and timeout fallback fixed. On main via PR #1.
+
 ## Week of 2026-09-15
-Impl Session.Waiting() to prioritize waiting:* tabs in selection.go, session.go; deployed. False positive found: waiting:permission prompt during MCP server. Security audit passed (no vulns); WaitingFor predicate, data flow, and parity verified safe.
+Session.Waiting() prioritizes waiting:* tabs; deployed. False positive: waiting:permission during MCP server. Sec audit passed.
 
 ## Week of 2026-08-18
-Security review cleared grok integration (no vulns). Impl grok sessions module (grok.go + 11 mods) with tmux display (attach/kill/preview/send-keys); merged. Code review found 5 gaps; grok reviewer AGREE-WITH-CAVEATS on 3 blockers (group/disable, bare-PID kill, dedupe test). Fixed permission prompt states; pending deploy.
+Sec review cleared grok integration. Grok sessions module merged; review gaps and perm prompt states fixed. Pending deploy.
 
 ## Week of 2026-08-10
-Designed grok-session display with active_sessions.json→summary.json join and Tool field. Started impl in worktree.
+Grok-session display designed (summary.json join). Impl started in worktree.
 
 ## Week of 2026-08-03
-Agent-workstation server infra impl on local port 8765 with security review (localhost filtering, safe slices verified, no vulns). Shipped TUI self-ref filter and Tailscale config. Merged and deployed.
+Agent-workstation infra on port 8765; sec review passed. TUI self-ref filter and Tailscale config shipped; merged, deployed.
 
 ## Week of 2026-07-27
-Scout found SSH attach bottleneck (handshake overhead, no pooling). Shipped: ControlMaster multiplexing (60s reuse), persisted session-disabled state (DisabledStore + flock, POST endpoint), worktree locking (auto-detect/unlock/retry). SSH security review passed; disabled-session review ongoing.
+Scout found SSH attach bottleneck. Shipped ControlMaster multiplexing, persisted disabled-session state (flock), worktree locking. SSH sec review passed; disabled-session review ongoing.
 
 ## Week of 2026-07-20
-Kill-session bug fixed (metadata routing via tmux/PID). Session mgmt suite shipped: disable toggle (loopback→Tailscale fallback), flicker-free rendering via row-diff sync, picker polish (type-to-filter, selection tracking, status sort, filters, load display, home collapse). 9 commits, tests pass.
+Fixed kill-session routing bug. Shipped session mgmt suite (disable toggle, flicker-free rendering, picker polish); 9 commits, tests pass.
