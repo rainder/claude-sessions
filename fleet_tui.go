@@ -121,8 +121,9 @@ type fleetDismissResult struct {
 // fleetLoop is the modal loop's job bookkeeping, apart from the terminal so
 // the order of results can be tested.
 //
-// state, send and dismiss hold fleetLocal's mutex across a network call of up
-// to 5 s (15 s for a say), so they run only inside jobs, never on the loop.
+// A state fetch holds fleetLocal's mutex across a network call of up to 5 s;
+// a send and a dismiss hold it only to get the client (a connect, up to 5 s).
+// So they run only inside jobs, never on the loop.
 type fleetLoop struct {
 	st       *fleetViewState
 	state    func() (fleetStateView, error)

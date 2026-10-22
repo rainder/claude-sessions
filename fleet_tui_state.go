@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -159,6 +160,12 @@ func fleetSendJob(c *fleetClient, req fleetSayRequest) fleetSendResult {
 	}
 	if !fleetCardStillAsked(v, req.CardID, req.CardHash) {
 		r.Stale = true
+		return r
+	}
+	// Answered elsewhere since the panel opened: the server would refuse it
+	// the same way, so skip the round trip and show its answer.
+	if _, answered := v.Answered[req.CardID]; answered && !req.Correction {
+		r.Out = fleetSayOutcome{Status: http.StatusOK, Result: fleetSayResult{Code: "already_answered"}}
 		return r
 	}
 	r.Out = c.Say(req)

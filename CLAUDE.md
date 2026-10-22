@@ -1480,8 +1480,8 @@ can point it at a remote host.
 
 **One connection, two users.** `fleetLocal` holds the client and re-dials
 after an error that carried no HTTP status (any status proves the service is
-there). Its mutex is held across the network call, up to 5 s for a state and
-15 s for a say. So its calls run only on the badge hub's goroutine or in a
+there). Its mutex is held across the network call: up to 5 s for a state or
+a connect. A say and a dismiss hold it only to get the client. So its calls run only on the badge hub's goroutine or in a
 `fleetJob`, never on the render path, which reads `Snapshot()` alone. The hub
 pauses while the view is open and resumes, with a fetch, after: a badge poll
 holding the lock ahead of a send would delay it. The badge shows only for a
@@ -1516,8 +1516,8 @@ state read before the answer was recorded would still show the card open, take
 printable ASCII, and its whitespace collapses to one space in the send text.
 Enter on the panel is ignored for 400 ms (`fleetArmDelay`, the page's
 `SHEET_ARM_MS`) and never sends when it arrived in the same read as other
-keys (a paste of `a<newline>b` must not send). Esc and `q` are refused with a
-toast while a send is in flight. `c` unlocks an answered card for one
+keys (a paste of `a<newline>b` must not send). Esc, `q` and Ctrl-C are
+refused with a toast while a send is in flight. `c` unlocks an answered card for one
 correction; `x` dismisses an `unconfirmed` one, and not while a send or
 another dismiss runs.
 

@@ -462,6 +462,37 @@ func TestFleetSendJob(t *testing.T) {
 	}
 }
 
+func TestFleetSendJobAnsweredElsewhere(t *testing.T) {
+	var says atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fleet/state":
+			io.WriteString(w, `{"fleet":{"alive":true},"cards":[{"id":"a","kind":"needs-you","options":[{"key":"yes","send":"Merge now"}]}],"cardHashes":{"a":"h1"},"answered":{"a":{"cardHash":"h1","attempts":[{"optionKey":"yes","label":"yes","at":"2026-10-22T10:00:00Z","status":"sent"}]}}}`)
+		case "/fleet/say":
+			says.Add(1)
+			io.WriteString(w, `{"ok":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newFleetClient(srv.URL, "tok")
+	req := fleetSayRequest{Text: "Merge now", CardID: "a", CardHash: "h1", OptionKey: "yes"}
+
+	r := fleetSendJob(c, req)
+	if r.Stale || r.Out.Result.Code != "already_answered" || says.Load() != 0 {
+		t.Fatalf("not a correction: %+v says = %d", r, says.Load())
+	}
+	if msg, _, _ := fleetSendToast(r.Out); msg != fleetToastAnswered {
+		t.Fatalf("toast = %q", msg)
+	}
+	req.Correction = true
+	r = fleetSendJob(c, req)
+	if !r.Out.Result.OK || says.Load() != 1 {
+		t.Fatalf("correction: %+v says = %d", r, says.Load())
+	}
+}
+
 func TestFleetViewOwnAnswerLocksCardUntilStateShowsIt(t *testing.T) {
 	now := time.Unix(1000, 0)
 	cards := []fleetCardView{fleetTestCard("a", "needs-you"), fleetTestCard("b", "needs-you")}
