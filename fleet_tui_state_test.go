@@ -461,3 +461,88 @@ func TestFleetSendJob(t *testing.T) {
 		t.Fatalf("state 500: %+v says = %d", r, says.Load())
 	}
 }
+
+func TestFleetViewOwnAnswerLocksCardUntilStateShowsIt(t *testing.T) {
+	now := time.Unix(1000, 0)
+	cards := []fleetCardView{fleetTestCard("a", "needs-you"), fleetTestCard("b", "needs-you")}
+	for _, out := range []fleetSayOutcome{
+		{Status: 200, Result: fleetSayResult{OK: true}},
+		{Status: 200, Result: fleetSayResult{Code: "not_submitted", Error: "x"}},
+	} {
+		st := fleetTestState(fleetTestView(cards...), now)
+		st.applySend(fleetSendResult{CardID: "a", Out: out}, now)
+		// The old list still shows a as open: a digit there must not open a
+		// panel that would later read as answered elsewhere.
+		st.sel = 0
+		st.handleKey("1", false, now)
+		if st.panel != nil {
+			t.Fatalf("%+v: a digit on the card just sent opened a panel", out)
+		}
+		if st.toast != "sent — waiting for FLEET" {
+			t.Errorf("%+v: toast = %q", out, st.toast)
+		}
+		// A poll that has not seen the answer yet keeps the lock.
+		st.applyState(fleetTestView(cards...), nil, now)
+		st.sel = fleetItemIndex(st.items, "a")
+		st.handleKey("1", false, now)
+		if st.panel != nil || st.justSent != "a" {
+			t.Fatalf("%+v: panel = %v justSent = %q before the state shows the answer", out, st.panel, st.justSent)
+		}
+		// The state shows the answer: the lock goes, and no
+		// "answered on another device" toast is shown for it.
+		st.toast = ""
+		v := fleetTestView(cards...)
+		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
+		st.applyState(v, nil, now)
+		if st.justSent != "" || st.toast == fleetToastAnswered {
+			t.Fatalf("%+v: justSent = %q toast = %q", out, st.justSent, st.toast)
+		}
+	}
+	// A panel open on the card we sent (not reachable through keys, but the
+	// guard must hold) still closes, without the "another device" copy.
+	{
+		st := fleetTestState(fleetTestView(cards...), now)
+		st.handleKey("1", false, now)
+		st.justSent = "a"
+		st.toast = ""
+		v := fleetTestView(cards...)
+		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
+		st.applyState(v, nil, now)
+		if st.panel != nil || st.toast == fleetToastAnswered {
+			t.Fatalf("own-answer panel: panel = %v toast = %q", st.panel, st.toast)
+		}
+	}
+	// A card that is gone also ends the lock.
+	st := fleetTestState(fleetTestView(cards...), now)
+	st.applySend(fleetSendResult{CardID: "a", Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{OK: true}}}, now)
+	st.applyState(fleetTestView(cards[1]), nil, now)
+	if st.justSent != "" {
+		t.Fatalf("justSent = %q after the card left", st.justSent)
+	}
+}
+
+func TestFleetViewDismissRefusedWhileSending(t *testing.T) {
+	now := time.Unix(1000, 0)
+	v := fleetTestView(fleetTestCard("a", "needs-you"))
+	v.Answered["a"] = fleetAnswerWith(fleetAttemptUnconfirmed)
+	st := fleetTestState(v, now)
+	st.sending = true
+	if cmd := st.handleKey("x", false, now); cmd != fleetCmdNone || st.dismissID != "" {
+		t.Fatalf("x while sending: cmd = %v dismissID = %q", cmd, st.dismissID)
+	}
+}
+
+func TestFleetViewDigitNeedsCardHash(t *testing.T) {
+	now := time.Unix(1000, 0)
+	for _, hash := range []*string{nil, new(string)} {
+		v := fleetTestView(fleetTestCard("a", "needs-you"))
+		delete(v.CardHashes, "a")
+		if hash != nil {
+			v.CardHashes["a"] = *hash
+		}
+		st := fleetTestState(v, now)
+		if cmd := st.handleKey("1", false, now); cmd != fleetCmdNone || st.panel != nil {
+			t.Fatalf("hash %v: cmd = %v panel = %+v", hash, cmd, st.panel)
+		}
+	}
+}

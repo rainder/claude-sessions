@@ -69,6 +69,7 @@ type fleetViewState struct {
 	send       *fleetSayRequest // set with fleetCmdSend; the loop takes it
 	dismissID  string           // set with fleetCmdDismiss
 	nextAfter  string           // card id just sent; the next applyState selects the next open card
+	justSent   string           // card id our own answer reached; locked until a state shows it answered or gone
 	toast      string
 	toastKind  fleetToastKind
 	toastUntil time.Time
@@ -256,6 +257,15 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		}
 	}
 
+	// Our own answer ends its lock once a state shows it recorded, or the
+	// card gone. A poll read before the answer landed keeps the lock.
+	ownSent := st.justSent
+	if st.justSent != "" {
+		if i := fleetItemIndex(st.items, st.justSent); i < 0 || st.items[i].Answer != nil {
+			st.justSent = ""
+		}
+	}
+
 	if p := st.panel; p != nil {
 		id := p.item.Card.ID
 		if !fleetCardStillAsked(v, id, p.hash) {
@@ -263,9 +273,12 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 			st.setToast(fleetToastChanged, fleetToastErr, now)
 		} else if _, answered := v.Answered[id]; answered && !p.correction {
 			// The panel opened on an unanswered card and an answer landed
-			// since: sending now would be a second answer.
+			// since: sending now would be a second answer. When that answer
+			// is our own, "another device" would be wrong.
 			st.panel = nil
-			st.setToast(fleetToastAnswered, fleetToastErr, now)
+			if id != ownSent {
+				st.setToast(fleetToastAnswered, fleetToastErr, now)
+			}
 		}
 	}
 }
@@ -326,7 +339,7 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return fleetCmdRender
 	case "x":
 		it := st.selected()
-		if it == nil || it.Answer == nil || it.Answer.latest().Status != fleetAttemptUnconfirmed {
+		if it == nil || st.sending || it.Answer == nil || it.Answer.latest().Status != fleetAttemptUnconfirmed {
 			return fleetCmdNone
 		}
 		st.dismissID = it.Card.ID
@@ -340,11 +353,18 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 	if !ok || it.Card.ID == "" || !st.view.Fleet.Alive || st.sending {
 		return fleetCmdNone
 	}
+	if it.Card.ID == st.justSent {
+		// The list may still show our own answer's card as open until the
+		// refetch lands; a panel now would be a second answer.
+		st.setToast("sent — waiting for FLEET", fleetToastInfo, now)
+		return fleetCmdRender
+	}
 	if it.Answer != nil && st.unlocked != it.Card.ID {
 		st.setToast("answered — press c to send a correction", fleetToastInfo, now)
 		return fleetCmdRender
 	}
-	if it.Card.Options[opt].Send == "" {
+	// Without the server's hash the send could never pass the re-check.
+	if it.Card.Options[opt].Send == "" || st.view.CardHashes[it.Card.ID] == "" {
 		return fleetCmdNone
 	}
 	st.panel = &fleetPanel{
@@ -403,9 +423,16 @@ func (st *fleetViewState) applySend(r fleetSendResult, now time.Time) (refetch b
 	}
 	msg, kind, refetch := fleetSendToast(r.Out)
 	st.setToast(msg, kind, now)
-	if r.Out.Result.OK && !r.Out.Unclear {
+	if r.Out.Unclear {
+		return refetch
+	}
+	if r.Out.Result.OK {
 		st.nextAfter = r.CardID
 		st.unlocked = ""
+	}
+	// The server records an OK and a not_submitted answer before it replies.
+	if r.Out.Result.OK || r.Out.Result.Code == "not_submitted" {
+		st.justSent = r.CardID
 	}
 	return refetch
 }
