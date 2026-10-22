@@ -1080,6 +1080,12 @@ func RunTUI(interval time.Duration) error {
 				}
 				screen.Invalidate()
 				render()
+			case "f", "F":
+				screen.Invalidate()
+				runFleetView(fleetSrc, modalWakes)
+				fleetBadgeHub.Refresh()
+				screen.Invalidate()
+				render()
 			case "r", "R":
 				screen.Invalidate()
 				ctx := makeCtx()
@@ -1512,6 +1518,7 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
 	fmt.Fprintln(&b, "    i            show session info (ticket + conversation summary)")
 	fmt.Fprintln(&b, "    Ctrl-W       switch that host's Claude account (⏎ applies · esc cancels)")
+	fmt.Fprintln(&b, "    F            FLEET decision cards (1-9 pick · Enter send · Esc back)")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("INSPECTOR"))
 	fmt.Fprintln(&b, "    Home / End   oldest output / resume live follow")

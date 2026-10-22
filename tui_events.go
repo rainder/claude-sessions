@@ -333,6 +333,7 @@ const (
 	wakeResize
 	wakePreview
 	wakeKill
+	wakeFleet
 )
 
 // wakeFD pairs a wake pipe's read-end descriptor with the kind reported when
