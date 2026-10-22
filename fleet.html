@@ -1260,39 +1260,36 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   let openCardID = null;
   let alive = false;
   const expanded = new Set();          // "row:<id>" for compact rows left open
-  // cardId → {attempts, changing, cardChanged, inStrip}. attempts: every
-  // answer sent for the card, oldest first: the first answer, then each
-  // correction, as {key, label, lean, state, inflight, cardAt (card
-  // updatedAt at send), csig (cardSig at send), title, ts}. inStrip: the
-  // last answer was confirmed, so the card left Decide for the "Sent"
-  // strip until FLEET rewrites or drops it.
-  // state: "sending" | "sent" | "unconfirmed" (no clear HTTP answer: it may
-  // have reached FLEET). cardChanged: the last attempt is unconfirmed and the
-  // card was rewritten after it.
+  // Answers live in the server's store, state.answered: card id →
+  // {cardHash, cardChanged, attempts}, attempts the last 3 sends as
+  // {optionKey, label, comment, at, status}, newest last, shared by every
+  // device. The page keeps only its own request, in pending: card id →
+  // {att: {key, label, lean, state, at}, inflight, settled}. An entry lives
+  // while its request is in flight (state "sending"), and once it settles
+  // ("sent", or "unconfirmed": no clear answer, so it may have reached
+  // FLEET) until the first state answer asked for after that: by then the
+  // server's entry, if it recorded one, takes its place. settled: the state
+  // request count when the answer came back; null while in flight.
+  // state: "sending" | "sent" | "unconfirmed".
   const pending = new Map();
-  // The last attempt per card is kept in localStorage, so a reload in the
-  // middle of a send still shows that delivery is unknown. No chat text.
+  let stateReqs = 0;
+  // correcting: card ids whose "Send a correction" is open.
+  const correcting = new Set();
+  // Before the server store, the page kept its answers in localStorage
+  // (PEND_KEY). The server store starts empty after the deploy, so the
+  // entries an older page wrote are read once and still honoured by their
+  // old rule (cardSig) until each one prunes or expires. Nothing new is
+  // ever written there. legacy: card id → {key, label, lean, state, ts,
+  // csig, cardChanged, raw}.
   const PEND_KEY = "fleet.pending.v1", PEND_MAX = 24 * 3600e3;
-  const lastAttempt = p => p.attempts[p.attempts.length - 1] || null;
-  function savePending() {
-    const out = {}, now = Date.now();
-    for (const [id, p] of pending) {
-      const a = lastAttempt(p);
-      if (!a || now - a.ts > PEND_MAX) continue;
-      out[id] = {cardId: id, updatedAt: a.cardAt, key: a.key, label: a.label, lean: a.lean, csig: a.csig, title: a.title,
-        at: new Date(a.ts).toISOString(), status: a.state};
-    }
-    try {
-      if (Object.keys(out).length) localStorage.setItem(PEND_KEY, JSON.stringify(out));
-      else localStorage.removeItem(PEND_KEY);
-    } catch { /* storage off (Safari private mode): memory only */ }
-  }
-  // A "sending" entry from an earlier page load never got its answer here,
-  // so it loads as unconfirmed.
-  function loadPending() {
+  const legacy = new Map();
+  const lastAttempt = a => a ? a.attempts[a.attempts.length - 1] || null : null;
+  // A "sending" entry never got its answer on the load that wrote it, so
+  // it counts as unconfirmed, as it always did.
+  function loadLegacyPending() {
     let m = null;
     try { m = obj(JSON.parse(localStorage.getItem(PEND_KEY) || "null")); } catch { m = null; }
-    if (!m) return;
+    if (!m) { saveLegacy(); return; }
     const now = Date.now();
     for (const [id, v] of Object.entries(m)) {
       const o = obj(v);
@@ -1300,13 +1297,49 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       const ts = Date.parse(str(o.at)), st = str(o.status);
       if (!isFinite(ts) || now - ts > PEND_MAX || now - ts < -PEND_MAX) continue;
       if (st !== "sending" && st !== "sent" && st !== "unconfirmed") continue;
-      pending.set(id, {changing: false, cardChanged: false, inStrip: st === "sent", attempts: [{key: str(o.key), label: str(o.label) || str(o.key),
-        lean: o.lean === true, state: st === "sent" ? "sent" : "unconfirmed", inflight: false, cardAt: str(o.updatedAt),
-        csig: str(o.csig) || null, title: str(o.title), ts}]});
+      legacy.set(id, {key: str(o.key), label: str(o.label) || str(o.key), lean: o.lean === true,
+        state: st === "sent" ? "sent" : "unconfirmed", ts, csig: str(o.csig), cardChanged: false, raw: o});
     }
-    savePending();
+    saveLegacy();
   }
-  loadPending();
+  // saveLegacy rewrites the key with the entries still honoured, and
+  // removes it when none are left.
+  function saveLegacy() {
+    try {
+      if (!legacy.size) { localStorage.removeItem(PEND_KEY); return; }
+      const out = {};
+      for (const [id, l] of legacy) out[id] = l.raw;
+      localStorage.setItem(PEND_KEY, JSON.stringify(out));
+    } catch { /* storage off (Safari private mode): nothing to migrate */ }
+  }
+  loadLegacyPending();
+  // answerOf: the one read path for a card's answers, as {attempts: [{key,
+  // label, lean, state, at}], cardChanged, src}, or null. This page's own
+  // request comes after the server's attempts (or a legacy entry's, when the
+  // server has none), so earlier answers stay in view above a correction.
+  // src: "local", "server" or "legacy" — what Dismiss removes.
+  function answerOf(id) {
+    if (!id) return null;
+    const all = obj(state && state.answered), srv = all ? obj(all[id]) : null;
+    let base = null;
+    if (srv) {
+      const atts = arr(srv.attempts).map(obj).filter(Boolean).map(a => ({key: str(a.optionKey),
+        label: str(a.label) || str(a.optionKey), lean: false, state: str(a.status) === "sent" ? "sent" : "unconfirmed", at: str(a.at)}));
+      if (atts.length) base = {attempts: atts, cardChanged: srv.cardChanged === true, src: "server"};
+    }
+    const l = base ? null : legacy.get(id);
+    if (l) base = {attempts: [{key: l.key, label: l.label, lean: l.lean, state: l.state, at: new Date(l.ts).toISOString()}],
+      cardChanged: l.cardChanged, src: "legacy"};
+    const p = pending.get(id);
+    if (!p) return base;
+    return {attempts: [...(base ? base.attempts : []), p.att].slice(-3), cardChanged: false, src: "local"};
+  }
+  // hashOf: the server's hash of the card as this state shows it. A send
+  // echoes it, and an open confirm sheet compares it to see the card move.
+  function hashOf(c) {
+    const h = obj(state && state.cardHashes);
+    return h ? str(h[str(c.id)]) : "";
+  }
   const failed = {};                   // poller name → last fetch failed
   // readOnly: the turns are the last FLEET session's, FLEET is not running.
   // stale: a render was skipped while the chat was hidden (phone view).
@@ -1893,42 +1926,40 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     card.append(el("div", "card-top", title, chatBtn(c)));
 
     // Andy's answers, once sent: shown by the title until FLEET drops or
-    // rewrites the card. The options lock while they stand. "Send a
-    // correction" unlocks them; earlier answers stay in view above the
-    // correction (at most the last 3). An unconfirmed last answer stays even
-    // when the card is rewritten, until Andy dismisses it or a correction
-    // is confirmed.
-    const pend = id ? pending.get(id) : null;
-    const last = pend ? lastAttempt(pend) : null;
-    const locked = !!(last && !pend.changing);
+    // rewrites the card. They come from answerOf, so an answer sent from
+    // another device shows here too. The options lock while they stand.
+    // "Send a correction" unlocks them; earlier answers stay in view above
+    // the correction (at most the last 3). An unconfirmed last answer stays
+    // even when the card is rewritten, until Andy dismisses it or a
+    // correction is confirmed.
+    const ans = answerOf(id);
+    const shown = ans ? ans.attempts.slice(-3) : [];
+    const last = lastAttempt(ans);
+    const changing = !!(last && correcting.has(id));
+    const locked = !!(last && !changing);
     if (last) {
-      const from = Math.max(0, pend.attempts.length - 3);
-      pend.attempts.slice(from).forEach((a, i) =>
-        card.append(chosenLine(from + i ? "Correction: " : "You chose: ", a.label, a.state)));
-      if (pend.cardChanged && last.state === "unconfirmed")
+      shown.forEach((a, i) => card.append(chosenLine(i ? "Correction: " : "You chose: ", a.label, a.state)));
+      if (ans.cardChanged && last.state === "unconfirmed")
         card.append(el("div", "chosen-line warn", el("span", "cl-t", el("span", "dot"),
           el("span", "", "Card changed · delivery of your last answer is still unknown — check the chat"))));
-      if (pend.changing) {
+      if (changing) {
         const cancel = el("button", "link-btn", "Cancel");
         cancel.type = "button";
-        cancel.addEventListener("click", () => { pend.changing = false; guard(renderCards); });
+        cancel.addEventListener("click", () => { correcting.delete(id); guard(renderCards); });
         card.append(el("div", "chosen-note", el("span", "", "Pick the correction below."), cancel));
       } else if (last.state !== "sending") {
         const acts = el("div", "chosen-acts");
         if (id && canSendNow()) {
           const ch = el("button", "link-btn", "Send a correction");
           ch.type = "button";
-          ch.addEventListener("click", () => { pend.changing = true; guard(renderCards); });
+          ch.addEventListener("click", () => { correcting.add(id); guard(renderCards); });
           acts.append(ch);
         }
         if (last.state === "unconfirmed") {
           const dis = el("button", "link-btn", "Dismiss");
           dis.type = "button";
           dis.title = "Remove this warning";
-          dis.addEventListener("click", () => {
-            if (pending.get(id) === pend && !pend.attempts.some(a => a.inflight)) { pending.delete(id); savePending(); }
-            guard(renderCards);
-          });
+          dis.addEventListener("click", () => dismissAnswer(id));
           acts.append(dis);
         }
         if (acts.childNodes.length) card.append(acts);
@@ -1989,9 +2020,30 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // answered: a card with an answer sent or on its way. It leaves the counts.
   // An unconfirmed answer still counts as open: Andy must check it.
   function answered(c) {
-    const p = pending.get(str(c.id));
-    const a = p ? lastAttempt(p) : null;
+    const a = lastAttempt(answerOf(str(c.id)));
     return !!(a && (a.state === "sending" || a.state === "sent"));
+  }
+  // dismissAnswer removes an unconfirmed answer once Andy checked the chat:
+  // the server's entry through the dismiss route, this page's own or a
+  // legacy one in memory.
+  async function dismissAnswer(id) {
+    const ans = answerOf(id);
+    if (!ans) return;
+    if (ans.src === "server") {
+      const res = await postSay("/fleet/card/dismiss", {cardId: id}, null);
+      if (!res.ok && res.code !== "not_found") toast(res.error, true);
+      runNow("state");
+      return;
+    }
+    if (ans.src === "local") {
+      const p = pending.get(id);
+      if (!p || p.inflight) return;
+      pending.delete(id);
+    } else {
+      legacy.delete(id);
+      saveLegacy();
+    }
+    guard(renderCards);
   }
   function canSendNow() { return alive && !expired; }
 
@@ -2027,13 +2079,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // openCardChat: the card's live session opens in the session view (the
   // route a Working row takes), and FLEET gets one line so it can re-read
   // that session and close the card. With no live session the FLEET chat
-  // opens with the card prefilled.
+  // opens with the card prefilled. The line goes with no card id, so the
+  // server never records it as an answer to the card.
   function openCardChat(c) {
     const id = str(c.id), tm = cardSession(c);
     if (!tm) { prefillChat(id ? "About card " + id + ": " : "About " + cardHead(c).name + ": "); return; }
     if (id && canSendNow() && !chatTold.has(id)) {
       chatTold.add(id);
-      say("Andy opened chat on card " + id + " (" + tm + ")", id);
+      say("Andy opened chat on card " + id + " (" + tm + ")", null);
     }
     location.hash = "#session/" + encodeURIComponent(tm);
   }
@@ -2642,7 +2695,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // cardSig: a short hash of what FLEET shows and asks on a card: kind,
   // status, title, ticket, summary, lean and every option's key, label,
   // line and send text. A change means FLEET asks again. Two 32-bit FNV-1a
-  // passes with different seeds keep it small for storage.
+  // passes with different seeds keep it small for storage. Only legacy
+  // entries use it (see loadLegacyPending); everything else compares the
+  // server's hash (hashOf).
   function cardSig(c) {
     const j = JSON.stringify([str(c.kind), str(c.status), str(c.title), str(c.ticket), str(c.summary), str(c.lean),
       optionList(c).map(o => [str(o.key), str(o.label), str(o.line), str(o.send)])]);
@@ -2654,9 +2709,13 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return "c1:" + fnv(2166136261) + "." + fnv(374761393) + "." + j.length.toString(36);
   }
   const cardTitle = c => { const h = cardHead(c); return h.ticket ? h.ticket + " · " + h.title : h.title; };
+  // inStrip: the last answer that is not still sending was confirmed sent,
+  // so the card left Decide for the "Sent" strip until FLEET rewrites or
+  // drops it. A correction on its way keeps a sent card in the strip.
   function inStrip(c) {
-    const p = pending.get(str(c.id));
-    return !!(p && p.inStrip && lastAttempt(p));
+    const ans = answerOf(str(c.id));
+    const done = ans ? ans.attempts.filter(a => a.state !== "sending") : [];
+    return !!(done.length && done[done.length - 1].state === "sent");
   }
 
   // One compact row per answered card in the "Sent" strip: title, the
@@ -2664,7 +2723,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // state, where "Send a correction" still works.
   function sentRow(c) {
     const id = str(c.id), explicit = str(c.kind) === "explicit-yes";
-    const a = lastAttempt(pending.get(id));
+    const a = lastAttempt(answerOf(id));
     const head = cardHead(c);
     const row = el("details", "row sent-row");
     row.dataset.cardId = id;
@@ -2677,7 +2736,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const l2 = el("div", "row-l2",
       el("span", "", a.state === "sending" ? "Sending: " : "Sent: ", el("b", "", a.label)),
       a.lean ? el("span", "pick", "FLEET's pick") : null,
-      relSpan(new Date(a.ts).toISOString()));
+      parseTime(a.at) !== null ? relSpan(a.at) : null);
     row.append(el("summary", "", el("div", "row-main", l1, l2), el("span", "chev")));
     row.append(el("div", "row-body", decisionCard(c, explicit)));
     return row;
@@ -2804,7 +2863,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   $("now").addEventListener("click", e => { if (!e.target.closest("a")) toggleNow(); });
   $("now").addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleNow(); } });
 
-  function applyState(text) {
+  // seq: the state request count when this answer was asked for.
+  function applyState(text, seq) {
     let st;
     try { st = obj(JSON.parse(text)); } catch { st = null; }
     if (!st) throw new Error("bad state body");
@@ -2816,7 +2876,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     alive = !!(fl && fl.alive === true);
     start.retryUntil = fl && num(fl.retryAfter) && fl.retryAfter > 0 ? Date.now() + fl.retryAfter * 1000 : 0;
 
-    prunePending();
+    const dropped = prunePending(seq);
     // An open sheet must not send an answer to a card that has moved on.
     if (sheet.card && !sheet.busy && $("sheet").open && !sheetValid()) {
       closeSheet();
@@ -2828,38 +2888,49 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       guard(renderNow);
       guard(renderCards);
       guard(applyEnabled);
-    }
+    } else if (dropped) guard(renderCards);
     guard(watchStart);
     guard(updateRel);
     if (!viewChosen) { viewChosen = true; setView(decideCount() ? "decide" : "chat", false); }
     if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
   }
 
-  // Runs on every state answer. An answer goes once its card is gone or no
-  // longer a decision (needs-you / explicit-yes). A sent answer also goes
-  // when FLEET asks again: the card's content signature differs from the
-  // one taken at send time; the card then shows as a normal card.
-  // updatedAt is not used: fleet-state.py stamps it on every card at every
-  // write, so it moves on every FLEET cycle. An entry with no signature
-  // (an older page wrote it) counts as moved, so the card shows. An unconfirmed answer stays through a
-  // rewrite (flagged cardChanged): only Dismiss or a confirmed correction
-  // clears it. An entry with a request still in flight is kept; it is
-  // checked once it settles.
-  const cardMoved = (cur, a) => !a.csig || cardSig(cur) !== a.csig;
-  function prunePending() {
-    if (!pending.size) return;
-    const now = new Map(arr(state && state.cards).map(obj)
-      .filter(c => c && str(c.id) && (str(c.kind) === "needs-you" || str(c.kind) === "explicit-yes")).map(c => [str(c.id), c]));
+  // Runs on every state answer; true when it dropped something the cards
+  // show. This page's own entry goes on the first state answer asked for
+  // after its request settled: that answer holds the server's entry, if it
+  // recorded one. One still in flight is kept.
+  // A legacy entry goes once its card is gone or no longer a decision
+  // (needs-you / explicit-yes), when it expires, or when the server holds
+  // an answer for the card. A sent one also goes when FLEET asks again: the
+  // card's content signature differs from the one taken at send time. An
+  // entry with no signature counts as moved. An unconfirmed one stays
+  // through a rewrite, flagged cardChanged, until Dismiss.
+  const isDecision = c => str(c.kind) === "needs-you" || str(c.kind) === "explicit-yes";
+  function prunePending(seq) {
     let dirty = false;
     for (const [id, p] of pending) {
-      const a = lastAttempt(p);
-      if (a && p.attempts.some(x => x.inflight)) continue;
-      if (!a || !now.has(id)) { pending.delete(id); dirty = true; continue; }
-      const moved = cardMoved(now.get(id), a);
-      if (moved && a.state !== "unconfirmed") { pending.delete(id); dirty = true; continue; }
-      p.cardChanged = moved;
+      if (p.inflight || p.settled === null || !(seq > p.settled)) continue;
+      pending.delete(id);
+      dirty = true;
     }
-    if (dirty) savePending();
+    if (legacy.size) {
+      const cards = new Map(arr(state && state.cards).map(obj).filter(c => c && str(c.id) && isDecision(c)).map(c => [str(c.id), c]));
+      const srv = obj(state && state.answered), t = Date.now();
+      let save = false;
+      for (const [id, l] of legacy) {
+        const cur = cards.get(id);
+        const moved = !!cur && (!l.csig || cardSig(cur) !== l.csig);
+        if (!cur || t - l.ts > PEND_MAX || (srv && obj(srv[id])) || (moved && l.state !== "unconfirmed")) {
+          legacy.delete(id);
+          save = dirty = true;
+          continue;
+        }
+        if (l.cardChanged !== moved) { l.cardChanged = moved; dirty = true; }
+      }
+      if (save) saveLegacy();
+    }
+    for (const id of correcting) if (!answerOf(id)) { correcting.delete(id); dirty = true; }
+    return dirty;
   }
 
   // ---- confirm sheet -----------------------------------------------------
@@ -2867,22 +2938,23 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // Both needs-you and explicit-yes open on that button. It stays off for
   // SHEET_ARM_MS so one stray tap cannot send.
   const SHEET_ARM_MS = 400;
-  const sheet = {card: null, opt: null, lean: false, text: "", explicit: false, busy: false, armed: false, armTimer: 0, armGen: 0};
+  const sheet = {card: null, opt: null, hash: "", lean: false, text: "", explicit: false, busy: false, armed: false, armTimer: 0, armGen: 0};
 
   const currentCard = id => arr(state && state.cards).map(obj).find(c => c && str(c.id) === id) || null;
 
   // sheetValid: the card behind the open sheet is still the same in the
-  // current state: present with the same content signature (kind, status,
-  // text, lean, options). Not updatedAt: it moves on every FLEET write. A
-  // card with no id cannot be tracked and never sends here.
+  // current state: present, a decision, and with the server's hash it had
+  // when the sheet opened (kind, status, text, lean, options; never
+  // updatedAt, which moves on every FLEET write). A card with no id cannot
+  // be tracked and never sends here.
   function sheetValid() {
     const c = sheet.card, o = sheet.opt;
     if (!c || !o) return false;
     const id = str(c.id);
     if (!id) return false;
     const cur = currentCard(id);
-    if (!cur) return false;
-    return cardSig(cur) === cardSig(c);
+    if (!cur || !isDecision(cur)) return false;
+    return hashOf(cur) === sheet.hash;
   }
 
   function openSheet(c, o, lean, explicit) {
@@ -2890,7 +2962,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const base = str(o.send);
     if (!base) return;
     const head = cardHead(c);
-    sheet.card = c; sheet.opt = o; sheet.lean = lean; sheet.explicit = explicit; sheet.busy = false; sheet.armed = false;
+    sheet.card = c; sheet.opt = o; sheet.hash = hashOf(c); sheet.lean = lean; sheet.explicit = explicit; sheet.busy = false; sheet.armed = false;
     // The dialog gives focus back to its opener on close, unless a state
     // update replaced that button: then the key finds its successor.
     const op = document.activeElement, oh = op && op !== document.body ? op.closest("[data-fkey]") : null;
@@ -2956,12 +3028,12 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   const optLabel = o => str(o.label) || str(o.send) || str(o.key);
 
   // The sheet closes at once; the card shows "You chose: … · sending…" and
-  // locks its options until the answer lands. The attempt is in
-  // localStorage before the POST goes out. An HTTP error answer removes the
+  // locks its options until the answer lands. A refusal removes the
   // attempt, so the card shows what it showed before. No clear answer
   // (network error, timeout, a 2xx the page cannot read) may still have
-  // reached FLEET, so the card says delivery is not confirmed and keeps its
-  // options locked.
+  // reached FLEET, so the card says delivery is not confirmed until the
+  // next state answer; if the server recorded the send, its entry takes
+  // over. not_submitted is recorded by the server as unconfirmed.
   // nextOpenKey: the data-fkey of the first card after this one, in screen
   // order, that still waits for an answer. "" when none is left.
   function nextOpenKey(id) {
@@ -2996,41 +3068,38 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     sheet.busy = true;
     for (const b of ["sheet-approve", "sheet-send", "sheet-cancel"]) $(b).disabled = true;
     btn.textContent = "Sending…";
-    const c = sheet.card, o = sheet.opt, text = sheet.text;
+    const c = sheet.card, o = sheet.opt, text = sheet.text, hash = sheet.hash;
     const id = str(c.id);
     const nextKey = nextOpenKey(id);
-    const att = {key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", inflight: true, cardAt: str(c.updatedAt),
-      csig: cardSig(c), title: cardTitle(c), ts: Date.now()};
-    let p = pending.get(id);
-    if (!p) { p = {attempts: [], changing: false, cardChanged: false, inStrip: false}; pending.set(id, p); }
-    p.attempts.push(att);
-    p.changing = false; p.cardChanged = false;
-    savePending();
+    // Any answer on record makes this a correction; without the flag the
+    // server refuses a second answer to an unchanged card.
+    const correction = answerOf(id) !== null;
+    const p = {att: {key: str(o.key), label: optLabel(o), lean: sheet.lean, state: "sending", at: new Date().toISOString()},
+      inflight: true, settled: null};
+    pending.set(id, p);
+    correcting.delete(id);
     guard(renderCards);
     closeSheet();
-    const res = await say(text, id);
-    att.inflight = false;
+    const res = await sayCard(text, id, str(o.key), hash, correction);
+    p.inflight = false;
+    p.settled = stateReqs;
     if (res.ok) {
       // Confirmed: the card leaves Decide for the "Sent" strip.
-      att.state = "sent";
-      p.inStrip = true;
+      p.att.state = "sent";
       // A plain success is silent: the card moving to the strip is the signal.
       if (res.queued) toast("Sent. FLEET is busy. It reads your answer next.");
       afterSend();
-    } else if (res.unclear) {
+    } else if (res.unclear || res.code === "not_submitted") {
       // Unknown: back in Decide, so Andy checks it.
-      att.state = "unconfirmed";
-      p.inStrip = false;
-      toast("Delivery not confirmed. Check the chat before you send again.", true);
+      p.att.state = "unconfirmed";
+      toast(res.unclear ? "Delivery not confirmed. Check the chat before you send again." : res.error, true);
       afterSend();
     } else {
-      const i = p.attempts.indexOf(att);
-      if (i >= 0) p.attempts.splice(i, 1);
-      if (!p.attempts.length && pending.get(id) === p) pending.delete(id);
+      if (pending.get(id) === p) pending.delete(id);
       toast(res.error, true);
+      // The server's entry, or the card as it is now, shows on the next state.
+      if (res.code === "already_answered" || res.code === "card_gone" || res.code === "card_changed") afterSend();
     }
-    savePending();
-    prunePending();
     guard(renderCards);
     if (res.ok) guard(() => scrollToCard(nextKey));
   }
@@ -3077,6 +3146,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // Grok session whose status is unknown or waiting.
   const GROK_BUSY = "The Grok session is busy. Try again when its turn ends.";
   const say = (text, cardId) => postSay("/fleet/say", {text, cardId}, {busy: GROK_BUSY});
+  // sayCard sends an answer to a card: the option's key, the card's hash as
+  // the page showed it (the server refuses when the card moved since), and
+  // whether it replaces an earlier answer.
+  const CARD_CHANGED = "The card changed. Check it again.";
+  const sayCard = (text, id, optionKey, cardHash, correction) =>
+    postSay("/fleet/say", {text, cardId: id, optionKey: optionKey, cardHash: cardHash, correction: correction === true}, {
+      busy: GROK_BUSY,
+      already_answered: "Already answered on another device.",
+      card_gone: CARD_CHANGED,
+      card_changed: CARD_CHANGED,
+    });
   // postSay is say for any send endpoint with the /fleet/say envelope.
   // codeText maps a refusal code to Andy's words before the server text.
   async function postSay(url, payload, codeText) {
@@ -3598,7 +3678,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 
   // ---- polling -----------------------------------------------------------
   const pollers = {
-    state: {base: 5000, fn: async () => applyState(await getJSON("/fleet/state"))},
+    state: {base: 5000, fn: async () => { const seq = ++stateReqs; return applyState(await getJSON("/fleet/state"), seq); }},
     chat: {base: 3000, fn: async () => {
       let url = "/fleet/chat?n=50";
       if (chat.pos !== null) url += "&since=" + chat.pos;

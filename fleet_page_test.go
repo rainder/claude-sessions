@@ -10,7 +10,10 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 	page := string(fleetPageHTML)
 	for _, bad := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "src=\"http", "href=\"http", "@import", "eval(",
 		// FLEET's pick is a tag on its option, not a button of its own.
-		"Use FLEET's pick"} {
+		"Use FLEET's pick",
+		// Answers live in the server store: the page never writes its old
+		// localStorage store, and the Chat note is never sent as an answer.
+		"savePending(", `" + tm + ")", id)`} {
 		if strings.Contains(page, bad) {
 			t.Errorf("fleet.html must not contain %q", bad)
 		}
@@ -52,7 +55,14 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// opens the card's live session (by its tmux field), else the FLEET
 		// chat.
 		`"opt other-btn"`, `"Other"`, `"Andy decides on "`, "function chatBtn(", `"btn chat-btn", "Chat"`,
-		"function cardSession(", "sessOf(c.tmux)", `"About card "`} {
+		"function cardSession(", "sessOf(c.tmux)", `"About card "`,
+		// Answers come from the server store (state.answered) and card
+		// identity from the server's hash (state.cardHashes). A send carries
+		// the option key and the correction flag; the old local store is
+		// read once for the deploy migration.
+		"/fleet/card/dismiss", "state.answered", "state.cardHashes", "optionKey:", "correction:",
+		"already_answered:", "card_changed:", "card_gone:", "Already answered on another device",
+		"function loadLegacyPending(", "function answerOf(", "function hashOf(", `" + tm + ")", null)`} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}
@@ -76,6 +86,27 @@ func TestFleetPageReadsRealUsageKeys(t *testing.T) {
 	for _, key := range []string{"claude", "grok", "active", "fiveHour", "sevenDay", "account", "pct", "windows", "label"} {
 		if !strings.Contains(body, `"`+key+`"`) {
 			t.Fatalf("usageNumbersResponse JSON has no key %q: %s", key, body)
+		}
+		if !strings.Contains(page, "."+key) {
+			t.Errorf("fleet.html does not read .%s", key)
+		}
+	}
+}
+
+// TestFleetPageReadsRealAnswerKeys pins the page to the json tags the answer
+// store actually writes: a renamed tag would leave every card looking open.
+func TestFleetPageReadsRealAnswerKeys(t *testing.T) {
+	a := fleetAnswer{CardHash: "h", CardChanged: true, Attempts: []fleetAttempt{{OptionKey: "k", Label: "l", Comment: true,
+		At: "2026-10-22T10:00:00Z", Status: "sent"}}}
+	b, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	page := string(fleetPageHTML)
+	for _, key := range []string{"cardHash", "cardChanged", "attempts", "optionKey", "label", "status"} {
+		if !strings.Contains(body, `"`+key+`"`) {
+			t.Fatalf("fleetAnswer JSON has no key %q: %s", key, body)
 		}
 		if !strings.Contains(page, "."+key) {
 			t.Errorf("fleet.html does not read .%s", key)
