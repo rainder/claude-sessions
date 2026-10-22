@@ -66,10 +66,12 @@ type fleetViewState struct {
 	unlocked   string // card id a 'c' unlocked for one answer
 	panel      *fleetPanel
 	sending    bool
+	dismissing bool
 	send       *fleetSayRequest // set with fleetCmdSend; the loop takes it
 	dismissID  string           // set with fleetCmdDismiss
 	nextAfter  string           // card id just sent; the next applyState selects the next open card
 	justSent   string           // card id our own answer reached; locked until a state shows it answered or gone
+	unclear    string           // card id whose send result is unknown; locked until the next applied state
 	toast      string
 	toastKind  fleetToastKind
 	toastUntil time.Time
@@ -204,6 +206,9 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		}
 		return
 	}
+	// A send whose result was unclear may or may not have reached FLEET:
+	// this state decides, whatever it shows.
+	st.unclear = ""
 	old := st.items
 	oldSel := st.sel
 	st.err, st.view, st.items = "", v, fleetItems(v)
@@ -339,10 +344,11 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return fleetCmdRender
 	case "x":
 		it := st.selected()
-		if it == nil || st.sending || it.Answer == nil || it.Answer.latest().Status != fleetAttemptUnconfirmed {
+		if it == nil || st.sending || st.dismissing || it.Answer == nil || it.Answer.latest().Status != fleetAttemptUnconfirmed {
 			return fleetCmdNone
 		}
 		st.dismissID = it.Card.ID
+		st.dismissing = true
 		return fleetCmdDismiss
 	}
 	it := st.selected()
@@ -357,6 +363,11 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		// The list may still show our own answer's card as open until the
 		// refetch lands; a panel now would be a second answer.
 		st.setToast("sent — waiting for FLEET", fleetToastInfo, now)
+		return fleetCmdRender
+	}
+	if it.Card.ID == st.unclear {
+		// The last send may have landed; the refetch it asked for decides.
+		st.setToast("delivery not confirmed — checking the card first", fleetToastWarn, now)
 		return fleetCmdRender
 	}
 	if it.Answer != nil && st.unlocked != it.Card.ID {
@@ -424,7 +435,11 @@ func (st *fleetViewState) applySend(r fleetSendResult, now time.Time) (refetch b
 	msg, kind, refetch := fleetSendToast(r.Out)
 	st.setToast(msg, kind, now)
 	if r.Out.Unclear {
-		return refetch
+		// The answer may have reached FLEET: lock the card until the next
+		// applied state, and fetch that now rather than at the next poll
+		// (this overrides the toast table's refetch for Unclear).
+		st.unclear = r.CardID
+		return true
 	}
 	if r.Out.Result.OK {
 		st.nextAfter = r.CardID

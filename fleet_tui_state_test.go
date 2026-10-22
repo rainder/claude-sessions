@@ -213,7 +213,7 @@ func TestFleetViewDismissKey(t *testing.T) {
 	if cmd := st.handleKey("x", false, now); cmd != fleetCmdDismiss || st.dismissID != "a" {
 		t.Fatalf("x on unconfirmed: cmd = %v dismissID = %q", cmd, st.dismissID)
 	}
-	st.dismissID = ""
+	st.dismissID, st.dismissing = "", false
 	st.handleKey(KeyDown, false, now)
 	if st.items[st.sel].Card.ID != "b" {
 		t.Fatalf("selected %q, want b", st.items[st.sel].Card.ID)
@@ -544,5 +544,48 @@ func TestFleetViewDigitNeedsCardHash(t *testing.T) {
 		if cmd := st.handleKey("1", false, now); cmd != fleetCmdNone || st.panel != nil {
 			t.Fatalf("hash %v: cmd = %v panel = %+v", hash, cmd, st.panel)
 		}
+	}
+}
+
+func TestFleetViewDismissIgnoredWhileDismissing(t *testing.T) {
+	now := time.Unix(1000, 0)
+	v := fleetTestView(fleetTestCard("a", "needs-you"))
+	v.Answered["a"] = fleetAnswerWith(fleetAttemptUnconfirmed)
+	st := fleetTestState(v, now)
+	if cmd := st.handleKey("x", false, now); cmd != fleetCmdDismiss || !st.dismissing {
+		t.Fatalf("x: cmd = %v dismissing = %v", cmd, st.dismissing)
+	}
+	st.dismissID = ""
+	if cmd := st.handleKey("x", false, now); cmd != fleetCmdNone || st.dismissID != "" {
+		t.Fatalf("x while dismissing: cmd = %v dismissID = %q", cmd, st.dismissID)
+	}
+}
+
+// A say whose result is unclear may have reached FLEET: the card stays locked
+// until the next applied state, whatever it shows, and a refetch is asked for.
+func TestFleetViewUnclearLocksCard(t *testing.T) {
+	now := time.Unix(1000, 0)
+	v := fleetTestView(fleetTestCard("a", "needs-you"))
+	st := fleetTestState(v, now)
+	st.handleKey("1", false, now)
+	if cmd := st.handleKey(KeyEnter, false, now.Add(time.Second)); cmd != fleetCmdSend {
+		t.Fatalf("enter: cmd = %v", cmd)
+	}
+	st.send = nil
+	if !st.applySend(fleetSendResult{CardID: "a", Out: fleetSayOutcome{Unclear: true}}, now) {
+		t.Fatal("an unclear send must ask for a refetch")
+	}
+	if st.toast != fleetToastUnclear {
+		t.Fatalf("toast = %q", st.toast)
+	}
+	st.handleKey("1", false, now)
+	if st.panel != nil {
+		t.Fatal("a digit on a card whose send is unclear opened a panel")
+	}
+	// The next state shows no answer at all: the poll decides, the card opens.
+	st.applyState(v, nil, now)
+	st.handleKey("1", false, now)
+	if st.panel == nil {
+		t.Fatal("the applied state did not unlock the card")
 	}
 }

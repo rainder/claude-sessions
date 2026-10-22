@@ -578,4 +578,108 @@ func TestFleetLoopTimeout(t *testing.T) {
 	if d := fleetLoopTimeout(&fleetViewState{}, now.Add(-time.Second), now); d != time.Millisecond {
 		t.Errorf("overdue poll: %v", d)
 	}
+	if d := fleetLoopTimeout(&fleetViewState{}, time.Time{}, now); d != 0 {
+		t.Errorf("no deadline at all must block (0), got %v", d)
+	}
+}
+
+// An overdue poll while a fetch is still held must not spin the loop with
+// 1 ms selects: the held job's pipe wakes it.
+func TestFleetLoopTimeoutWithHeldPoll(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	gate := make(chan struct{})
+	defer close(gate)
+	l := &fleetLoop{st: &fleetViewState{}, interval: 10 * time.Second,
+		state: func() (fleetStateView, error) { <-gate; return fleetTestView(), nil }}
+	defer l.closeAll()
+	l.startState()
+	l.nextPoll = now.Add(-time.Second)
+	if d := l.timeout(now); d != 0 {
+		t.Errorf("held fetch with a pipe: timeout %v, want 0 (block until its pipe)", d)
+	}
+	// A held job without a pipe is only seen by polling, so cap the wait.
+	l.states = append(l.states, &fleetJob[fleetStateFetch]{wakeR: -1, wakeW: -1})
+	if d := l.timeout(now); d != fleetNoPipePoll {
+		t.Errorf("held fetch without a pipe: timeout %v, want %v", d, fleetNoPipePoll)
+	}
+	l.states = l.states[:1]
+	l.st.setToast("x", fleetToastInfo, now)
+	if d := l.timeout(now); d != 3*time.Second {
+		t.Errorf("toast still counts: %v", d)
+	}
+	// With nothing held, the overdue poll is due now.
+	l.closeAll()
+	l.states = nil
+	if d := l.timeout(now); d != time.Millisecond {
+		t.Errorf("overdue poll, nothing held: %v", d)
+	}
+}
+
+func TestRenderFleetViewPanelSanitizesSend(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	c := fleetTestCard("a", "needs-you")
+	c.Options[0].Send = "Merge \x1b]0;x\x07now\x1b[2J please"
+	st := fleetTestState(fleetTestView(c), now)
+	st.handleKey("1", false, now)
+	if st.panel == nil {
+		t.Fatal("no panel")
+	}
+	out := renderFleetView(st, 100, 30, now)
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(stripANSI(l), "\x1b") {
+			t.Errorf("an ESC from the send text reached the terminal: %q", l)
+		}
+	}
+	if strings.Contains(out, "\x1b]") || strings.Contains(out, "\x1b[2J") {
+		t.Errorf("raw sequences in the panel: %q", out)
+	}
+	if !strings.Contains(stripANSI(out), "Merge now please") {
+		t.Errorf("the preview lost its text:\n%s", stripANSI(out))
+	}
+	// The request keeps the raw send text.
+	st.handleKey(KeyEnter, false, now.Add(time.Second))
+	if st.send == nil || st.send.Text != c.Options[0].Send {
+		t.Fatalf("request text = %+v", st.send)
+	}
+}
+
+func TestRenderFleetViewPanelShortScreen(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	st := fleetTestState(fleetRenderView(now), now)
+	st.handleKey("1", false, now)
+	for _, rows := range []int{12, 10, 8, 6} {
+		out := fleetRendered(st, 60, rows, now.Add(time.Second))
+		for _, want := range []string{"Comment: ▌", "Enter send · Esc cancel"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("rows %d: lacks %q:\n%s", rows, want, out)
+			}
+		}
+		if n := len(strings.Split(out, "\n")); n != rows {
+			t.Errorf("rows %d: frame has %d lines", rows, n)
+		}
+	}
+}
+
+func TestFleetLoopDismissClearsFlag(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	v := fleetTestView(fleetTestCard("a", "needs-you"))
+	v.Answered["a"] = fleetAnswerWith(fleetAttemptUnconfirmed)
+	gate := make(chan struct{})
+	l := &fleetLoop{st: fleetTestState(v, now), interval: time.Hour,
+		state:   func() (fleetStateView, error) { return v, nil },
+		dismiss: func(string) (fleetSayResult, error) { <-gate; return fleetSayResult{OK: true}, nil }}
+	defer l.closeAll()
+	l.run(l.st.handleKey("x", false, now), now)
+	if cmd := l.st.handleKey("x", false, now); cmd != fleetCmdNone {
+		t.Fatalf("second x while the dismiss runs: cmd = %v", cmd)
+	}
+	if len(l.dismisses) != 1 {
+		t.Fatalf("%d dismiss jobs", len(l.dismisses))
+	}
+	close(gate)
+	waitFleetJobs(t, l)
+	l.reap(now)
+	if l.st.dismissing {
+		t.Fatal("dismissing stays set after the result")
+	}
 }

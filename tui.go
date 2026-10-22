@@ -1082,8 +1082,11 @@ func RunTUI(interval time.Duration) error {
 				render()
 			case "f", "F":
 				screen.Invalidate()
+				// The badge's poll shares fleetLocal's lock with the view's
+				// jobs; paused, it never holds that lock ahead of a send.
+				fleetBadgeHub.Pause()
 				runFleetView(fleetSrc, modalWakes)
-				fleetBadgeHub.Refresh()
+				fleetBadgeHub.Resume()
 				screen.Invalidate()
 				render()
 			case "r", "R":

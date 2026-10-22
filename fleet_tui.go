@@ -180,6 +180,7 @@ func (l *fleetLoop) reap(now time.Time) {
 	var dismissed []fleetDismissResult
 	l.dismisses, dismissed = reapFleetJobs(l.dismisses)
 	for _, r := range dismissed {
+		l.st.dismissing = false
 		l.dropOlderStates()
 		msg, kind := fleetDismissToast(r)
 		l.st.setToast(msg, kind, now)
@@ -225,6 +226,7 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 		id := l.st.dismissID
 		l.st.dismissID = ""
 		if id == "" {
+			l.st.dismissing = false
 			return false
 		}
 		dismiss := l.dismiss
@@ -305,23 +307,63 @@ func fleetDismissToast(r fleetDismissResult) (string, fleetToastKind) {
 	return "dismiss failed", fleetToastErr
 }
 
-// fleetLoopTimeout is how long the loop may wait for input: until the next
-// poll, the panel arming, or the toast running out, and at least 1 ms
-// (pollEvents reads 0 as "block").
-func fleetLoopTimeout(st *fleetViewState, nextPoll, now time.Time) time.Duration {
-	d := nextPoll.Sub(now)
-	if p := st.panel; p != nil {
-		if arm := p.openedAt.Add(fleetArmDelay); now.Before(arm) && arm.Sub(now) < d {
-			d = arm.Sub(now)
+// fleetNoPipePoll caps the wait while a job without a wake pipe runs: only
+// the loop's own passes can see it finish.
+const fleetNoPipePoll = 250 * time.Millisecond
+
+// timeout is the loop's wait. The next poll counts only while no state fetch
+// is held: tick does not start a second one, so an overdue nextPoll would
+// otherwise turn every select into 1 ms until the fetch lands. A held job's
+// pipe wakes the loop; a job without a pipe gets fleetNoPipePoll.
+func (l *fleetLoop) timeout(now time.Time) time.Duration {
+	var pollAt time.Time
+	if len(l.states) == 0 {
+		pollAt = l.nextPoll
+	}
+	if l.pipeless() {
+		if c := now.Add(fleetNoPipePoll); pollAt.IsZero() || c.Before(pollAt) {
+			pollAt = c
 		}
 	}
-	if st.toast != "" && now.Before(st.toastUntil) && st.toastUntil.Sub(now) < d {
-		d = st.toastUntil.Sub(now)
+	return fleetLoopTimeout(l.st, pollAt, now)
+}
+
+// pipeless reports whether a running job has no wake pipe.
+func (l *fleetLoop) pipeless() bool {
+	for _, w := range l.wakes(nil) {
+		if w.fd < 0 {
+			return true
+		}
 	}
-	if d < time.Millisecond {
-		d = time.Millisecond
+	return false
+}
+
+// fleetLoopTimeout is how long the loop may wait for input: until pollAt
+// (zero: none), the panel arming, or the toast running out, and at least
+// 1 ms. With none of them it is 0, which pollEvents reads as "block until a
+// key or a wake pipe".
+func fleetLoopTimeout(st *fleetViewState, pollAt, now time.Time) time.Duration {
+	var due time.Time
+	earlier := func(t time.Time) {
+		if due.IsZero() || t.Before(due) {
+			due = t
+		}
 	}
-	return d
+	if !pollAt.IsZero() {
+		earlier(pollAt)
+	}
+	if p := st.panel; p != nil {
+		if arm := p.openedAt.Add(fleetArmDelay); now.Before(arm) {
+			earlier(arm)
+		}
+	}
+	if st.toast != "" && now.Before(st.toastUntil) {
+		earlier(st.toastUntil)
+	}
+	if due.IsZero() {
+		return 0
+	}
+	return max(due.Sub(now), time.Millisecond)
 }
 
 // runFleetView is the Fleet view's modal loop. It owns stdin until Esc (or q)
@@ -347,7 +389,7 @@ func runFleetView(src *fleetLocal, wakes []wakeFD) {
 			cols, rows = 0, 0
 		}
 		_ = screen.Draw(renderFleetView(l.st, cols, rows, time.Now()), cols, rows)
-		events, _ := pollEvents(dec, fleetLoopTimeout(l.st, l.nextPoll, time.Now()), l.wakes(wakes))
+		events, _ := pollEvents(dec, l.timeout(time.Now()), l.wakes(wakes))
 		now := time.Now()
 		l.reap(now)
 		l.tick(now)
@@ -663,7 +705,7 @@ func fleetOptionLines(st *fleetViewState, it fleetItem, cols int) []string {
 		if code := st.view.Fleet.Code; code != "" {
 			note = "FLEET is not running (" + code + ") — answers are off"
 		}
-	case c.ID == st.justSent, it.Answer != nil && st.unlocked != c.ID:
+	case c.ID == st.justSent, c.ID == st.unclear, it.Answer != nil && st.unlocked != c.ID:
 		locked = true
 	}
 	greyAll := note != "" || locked
@@ -750,8 +792,10 @@ func fleetPanelLines(st *fleetViewState, cols, bodyRows int, now time.Time) []st
 	}
 	head = append(head, "", "FLEET receives:")
 
+	// Send is kept raw for the server (fleet_client.go sanitize), so the
+	// preview cleans it before it reaches the terminal.
 	var preview []string
-	for _, l := range wrapRunes(fleetSendText(opt.Send, p.comment), cols-2) {
+	for _, l := range wrapRunes(fleetDisplayText(fleetSendText(opt.Send, p.comment)), cols-2) {
 		preview = append(preview, "  "+l)
 	}
 
@@ -769,11 +813,56 @@ func fleetPanelLines(st *fleetViewState, cols, bodyRows int, now time.Time) []st
 	keys += " · Esc cancel · comment is optional"
 	tail := []string{"", commentLabel + comment + "▌", "", dim(keys)}
 
-	if bodyRows >= 0 {
-		if room := bodyRows - len(head) - len(tail); len(preview) > room && room >= 1 {
-			preview = append(preview[:room-1], "  …")
-		}
+	if bodyRows < 0 {
+		return append(append(head, preview...), tail...)
 	}
-	out := append(head, preview...)
-	return append(out, tail...)
+	// On a short screen the comment and the key line must stay. The preview
+	// is cut first; with no room for two of its lines the blank spacer lines
+	// go, then the preview with its label, then the effect line, and as a
+	// last resort the top of the panel.
+	effect := opt.Line != ""
+	fixed := func(blanks bool) int {
+		n := 3 // title, what, comment line
+		if effect {
+			n++
+		}
+		if blanks {
+			n += 3
+		}
+		return n + 2 // "FLEET receives:" and the key line
+	}
+	blanks := true
+	fit := bodyRows - fixed(true)
+	if len(preview) > fit && fit < 2 {
+		blanks = false
+		fit = bodyRows - fixed(false)
+	}
+	switch {
+	case len(preview) <= fit:
+	case fit >= 2:
+		preview = append(preview[:fit-1], "  …")
+	case fit == 1:
+		preview = preview[:1]
+	default:
+		preview = nil
+	}
+	sp := func() []string {
+		if blanks {
+			return []string{""}
+		}
+		return nil
+	}
+	out := []string{head[0], head[1]}
+	if effect && (preview != nil || bodyRows-len(out)-2 > 0) {
+		out = append(out, head[2])
+	}
+	if preview != nil {
+		out = append(append(append(out, sp()...), "FLEET receives:"), preview...)
+	}
+	out = append(append(out, sp()...), tail[1])
+	out = append(append(out, sp()...), tail[3])
+	if len(out) > bodyRows {
+		out = out[len(out)-bodyRows:]
+	}
+	return out
 }
