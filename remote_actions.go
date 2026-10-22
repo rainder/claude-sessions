@@ -22,10 +22,18 @@ import (
 // manage; if the socket can't be created ssh degrades to a normal connection.
 // %C hashes local host + remote host/port/user, keeping the path short and
 // per-destination.
+//
+// ServerAlive* make a master notice a dead link. Without them a master whose
+// network path died (sleep, Tailscale route change) keeps its TCP socket
+// "ESTABLISHED" forever, never counts as idle because a channel's close never
+// arrives, and every later attach to that host hangs inside it. With them the
+// master exits after ~45s of silence and the next attach dials fresh.
 var sshMuxFlags = []string{
 	"-o", "ControlMaster=auto",
 	"-o", "ControlPath=~/.ssh/cs-mux-%C",
 	"-o", "ControlPersist=60",
+	"-o", "ServerAliveInterval=15",
+	"-o", "ServerAliveCountMax=3",
 }
 
 // runRemoteAttach runs the interactive `ssh -t <target> tmux attach -t <tname>`,
