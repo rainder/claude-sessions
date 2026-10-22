@@ -2583,6 +2583,9 @@ func cmdServer(args []string) int {
 	// The page's "recently ended" group survives a restart; tests keep it in
 	// memory.
 	s.fleet.ended.path = fleetEndedPathDefault()
+	// Card answers survive a restart, so an answered card does not come
+	// back to Decide; tests keep the store in memory.
+	s.fleet.answered.path = fleetAnsweredPathDefault()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("GET /usage", s.usage)

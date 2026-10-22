@@ -124,6 +124,10 @@ type fleetDeps struct {
 	disabled func(sid string) bool // nil → the flags store's disabled bit
 	ended    fleetEndedTracker     // recently ended rows; cmdServer sets ended.path
 	tickets  fleetTicketCache      // ClickUp status per ticket
+
+	// Card answers (fleet_answered.go). Lock order: sayMu, then the store's
+	// own mutex; /fleet/state and dismiss take the store's only.
+	answered fleetAnsweredStore // cmdServer sets answered.path
 }
 
 func (s *server) fleetDir() string {
@@ -281,6 +285,7 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("GET /fleet/log", s.fleetLog)     // Task 4
 	mux.HandleFunc("GET /fleet/chat", s.fleetChat)   // Task 5
 	mux.HandleFunc("POST /fleet/say", s.fleetSay)    // Task 6
+	mux.HandleFunc("POST /fleet/card/dismiss", s.fleetCardDismiss)
 	mux.HandleFunc("POST /fleet/start", s.fleetStart)
 	mux.HandleFunc("GET /fleet/session", s.fleetSessionGet)
 	mux.HandleFunc("POST /fleet/session/say", s.fleetSessionSay)
@@ -434,6 +439,15 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	out["deps"] = fleetDependencies(state, rows)
 	// FLEET's busy-session caps per model family, valid entries only.
 	out["caps"] = fleetCaps(state)
+	// Decision card hashes, which a client echoes back when it answers, and
+	// the answers the server recorded, pruned against the current cards. A
+	// bad state.json prunes nothing.
+	cards := fleetDecisionCards(state)
+	out["cardHashes"] = fleetCardHashes(cards)
+	if stateErr != "" {
+		cards = nil
+	}
+	out["answered"] = s.fleet.answered.view(cards, now)
 	if stateErr != "" {
 		out["stateError"] = stateErr
 	} else {

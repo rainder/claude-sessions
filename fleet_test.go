@@ -449,3 +449,41 @@ func TestAppendFleetLogCreatesDirAndAppends(t *testing.T) {
 		t.Fatalf("mode %v", st.Mode().Perm())
 	}
 }
+
+func TestFleetStateCardHashesAndAnswered(t *testing.T) {
+	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	s := fleetTestServer(t, nil)
+	s.fleet.now = func() time.Time { return now }
+	writeFleetFile(t, s, "state.json", `{"version":1,"writtenAt":"2026-10-13T09:59:00Z","cards":[
+		{"id":"a","kind":"needs-you","title":"A?"},
+		{"id":"b","kind":"explicit-yes","title":"B?"},
+		{"id":"c","kind":"done","title":"C"},
+		{"kind":"needs-you","title":"no id"}]}`)
+	out := getFleetJSON(t, s, "/fleet/state")
+	hashes, _ := out["cardHashes"].(map[string]any)
+	if len(hashes) != 2 || hashes["a"] == nil || hashes["b"] == nil {
+		t.Fatalf("cardHashes = %v", out["cardHashes"])
+	}
+	if ans, ok := out["answered"].(map[string]any); !ok || len(ans) != 0 {
+		t.Fatalf("answered = %#v, want {}", out["answered"])
+	}
+
+	state, _ := s.loadFleetState()
+	cards := fleetDecisionCards(state)
+	s.fleet.answered.record("a", cards["a"].Hash,
+		fleetAttempt{OptionKey: "yes", At: now.Format(time.RFC3339), Status: fleetAttemptSent}, cards, now)
+	writeFleetFile(t, s, "state.json", `{"version":1,"cards":[{"id":"torn"`)
+	out = getFleetJSON(t, s, "/fleet/state")
+	if ans, _ := out["answered"].(map[string]any); ans["a"] == nil {
+		t.Fatalf("a bad state.json must prune nothing: %v", out["answered"])
+	}
+	if out["stateError"] == nil {
+		t.Fatal("stateError must be set")
+	}
+
+	writeFleetFile(t, s, "state.json", `{"version":1,"writtenAt":"2026-10-13T09:59:00Z","cards":[{"id":"b","kind":"explicit-yes","title":"B?"}]}`)
+	out = getFleetJSON(t, s, "/fleet/state")
+	if ans, ok := out["answered"].(map[string]any); !ok || len(ans) != 0 {
+		t.Fatalf("answered = %#v, want {}", out["answered"])
+	}
+}

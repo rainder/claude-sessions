@@ -28,6 +28,7 @@ type sayRig struct {
 	enters   int
 	now      time.Time
 	captures []string // consumed in order; the last one repeats
+	writes   int      // sayCards calls, so each rewrite gets its own mtime
 }
 
 func newSayRig(t *testing.T, sessions []Session) *sayRig {
@@ -76,6 +77,7 @@ func (rig *sayRig) post(t *testing.T, body string, mod func(*http.Request)) (int
 
 func TestFleetSaySendsExactTextAndLogs(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
 	code, res := rig.post(t, `{"text":"Andy decides: DR-1 — yes (explicit).","cardId":"dr-1"}`, nil)
 	if code != 200 || !res.OK || res.Queued {
 		t.Fatalf("%d %+v", code, res)
@@ -644,5 +646,331 @@ func TestFleetSendsRefuseTheReservedEventTag(t *testing.T) {
 		if _, res := rig.post(t, string(body), nil); !res.OK {
 			t.Errorf("bare words %q: %+v", text, res)
 		}
+	}
+}
+
+const dr1Send = "Andy decides: DR-1 — yes (explicit)."
+
+// dr1Card is one needs-you card with two options.
+const dr1Card = `[{"id":"dr-1","kind":"needs-you","title":"Merge DR-1?","ticket":"DR-1","summary":"Ready to merge.",
+"options":[{"key":"yes","label":"Merge now","send":"Andy decides: DR-1 — yes (explicit)."},
+{"key":"not-yet","label":"Not yet","send":"Andy decides: DR-1 — not yet."}]}]`
+
+// sayCards writes state.json with cards and moves its mtime on by a second
+// per call, so the (mtime, size) cache sees every rewrite.
+func sayCards(t *testing.T, rig *sayRig, cards string) {
+	t.Helper()
+	path := filepath.Join(rig.s.fleet.dir, "state.json")
+	body := `{"version":1,"writtenAt":"` + rig.now.UTC().Format(time.RFC3339) + `","cards":` + cards + `}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.writes++
+	mt := rig.now.Add(time.Duration(rig.writes) * time.Second)
+	if err := os.Chtimes(path, mt, mt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rigHash(t *testing.T, rig *sayRig, id string) string {
+	t.Helper()
+	state, _ := rig.s.loadFleetState()
+	c, ok := fleetDecisionCards(state)[id]
+	if !ok {
+		t.Fatalf("no decision card %q", id)
+	}
+	return c.Hash
+}
+
+func rigAnswered(t *testing.T, rig *sayRig) map[string]fleetAnswer {
+	t.Helper()
+	r := httptest.NewRequest("GET", "/fleet/state", nil)
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	fleetMux(rig.s).ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("state: %d", w.Code)
+	}
+	var out struct {
+		Answered map[string]fleetAnswer `json:"answered"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Answered == nil {
+		t.Fatal("answered must be {}, not null")
+	}
+	return out.Answered
+}
+
+func sayBody(t *testing.T, fields map[string]any) string {
+	t.Helper()
+	b, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestFleetSayBodyFieldsNeedCardID(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	for _, b := range []string{
+		`{"text":"a","optionKey":"y"}`,
+		`{"text":"a","cardHash":"h"}`,
+		`{"text":"a","correction":false}`,
+		`{"text":"a","cardId":"","optionKey":"y"}`,
+	} {
+		if code, _ := rig.post(t, b, nil); code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", b, code)
+		}
+	}
+	long := sayBody(t, map[string]any{"text": "a", "cardId": "dr-1", "optionKey": strings.Repeat("k", 101)})
+	if code, _ := rig.post(t, long, nil); code != http.StatusBadRequest {
+		t.Errorf("101-byte optionKey: %d", code)
+	}
+	long = sayBody(t, map[string]any{"text": "a", "cardId": "dr-1", "cardHash": strings.Repeat("h", 65)})
+	if code, _ := rig.post(t, long, nil); code != http.StatusBadRequest {
+		t.Errorf("65-byte cardHash: %d", code)
+	}
+	if len(rig.typed) != 0 {
+		t.Fatalf("typed %q", rig.typed)
+	}
+}
+
+func TestFleetSayRecordsSentAndRefusesSecond(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	hash := rigHash(t, rig, "dr-1")
+	body := sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "cardHash": hash, "optionKey": "yes"})
+	if _, res := rig.post(t, body, nil); !res.OK {
+		t.Fatalf("first: %+v", res)
+	}
+	a := rigAnswered(t, rig)["dr-1"]
+	want := fleetAttempt{OptionKey: "yes", Label: "Merge now", Status: fleetAttemptSent, At: rig.now.Format(time.RFC3339)}
+	if a.CardHash != hash || len(a.Attempts) != 1 || a.Attempts[0] != want {
+		t.Fatalf("answered = %+v", a)
+	}
+	rig.now = rig.now.Add(11 * time.Second)
+	if _, res := rig.post(t, body, nil); res.OK || res.Code != "already_answered" {
+		t.Fatalf("second: %+v", res)
+	}
+	if len(rig.typed) != 1 {
+		t.Fatalf("typed %q", rig.typed)
+	}
+	corr := sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "cardHash": hash, "optionKey": "yes", "correction": true})
+	if _, res := rig.post(t, corr, nil); !res.OK {
+		t.Fatalf("correction: %+v", res)
+	}
+	if a := rigAnswered(t, rig)["dr-1"]; len(a.Attempts) != 2 || len(rig.typed) != 2 {
+		t.Fatalf("answered = %+v typed %q", a, rig.typed)
+	}
+}
+
+func TestFleetSayRecordsUnconfirmed(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	rig.captures = []string{emptyBoxCapture} // the text never lands
+	body := sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "optionKey": "yes"})
+	if _, res := rig.post(t, body, nil); res.Code != "not_submitted" {
+		t.Fatalf("%+v", res)
+	}
+	if a := rigAnswered(t, rig)["dr-1"]; a.latest().Status != fleetAttemptUnconfirmed {
+		t.Fatalf("answered = %+v", a)
+	}
+	rig.captures = []string{emptyBoxCapture, boxCapture(dr1Send)}
+	if _, res := rig.post(t, body, nil); res.Code != "already_answered" {
+		t.Fatalf("without correction: %+v", res)
+	}
+	if len(rig.typed) != 1 {
+		t.Fatalf("typed %q", rig.typed)
+	}
+	corr := sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "optionKey": "yes", "correction": true})
+	if _, res := rig.post(t, corr, nil); !res.OK {
+		t.Fatalf("correction: %+v", res)
+	}
+	if a := rigAnswered(t, rig)["dr-1"]; a.latest().Status != fleetAttemptSent || len(a.Attempts) != 2 {
+		t.Fatalf("answered = %+v", a)
+	}
+}
+
+func TestFleetSayCommentFlagAndUnknownKey(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	body := sayBody(t, map[string]any{"text": dr1Send + " Andy adds: hi", "cardId": "dr-1", "optionKey": "yes"})
+	if _, res := rig.post(t, body, nil); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	if a := rigAnswered(t, rig)["dr-1"]; !a.latest().Comment || a.latest().Label != "Merge now" {
+		t.Fatalf("answered = %+v", a)
+	}
+
+	rig = newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	body = sayBody(t, map[string]any{"text": "something else", "cardId": "dr-1", "optionKey": "zzz"})
+	if _, res := rig.post(t, body, nil); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	if a := rigAnswered(t, rig)["dr-1"]; len(a.Attempts) != 1 || a.latest().OptionKey != "zzz" ||
+		a.latest().Label != "" || a.latest().Comment {
+		t.Fatalf("answered = %+v", a)
+	}
+}
+
+func TestFleetSayCardGone(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	if _, res := rig.post(t, sayBody(t, map[string]any{"text": "hi", "cardId": "dr-9"}), nil); res.Code != "card_gone" {
+		t.Fatalf("unknown id: %+v", res)
+	}
+	rig.now = rig.now.Add(time.Minute)
+	sayCards(t, rig, `[{"id":"dr-1","kind":"done","title":"Merged"}]`)
+	if _, res := rig.post(t, sayBody(t, map[string]any{"text": "hi", "cardId": "dr-1"}), nil); res.Code != "card_gone" {
+		t.Fatalf("done card: %+v", res)
+	}
+	if len(rig.typed) != 0 || len(rigAnswered(t, rig)) != 0 {
+		t.Fatalf("typed %q", rig.typed)
+	}
+}
+
+func TestFleetSayCardChangedWhileWaitingOnSayMu(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	body := sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "cardHash": rigHash(t, rig, "dr-1"), "optionKey": "yes"})
+	rig.s.fleet.sayMu.Lock()
+	done := make(chan fleetSayResult)
+	go func() {
+		_, res := rig.post(t, body, nil)
+		done <- res
+	}()
+	time.Sleep(50 * time.Millisecond) // the post parks on sayMu
+	sayCards(t, rig, strings.Replace(dr1Card, "Ready to merge.", "Tests failed; merge anyway?", 1))
+	rig.s.fleet.sayMu.Unlock()
+	if res := <-done; res.OK || res.Code != "card_changed" {
+		t.Fatalf("%+v", res)
+	}
+	if len(rig.typed) != 0 {
+		t.Fatalf("typed %q", rig.typed)
+	}
+	if _, ok := rigAnswered(t, rig)["dr-1"]; ok {
+		t.Fatal("a refused send must record nothing")
+	}
+}
+
+func TestFleetSayCardChangedDuringResolve(t *testing.T) {
+	rig := newSayRig(t, nil)
+	sayCards(t, rig, dr1Card)
+	body := sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "cardHash": rigHash(t, rig, "dr-1"), "optionKey": "yes"})
+	calls := 0
+	rig.s.collect = func() ([]Session, error) {
+		calls++
+		if calls == 2 { // resolveLivePID's fresh collect
+			sayCards(t, rig, strings.Replace(dr1Card, "Ready to merge.", "Changed.", 1))
+		}
+		return []Session{fleetRow()}, nil
+	}
+	if _, res := rig.post(t, body, nil); res.OK || res.Code != "card_changed" {
+		t.Fatalf("%+v", res)
+	}
+	if len(rig.typed) != 0 {
+		t.Fatalf("typed %q", rig.typed)
+	}
+}
+
+func TestFleetSayNoCardHashSkipsStaleCheck(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	if _, res := rig.post(t, sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1"}), nil); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	a := rigAnswered(t, rig)["dr-1"]
+	if a.CardHash != rigHash(t, rig, "dr-1") || len(a.Attempts) != 1 || a.latest().OptionKey != "" {
+		t.Fatalf("answered = %+v", a)
+	}
+}
+
+func TestFleetSayCorrectionWithoutEntry(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	body := sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "optionKey": "yes", "correction": true})
+	if _, res := rig.post(t, body, nil); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	if a := rigAnswered(t, rig)["dr-1"]; len(a.Attempts) != 1 || a.latest().Status != fleetAttemptSent {
+		t.Fatalf("answered = %+v", a)
+	}
+}
+
+func TestFleetSayOtherRefusalRecordsNothing(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	rig.captures = []string{boxCapture("x")}
+	body := sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "optionKey": "yes"})
+	if _, res := rig.post(t, body, nil); res.Code != "input_busy" {
+		t.Fatalf("%+v", res)
+	}
+	if a := rigAnswered(t, rig); len(a) != 0 {
+		t.Fatalf("answered = %+v", a)
+	}
+}
+
+func TestFleetCardDismiss(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	dismiss := func(body string, mod func(*http.Request)) (int, fleetSayResult) {
+		t.Helper()
+		r := httptest.NewRequest("POST", "http://ws.ts.net:8765/fleet/card/dismiss", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer tok")
+		if mod != nil {
+			mod(r)
+		}
+		w := httptest.NewRecorder()
+		fleetMux(rig.s).ServeHTTP(w, r)
+		var res fleetSayResult
+		_ = json.Unmarshal(w.Body.Bytes(), &res)
+		return w.Code, res
+	}
+	if code, _ := dismiss(`{"cardId":"dr-1"}`, func(r *http.Request) { r.Header.Del("Authorization") }); code != http.StatusUnauthorized {
+		t.Fatalf("no auth: %d", code)
+	}
+	cookie := func(r *http.Request) {
+		r.Header.Del("Authorization")
+		r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
+	}
+	if code, res := dismiss(`{"cardId":"dr-1"}`, cookie); code != http.StatusForbidden || res.Code != "origin" {
+		t.Fatalf("cookie, no origin: %d %+v", code, res)
+	}
+	if code, res := dismiss(`{"cardId":"dr-1"}`, func(r *http.Request) {
+		cookie(r)
+		r.Header.Set("Origin", "http://ws.ts.net:8765")
+	}); code != http.StatusOK || res.Code != "not_found" {
+		t.Fatalf("cookie with origin: %d %+v", code, res)
+	}
+	for name, b := range map[string]string{
+		"extra field": `{"cardId":"dr-1","x":1}`,
+		"trailing":    `{"cardId":"dr-1"} x`,
+		"too large":   `{"cardId":"` + strings.Repeat("a", 5<<10) + `"}`,
+		"empty id":    `{"cardId":""}`,
+		"long id":     `{"cardId":"` + strings.Repeat("a", 201) + `"}`,
+		"null":        `null`,
+	} {
+		if code, _ := dismiss(b, nil); code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", name, code)
+		}
+	}
+	if code, res := dismiss(`{"cardId":"dr-1"}`, nil); code != http.StatusOK || res.OK || res.Code != "not_found" {
+		t.Fatalf("unknown: %d %+v", code, res)
+	}
+	if _, res := rig.post(t, sayBody(t, map[string]any{"text": dr1Send, "cardId": "dr-1", "optionKey": "yes"}), nil); !res.OK {
+		t.Fatalf("say: %+v", res)
+	}
+	if len(rigAnswered(t, rig)) != 1 {
+		t.Fatal("the send must be recorded")
+	}
+	if code, res := dismiss(`{"cardId":"dr-1"}`, nil); code != http.StatusOK || !res.OK {
+		t.Fatalf("dismiss: %d %+v", code, res)
+	}
+	if a := rigAnswered(t, rig); len(a) != 0 {
+		t.Fatalf("answered = %+v", a)
 	}
 }

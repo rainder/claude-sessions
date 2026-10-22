@@ -65,23 +65,51 @@ func sameOrigin(r *http.Request) bool {
 	return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host)
 }
 
-func decodeFleetSayBody(w http.ResponseWriter, r *http.Request) (text, cardID string, err error) {
+// fleetSayBody is a /fleet/say request. OptionKey, CardHash and Correction
+// mean something only for a card, so any of them without CardID is a 400.
+type fleetSayBody struct {
+	Text, CardID, OptionKey, CardHash string
+	Correction                        bool
+}
+
+// decodeFleetSayBody reads one strict JSON object. The error text is the 400
+// body: "bad json" or "bad request".
+func decodeFleetSayBody(w http.ResponseWriter, r *http.Request) (fleetSayBody, error) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
 	dec.DisallowUnknownFields()
+	// Pointers tell a field that is absent from one sent empty or false.
 	var body *struct {
-		Text   string  `json:"text"`
-		CardID *string `json:"cardId"`
+		Text       string  `json:"text"`
+		CardID     *string `json:"cardId"`
+		OptionKey  *string `json:"optionKey"`
+		CardHash   *string `json:"cardHash"`
+		Correction *bool   `json:"correction"`
 	}
 	if err := dec.Decode(&body); err != nil || body == nil {
-		return "", "", errors.New("bad json")
+		return fleetSayBody{}, errors.New("bad json")
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return "", "", errors.New("bad json")
+		return fleetSayBody{}, errors.New("bad json")
 	}
+	out := fleetSayBody{Text: body.Text}
 	if body.CardID != nil {
-		cardID = *body.CardID
+		out.CardID = *body.CardID
 	}
-	return body.Text, cardID, nil
+	if body.OptionKey != nil || body.CardHash != nil || body.Correction != nil {
+		if out.CardID == "" {
+			return fleetSayBody{}, errors.New("bad request")
+		}
+		if body.OptionKey != nil {
+			out.OptionKey = *body.OptionKey
+		}
+		if body.CardHash != nil {
+			out.CardHash = *body.CardHash
+		}
+		if body.Correction != nil {
+			out.Correction = *body.Correction
+		}
+	}
+	return out, nil
 }
 
 // tmuxTypeLiteral types text into target as literal keys. The "--" ends
@@ -468,16 +496,25 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, fleetSayResult{Error: "origin mismatch", Code: "origin"})
 		return
 	}
-	raw, cardID, err := decodeFleetSayBody(w, r)
+	body, err := decodeFleetSayBody(w, r)
 	if err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	cardID := body.CardID
 	if len(cardID) > 200 {
 		http.Error(w, "bad cardId", http.StatusBadRequest)
 		return
 	}
-	text, code, msg := fleetCleanSayText(raw)
+	if len(body.OptionKey) > 100 {
+		http.Error(w, "bad optionKey", http.StatusBadRequest)
+		return
+	}
+	if len(body.CardHash) > 64 {
+		http.Error(w, "bad cardHash", http.StatusBadRequest)
+		return
+	}
+	text, code, msg := fleetCleanSayText(body.Text)
 	if code == "reserved_tag" {
 		writeJSON(w, http.StatusBadRequest, fleetSayResult{Code: code, Error: msg})
 		return
@@ -520,7 +557,39 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		refuse("fleet_changed", "FLEET changed. Try again.")
 		return
 	}
+	// A card answer: the card must still be open and still ask what the
+	// client showed, and must not have an answer already. Checked here,
+	// under sayMu and right before typing, because the send may have waited
+	// on sayMu (another send, an event line) while FLEET rewrote the card.
+	var (
+		cards map[string]fleetDecisionCard
+		card  fleetDecisionCard
+	)
+	if cardID != "" {
+		state, stateErr := s.loadFleetState()
+		cards = fleetDecisionCards(state)
+		var ok bool
+		if card, ok = cards[cardID]; !ok {
+			refuse("card_gone", "The card is no longer open.")
+			return
+		}
+		if body.CardHash != "" && body.CardHash != card.Hash {
+			refuse("card_changed", "The card changed.")
+			return
+		}
+		prev, has := f.answered.get(cardID)
+		if fleetAnswerRefused(prev, has, card.Hash, body.Correction) {
+			refuse("already_answered", "Already answered.")
+			return
+		}
+		if stateErr != "" {
+			cards = nil // a bad state.json prunes nothing
+		}
+	}
 	res := s.fleetTypeInto(*fresh, text, fleetSayFLEET)
+	if cardID != "" && (res.OK || res.Code == "not_submitted") {
+		s.fleetRecordAnswer(cardID, card, cards, body, text, res.OK)
+	}
 	if !res.OK {
 		if res.Code == "not_submitted" {
 			_ = s.appendFleetLog(fleetLogEntry{At: now.UTC().Format(time.RFC3339), Type: "note",
@@ -534,6 +603,59 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "fleet: web-say log append failed: %v\n", err)
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// fleetRecordAnswer stores a card answer that was typed: sent when Enter was
+// pressed, unconfirmed when it was not. The label comes from the card, never
+// the client; an unknown key records an empty one. The text itself is never
+// stored, only whether a comment rode on the option's send text. cards nil
+// (a bad state.json) prunes nothing. Caller holds sayMu.
+func (s *server) fleetRecordAnswer(cardID string, card fleetDecisionCard, cards map[string]fleetDecisionCard,
+	body fleetSayBody, text string, sent bool) {
+	at := fleetAttempt{OptionKey: body.OptionKey, At: s.fleetNow().UTC().Format(time.RFC3339), Status: fleetAttemptUnconfirmed}
+	if sent {
+		at.Status = fleetAttemptSent
+	}
+	if label, send, ok := fleetOptionLabel(card.Card, body.OptionKey); ok {
+		at.Label = label
+		clean, _, _ := fleetCleanSayText(send)
+		at.Comment = text != clean
+	}
+	s.fleet.answered.record(cardID, card.Hash, at, cards, s.fleetNow())
+}
+
+func (s *server) fleetCardDismiss(w http.ResponseWriter, r *http.Request) {
+	kind := s.fleetAuth(r)
+	if kind == fleetAuthNone {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if kind == fleetAuthCookie && !sameOrigin(r) {
+		writeJSON(w, http.StatusForbidden, fleetSayResult{Error: "origin mismatch", Code: "origin"})
+		return
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	dec.DisallowUnknownFields()
+	var body *struct {
+		CardID string `json:"cardId"`
+	}
+	if err := dec.Decode(&body); err != nil || body == nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if body.CardID == "" || len(body.CardID) > 200 {
+		http.Error(w, "bad cardId", http.StatusBadRequest)
+		return
+	}
+	if !s.fleet.answered.dismiss(body.CardID) {
+		writeJSON(w, http.StatusOK, fleetSayResult{Code: "not_found", Error: "no answer for that card"})
+		return
+	}
+	writeJSON(w, http.StatusOK, fleetSayResult{OK: true})
 }
 
 const (
