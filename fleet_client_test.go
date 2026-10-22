@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestDecodeFleetStateViewLenient(t *testing.T) {
@@ -290,4 +291,88 @@ func TestConnectLocalFleetFallsBackToTailscale(t *testing.T) {
 	if _, _, err := connectLocalFleet(); err == nil {
 		t.Error("loopback 404 with no Tailscale address must fail")
 	}
+}
+
+// fleetEvil holds every escape shape the display path must remove: OSC,
+// clear-screen CSI, a complete SGR pair, and a raw C1 CSI introducer.
+const fleetEvil = "\x1b]0;pwn\x07A\x1b[2JB\x1b[31mred\x1b[0m\x9bC"
+
+// fleetEvilJSON is fleetEvil as a JSON string literal, with the C1 byte as the
+// rune U+009B (json.Marshal would turn the raw byte into U+FFFD).
+const fleetEvilJSON = `"\u001b]0;pwn\u0007A\u001b[2JB\u001b[31mred\u001b[0m\u009bC"`
+
+func assertNoEscapes(t *testing.T, name, s string) {
+	t.Helper()
+	for _, r := range s {
+		if r == 0x1b || r == 0x07 || (r >= 0x80 && r <= 0x9f) || r == utf8.RuneError {
+			t.Errorf("%s holds control rune %U: %q", name, r, s)
+			return
+		}
+	}
+}
+
+func TestDecodeFleetStateViewStripsEscapes(t *testing.T) {
+	e := fleetEvilJSON
+	body := `{"stateError":` + e + `,"fleet":{"reason":` + e + `,"status":` + e + `,"starting":{"at":` + e + `}},` +
+		`"cards":[{"id":"id\u001b[1m-1","kind":"needs-you","title":` + e + `,"ticket":` + e + `,"lean":` + e + `,` +
+		`"waitingOn":` + e + `,"summary":"line1\n` + strings.Trim(e, `"`) + `\nline3",` +
+		`"options":[{"key":"k","label":` + e + `,"line":` + e + `,"send":"s\u001b[2Jend"}]}],` +
+		`"cardHashes":{"id\u001b[1m-1":"h\u001b[1m"},` +
+		`"answered":{"a":{"cardHash":"h","attempts":[{"optionKey":` + e + `,"label":` + e + `,"comment":true,"at":"t","status":"sent"}]}}}`
+	v, err := decodeFleetStateView([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := v.Cards[0]
+	for name, s := range map[string]string{
+		"stateError": v.StateError, "fleet.reason": v.Fleet.Reason, "fleet.status": v.Fleet.Status,
+		"title": c.Title, "ticket": c.Ticket, "lean": c.Lean, "waitingOn": c.WaitingOn, "summary": c.Summary,
+		"label": c.Options[0].Label, "line": c.Options[0].Line, "key": c.Options[0].Key,
+		"attempt.optionKey": v.Answered["a"].Attempts[0].OptionKey, "attempt.label": v.Answered["a"].Attempts[0].Label,
+	} {
+		assertNoEscapes(t, name, s)
+	}
+	if v.Fleet.Starting == nil {
+		t.Fatal("starting dropped")
+	}
+	assertNoEscapes(t, "starting.at", v.Fleet.Starting.At)
+	if want := "ABredC"; c.Title != want {
+		t.Errorf("title = %q, want %q", c.Title, want)
+	}
+	if want := "line1\nABredC\nline3"; c.Summary != want {
+		t.Errorf("summary = %q, want %q", c.Summary, want)
+	}
+	// Identity and the text sent to the server stay as received.
+	if c.ID != "id\x1b[1m-1" || c.Options[0].Send != "s\x1b[2Jend" {
+		t.Errorf("id = %q, send = %q: must be unchanged", c.ID, c.Options[0].Send)
+	}
+	if v.CardHashes["id\x1b[1m-1"] != "h\x1b[1m" {
+		t.Errorf("cardHashes = %q: must be unchanged", v.CardHashes)
+	}
+}
+
+func TestFleetClientBodyStripsEscapes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, fleetEvil, http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	c := newFleetClient(srv.URL, "tok")
+	o := c.Say(fleetSayRequest{Text: "x", CardID: "a"})
+	assertNoEscapes(t, "say body", o.Body)
+	if o.Body != "ABredC" {
+		t.Errorf("body = %q", o.Body)
+	}
+
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"ok":false,"code":"x","error":`+fleetEvilJSON+`}`)
+	}))
+	defer srv2.Close()
+	res, err := newFleetClient(srv2.URL, "tok").Dismiss("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoEscapes(t, "dismiss error", res.Error)
+	o = newFleetClient(srv2.URL, "tok").Say(fleetSayRequest{Text: "x", CardID: "a"})
+	assertNoEscapes(t, "say result error", o.Result.Error)
+	assertNoEscapes(t, "say result body", o.Body)
 }

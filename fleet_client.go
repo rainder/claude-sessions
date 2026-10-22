@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,21 @@ func fleetErrorStatus(err error) int {
 		return se.Status
 	}
 	return 0
+}
+
+// fleetSGR matches a complete SGR sequence, the one kind sanitizeTerminalText
+// keeps (its body may also hold ':').
+var fleetSGR = regexp.MustCompile("\x1b\\[[0-9;:]*m")
+
+// fleetDisplayText makes text FLEET wrote safe to draw in the TUI. State
+// text is written by an LLM from ticket titles strangers control, so an ESC,
+// OSC or CSI sequence in it must never reach Andy's terminal.
+// sanitizeTerminalText drops C0/C1/OSC/DCS and non-SGR CSI and expands tabs;
+// the SGR sequences it keeps are removed too, so no ESC survives and display
+// widths stay right. Newlines are kept.
+func fleetDisplayText(s string) string {
+	s = fleetSGR.ReplaceAllString(sanitizeTerminalText(s), "")
+	return strings.ReplaceAll(s, "\x1b", "")
 }
 
 // fleetStateView is /fleet/state as the TUI reads it. It decodes as
@@ -106,7 +122,46 @@ func decodeFleetStateView(data []byte) (fleetStateView, error) {
 			}
 		}
 	}
+	v.sanitize()
 	return v, nil
+}
+
+// sanitize runs fleetDisplayText over every string the TUI draws. Card ids,
+// card hashes and an option's Send are identity or text for the server, and
+// stay as received.
+func (v *fleetStateView) sanitize() {
+	f := &v.Fleet
+	f.SessionID, f.Status, f.Tool = fleetDisplayText(f.SessionID), fleetDisplayText(f.Status), fleetDisplayText(f.Tool)
+	f.Reason, f.Code = fleetDisplayText(f.Reason), fleetDisplayText(f.Code)
+	f.PendingTmux = fleetDisplayText(f.PendingTmux)
+	if f.Starting != nil {
+		st := *f.Starting
+		st.At, st.Mode = fleetDisplayText(st.At), fleetDisplayText(st.Mode)
+		f.Starting = &st
+	}
+	v.StateFileAt = fleetDisplayText(v.StateFileAt)
+	v.StateError = fleetDisplayText(v.StateError)
+	for i := range v.Cards {
+		c := &v.Cards[i]
+		c.Status, c.Ticket, c.Title = fleetDisplayText(c.Status), fleetDisplayText(c.Ticket), fleetDisplayText(c.Title)
+		c.Summary, c.Lean = fleetDisplayText(c.Summary), fleetDisplayText(c.Lean)
+		c.WaitingOn, c.Session = fleetDisplayText(c.WaitingOn), fleetDisplayText(c.Session)
+		c.UpdatedAt = fleetDisplayText(c.UpdatedAt)
+		for j := range c.Options {
+			o := &c.Options[j]
+			o.Key, o.Label, o.Line = fleetDisplayText(o.Key), fleetDisplayText(o.Label), fleetDisplayText(o.Line)
+		}
+	}
+	for id, a := range v.Answered {
+		attempts := make([]fleetAttempt, len(a.Attempts))
+		for i, at := range a.Attempts {
+			at.OptionKey, at.Label = fleetDisplayText(at.OptionKey), fleetDisplayText(at.Label)
+			at.At, at.Status = fleetDisplayText(at.At), fleetDisplayText(at.Status)
+			attempts[i] = at
+		}
+		a.Attempts = attempts
+		v.Answered[id] = a
+	}
 }
 
 type fleetClient struct{ base, token string } // base "http://host:port"
@@ -179,7 +234,7 @@ type fleetSayOutcome struct {
 // fleetBodyText trims a body and cuts it to fleetBodyTextMax bytes on a rune
 // boundary.
 func fleetBodyText(b []byte) string {
-	s := strings.TrimSpace(string(b))
+	s := strings.TrimSpace(fleetDisplayText(string(b)))
 	if len(s) > fleetBodyTextMax {
 		s = s[:fleetBodyTextMax]
 		for len(s) > 0 && !utf8.ValidString(s) {
@@ -233,7 +288,11 @@ func fleetDecodeSayResult(data []byte, into *fleetSayResult) bool {
 	if json.Unmarshal(m["ok"], &ok) != nil {
 		return false
 	}
-	return json.Unmarshal(data, into) == nil
+	if json.Unmarshal(data, into) != nil {
+		return false
+	}
+	into.Error, into.Code = fleetDisplayText(into.Error), fleetDisplayText(into.Code)
+	return true
 }
 
 // Dismiss asks the server to drop a card. An error means the service did not
