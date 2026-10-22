@@ -138,6 +138,7 @@ claude-sessions tmux-info PID              # tmux session name for a pid
 | m       | toggle view mode (full ↔ minimal, persisted)    |
 | r       | refresh now                                     |
 | Ctrl-W  | switch that row's host to another Claude account |
+| F       | FLEET decision cards (1-9 pick · Enter send · Esc back) |
 | ?       | help modal                                      |
 | q       | quit (Ctrl-C / Ctrl-D also work)                |
 | click   | select a row (double-click opens the inspector) |

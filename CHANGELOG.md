@@ -9,6 +9,20 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The server remembers which FLEET cards were answered. `/fleet/say` takes
+  `optionKey`, `cardHash` and `correction` for a card answer and refuses a
+  second one (`already_answered`), a card that closed (`card_gone`) or changed
+  (`card_changed`). `/fleet/state` serves `cardHashes` and `answered`, kept in
+  `fleet-answered.json`. `POST /fleet/card/dismiss` clears an unconfirmed
+  answer. The page reads its Sent strip from this store, so every device
+  agrees, and the Chat button no longer counts as an answer.
+
+- The session list has a FLEET view. `F` opens the decision cards from the
+  local service: 1-9 picks an option, Enter sends it after an optional
+  comment, `c` corrects an answer, `x` dismisses an unconfirmed one. The list
+  header shows a `FLEET 1 approve · 2 decide` badge while FLEET is running
+  and cards wait. The TUI strips terminal escapes from all FLEET text.
+
 - The FLEET page's Working section opens with a capacity strip: one tile
   per model family (Fable, Opus + Sonnet, Haiku, Grok, then any other
   model). A tile shows the busy sessions against FLEET's cap with a bar,

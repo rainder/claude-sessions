@@ -855,7 +855,7 @@ writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 `web-switch` and `clickup` lines) — mirrors the FLEET transcript, types text into the FLEET pane, and can
 start FLEET when it is down. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
-`POST /fleet/start`, `/fleet/session`, `POST /fleet/session/say`,
+`POST /fleet/card/dismiss`, `POST /fleet/start`, `/fleet/session`, `POST /fleet/session/say`,
 `POST /fleet/login`, `POST /fleet/login/arm`,
 `POST /fleet/login/revoke`, `/fleet/accounts`, `POST /fleet/account/switch`,
 `/fleet/push/key`, `POST /fleet/push/subscribe`, `POST /fleet/push/unsubscribe`,
@@ -1081,15 +1081,67 @@ note: http and https logins on one device share one cookie jar (cookies
 ignore the port), so the Secure cookie from an https login blocks an http
 login there, and that device must log in over https again.
 
-**Sent strip** (page only). A confirmed card answer moves the card from
-Decide into "Sent - waiting for FLEET", kept in localStorage
-`fleet.pending.v1`. It leaves the strip when its card id is gone or is no
-longer a decision, and comes back to Decide as a normal card when its
-**content** signature (kind, status, title, ticket, summary, lean, options)
-changes. Not `updatedAt`: `fleet-state.py` stamps `updatedAt = now` on every
-card at every write, so it changes every FLEET cycle and would bounce every
-sent card straight back. A send that is unclear or failed keeps the card in
-Decide.
+**Answer store** (`fleet_answered.go`, `fleet_card.go`). The server, not the
+page, remembers which cards were answered, so a second device, the TUI or a
+restart sees the same answer. File `$XDG_STATE_HOME/claude-sessions/fleet-answered.json`
+(`fleetAnsweredPathDefault`; 0600, atomic, written only on a change;
+`cmdServer` sets the path, tests keep it in memory): `{"answered": {"<cardId>":
+{cardHash, cardChanged?, attempts}}}`, `attempts` the last 3 sends, newest
+last, each `{optionKey, label, comment?, at, status}`. `status` is `sent`
+(Enter was pressed) or `unconfirmed` (`not_submitted`: the text may sit in the
+box). The label comes from the card in state.json (`fleetOptionLabel`), never
+from the client; `comment` says only that text rode with the option's `send`.
+The text is never stored. A server attempt carries no `lean`, so the page's
+"FLEET's pick" tag on a sent answer disappears after the next poll.
+`cardHash` (`fleetCardHash`) is 16 hex of sha256 over kind, status, title,
+ticket, summary, lean and each option's key, label, line and send: what the
+card asks, never `updatedAt` (`fleet-state.py` stamps it on every card at every
+write, so it would bounce every answered card back). `/fleet/state` serves `cardHashes` (id → hash, decision
+cards) and `answered`.
+
+**The guard sits in `fleetSay`, under `sayMu`, right before `fleetTypeInto`.**
+A send waits on `sayMu` behind other sends and event lines, and FLEET can
+rewrite the card meanwhile, so the check has to run at the last moment on a
+fresh `loadFleetState`. Body fields `optionKey`, `cardHash` and `correction`
+need a `cardId` (400 otherwise). In order: the card is not an open decision →
+`card_gone`; a `cardHash` that differs from the card's → `card_changed`;
+`fleetAnswerRefused` → `already_answered` (the latest attempt is
+`unconfirmed`, whatever the card says now, or `sent` for this same hash; a
+`correction: true` is always allowed). An `ok` or `not_submitted` send is
+recorded before the reply. Lock order is `sayMu`, then the store's own mutex;
+`/fleet/state` and dismiss take the store's only. The say path's
+`answered.get` does not apply the 24 h expiry itself; it relies on
+`/fleet/state` polls pruning.
+
+**Pruning** (`pruneLocked`, on `/fleet/state` and on each record). An entry
+goes when its card is no longer a decision, when its latest attempt is over
+24 h old, or when its card changed and the answer was `sent`. A changed card
+with an `unconfirmed` answer stays, flagged `cardChanged`, so Andy checks the
+chat before sending again. A bad state.json passes no cards, which prunes
+nothing and flags nothing: a read error must not read as "every card is gone".
+`POST /fleet/card/dismiss` (`{"cardId"}`, same auth as say, strict body)
+forgets one entry: `{ok:true}`, or `not_found` when none existed. Both clients
+offer it for an `unconfirmed` answer only.
+
+**Page.** `answerOf(id)` is the one read path: the server's attempts, or a
+legacy entry's when the server has none, then this page's own in-flight
+request (`pending`, id → `{att, inflight, settled}`) last. `pending` goes on
+the first state answer asked for after its request settled (`stateReqs` /
+`settled`), by when the server's entry, if any, has replaced it. Before the
+store the page kept answers in localStorage `fleet.pending.v1`. The server
+store starts empty after the deploy, so `loadLegacyPending` reads that key once
+and honours each entry by the old content-signature rule (`cardSig`) until it
+prunes or expires; nothing new is ever written there. A send carries the
+server's `cardHashes[id]` as of the moment the sheet opened (`hashOf`), never a
+page-side hash. `sheet.correction` is fixed in `openSheet` (Andy asked for a
+correction, or an answer was already on record). A sheet that opened on an
+unanswered card closes with "Already answered on another device." when a state
+shows an answer meanwhile (`sheetAnsweredElsewhere`). Worked out at send time,
+an answer from another device that landed while the sheet was open would turn
+the send into a "correction" and bypass `already_answered`. The Chat button's
+note to FLEET goes with no `cardId` on purpose: any `cardId` says "this is an
+answer to the card", and the server would record Chat as one and move the card
+to SENT.
 
 **Session view** (`fleet_session.go`). A card's `session` field (a tmux
 session name; a `name:0.0` form counts only before `:`) opens that session:
@@ -1404,6 +1456,81 @@ A status fetched more than 2 h ago (`fleetTicketStatusMaxAge`) is not served,
 so a failing `cu` or a disabled loop does not show old statuses for ever.
 Rows read `ticketStatus` from it; an ended row falls back to the status it had
 when it ended.
+
+### FLEET view in the TUI
+
+The session list's `F` key opens the FLEET decision cards in the terminal, and
+a header badge (`FLEET 1 approve · 2 decide`) shows how many wait. Phase 1 is
+local only: it talks to this host's service. The server makes no new decision
+here; every guard in "Say guards" and "Answer store" applies to a TUI answer
+as to a page one, because the client is a bearer-token HTTP client of the same
+routes.
+
+**Files.** `fleet_client.go`: HTTP client, decoder and `fleetLocal`.
+`fleet_view.go`: the pure view model (sections, counts, digit keys, send text,
+summary wrap). `fleet_tui_state.go`: keys, selection, confirm panel and send
+results, with no terminal I/O. `fleet_tui.go`: drawing, the `fleetJob`s and
+the modal loop `runFleetView`. `fleet_badge.go`: `FleetBadgeHub` and the
+badge text. `server_client.go`'s `tryLocalService` is the loopback-then-
+Tailscale lookup (a `--bind tailscale` service answers loopback only for
+`/paste-request`, so status 0 or 404 retries on the Tailscale address, except
+after a timeout); `usage`, `list-sessions` and FLEET all call it. The client
+is `fleetClient{base, token}` over a base URL, not a "local" type, so Phase 2
+can point it at a remote host.
+
+**One connection, two users.** `fleetLocal` holds the client and re-dials
+after an error that carried no HTTP status (any status proves the service is
+there). Its mutex is held across the network call, up to 5 s for a state and
+15 s for a say. So its calls run only on the badge hub's goroutine or in a
+`fleetJob`, never on the render path, which reads `Snapshot()` alone. The hub
+pauses while the view is open and resumes, with a fetch, after: a badge poll
+holding the lock ahead of a send would delay it. The badge shows only for a
+live FLEET with something waiting, and counts a card when it has an `id` and
+either no answer or an `unconfirmed` one (`countFleetCards`); SENT cards are
+already answered.
+
+**Untrusted text.** state.json text is written by an LLM from ticket titles
+strangers control. `decodeFleetStateView` runs `fleetDisplayText` over every
+string the view draws, and say and dismiss result text too: it strips every
+escape, including the SGR that `sanitizeTerminalText` would keep, so no ESC
+reaches Andy's terminal. Option `Send`, card ids and `cardHashes` stay raw,
+because they go back to the server; the confirm panel draws
+`fleetDisplayText` of the send text. The `cardHash` a send carries is the
+server's `cardHashes[id]` from the state the panel opened on, never recomputed
+(the view's text is sanitized, so a recomputed hash could differ).
+
+**The modal loop** (`runFleetView`) owns stdin like the inspector. Network
+calls are `fleetJob`s that wake `pollEvents` through a pipe (`wakeFleet`,
+`killJob`'s pattern); the loop also reaps on every pass, and a job without a
+pipe caps the wait at 250 ms. The poll timer does not count while a state
+fetch is held, or an overdue `nextPoll` would spin the select at 1 ms.
+Every fetch has a `seq`. A send or dismiss result drops all fetches started
+before it (`dropOlderStates`) and reaps send and dismiss results first: a
+state read before the answer was recorded would still show the card open, take
+`nextAfter` early and let a second answer through. A dropped job keeps
+`fleetLocal`'s mutex until its HTTP timeout, so a fresh fetch can wait up to
+5 s; accepted. A send job re-reads the state first and refuses locally
+(`Stale`) when the card is gone or its hash moved.
+
+**Keys.** An option is picked by digit `1`..`9` only; the comment box takes
+printable ASCII, and its whitespace collapses to one space in the send text.
+Enter on the panel is ignored for 400 ms (`fleetArmDelay`, the page's
+`SHEET_ARM_MS`) and never sends when it arrived in the same read as other
+keys (a paste of `a<newline>b` must not send). Esc and `q` are refused with a
+toast while a send is in flight. `c` unlocks an answered card for one
+correction; `x` dismisses an `unconfirmed` one, and not while a send or
+another dismiss runs.
+
+**Locks, each with a reason.** The panel's correction flag is fixed when it
+opens, as on the page; a panel opened on an unanswered card closes ("already
+answered on another device") when a state shows an answer, unless it is our own
+(`justSent`). `justSent` is set on our own OK or `not_submitted` answer and
+holds until a state shows the answer recorded or the card gone: the list may
+still show the card open until the refetch lands, and a panel then would be a
+second answer. `unclear` is set on a timed-out or unreadable say and holds
+until the next applied state, which is fetched at once: the answer may have
+landed, and the state decides. A digit also needs a server card hash; without
+it the send could never pass the re-check.
 
 ### Idle events for FLEET
 
