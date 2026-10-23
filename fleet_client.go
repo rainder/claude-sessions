@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -81,6 +82,10 @@ type fleetStateView struct {
 	Cards       []fleetCardView
 	CardHashes  map[string]string
 	Answered    map[string]fleetAnswer
+	// Sessions is the server's working list, raw and never drawn: only what
+	// the attach key needs. nil when the server sent null (its session list
+	// failed) or no list at all, which allows no attach.
+	Sessions []fleetWorkSession
 
 	// Host is the servers.yaml name of the remote host this state came from,
 	// "" for this host's service. Set by fleetLocal, never decoded, and
@@ -135,8 +140,42 @@ func decodeFleetStateView(data []byte) (fleetStateView, error) {
 			}
 		}
 	}
+	v.Sessions = decodeFleetWorkSessions(m["sessions"])
 	v.sanitize()
 	return v, nil
+}
+
+// decodeFleetWorkSessions reads /fleet/state's "sessions" as leniently as
+// the cards: a row that is not an object or has no string tmux is skipped,
+// and a ticket that is not a string is dropped. Not an array (null, absent,
+// anything else) is nil.
+func decodeFleetWorkSessions(data json.RawMessage) []fleetWorkSession {
+	var rows []json.RawMessage
+	if json.Unmarshal(data, &rows) != nil || rows == nil {
+		return nil
+	}
+	out := []fleetWorkSession{}
+	for _, raw := range rows {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil {
+			continue
+		}
+		var row fleetWorkSession
+		if json.Unmarshal(m["tmux"], &row.Tmux) != nil || row.Tmux == "" {
+			continue
+		}
+		var tickets []json.RawMessage
+		if json.Unmarshal(m["tickets"], &tickets) == nil {
+			for _, t := range tickets {
+				var s string
+				if json.Unmarshal(t, &s) == nil {
+					row.Tickets = append(row.Tickets, s)
+				}
+			}
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // sanitize runs fleetDisplayText over every string the TUI draws. Card ids,
@@ -406,6 +445,7 @@ func fleetRemoteName(srv ServerConfig) string {
 // fleetRemoteAnswer is one remote host's 200 answer to /fleet/state.
 type fleetRemoteAnswer struct {
 	name string // fleetHostName of the config name
+	srv  ServerConfig
 	c    *fleetClient
 	v    fleetStateView
 }
@@ -429,7 +469,7 @@ func fleetAskRemotes(cfgs []ServerConfig) []fleetRemoteAnswer {
 			if err != nil {
 				return
 			}
-			answers[i] = &fleetRemoteAnswer{name: fleetRemoteName(srv), c: c, v: v}
+			answers[i] = &fleetRemoteAnswer{name: fleetRemoteName(srv), srv: srv, c: c, v: v}
 		}()
 	}
 	wg.Wait()
@@ -493,6 +533,43 @@ type fleetLocal struct {
 	// live local FLEET, or the host leaving servers.yaml, clears it.
 	sticky     *fleetClient
 	stickyName string
+	stickySrv  ServerConfig
+
+	// host mirrors chosen for the attach key, which runs on the view's loop
+	// and so must not wait on mu (a state job holds it for up to 10 s). nil
+	// when chosen is nil.
+	host atomic.Pointer[fleetHostRef]
+}
+
+// fleetHostRef is the host chosen for say, dismiss and attach: its base URL
+// and, for a remote, its servers.yaml entry (ssh target and paste relay).
+type fleetHostRef struct {
+	base string
+	srv  *ServerConfig // nil: this host's service
+}
+
+// setChosenLocked sets chosen and its lock-free mirror. srv is nil for this
+// host's service.
+func (l *fleetLocal) setChosenLocked(c *fleetClient, srv *ServerConfig) {
+	l.chosen = c
+	if c == nil {
+		l.host.Store(nil)
+		return
+	}
+	ref := &fleetHostRef{base: c.base}
+	if srv != nil {
+		cp := *srv
+		ref.srv = &cp
+	}
+	l.host.Store(ref)
+}
+
+// chosenHost is the host say and dismiss would use now, read without mu.
+func (l *fleetLocal) chosenHost() (fleetHostRef, bool) {
+	if p := l.host.Load(); p != nil {
+		return *p, true
+	}
+	return fleetHostRef{}, false
 }
 
 func (l *fleetLocal) dial() (*fleetClient, fleetStateView, error) {
@@ -533,7 +610,8 @@ func (l *fleetLocal) localStateLocked() (fleetStateView, error) {
 func (l *fleetLocal) discoverLocked() (fleetStateView, error) {
 	lv, lerr := l.localStateLocked()
 	if lerr == nil && lv.Fleet.Alive {
-		l.chosen, l.sticky, l.stickyName = l.c, nil, ""
+		l.setChosenLocked(l.c, nil)
+		l.sticky, l.stickyName, l.stickySrv = nil, "", ServerConfig{}
 		lv.Source = l.c.base
 		return lv, nil
 	}
@@ -549,7 +627,7 @@ func (l *fleetLocal) discoverLocked() (fleetStateView, error) {
 		}
 	}
 	pick := func(a fleetRemoteAnswer) (fleetStateView, error) {
-		l.chosen = a.c
+		l.setChosenLocked(a.c, &a.srv)
 		a.v.Host, a.v.Source = a.name, a.c.base
 		return a.v, nil
 	}
@@ -557,19 +635,19 @@ func (l *fleetLocal) discoverLocked() (fleetStateView, error) {
 		known := false
 		for _, srv := range cfgs {
 			if srv.Host != "" && srv.Token != "" && fleetRemoteBase(srv) == l.sticky.base {
-				known, l.stickyName = true, fleetRemoteName(srv)
+				known, l.stickyName, l.stickySrv = true, fleetRemoteName(srv), srv
 			}
 		}
 		if !known {
-			l.sticky, l.stickyName = nil, ""
+			l.sticky, l.stickyName, l.stickySrv = nil, "", ServerConfig{}
 		}
 	}
 	switch {
 	case len(live) == 1:
-		l.sticky, l.stickyName = live[0].c, live[0].name
+		l.sticky, l.stickyName, l.stickySrv = live[0].c, live[0].name, live[0].srv
 		return pick(live[0])
 	case len(live) > 1:
-		l.chosen = nil
+		l.setChosenLocked(nil, nil)
 		hosts := make([]string, len(live))
 		for i, a := range live {
 			hosts[i] = a.name
@@ -581,19 +659,19 @@ func (l *fleetLocal) discoverLocked() (fleetStateView, error) {
 				return pick(a)
 			}
 		}
-		l.chosen = l.sticky
+		l.setChosenLocked(l.sticky, &l.stickySrv)
 		return fleetStateView{}, &fleetHostDownError{host: l.stickyName}
 	case lerr == nil:
-		l.chosen = l.c
+		l.setChosenLocked(l.c, nil)
 		lv.Source = l.c.base
 		return lv, nil
 	case len(answers) > 0:
-		l.chosen = nil
+		l.setChosenLocked(nil, nil)
 		f := answers[0].v.Fleet
 		f.Alive = false
 		return fleetStateView{Fleet: f}, nil
 	}
-	l.chosen = nil
+	l.setChosenLocked(nil, nil)
 	return fleetStateView{}, lerr
 }
 

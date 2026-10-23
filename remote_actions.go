@@ -42,15 +42,27 @@ var sshMuxFlags = []string{
 // — those belong to ssh — and is cancelled and joined the moment the attach
 // returns.
 func runRemoteAttach(c *actCtx, srv ServerConfig, tname string) error {
+	return runSSHWithPasteRelay(c, srv, tname, sshInteractiveArgs(srv, "tmux", "attach", "-t", tname))
+}
+
+// sshInteractiveArgs is ssh's argv (without "ssh") for running remote on srv
+// with a terminal. ssh joins remote with spaces and the remote login shell
+// parses the result, so every word must already be safe for that shell.
+func sshInteractiveArgs(srv ServerConfig, remote ...string) []string {
+	args := append(append([]string{}, sshMuxFlags...), "-t", srv.EffectiveSSHTarget())
+	return append(args, remote...)
+}
+
+// runSSHWithPasteRelay runs the interactive `ssh args...` while relaying
+// image pastes for tmux session `session` on srv (see runRemoteAttach).
+func runSSHWithPasteRelay(c *actCtx, srv ServerConfig, session string, args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pasteRelayLoop(ctx, srv, tname)
+		pasteRelayLoop(ctx, srv, session)
 	}()
-	args := append(append([]string{}, sshMuxFlags...),
-		"-t", srv.EffectiveSSHTarget(), "tmux", "attach", "-t", tname)
 	err := c.runInteractive("ssh", args...)
 	cancel()
 	wg.Wait()

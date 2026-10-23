@@ -127,10 +127,13 @@ type fleetDismissResult struct {
 // remembered).
 // So they run only inside jobs, never on the loop.
 type fleetLoop struct {
-	st       *fleetViewState
-	state    func() (fleetStateView, error)
-	send     func(fleetSayRequest) fleetSendResult
-	dismiss  func(cardID, source string) (fleetSayResult, error)
+	st      *fleetViewState
+	state   func() (fleetStateView, error)
+	send    func(fleetSayRequest) fleetSendResult
+	dismiss func(cardID, source string) (fleetSayResult, error)
+	// attach hands the terminal to the attach and returns once Andy
+	// detaches. nil: the a key does nothing.
+	attach   func(fleetAttachRequest) error
 	interval time.Duration
 	nextPoll time.Time
 
@@ -237,6 +240,17 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 			res, err := dismiss(id, source)
 			return fleetDismissResult{Res: res, Err: err}
 		}))
+	case fleetCmdAttach:
+		req := l.st.attach
+		l.st.attach = nil
+		if req == nil || l.attach == nil {
+			return false
+		}
+		// Synchronous: the terminal belongs to tmux or ssh until Andy
+		// detaches. The cards may have moved meanwhile, so fetch them now.
+		err := l.attach(*req)
+		l.st.applyAttach(err, time.Now())
+		l.startState()
 	}
 	return false
 }
@@ -386,7 +400,9 @@ func fleetLoopTimeout(st *fleetViewState, pollAt, now time.Time) time.Duration {
 // runFleetView is the Fleet view's modal loop. It owns stdin until Esc (or q)
 // closes it; network calls run in jobs that wake it through pipes, and the
 // loop also checks them on every pass, so a job without a pipe still lands.
-func runFleetView(src *fleetLocal, wakes []wakeFD) {
+// attach runs the terminal handoff for the a key (srv nil: this host); nil
+// turns the key off.
+func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig, tmux string) error) {
 	fd := int(os.Stdin.Fd())
 	dec := newInputDecoder()
 	screen := newScreenRenderer(os.Stdout)
@@ -396,6 +412,9 @@ func runFleetView(src *fleetLocal, wakes []wakeFD) {
 		send:     fleetSendVia(src),
 		dismiss:  fleetDismissVia(src),
 		interval: fleetBadgeInterval,
+	}
+	if attach != nil {
+		l.attach = fleetAttachVia(src, attach)
 	}
 	defer l.closeAll()
 	l.startState()
@@ -418,8 +437,15 @@ func runFleetView(src *fleetLocal, wakes []wakeFD) {
 		}
 		for _, k := range keys {
 			now := time.Now()
-			if l.run(l.st.handleKey(k, len(keys) > 1, now), now) {
+			cmd := l.st.handleKey(k, len(keys) > 1, now)
+			if l.run(cmd, now) {
 				return
+			}
+			if cmd == fleetCmdAttach {
+				// The attach drew over the screen; keys read before it
+				// belong to a view Andy has not seen since.
+				screen.Invalidate()
+				break
 			}
 		}
 	}
@@ -449,6 +475,9 @@ const (
 	fleetSGRRed     = "31"
 	fleetIndent     = "   "
 	fleetHelpRow    = "↑↓ card · 1-9 pick option · o other · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
+	// fleetHelpRowAttach is the key help when the selected card resolves to
+	// exactly one live session.
+	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
 )
 
 // fleetAge is the age of an RFC 3339 stamp, "" when it does not parse.
@@ -601,6 +630,9 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 	}
 	if st.panel != nil {
 		return ""
+	}
+	if st.attachable() {
+		return dim(fleetHelpRowAttach)
 	}
 	return dim(fleetHelpRow)
 }

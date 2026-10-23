@@ -1644,7 +1644,38 @@ Enter on the panel is ignored for 400 ms (`fleetArmDelay`, the page's
 keys (a paste of `a<newline>b` must not send). Esc, `q` and Ctrl-C are
 refused with a toast while a send is in flight. `c` unlocks an answered card for one
 correction; `x` dismisses an `unconfirmed` one, and not while a send or
-another dismiss runs.
+another dismiss runs. `a` attaches to the selected card's session (below),
+and not while a send or dismiss runs.
+
+**Attach** (`fleet_attach.go`). `a` opens the tmux session a card belongs
+to; the view comes back, redrawn and refetched, when Andy detaches. The
+session is resolved against `/fleet/state`'s `sessions` (the server's
+working list; the decoder keeps only `tmux` and `tickets`, raw and never
+drawn): first the card's `session` (before any `:`, as the server reads it)
+when a row has that tmux name; else, also when `session` names no live row,
+the one tmux session whose row lists the card's ticket (case-insensitive;
+two rows in one tmux session are one target). Two or more is a warn toast
+(`2 sessions for DR-123`) and nothing else; none, or `sessions` null (the
+server's list failed), does nothing. The footer shows `a attach` only when
+the selected card resolves to exactly one session. The match uses the
+card's raw `session`/`ticket` (`rawSession`/`rawTicket`), not the sanitized
+copies drawn, so an escape stripped for display cannot turn a bad name into
+a good one. **Why so strict:** those fields are LLM text from ticket titles
+strangers control, and on a remote host the name is parsed by that host's
+login shell. So a name reaches a command line only when it matches
+`fleetSessionNameRe` **and** equals a working-list row's `tmux`, and the
+target is `=name` (`tmuxExactTarget`: a gone session never prefix-matches
+another, and `-foo` is never a flag). Local: `tmux attach -t =name`, or
+`switch-client` inside tmux. Remote: `ssh -t <ssh target> tmux attach -t
+'=name'`, single-quoted because zsh reads a word starting with `=` as a
+command path, with the paste relay (`runSSHWithPasteRelay`). The attach is
+pinned like a send: `fleetAttachVia` runs it only when fleetLocal's chosen
+host is the applied state's `Source`, else the "FLEET moved" toast and a
+refetch. It reads that host from `fleetLocal.host`, a lock-free mirror of
+`chosen` with the remote's `ServerConfig`, because the attach runs on the
+loop and `mu` can be held by a state job for 10 s. `tui.go` injects the
+handoff (`runFleetAttach` over `makeCtx()`), with a pause/resume that leaves
+the FLEET badge paused, since the view is still open when the attach returns.
 
 **Other.** Every card with options ends its list with `o Other`, the page's
 Other button: `o` opens a panel whose box is the whole answer, and it sends

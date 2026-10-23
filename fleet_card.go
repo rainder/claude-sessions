@@ -16,6 +16,11 @@ type fleetOptionView struct{ Key, Label, Line, Send string }
 type fleetCardView struct {
 	ID, Kind, Status, Ticket, Title, Summary, Lean, WaitingOn, Session, UpdatedAt string
 	Options                                                                       []fleetOptionView
+
+	// rawSession and rawTicket are session and ticket as decoded, before the
+	// TUI sanitizes the drawn fields. The Fleet view's attach matches them
+	// against the server's working list; they are never drawn.
+	rawSession, rawTicket string
 }
 
 // UnmarshalJSON fails only when b is not a JSON object.
@@ -36,6 +41,7 @@ func (c *fleetCardView) UnmarshalJSON(b []byte) error {
 		Session:   fleetPushStr(m["session"]),
 		UpdatedAt: fleetPushStr(m["updatedAt"]),
 	}
+	c.rawSession, c.rawTicket = c.Session, c.Ticket
 	if list, ok := m["options"].([]any); ok {
 		for _, o := range list {
 			om, ok := o.(map[string]any)

@@ -27,6 +27,7 @@ const (
 	fleetCmdClose            // back to the session list
 	fleetCmdSend             // start fleetSendJob with st.send
 	fleetCmdDismiss          // dismiss st.dismissID
+	fleetCmdAttach           // attach to st.attach, then refetch
 )
 
 type fleetToastKind int
@@ -45,6 +46,7 @@ const (
 	fleetToastTokenBad  = "service token rejected"
 	fleetErrNoService   = "no FLEET service answered on this host — start it with: claude-sessions service restart"
 	fleetToastStillSend = "the answer is still sending — wait for the result"
+	fleetToastStillDism = "the dismiss is still running — wait for the result"
 )
 
 // fleetPanel is the open confirm panel: one option of one card, or (other)
@@ -71,12 +73,13 @@ type fleetViewState struct {
 	panel         *fleetPanel
 	sending       bool
 	dismissing    bool
-	send          *fleetSayRequest // set with fleetCmdSend; the loop takes it
-	dismissID     string           // set with fleetCmdDismiss
-	dismissSource string           // the applied state's Source when x was pressed
-	nextAfter     string           // card id just sent; the next applyState selects the next open card
-	justSent      string           // card id our own answer reached; locked until a state shows it answered or gone
-	unclear       string           // card id whose send result is unknown; locked until the next applied state
+	send          *fleetSayRequest    // set with fleetCmdSend; the loop takes it
+	dismissID     string              // set with fleetCmdDismiss
+	dismissSource string              // the applied state's Source when x was pressed
+	attach        *fleetAttachRequest // set with fleetCmdAttach; the loop takes it
+	nextAfter     string              // card id just sent; the next applyState selects the next open card
+	justSent      string              // card id our own answer reached; locked until a state shows it answered or gone
+	unclear       string              // card id whose send result is unknown; locked until the next applied state
 	toast         string
 	toastKind     fleetToastKind
 	toastUntil    time.Time
@@ -365,6 +368,32 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		st.unlocked = it.Card.ID
 		st.setToast("pick the correction (1-9)", fleetToastInfo, now)
 		return fleetCmdRender
+	case "a":
+		// The attach hands the terminal away until Andy detaches; a send or
+		// dismiss result would land unseen behind it.
+		if st.sending || st.dismissing {
+			msg := fleetToastStillSend
+			if !st.sending {
+				msg = fleetToastStillDism
+			}
+			st.setToast(msg, fleetToastWarn, now)
+			return fleetCmdRender
+		}
+		it := st.selected()
+		if it == nil {
+			return fleetCmdNone
+		}
+		pick := fleetAttachTarget(it.Card, st.view.Sessions)
+		if pick.Many > 0 {
+			// Card.Ticket is the sanitized copy, safe to draw.
+			st.setToast(fmt.Sprintf("%d sessions for %s", pick.Many, it.Card.Ticket), fleetToastWarn, now)
+			return fleetCmdRender
+		}
+		if pick.Tmux == "" {
+			return fleetCmdNone
+		}
+		st.attach = &fleetAttachRequest{Tmux: pick.Tmux, Source: st.view.Source}
+		return fleetCmdAttach
 	case "x":
 		it := st.selected()
 		if it == nil || st.sending || st.dismissing || it.Answer == nil || it.Answer.latest().Status != fleetAttemptUnconfirmed {
@@ -499,6 +528,24 @@ func (st *fleetViewState) handlePanelKey(k string, inBatch bool, now time.Time) 
 		return fleetCmdRender
 	}
 	return fleetCmdNone
+}
+
+// attachable reports whether the selected card resolves to exactly one live
+// session, which is when the view offers the attach key.
+func (st *fleetViewState) attachable() bool {
+	it := st.selected()
+	return it != nil && st.panel == nil && fleetAttachTarget(it.Card, st.view.Sessions).Tmux != ""
+}
+
+// applyAttach takes the attach's outcome once the terminal is back.
+func (st *fleetViewState) applyAttach(err error, now time.Time) {
+	switch {
+	case err == nil:
+	case errors.Is(err, errFleetMoved):
+		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
+	default:
+		st.setToast("attach failed: "+fleetDisplayText(err.Error()), fleetToastErr, now)
+	}
 }
 
 // applySend takes a finished send job and reports whether to fetch the state

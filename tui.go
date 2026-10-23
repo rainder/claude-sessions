@@ -540,6 +540,29 @@ func RunTUI(interval time.Duration) error {
 	// Modal screens only listen for resize wakes. Remote and inspector wakes
 	// remain owned by the main loop so background data never changes a modal.
 	modalWakes := []wakeFD{{fd: rw.FD(), kind: wakeResize}}
+	// pauseHubs/resumeHubs are every poller but the FLEET badge. The F view
+	// keeps the badge paused for its whole life, so an attach from inside it
+	// must not resume the badge when the attach returns.
+	pauseHubs := func() {
+		hub.Pause()
+		usageHub.Pause()
+		codexUsageHub.Pause()
+		grokUsageHub.Pause()
+		knownAccountsHub.Pause()
+		knownGrokAccountsHub.Pause()
+		remoteUsageHub.Pause()
+		hostUsageHub.Pause()
+	}
+	resumeHubs := func() {
+		hub.Resume()
+		usageHub.Resume()
+		codexUsageHub.Resume()
+		grokUsageHub.Resume()
+		knownAccountsHub.Resume()
+		knownGrokAccountsHub.Resume()
+		remoteUsageHub.Resume()
+		hostUsageHub.Resume()
+	}
 	makeCtx := func() *actCtx {
 		return &actCtx{
 			fd:         fd,
@@ -568,26 +591,12 @@ func RunTUI(interval time.Duration) error {
 				return accountSnapshot{}
 			},
 			pause: func() {
-				hub.Pause()
-				usageHub.Pause()
-				codexUsageHub.Pause()
-				grokUsageHub.Pause()
-				knownAccountsHub.Pause()
-				knownGrokAccountsHub.Pause()
-				remoteUsageHub.Pause()
+				pauseHubs()
 				fleetBadgeHub.Pause()
-				hostUsageHub.Pause()
 			},
 			resume: func() {
-				hub.Resume()
-				usageHub.Resume()
-				codexUsageHub.Resume()
-				grokUsageHub.Resume()
-				knownAccountsHub.Resume()
-				knownGrokAccountsHub.Resume()
-				remoteUsageHub.Resume()
+				resumeHubs()
 				fleetBadgeHub.Resume()
-				hostUsageHub.Resume()
 			},
 			// killInFlight reports whether a background kill is already
 			// running for this PID, so actKill can refuse a second Ctrl+X on
@@ -1086,7 +1095,11 @@ func RunTUI(interval time.Duration) error {
 				// The badge's poll shares fleetLocal's lock with the view's
 				// jobs; paused, it never holds that lock ahead of a send.
 				fleetBadgeHub.Pause()
-				runFleetView(fleetSrc, modalWakes)
+				runFleetView(fleetSrc, modalWakes, func(srv *ServerConfig, tmux string) error {
+					ctx := makeCtx()
+					ctx.pause, ctx.resume = pauseHubs, resumeHubs
+					return runFleetAttach(ctx, srv, tmux)
+				})
 				fleetBadgeHub.Resume()
 				screen.Invalidate()
 				render()

@@ -28,6 +28,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   header shows a `FLEET 1 approve · 2 decide` badge while FLEET is running
   and cards wait. The TUI strips terminal escapes from all FLEET text.
 
+- The FLEET view attaches to a card's session. `a` opens the tmux session
+  the card names, or the one live session that works on the card's ticket,
+  and the view comes back when you detach. It works over ssh when FLEET runs
+  on a remote host. Only a session in the server's own session list can be
+  opened. The footer shows `a attach` when a card has one session.
+
 - The FLEET view and badge find FLEET on a remote host. When this host's
   service has no live FLEET, the TUI asks every `servers.yaml` host at once
   and uses the one that runs FLEET; the badge reads `FLEET@<host>`. Two live
