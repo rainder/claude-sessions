@@ -95,23 +95,46 @@ func fleetSendText(send, comment string) string {
 	return send + " Andy adds: " + c
 }
 
+// fleetOtherText is the text typed into FLEET for an Other answer: Andy's
+// own words about card id, with every whitespace run (a pasted newline too)
+// collapsed to one space. The page's Other button sends the same prefix, and
+// FLEET's skill reads "Andy decides on <id>: <text>" as a free-text answer.
+func fleetOtherText(id, text string) string {
+	return "Andy decides on " + id + ": " + strings.Join(strings.Fields(text), " ")
+}
+
 // fleetEditComment applies one key to the comment box. The bool reports
 // whether the key is an edit key (printable ASCII, backspace); a printable
 // byte that would push the send text past sendKeysMaxLen is dropped.
 func fleetEditComment(comment, key, send string) (string, bool) {
+	return fleetEditText(comment, key, func(c string) bool {
+		return len(c) <= sendKeysMaxLen && len(fleetSendText(send, c)) <= sendKeysMaxLen
+	})
+}
+
+// fleetEditOther is fleetEditComment for the Other answer box of card id.
+func fleetEditOther(text, key, id string) (string, bool) {
+	return fleetEditText(text, key, func(t string) bool {
+		return len(t) <= sendKeysMaxLen && len(fleetOtherText(id, t)) <= sendKeysMaxLen
+	})
+}
+
+// fleetEditText applies one key to a one-line text box; fits says whether
+// the longer text may still be sent.
+func fleetEditText(text, key string, fits func(string) bool) (string, bool) {
 	switch {
 	case key == "\x7f" || key == "\x08":
-		if comment != "" {
-			comment = comment[:len(comment)-1]
+		if text != "" {
+			text = text[:len(text)-1]
 		}
-		return comment, true
+		return text, true
 	case len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e:
-		if len(comment)+1 <= sendKeysMaxLen && len(fleetSendText(send, comment+key)) <= sendKeysMaxLen {
-			comment += key
+		if fits(text + key) {
+			text += key
 		}
-		return comment, true
+		return text, true
 	}
-	return comment, false
+	return text, false
 }
 
 var fleetListMarkerRe = regexp.MustCompile(`^\s*([-*] |\d+\. )`)

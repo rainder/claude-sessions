@@ -683,3 +683,47 @@ func TestFleetLoopDismissClearsFlag(t *testing.T) {
 		t.Fatal("dismissing stays set after the result")
 	}
 }
+
+func TestRenderFleetViewOther(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	t.Run("row after the options", func(t *testing.T) {
+		st := fleetTestState(fleetTestView(fleetTestCard("a", "needs-you")), now)
+		out := fleetRendered(st, 100, 30, now)
+		hold, other := strings.Index(out, "Hold"), strings.Index(out, "o  …        Other — write your own answer")
+		if other < 0 || hold < 0 || other < hold {
+			t.Errorf("no Other row after the options:\n%s", out)
+		}
+		if !strings.Contains(out, "o other") {
+			t.Errorf("help row lacks o other:\n%s", out)
+		}
+	})
+	t.Run("no options", func(t *testing.T) {
+		c := fleetTestCard("a", "needs-you")
+		c.Options = nil
+		if out := fleetRendered(fleetTestState(fleetTestView(c), now), 100, 30, now); strings.Contains(out, "Other —") {
+			t.Errorf("a card with no options shows Other:\n%s", out)
+		}
+	})
+	t.Run("panel", func(t *testing.T) {
+		st := fleetTestState(fleetTestView(fleetTestCard("a", "explicit-yes")), now)
+		st.handleKey("o", false, now)
+		fleetTypeKeys(st, "hold it", now)
+		out := fleetRendered(st, 100, 30, now.Add(100*time.Millisecond))
+		for _, want := range []string{
+			"Send this to FLEET?", "DR-1 · Other · your own answer", "FLEET receives:",
+			"Andy decides on a: hold it", "Answer: hold it▌", "ready in 0.3 s", "Esc cancel",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("panel lacks %q:\n%s", want, out)
+			}
+		}
+		for _, bad := range []string{"Approve this write?", "comment is optional", "effect:"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("panel shows %q:\n%s", bad, out)
+			}
+		}
+		if out := fleetRendered(st, 100, 8, now.Add(time.Second)); !strings.Contains(out, "Answer: hold it▌") {
+			t.Errorf("short screen lost the answer box:\n%s", out)
+		}
+	})
+}

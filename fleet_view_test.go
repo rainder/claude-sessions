@@ -151,3 +151,35 @@ func TestFleetSummaryLines(t *testing.T) {
 		t.Errorf("fence: %q", got)
 	}
 }
+
+func TestFleetOtherText(t *testing.T) {
+	for _, c := range [][3]string{
+		{"dr-1", "merge it", "Andy decides on dr-1: merge it"},
+		{"dr-1", "  a \t b  ", "Andy decides on dr-1: a b"},
+		{"dr-1", "a\nb\r\n c", "Andy decides on dr-1: a b c"},
+	} {
+		if got := fleetOtherText(c[0], c[1]); got != c[2] {
+			t.Errorf("(%q,%q) = %q want %q", c[0], c[1], got, c[2])
+		}
+	}
+}
+
+func TestFleetEditOther(t *testing.T) {
+	if got, ok := fleetEditOther("ab", "c", "a"); got != "abc" || !ok {
+		t.Errorf("printable: %q,%v", got, ok)
+	}
+	if got, ok := fleetEditOther("ab", "\x7f", "a"); got != "a" || !ok {
+		t.Errorf("backspace: %q,%v", got, ok)
+	}
+	if got, ok := fleetEditOther("ab", KeyUp, "a"); got != "ab" || ok {
+		t.Errorf("arrow: %q,%v", got, ok)
+	}
+	// The cap counts the "Andy decides on <id>: " prefix.
+	id := strings.Repeat("x", sendKeysMaxLen-len("Andy decides on : ")-1)
+	if got, _ := fleetEditOther("", "a", id); got != "a" {
+		t.Errorf("first byte refused: %q", got)
+	}
+	if got, _ := fleetEditOther("a", "b", id); got != "a" {
+		t.Errorf("second byte accepted: %q", got)
+	}
+}

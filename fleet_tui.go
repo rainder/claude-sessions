@@ -448,7 +448,7 @@ const (
 	fleetSGRAmber   = "33"
 	fleetSGRRed     = "31"
 	fleetIndent     = "   "
-	fleetHelpRow    = "↑↓ card · 1-9 pick option · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
+	fleetHelpRow    = "↑↓ card · 1-9 pick option · o other · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
 )
 
 // fleetAge is the age of an RFC 3339 stamp, "" when it does not parse.
@@ -775,6 +775,14 @@ func fleetOptionLines(st *fleetViewState, it fleetItem, cols int) []string {
 			}
 		}
 	}
+	// Other, last, as on the page: Andy's own answer. The answer locks do not
+	// grey it, since the card does not track it.
+	n, k, label := fmt.Sprintf("%*s", nW, "o"), padRight("…", keyW), "Other — write your own answer"
+	if note != "" {
+		out = append(out, dim(fleetIndent+n+"  "+k+"  "+label))
+	} else {
+		out = append(out, fleetIndent+bold(n)+"  "+dim(k)+"  "+label)
+	}
 	if c.Lean != "" && !leanFound {
 		out = append(out, fleetIndent+"Lean: "+c.Lean)
 	}
@@ -803,29 +811,40 @@ func fleetSuffix(s string) string {
 func fleetPanelLines(st *fleetViewState, cols, bodyRows int, now time.Time) []string {
 	p := st.panel
 	c := p.item.Card
-	opt := c.Options[p.opt]
 	title := "Send this to FLEET?"
-	if c.Kind == "explicit-yes" {
+	if c.Kind == "explicit-yes" && !p.other {
 		title = "Approve this write?"
 	}
-	what := fmt.Sprintf("%d %s · %s", p.opt+1, opt.Key, opt.Label)
+	// The Other panel has no option: the box is the whole answer, and it
+	// sends nothing while empty.
+	var what, effectLine, sendText string
+	commentLabel, keysTail := "Comment: ", " · Esc cancel · comment is optional"
+	if p.other {
+		what = "Other · your own answer"
+		sendText = fleetOtherText(c.ID, p.comment)
+		commentLabel, keysTail = "Answer: ", " · Esc cancel"
+	} else {
+		opt := c.Options[p.opt]
+		what = fmt.Sprintf("%d %s · %s", p.opt+1, opt.Key, opt.Label)
+		effectLine = opt.Line
+		sendText = fleetSendText(opt.Send, p.comment)
+	}
 	if c.Ticket != "" {
 		what = c.Ticket + " · " + what
 	}
 	head := []string{bold(title), "  " + what}
-	if opt.Line != "" {
-		head = append(head, "effect: "+opt.Line)
+	if effectLine != "" {
+		head = append(head, "effect: "+effectLine)
 	}
 	head = append(head, "", "FLEET receives:")
 
 	// Send is kept raw for the server (fleet_client.go sanitize), so the
 	// preview cleans it before it reaches the terminal.
 	var preview []string
-	for _, l := range wrapRunes(fleetDisplayText(fleetSendText(opt.Send, p.comment)), cols-2) {
+	for _, l := range wrapRunes(fleetDisplayText(sendText), cols-2) {
 		preview = append(preview, "  "+l)
 	}
 
-	const commentLabel = "Comment: "
 	room := cols - len(commentLabel) - 1
 	comment := p.comment
 	if r := []rune(comment); room >= 2 && len(r) > room {
@@ -836,7 +855,7 @@ func fleetPanelLines(st *fleetViewState, cols, bodyRows int, now time.Time) []st
 		tenths := math.Ceil(float64(arm.Sub(now)) / float64(100*time.Millisecond))
 		keys += fmt.Sprintf(" (ready in %.1f s)", tenths/10)
 	}
-	keys += " · Esc cancel · comment is optional"
+	keys += keysTail
 	tail := []string{"", commentLabel + comment + "▌", "", dim(keys)}
 
 	if bodyRows < 0 {
@@ -846,7 +865,7 @@ func fleetPanelLines(st *fleetViewState, cols, bodyRows int, now time.Time) []st
 	// is cut first; with no room for two of its lines the blank spacer lines
 	// go, then the preview with its label, then the effect line, and as a
 	// last resort the top of the panel.
-	effect := opt.Line != ""
+	effect := effectLine != ""
 	fixed := func(blanks bool) int {
 		n := 3 // title, what, comment line
 		if effect {

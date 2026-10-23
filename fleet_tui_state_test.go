@@ -620,3 +620,228 @@ func TestFleetViewUnclearLocksCard(t *testing.T) {
 		t.Fatal("the applied state did not unlock the card")
 	}
 }
+
+func TestFleetViewOtherOpens(t *testing.T) {
+	now := time.Unix(1000, 0)
+	open := func(v fleetStateView) *fleetViewState {
+		st := fleetTestState(v, now)
+		st.handleKey("o", false, now)
+		return st
+	}
+	t.Run("card with options", func(t *testing.T) {
+		v := fleetTestView(fleetTestCard("a", "explicit-yes"))
+		v.Source = "http://h"
+		st := open(v)
+		p := st.panel
+		if p == nil || !p.other || p.hash != "h-a" || p.source != "http://h" || p.correction || p.item.Card.ID != "a" {
+			t.Fatalf("panel = %+v", p)
+		}
+	})
+	t.Run("card without options", func(t *testing.T) {
+		c := fleetTestCard("a", "needs-you")
+		c.Options = nil
+		if st := open(fleetTestView(c)); st.panel != nil {
+			t.Fatal("a card with no options must not offer Other")
+		}
+	})
+	t.Run("id-less card", func(t *testing.T) {
+		if st := open(fleetTestView(fleetTestCard("", "needs-you"))); st.panel != nil {
+			t.Fatal("an id-less card must not open a panel")
+		}
+	})
+	t.Run("fleet not alive", func(t *testing.T) {
+		v := fleetTestView(fleetTestCard("a", "needs-you"))
+		v.Fleet.Alive = false
+		if st := open(v); st.panel != nil {
+			t.Fatal("no panel while FLEET is not alive")
+		}
+	})
+	t.Run("no card hash", func(t *testing.T) {
+		v := fleetTestView(fleetTestCard("a", "needs-you"))
+		delete(v.CardHashes, "a")
+		if st := open(v); st.panel != nil {
+			t.Fatal("no panel without the server's card hash")
+		}
+	})
+	t.Run("while sending", func(t *testing.T) {
+		st := fleetTestState(fleetTestView(fleetTestCard("a", "needs-you")), now)
+		st.sending = true
+		if st.handleKey("o", false, now); st.panel != nil {
+			t.Fatal("no panel while a send runs")
+		}
+	})
+	// The page keeps Other on while the options are locked: the card does
+	// not track it, so it is never a second answer.
+	t.Run("answered card", func(t *testing.T) {
+		v := fleetTestView(fleetTestCard("a", "needs-you"))
+		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
+		if st := open(v); st.panel == nil || !st.panel.other {
+			t.Fatal("Other must stay on for an answered card")
+		}
+	})
+	t.Run("just sent card", func(t *testing.T) {
+		st := fleetTestState(fleetTestView(fleetTestCard("a", "needs-you")), now)
+		st.justSent = "a"
+		if st.handleKey("o", false, now); st.panel == nil {
+			t.Fatal("Other must stay on for a card just sent")
+		}
+	})
+}
+
+// fleetOpenOther opens the Other panel on card a at now.
+func fleetOpenOther(t *testing.T, now time.Time) *fleetViewState {
+	t.Helper()
+	st := fleetTestState(fleetTestView(fleetTestCard("a", "needs-you"), fleetTestCard("b", "needs-you")), now)
+	st.handleKey("o", false, now)
+	if st.panel == nil || !st.panel.other {
+		t.Fatal("Other panel did not open")
+	}
+	return st
+}
+
+func fleetTypeKeys(st *fleetViewState, s string, now time.Time) {
+	for _, r := range s {
+		st.handleKey(string(r), false, now)
+	}
+}
+
+func TestFleetViewOtherSubmit(t *testing.T) {
+	now := time.Unix(1000, 0)
+	st := fleetOpenOther(t, now)
+	st.panel.source = "http://h"
+	fleetTypeKeys(st, " merge  later ", now)
+	if cmd := st.handleKey(KeyEnter, false, now.Add(399*time.Millisecond)); cmd != fleetCmdNone || st.panel == nil || st.send != nil {
+		t.Fatalf("early Enter: cmd = %v panel = %v send = %v", cmd, st.panel, st.send)
+	}
+	if cmd := st.handleKey(KeyEnter, false, now.Add(fleetArmDelay)); cmd != fleetCmdSend {
+		t.Fatalf("armed Enter: cmd = %v", cmd)
+	}
+	// No card id, hash or option key: the server takes it as a plain line,
+	// as the page's Other sends it.
+	want := fleetSayRequest{Source: "http://h", Text: "Andy decides on a: merge later"}
+	if st.send == nil || *st.send != want {
+		t.Fatalf("send = %+v, want %+v", st.send, want)
+	}
+	if st.panel != nil || !st.sending || st.toast != "sending…" {
+		t.Fatalf("panel = %v sending = %v toast = %q", st.panel, st.sending, st.toast)
+	}
+}
+
+func TestFleetViewOtherEmptySubmit(t *testing.T) {
+	now := time.Unix(1000, 0)
+	st := fleetOpenOther(t, now)
+	for _, text := range []string{"", "   "} {
+		st.panel.comment = text
+		if cmd := st.handleKey(KeyEnter, false, now.Add(time.Second)); cmd != fleetCmdNone || st.send != nil || st.panel == nil || st.sending {
+			t.Fatalf("Enter on %q: cmd = %v send = %v panel = %v", text, cmd, st.send, st.panel)
+		}
+	}
+}
+
+func TestFleetViewOtherCancelAndEdit(t *testing.T) {
+	now := time.Unix(1000, 0)
+	st := fleetOpenOther(t, now)
+	// q, o, c and x are answer text inside the panel, not keys.
+	fleetTypeKeys(st, "qocx", now)
+	st.handleKey("\x7f", false, now)
+	st.handleKey(KeyUp, false, now)
+	if st.panel == nil || st.panel.comment != "qoc" {
+		t.Fatalf("panel = %+v", st.panel)
+	}
+	if cmd := st.handleKey(KeyEsc, false, now); cmd != fleetCmdRender || st.panel != nil || st.send != nil {
+		t.Fatalf("Esc: cmd = %v panel = %v send = %v", cmd, st.panel, st.send)
+	}
+	st.handleKey("o", false, now)
+	if st.panel == nil || st.panel.comment != "" {
+		t.Fatalf("reopened panel = %+v, want an empty box", st.panel)
+	}
+	if cmd := st.handleKey("\x03", false, now); cmd != fleetCmdRender || st.panel != nil {
+		t.Fatalf("Ctrl-C: cmd = %v panel = %v", cmd, st.panel)
+	}
+}
+
+func TestFleetViewOtherPasteFlattensNewlines(t *testing.T) {
+	now := time.Unix(1000, 0)
+	st := fleetOpenOther(t, now)
+	// A paste of "hold\r\nthen merge": each newline byte is an Enter in the
+	// same read, which types a space and never sends.
+	for _, k := range []string{"h", "o", "l", "d", KeyEnter, KeyEnter, "t", "h", "e", "n"} {
+		if cmd := st.handleKey(k, true, now.Add(time.Second)); cmd == fleetCmdSend {
+			t.Fatalf("%q in a paste sent", k)
+		}
+	}
+	if st.panel == nil || st.panel.comment != "hold  then" {
+		t.Fatalf("panel = %+v", st.panel)
+	}
+	st.handleKey(KeyEnter, false, now.Add(time.Second))
+	if st.send == nil || st.send.Text != "Andy decides on a: hold then" {
+		t.Fatalf("send = %+v", st.send)
+	}
+}
+
+func TestFleetViewOtherSendLeavesCardLocks(t *testing.T) {
+	now := time.Unix(1000, 0)
+	st := fleetTestState(fleetTestView(fleetTestCard("a", "needs-you"), fleetTestCard("b", "needs-you")), now)
+	st.justSent, st.unclear, st.unlocked, st.sending = "b", "a", "a", true
+	if !st.applySend(fleetSendResult{Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{OK: true}}}, now) {
+		t.Fatal("a sent Other answer must ask for a refetch")
+	}
+	if st.sending || st.toast != fleetToastSent {
+		t.Fatalf("sending = %v toast = %q", st.sending, st.toast)
+	}
+	if st.justSent != "b" || st.unclear != "a" || st.unlocked != "a" || st.nextAfter != "" {
+		t.Fatalf("locks moved: justSent = %q unclear = %q unlocked = %q nextAfter = %q", st.justSent, st.unclear, st.unlocked, st.nextAfter)
+	}
+	st.applySend(fleetSendResult{Out: fleetSayOutcome{Unclear: true}}, now)
+	if st.toast != fleetToastUnclear || st.unclear != "a" {
+		t.Fatalf("unclear: toast = %q unclear = %q", st.toast, st.unclear)
+	}
+	st.applySend(fleetSendResult{Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{OK: true, Queued: true}}}, now)
+	if st.toast != "FLEET is busy — it reads your answer next" {
+		t.Fatalf("queued: toast = %q", st.toast)
+	}
+}
+
+func TestFleetViewApplyStateOtherPanel(t *testing.T) {
+	now := time.Unix(1000, 0)
+	st := fleetOpenOther(t, now)
+	// An answer landing elsewhere does not close it: Other may follow one.
+	v := fleetTestView(fleetTestCard("a", "needs-you"), fleetTestCard("b", "needs-you"))
+	v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
+	st.applyState(v, nil, now)
+	if st.panel == nil {
+		t.Fatal("an answer elsewhere closed the Other panel")
+	}
+	// A changed card does: the answer was written for what it asked before.
+	v.CardHashes["a"] = "h-new"
+	st.applyState(v, nil, now)
+	if st.panel != nil || st.toast != fleetToastChanged {
+		t.Fatalf("changed card: panel = %v toast = %q", st.panel, st.toast)
+	}
+}
+
+func TestFleetSendJobOther(t *testing.T) {
+	var states atomic.Int32
+	var body atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fleet/state":
+			states.Add(1)
+			io.WriteString(w, `{"fleet":{"alive":true}}`)
+		case "/fleet/say":
+			b, _ := io.ReadAll(r.Body)
+			body.Store(string(b))
+			io.WriteString(w, `{"ok":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	r := fleetSendJob(newFleetClient(srv.URL, "tok"), fleetSayRequest{Text: "Andy decides on a: hold"})
+	if r.Stale || r.CheckErr != nil || r.CardID != "" || !r.Out.Result.OK || states.Load() != 0 {
+		t.Fatalf("result = %+v states = %d", r, states.Load())
+	}
+	if got, _ := body.Load().(string); got != `{"text":"Andy decides on a: hold","cardId":""}` {
+		t.Fatalf("say body = %s", got)
+	}
+}

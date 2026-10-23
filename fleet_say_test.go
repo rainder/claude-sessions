@@ -1003,3 +1003,21 @@ func TestFleetCardDismiss(t *testing.T) {
 		t.Fatalf("answered = %+v", a)
 	}
 }
+
+// The TUI's Other answer posts "cardId":"" (the field has no omitempty): the
+// server must take it as a plain line and record no answer, as the page's
+// Other line with no cardId.
+func TestFleetSayEmptyCardIDIsPlainLine(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
+	code, res := rig.post(t, `{"text":"Andy decides on dr-1: hold","cardId":""}`, nil)
+	if code != 200 || !res.OK {
+		t.Fatalf("%d %+v", code, res)
+	}
+	if len(rig.typed) != 1 || rig.typed[0] != "Andy decides on dr-1: hold" {
+		t.Fatalf("typed %q", rig.typed)
+	}
+	if _, ok := rig.s.fleet.answered.get("dr-1"); ok {
+		t.Fatal("a plain line recorded an answer")
+	}
+}

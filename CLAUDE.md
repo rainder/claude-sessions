@@ -1646,6 +1646,19 @@ refused with a toast while a send is in flight. `c` unlocks an answered card for
 correction; `x` dismisses an `unconfirmed` one, and not while a send or
 another dismiss runs.
 
+**Other.** Every card with options ends its list with `o Other`, the page's
+Other button: `o` opens a panel whose box is the whole answer, and it sends
+`Andy decides on <cardId>: <text>` (`fleetOtherText`; the prefix FLEET's skill
+reads as a free-text answer, so keep it in step with the page and the skill).
+It goes as a plain line with no `cardId`, as on the page: the server records
+no answer and the card neither locks nor moves to SENT, so `applySend` leaves
+`justSent`, `unclear`, `unlocked` and `nextAfter` alone and `fleetSendJob`
+skips its card re-check. For the same reason the answer locks do not grey it
+(only no id, no card hash, FLEET down or a send in flight do), and a panel
+stays open when an answer lands elsewhere; a gone or changed card still
+closes it. Enter is armed as on the option panel and does nothing on an empty
+box; an Enter in a paste batch types a space, so a pasted newline flattens.
+
 **Locks, each with a reason.** The panel's correction flag is fixed when it
 opens, as on the page; a panel opened on an unanswered card closes ("already
 answered on another device") when a state shows an answer, unless it is our own

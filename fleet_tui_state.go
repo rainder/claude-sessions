@@ -47,10 +47,12 @@ const (
 	fleetToastStillSend = "the answer is still sending — wait for the result"
 )
 
-// fleetPanel is the open confirm panel: one option of one card.
+// fleetPanel is the open confirm panel: one option of one card, or (other)
+// Andy's own answer about the card.
 type fleetPanel struct {
 	item       fleetItem
 	opt        int
+	other      bool   // the Other answer: comment is the whole answer and opt means nothing
 	hash       string // cardHashes value when the panel opened
 	source     string // the opening state's Source: the send is pinned to it
 	comment    string
@@ -153,9 +155,15 @@ func fleetSendToast(o fleetSayOutcome) (msg string, kind fleetToastKind, refetch
 }
 
 // fleetSendJob re-reads the state, refuses locally when the card is gone or
-// changed, and only then posts the answer. Runs off the UI goroutine.
+// changed, and only then posts the answer. A request with no card id is an
+// Other answer, a plain line as the page sends it: it has no card to check,
+// so it is posted at once. Runs off the UI goroutine.
 func fleetSendJob(c *fleetClient, req fleetSayRequest) fleetSendResult {
 	r := fleetSendResult{CardID: req.CardID}
+	if req.CardID == "" {
+		r.Out = c.Say(req)
+		return r
+	}
 	v, err := c.GetState()
 	if err != nil {
 		r.CheckErr = err
@@ -290,10 +298,11 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		if !fleetCardStillAsked(v, id, p.hash) {
 			st.panel = nil
 			st.setToast(fleetToastChanged, fleetToastErr, now)
-		} else if _, answered := v.Answered[id]; answered && !p.correction {
+		} else if _, answered := v.Answered[id]; answered && !p.correction && !p.other {
 			// The panel opened on an unanswered card and an answer landed
 			// since: sending now would be a second answer. When that answer
-			// is our own, "another device" would be wrong.
+			// is our own, "another device" would be wrong. An Other answer is
+			// a plain line the card does not track, so it may follow one.
 			st.panel = nil
 			if id != ownSent {
 				st.setToast(fleetToastAnswered, fleetToastErr, now)
@@ -364,6 +373,8 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		st.dismissID, st.dismissSource = it.Card.ID, st.view.Source
 		st.dismissing = true
 		return fleetCmdDismiss
+	case "o":
+		return st.openOther(now)
 	}
 	it := st.selected()
 	if it == nil {
@@ -403,8 +414,62 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 	return fleetCmdRender
 }
 
+// openOther opens the Other panel on the selected card: Andy's own answer,
+// for a card with options when none fits. Like the page's Other button it
+// stays on while the options are locked (answered, just sent, unclear): the
+// answer is a plain line the card does not track, so it is never a second
+// answer. The card hash only lets a poll close the panel when the card moves.
+func (st *fleetViewState) openOther(now time.Time) fleetCmd {
+	it := st.selected()
+	if it == nil || len(it.Card.Options) == 0 || it.Card.ID == "" || !st.view.Fleet.Alive || st.sending {
+		return fleetCmdNone
+	}
+	hash := st.view.CardHashes[it.Card.ID]
+	if hash == "" {
+		return fleetCmdNone
+	}
+	st.panel = &fleetPanel{item: *it, other: true, hash: hash, source: st.view.Source, openedAt: now}
+	return fleetCmdRender
+}
+
+// handleOtherKey is handlePanelKey for the Other panel. A pasted newline
+// becomes a space; Enter on an empty answer does nothing.
+func (st *fleetViewState) handleOtherKey(k string, inBatch bool, now time.Time) fleetCmd {
+	p := st.panel
+	id := p.item.Card.ID
+	switch k {
+	case KeyEsc, "\x03":
+		st.panel = nil
+		return fleetCmdRender
+	case KeyEnter:
+		if inBatch {
+			p.comment, _ = fleetEditOther(p.comment, " ", id)
+			return fleetCmdRender
+		}
+		if now.Before(p.openedAt.Add(fleetArmDelay)) || strings.TrimSpace(p.comment) == "" {
+			return fleetCmdNone
+		}
+		// No card id: the server takes it as a plain line, so it neither
+		// records an answer nor locks the card (the page's Other does the same).
+		st.send = &fleetSayRequest{Source: p.source, Text: fleetOtherText(id, p.comment)}
+		st.panel = nil
+		st.sending = true
+		st.setToast("sending…", fleetToastInfo, now)
+		return fleetCmdSend
+	}
+	var edit bool
+	p.comment, edit = fleetEditOther(p.comment, k, id)
+	if edit {
+		return fleetCmdRender
+	}
+	return fleetCmdNone
+}
+
 func (st *fleetViewState) handlePanelKey(k string, inBatch bool, now time.Time) fleetCmd {
 	p := st.panel
+	if p.other {
+		return st.handleOtherKey(k, inBatch, now)
+	}
 	opt := p.item.Card.Options[p.opt]
 	switch k {
 	case KeyEsc, "\x03":
@@ -454,6 +519,11 @@ func (st *fleetViewState) applySend(r fleetSendResult, now time.Time) (refetch b
 	}
 	msg, kind, refetch := fleetSendToast(r.Out)
 	st.setToast(msg, kind, now)
+	if r.CardID == "" {
+		// An Other answer: no card records it, so nothing locks, moves on
+		// or unlocks, and an earlier card send's locks stay as they are.
+		return refetch
+	}
 	if r.Out.Unclear {
 		// The answer may have reached FLEET: lock the card until the next
 		// applied state, and fetch that now rather than at the next poll

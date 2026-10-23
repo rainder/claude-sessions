@@ -9,6 +9,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The FLEET view offers Other on every card with options, as the page does:
+  `o` opens a box for Andy's own answer, and Enter sends it to FLEET as
+  `Andy decides on <card id>: <text>`. It is a plain line, so the card does
+  not lock or count it as answered.
+
 - The server remembers which FLEET cards were answered. `/fleet/say` takes
   `optionKey`, `cardHash` and `correction` for a card answer and refuses a
   second one (`already_answered`), a card that closed (`card_gone`) or changed
