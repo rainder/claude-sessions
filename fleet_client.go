@@ -15,9 +15,10 @@ import (
 	"unicode/utf8"
 )
 
-// The TUI's view of the local service's FLEET routes. It talks to the same
-// server the page does, with the bearer token and never a cookie, so every
-// guard in fleet_say.go applies to a TUI answer as it does to a page one.
+// The TUI's view of FLEET's routes, on this host's service or on the one
+// remote host that runs FLEET. It talks to the same server the page does,
+// with the bearer token and never a cookie, so every guard in fleet_say.go
+// applies to a TUI answer as it does to a page one.
 
 var (
 	fleetStateTimeout = 5 * time.Second
@@ -80,6 +81,14 @@ type fleetStateView struct {
 	Cards       []fleetCardView
 	CardHashes  map[string]string
 	Answered    map[string]fleetAnswer
+
+	// Host is the servers.yaml name of the remote host this state came from,
+	// "" for this host's service. Set by fleetLocal, never decoded, and
+	// already passed through fleetHostName.
+	Host string
+	// Ambiguous names the hosts that each run a live FLEET when there is more
+	// than one. The rest of the view is then empty, and nothing is sent.
+	Ambiguous []string
 }
 
 // decodeFleetStateView fails only when data is not a JSON object.
@@ -353,12 +362,100 @@ func connectLocalFleet() (*fleetClient, fleetStateView, error) {
 	return newFleetClient("http://"+hostPort(srv.Host, srv.Port), srv.Token), view, nil
 }
 
-// fleetLocal keeps one connection to the local service for the TUI and
-// reconnects after the service went away.
+// fleetHostNameMax caps a host name on the badge and the view header.
+const fleetHostNameMax = 24
+
+// fleetHostName is a servers.yaml name made safe to draw: user config, but
+// every string this code puts on the terminal goes through fleetDisplayText.
+// Whitespace collapses so a name never breaks the header line.
+func fleetHostName(name string) string {
+	return truncateRunes(strings.Join(strings.Fields(fleetDisplayText(name)), " "), fleetHostNameMax)
+}
+
+// fleetRemoteServers is the production remote list: servers.yaml without
+// the entry that is this host. An unreadable file is no remotes.
+func fleetRemoteServers() []ServerConfig {
+	cfgs, err := LoadServerConfigs()
+	if err != nil {
+		return nil
+	}
+	return dropSelfServer(cfgs)
+}
+
+// fleetRemoteAnswer is one remote host's 200 answer to /fleet/state.
+type fleetRemoteAnswer struct {
+	name string // fleetHostName of the config name
+	c    *fleetClient
+	v    fleetStateView
+}
+
+// fleetAskRemotes asks every remote with a host and a token for its state,
+// all at once, so the whole fan-out takes one fleetStateTimeout at most. Only
+// 200 answers come back, in config order: any other status (404 from an older
+// server, 401, 5xx) or a transport error means that host has no FLEET.
+func fleetAskRemotes(cfgs []ServerConfig) []fleetRemoteAnswer {
+	answers := make([]*fleetRemoteAnswer, len(cfgs))
+	var wg sync.WaitGroup
+	for i, srv := range cfgs {
+		if srv.Host == "" || srv.Token == "" {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := newFleetClient("http://"+hostPort(srv.Host, srv.Port), srv.Token)
+			v, err := c.GetState()
+			if err != nil {
+				return
+			}
+			name := srv.Name
+			if strings.TrimSpace(name) == "" {
+				name = srv.Host
+			}
+			answers[i] = &fleetRemoteAnswer{name: fleetHostName(name), c: c, v: v}
+		}()
+	}
+	wg.Wait()
+	var out []fleetRemoteAnswer
+	for _, a := range answers {
+		if a != nil {
+			out = append(out, *a)
+		}
+	}
+	return out
+}
+
+// fleetAmbiguousError is the refusal Client gives while more than one host
+// runs a live FLEET: nothing says which one Andy means.
+type fleetAmbiguousError struct{ hosts []string }
+
+func (e *fleetAmbiguousError) Error() string {
+	return fleetAmbiguousText(e.hosts)
+}
+
+// fleetAmbiguousText is the one-line warning for two or more live FLEETs.
+func fleetAmbiguousText(hosts []string) string {
+	list := strings.Join(hosts, ", ")
+	if len(hosts) == 2 {
+		return "Two FLEETs are live (" + list + "). Stop one."
+	}
+	return fmt.Sprintf("%d FLEETs are live (%s). Stop all but one.", len(hosts), list)
+}
+
+// fleetLocal finds FLEET for the TUI: this host's service first, then the
+// remote hosts. It keeps one connection to the local service, reconnects
+// after the service went away, and remembers the client of the host it chose
+// for say and dismiss.
 type fleetLocal struct {
 	mu      sync.Mutex
-	c       *fleetClient
+	c       *fleetClient                                 // this host's service
 	connect func() (*fleetClient, fleetStateView, error) // nil → connectLocalFleet
+	// remotes lists the hosts to ask when FLEET is not live here. nil asks
+	// none, so no test reaches the real servers.yaml; the TUI sets
+	// fleetRemoteServers.
+	remotes func() []ServerConfig
+
+	chosen *fleetClient // the host say and dismiss use; nil when none or ambiguous
 }
 
 func (l *fleetLocal) dial() (*fleetClient, fleetStateView, error) {
@@ -368,12 +465,10 @@ func (l *fleetLocal) dial() (*fleetClient, fleetStateView, error) {
 	return connectLocalFleet()
 }
 
-// State reads the state, connecting first when there is no client. It forgets
-// the client only after an error that carried no HTTP status: an answer of any
-// status proves the service is there.
-func (l *fleetLocal) State() (fleetStateView, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+// localStateLocked reads the local service's state, connecting first when
+// there is no client. It forgets the client only after an error that carried
+// no HTTP status: an answer of any status proves the service is there.
+func (l *fleetLocal) localStateLocked() (fleetStateView, error) {
 	if l.c == nil {
 		c, v, err := l.dial()
 		if err != nil {
@@ -389,16 +484,79 @@ func (l *fleetLocal) State() (fleetStateView, error) {
 	return v, err
 }
 
-// Client returns the connected client, connecting when needed.
+// discoverLocked finds FLEET and sets chosen. A live local FLEET wins
+// outright and no remote is asked. Otherwise every remote is asked at once:
+// exactly one live FLEET is used; two or more is an Ambiguous view and no
+// client, because a guess could answer the wrong FLEET. With none live, the
+// local view when the service answered (it shows "not running"), else the
+// first remote view, else the local error.
+func (l *fleetLocal) discoverLocked() (fleetStateView, error) {
+	lv, lerr := l.localStateLocked()
+	if lerr == nil && lv.Fleet.Alive {
+		l.chosen = l.c
+		return lv, nil
+	}
+	var cfgs []ServerConfig
+	if l.remotes != nil {
+		cfgs = l.remotes()
+	}
+	answers := fleetAskRemotes(cfgs)
+	var live []fleetRemoteAnswer
+	for _, a := range answers {
+		if a.v.Fleet.Alive {
+			live = append(live, a)
+		}
+	}
+	pick := func(a fleetRemoteAnswer) (fleetStateView, error) {
+		l.chosen = a.c
+		a.v.Host = a.name
+		return a.v, nil
+	}
+	switch {
+	case len(live) == 1:
+		return pick(live[0])
+	case len(live) > 1:
+		l.chosen = nil
+		hosts := make([]string, len(live))
+		for i, a := range live {
+			hosts[i] = a.name
+		}
+		return fleetStateView{Ambiguous: hosts}, nil
+	case lerr == nil:
+		l.chosen = l.c
+		return lv, nil
+	case len(answers) > 0:
+		return pick(answers[0])
+	}
+	l.chosen = nil
+	return fleetStateView{}, lerr
+}
+
+// State runs discovery and returns the chosen host's state. The lock is held
+// across the local call and the parallel fan-out: up to two timeouts.
+func (l *fleetLocal) State() (fleetStateView, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.discoverLocked()
+}
+
+// Client returns the chosen host's client, running discovery when none is
+// remembered. While FLEET is ambiguous it returns an error, so a send goes
+// nowhere.
 func (l *fleetLocal) Client() (*fleetClient, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.c == nil {
-		c, _, err := l.dial()
+	if l.chosen == nil {
+		v, err := l.discoverLocked()
 		if err != nil {
 			return nil, err
 		}
-		l.c = c
+		if len(v.Ambiguous) > 0 {
+			return nil, &fleetAmbiguousError{hosts: v.Ambiguous}
+		}
+		if l.chosen == nil {
+			return nil, errors.New("no FLEET service")
+		}
 	}
-	return l.c, nil
+	return l.chosen, nil
 }

@@ -121,8 +121,10 @@ type fleetDismissResult struct {
 // fleetLoop is the modal loop's job bookkeeping, apart from the terminal so
 // the order of results can be tested.
 //
-// A state fetch holds fleetLocal's mutex across a network call of up to 5 s;
-// a send and a dismiss hold it only to get the client (a connect, up to 5 s).
+// A state fetch holds fleetLocal's mutex across discovery: the local call and,
+// when FLEET is not live here, the parallel remote fan-out, up to 10 s. A send
+// and a dismiss hold it only to get the client (a discovery when none is
+// remembered).
 // So they run only inside jobs, never on the loop.
 type fleetLoop struct {
 	st       *fleetViewState
@@ -489,6 +491,8 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 		}
 	case !st.loaded:
 		body = []string{dim("loading…")}
+	case len(st.view.Ambiguous) > 0:
+		body = []string{colorize(fleetSGRAmber, fleetAmbiguousText(st.view.Ambiguous))}
 	case st.panel != nil:
 		body = fleetPanelLines(st, width, bodyRows, now)
 	default:
@@ -527,7 +531,14 @@ func fleetHeaderLine(st *fleetViewState, cols int, now time.Time) string {
 		return bold("FLEET")
 	}
 	v := st.view
-	left := bold("FLEET") + " "
+	if len(v.Ambiguous) > 0 {
+		return bold("FLEET") + " " + colorize(fleetSGRAmber, "?")
+	}
+	name := "FLEET"
+	if v.Host != "" {
+		name += "@" + v.Host // a fleetHostName
+	}
+	left := bold(name) + " "
 	if v.Fleet.Alive {
 		left += colorize(fleetSGRAlive, "●")
 		if v.Fleet.Status != "" {
