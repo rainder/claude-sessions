@@ -3816,3 +3816,81 @@ func TestUsageViaHostSanitizes(t *testing.T) {
 		}
 	}
 }
+
+// An expired local line filled from a remote keeps the remote's bars and
+// still says the local credential is dead; a reason line only says via.
+func TestRemoteFilledExpiredLineStillSaysExpired(t *testing.T) {
+	now := time.Now()
+	lines := dedupeAccounts(
+		AccountUsage{Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: now},
+		[]KnownAccountUsage{
+			{Name: "trecs", Account: "andy@trecs.aero", Expired: true},
+			{Name: "spare", Account: "andy@spare.dev", Reason: "rate limited"},
+		},
+		[]RemoteResult{{Name: "ws", CachedClaude: []remoteClaudeReading{
+			cachedReading("andy@trecs.aero", 63, now.Add(-time.Minute)),
+			cachedReading("andy@spare.dev", 7, now.Add(-usageNumbersStaleAfter-3*time.Minute)),
+		}}},
+	)
+	if len(lines) != 3 || !lines[1].deadLocal || lines[2].deadLocal {
+		t.Fatalf("lines = %#v, want only trecs marked dead", lines)
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, lines, nil, nil, 0)
+	out := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(out) != 3 {
+		t.Fatalf("header = %#v", out)
+	}
+	if !strings.Contains(out[1], "63%") || !strings.HasSuffix(out[1], " "+dim(usageExpiredText+" · via ws")) {
+		t.Fatalf("expired-filled line = %q, want bars plus %q", out[1], usageExpiredText+" · via ws")
+	}
+	if !strings.HasSuffix(out[2], " "+dim(usageStaleText+" 7m via ws")) || strings.Contains(out[2], usageExpiredText) {
+		t.Fatalf("reason-filled line = %q, want only the stale via marker", out[2])
+	}
+
+	// The whole marker takes part in sizing, so the clip cannot eat it.
+	const cols = 64
+	narrow := []accountUsageLine{
+		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		lines[1],
+	}
+	narrow[1].label = "andy@trecs.aero"
+	b.Reset()
+	writeUsageHeader(&b, narrow, nil, nil, cols)
+	clipped := clipLine(strings.Split(strings.TrimRight(b.String(), "\n"), "\n")[1], cols)
+	if !strings.Contains(clipped, usageExpiredText) || !strings.Contains(clipped, "via ws") || !strings.Contains(clipped, "63%") {
+		t.Fatalf("narrow expired-filled line = %q, want bars and the whole marker", clipped)
+	}
+}
+
+// A live account with no numbers of its own gets its line from a remote's
+// reading, labelled even when alone; without a reading it is still dropped.
+func TestDedupeAccountsFillsANumberlessLiveLine(t *testing.T) {
+	now := time.Now()
+	local := AccountUsage{Account: "andy@avisoma.com"}
+	if lines := dedupeAccounts(local, nil, []RemoteResult{{Name: "ws"}}); len(lines) != 0 {
+		t.Fatalf("lines = %#v, want a numberless live line still dropped", lines)
+	}
+	remotes := []RemoteResult{{Name: "ws", CachedClaude: []remoteClaudeReading{
+		cachedReading("Andy@Avisoma.com", 33, now.Add(-time.Minute)),
+		cachedReading("stranger@example.com", 50, now),
+	}}}
+	lines := dedupeAccounts(local, nil, remotes)
+	if len(lines) != 1 {
+		t.Fatalf("lines = %#v, want only the live line", lines)
+	}
+	l := lines[0]
+	if !l.mine || l.via != "ws" || l.info == nil || l.info.FiveHour.Pct != 33 || l.label != "andy" {
+		t.Fatalf("live line = %#v", l)
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, lines, nil, nil, 0)
+	out := strings.TrimRight(b.String(), "\n")
+	if !strings.HasPrefix(out, usageLinePrefix("andy")) || !strings.HasSuffix(out, " "+dim("via ws")) {
+		t.Fatalf("sole via line = %q, want it labelled, not bare", out)
+	}
+	// An unknown live identity has nothing to match.
+	if lines := dedupeAccounts(AccountUsage{}, nil, remotes); len(lines) != 0 {
+		t.Fatalf("lines = %#v, want none with no live email", lines)
+	}
+}

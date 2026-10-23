@@ -712,6 +712,10 @@ type accountUsageLine struct {
 	// numbers. Such a line is never fresh: it renders a dim "via <host>"
 	// marker, plus "stale" when the reading is past the stale bound.
 	via string
+	// deadLocal marks a via line that was this machine's "auth expired"
+	// placeholder before the fill. The remote's bars do not revive the local
+	// credential, so the marker keeps saying so.
+	deadLocal bool
 }
 
 // knownAccountPlaceholder is the dim text a known account renders instead of
@@ -808,7 +812,16 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 		seen[key] = true
 		lines = append(lines, accountUsageLine{label: accountLocalPart(account), email: account, info: info, mine: mine, stale: stale, fetchedAt: fetchedAt})
 	}
-	add(local.Account, "local", local.Info, local.Stale, local.FetchedAt, true)
+	cached := bestRemoteReadings(remotes)
+	if local.Info != nil {
+		add(local.Account, "local", local.Info, local.Stale, local.FetchedAt, true)
+	} else if b, ok := cached[strings.ToLower(strings.TrimSpace(local.Account))]; ok {
+		// A live account with no numbers of its own (cold, or throttled with
+		// nothing to carry) gets its line from a remote's cached reading.
+		// Without one it is still dropped, as before.
+		add(local.Account, "local", b.r.Info, b.r.Stale, b.r.FetchedAt, true)
+		lines[len(lines)-1].via = usageViaHost(b.host)
+	}
 	for _, r := range remotes {
 		if r.Usage != nil {
 			add(r.Usage.Account, r.Name, r.Usage.Info, r.Usage.Stale, r.Usage.FetchedAt, false)
@@ -866,7 +879,7 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 			addKnown(k)
 		}
 	}
-	fillFromRemoteCache(lines, local, localKnown, remotes)
+	fillFromRemoteCache(lines, cached, local, localKnown)
 	labelCount := make(map[string]int)
 	for _, l := range lines {
 		labelCount[l.label]++
@@ -879,23 +892,19 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 	return lines
 }
 
-// fillFromRemoteCache gives a header line with no usable numbers the reading a
-// remote host already holds for the same account (RemoteResult.CachedClaude).
-// Display only: nothing is fetched and no credential moves.
-//
-// Only an account this machine itself knows (its live account or one of its
-// own snapshots) is filled, and only on a line that already exists, so the
-// header never grows. A line is filled when it has no numbers (a placeholder:
-// expired or a reason), or when its numbers are stale and the remote reading
-// is newer; a line with fresh numbers always wins. Among several remotes the
-// newest fetchedAt wins, the first in config order on a tie. A filled line
-// keeps its label, email and mine, and is marked via its host.
-func fillFromRemoteCache(lines []accountUsageLine, local AccountUsage, localKnown []KnownAccountUsage, remotes []RemoteResult) {
-	type best struct {
-		r    remoteClaudeReading
-		host string
-	}
-	readings := make(map[string]best)
+// remoteCachedBest is the reading one account gets from the remotes, and the
+// host it came from.
+type remoteCachedBest struct {
+	r    remoteClaudeReading
+	host string
+}
+
+// bestRemoteReadings keys every remote's usable cached reading by lowercased
+// email, keeping the newest fetchedAt (the first in config order on a tie).
+// FetchedAt was clamped to the fetch time where the readings entered
+// (remoteClaudeReadings), so a remote clock running ahead cannot win here.
+func bestRemoteReadings(remotes []RemoteResult) map[string]remoteCachedBest {
+	readings := make(map[string]remoteCachedBest)
 	for _, rr := range remotes {
 		for _, r := range rr.CachedClaude {
 			key := strings.ToLower(strings.TrimSpace(r.Account))
@@ -903,10 +912,26 @@ func fillFromRemoteCache(lines []accountUsageLine, local AccountUsage, localKnow
 				continue
 			}
 			if b, ok := readings[key]; !ok || r.FetchedAt.After(b.r.FetchedAt) {
-				readings[key] = best{r: r, host: rr.Name}
+				readings[key] = remoteCachedBest{r: r, host: rr.Name}
 			}
 		}
 	}
+	return readings
+}
+
+// fillFromRemoteCache gives a header line with no usable numbers the reading a
+// remote host already holds for the same account (RemoteResult.CachedClaude).
+// Display only: nothing is fetched and no credential moves.
+//
+// Only an account this machine itself knows (its live account or one of its
+// own snapshots) is filled, and only on a line that already exists, so the
+// header never grows; the live account's own nil-Info line is the one
+// dedupeAccounts emits from a reading before this runs. A line is filled when
+// it has no numbers (a placeholder: expired or a reason), or when its numbers
+// are stale and the remote reading is newer; a line with fresh numbers always
+// wins. A filled line keeps its label, email and mine, and is marked via its
+// host; an expired one also keeps saying so (deadLocal).
+func fillFromRemoteCache(lines []accountUsageLine, readings map[string]remoteCachedBest, local AccountUsage, localKnown []KnownAccountUsage) {
 	if len(readings) == 0 {
 		return
 	}
@@ -936,6 +961,7 @@ func fillFromRemoteCache(lines []accountUsageLine, local AccountUsage, localKnow
 		lines[i].info = b.r.Info
 		lines[i].fetchedAt = b.r.FetchedAt
 		lines[i].stale = b.r.Stale
+		lines[i].deadLocal = l.placeholder == usageExpiredText
 		lines[i].placeholder = ""
 		lines[i].via = usageViaHost(b.host)
 	}
@@ -960,7 +986,8 @@ func usageViaHost(name string) string {
 
 // usageLineMarker is the dim trailing text of a Claude segment line, "" for
 // none: "stale <age>" for carried numbers, "via <host>" for a line filled
-// from a remote's cache, and both together. A via line also turns stale once
+// from a remote's cache, and both together, led by "auth expired · " when the
+// filled line was an expired placeholder. A via line also turns stale once
 // its reading passes usageNumbersStaleAfter, checked here against now because
 // the reading ages between the hub's passes.
 func usageLineMarker(a accountUsageLine, now time.Time) string {
@@ -979,7 +1006,11 @@ func usageLineMarker(a accountUsageLine, now time.Time) string {
 	if a.via != "" {
 		parts = append(parts, "via "+a.via)
 	}
-	return strings.Join(parts, " ")
+	text := strings.Join(parts, " ")
+	if a.deadLocal && text != "" {
+		text = usageExpiredText + " · " + text
+	}
+	return text
 }
 
 // writeUsageHeader prints the header's account rate-limit line(s) for three
@@ -1043,7 +1074,7 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		if segs := claudeSegs(a.info); len(segs) > 0 {
 			suffix, suffixW := "", 0
 			if text := usageLineMarker(a, now); text != "" {
-				suffix, suffixW = " "+dim(text), 1+len(text)
+				suffix, suffixW = " "+dim(text), 1+utf8.RuneCountInString(text)
 			}
 			entries = append(entries, entry{label: label, segs: segs, suffix: suffix, suffixW: suffixW})
 		}
@@ -1067,8 +1098,9 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 
 	// Anthropic block. Only a live line may go bare — dedupeAccounts never marks
 	// a snapshot-derived line mine, so an unlabeled line always means "this
-	// machine's account, right now".
-	if len(accounts) == 1 && accounts[0].mine {
+	// machine's account, right now". A via line is never that, so it keeps its
+	// label even alone.
+	if len(accounts) == 1 && accounts[0].mine && accounts[0].via == "" {
 		label := ""
 		if otherPresent {
 			label = "claude"

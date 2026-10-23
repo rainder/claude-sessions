@@ -490,3 +490,55 @@ func TestOverlayRemoteCachedUsageClearsAHostWithNone(t *testing.T) {
 		t.Fatalf("remotes = %#v, want one cleared and two filled", remotes)
 	}
 }
+
+// A remote clock running ahead is clamped to the fetch time.
+func TestRemoteClaudeReadingsClampsAFutureFetchedAt(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	ahead, behind := now.Add(time.Hour), now.Add(-time.Minute)
+	mk := func(email string, at time.Time) claudeUsageNumbers {
+		var e claudeUsageNumbers
+		e.Account = email
+		fillClaudeInfo(&e, &UsageInfo{FiveHour: usageBucket{Pct: 1}})
+		e.FetchedAt = &at
+		return e
+	}
+	got := remoteClaudeReadings([]claudeUsageNumbers{mk("a@x.y", ahead), mk("b@x.y", behind)}, now)
+	if len(got) != 2 || !got[0].FetchedAt.Equal(now) || !got[1].FetchedAt.Equal(behind) {
+		t.Fatalf("readings = %#v, want the future one clamped to now and the past one kept", got)
+	}
+}
+
+// A cached leg that hangs past its timeout costs only that leg: the /usage
+// answer still lands in the same pass.
+func TestRemoteUsageHubSlowCachedLegDoesNotBlockIdentity(t *testing.T) {
+	prev := remoteCachedUsageTimeout
+	remoteCachedUsageTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { remoteCachedUsageTimeout = prev })
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/usage/numbers" {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sampleUsageResponse())
+	}))
+	defer srv.Close()
+	defer close(release)
+	cfgs := []ServerConfig{serverConfigFor(t, "alias", srv.URL)}
+
+	h := &RemoteUsageHub{kick: make(chan struct{}, 1), stop: make(chan struct{})}
+	start := time.Now()
+	h.fetchFrom(cfgs)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("pass took %v, want the cached leg cut off at its timeout", d)
+	}
+	if u, ok := h.Snapshot()["alias"]; !ok || u.ActiveSnapshotName != "work" {
+		t.Fatalf("identity = %#v, want /usage to land despite the hung leg", h.Snapshot())
+	}
+	if got := h.CachedSnapshot(); len(got) != 0 {
+		t.Fatalf("cached = %#v, want none from a timed-out leg", got)
+	}
+}

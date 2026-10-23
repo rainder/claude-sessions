@@ -2168,21 +2168,29 @@ on disk, which costs it no Anthropic call. `claudeInfoFromNumbers` maps each
 entry back to a `UsageInfo` (credits come back in major units with
 `DecimalPlaces` 0, which renders the same); an entry with no `fetchedAt` or no
 windows is dropped, and the remote's `name`, `reason` and `expired` are never
-read. The email is used only to match; the two strings that do reach the
+read. A `fetchedAt` later than the fetch time (a remote clock running ahead)
+is clamped to it, so no reading shows a negative age or wins the newest pick
+unfairly. The email is used only to match; the two strings that do reach the
 terminal (scoped-limit label, currency) must pass a narrow pattern or are
 dropped. The readings land on `RemoteResult.CachedClaude`
 (`overlayRemoteCachedUsage`, TUI only — no one-shot path fetches them), and a
 failed or 404 leg clears that host's readings for the pass, like everything
 else this hub holds. `fillFromRemoteCache`, the last step of
-`dedupeAccounts`, fills only a line that already exists for an account this
-machine knows (its live account or its own snapshot), so the header never
-grows: a placeholder line (expired or a reason) always, a stale line only
-when the remote reading is newer, a fresh line never. The newest `fetchedAt`
-across remotes wins. The filled line keeps its label, email and `mine`, and
-always carries a dim `via <host>` marker (servers.yaml name, printable ASCII
-only), with `stale <age>` before it when the reading is past
-`usageNumbersStaleAfter` or the remote marked it stale — the same trailing
-mechanism and `suffixW` sizing as the stale marker. `localFreshAccountEmails`
+`dedupeAccounts`, fills only a line for an account this machine knows (its
+live account or its own snapshot), so the header never grows: a placeholder
+line (expired or a reason) always, a stale line only when the remote reading
+is newer, a fresh line never. The live account is the one line a reading may
+create: with no numbers of its own its pass-1 line used to be dropped, and it
+is now emitted from the reading (still dropped when no remote has one). The
+newest `fetchedAt` across remotes wins. The filled line keeps its label, email
+and `mine`, and always carries a dim `via <host>` marker (servers.yaml name,
+printable ASCII only), with `stale <age>` before it when the reading is past
+`usageNumbersStaleAfter` or the remote marked it stale, and led by
+`auth expired · ` when the line was an expired placeholder (`deadLocal`: the
+remote's bars do not revive the local credential; a reason placeholder gets
+the plain via marker) — the same trailing mechanism and `suffixW` sizing as
+the stale marker, counted in runes. A via line never renders bare, even
+alone: bare means this machine's own reading. `localFreshAccountEmails`
 reads the hubs, not the lines, so a filled line never counts as local fresh
 data. No credential moves.
 

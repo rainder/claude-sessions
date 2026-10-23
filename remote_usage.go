@@ -248,8 +248,9 @@ type remoteClaudeReading struct {
 	Stale bool
 }
 
-// remoteCachedUsageTimeout matches FetchRemoteUsage's.
-const remoteCachedUsageTimeout = 8 * time.Second
+// remoteCachedUsageTimeout matches FetchRemoteUsage's. A var so a test can
+// shorten it.
+var remoteCachedUsageTimeout = 8 * time.Second
 
 // FetchRemoteCachedClaude asks one host for the Claude numbers it already
 // holds (GET /usage/numbers?cached=1, bearer auth). That mode never calls
@@ -267,11 +268,13 @@ func FetchRemoteCachedClaude(srv ServerConfig) ([]remoteClaudeReading, error) {
 	if err != nil {
 		return nil, err
 	}
-	return remoteClaudeReadings(resp.Claude), nil
+	return remoteClaudeReadings(resp.Claude, usageClockNow()), nil
 }
 
 // remoteClaudeReadings keeps the entries with an account and usable numbers.
-func remoteClaudeReadings(entries []claudeUsageNumbers) []remoteClaudeReading {
+// A fetchedAt after now (a remote clock running ahead) is clamped to now, so
+// no reading renders a negative age or wins the newest-reading pick unfairly.
+func remoteClaudeReadings(entries []claudeUsageNumbers, now time.Time) []remoteClaudeReading {
 	var out []remoteClaudeReading
 	for _, e := range entries {
 		if strings.TrimSpace(e.Account) == "" {
@@ -280,6 +283,9 @@ func remoteClaudeReadings(entries []claudeUsageNumbers) []remoteClaudeReading {
 		info, at, ok := claudeInfoFromNumbers(e)
 		if !ok {
 			continue
+		}
+		if at.After(now) {
+			at = now
 		}
 		out = append(out, remoteClaudeReading{Account: e.Account, Info: info, FetchedAt: at, Stale: e.Stale})
 	}
