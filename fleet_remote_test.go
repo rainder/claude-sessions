@@ -14,21 +14,28 @@ import (
 )
 
 // fleetTestHost is one httptest service for the remote discovery tests: it
-// answers /fleet/state with state (or status when non-zero) after delay, and
-// /fleet/say with ok. It counts both.
+// answers /fleet/state with its state (or status when non-zero) after delay,
+// and /fleet/say and /fleet/card/dismiss with ok. It counts all three. alive,
+// status and delay can change between polls; gate, when set, runs before a
+// state answer.
 type fleetTestHost struct {
-	srv    *httptest.Server
-	cfg    ServerConfig
-	states atomic.Int32
-	says   atomic.Int32
+	srv      *httptest.Server
+	cfg      ServerConfig
+	alive    atomic.Bool
+	status   atomic.Int32
+	delay    atomic.Int64
+	gate     atomic.Pointer[func()]
+	states   atomic.Int32
+	says     atomic.Int32
+	dismisss atomic.Int32
 }
 
 func newFleetTestHost(t *testing.T, name string, alive bool, status int, delay time.Duration) *fleetTestHost {
 	t.Helper()
 	h := &fleetTestHost{}
-	state := `{"fleet":{"alive":` + strconv.FormatBool(alive) + `},` +
-		`"cards":[{"id":"a","kind":"needs-you","options":[{"key":"yes","label":"Yes","send":"yes"}]}],` +
-		`"cardHashes":{"a":"h-a"},"answered":{}}`
+	h.alive.Store(alive)
+	h.status.Store(int32(status))
+	h.delay.Store(int64(delay))
 	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok-"+name {
 			http.Error(w, "bad", http.StatusUnauthorized)
@@ -37,14 +44,22 @@ func newFleetTestHost(t *testing.T, name string, alive bool, status int, delay t
 		switch r.URL.Path {
 		case "/fleet/state":
 			h.states.Add(1)
-			time.Sleep(delay)
-			if status != 0 {
-				http.Error(w, "no", status)
+			if g := h.gate.Load(); g != nil {
+				(*g)()
+			}
+			time.Sleep(time.Duration(h.delay.Load()))
+			if st := h.status.Load(); st != 0 {
+				http.Error(w, "no", int(st))
 				return
 			}
-			io.WriteString(w, state)
+			io.WriteString(w, `{"fleet":{"alive":`+strconv.FormatBool(h.alive.Load())+`},`+
+				`"cards":[{"id":"a","kind":"needs-you","options":[{"key":"yes","label":"Yes","send":"yes"}]}],`+
+				`"cardHashes":{"a":"h-a"},"answered":{}}`)
 		case "/fleet/say":
 			h.says.Add(1)
+			io.WriteString(w, `{"ok":true}`)
+		case "/fleet/card/dismiss":
+			h.dismisss.Add(1)
 			io.WriteString(w, `{"ok":true}`)
 		default:
 			http.NotFound(w, r)
@@ -105,10 +120,10 @@ func TestFleetDiscoveryOneRemote(t *testing.T) {
 	pi := newFleetTestHost(t, "pi", false, 0, 0)
 	src := fleetTestSource(local, pi, ws)
 	v, err := src.State()
-	if err != nil || !v.Fleet.Alive || v.Host != "ws" {
+	if err != nil || !v.Fleet.Alive || v.Host != "ws" || v.Source != ws.srv.URL {
 		t.Fatalf("State = %+v, %v", v, err)
 	}
-	r := fleetSendVia(src)(fleetSayRequest{Text: "yes", CardID: "a", CardHash: "h-a", OptionKey: "yes"})
+	r := fleetSendVia(src)(fleetSayRequest{Text: "yes", CardID: "a", CardHash: "h-a", OptionKey: "yes", Source: v.Source})
 	if r.CheckErr != nil || r.Stale || !r.Out.Result.OK {
 		t.Fatalf("send = %+v", r)
 	}
@@ -191,21 +206,37 @@ func TestFleetDiscoveryNoLiveFleet(t *testing.T) {
 	if err != nil || v.Fleet.Alive || v.Host != "" || len(v.Cards) != 1 {
 		t.Fatalf("local answered: %+v, %v", v, err)
 	}
-	// Local down: the first remote that answered.
+	// Local down and no remote ever chosen: not running, and no remote's old
+	// cards.
 	v, err = fleetTestSource(nil, ws).State()
-	if err != nil || v.Fleet.Alive || v.Host != "ws" {
+	if err != nil || v.Fleet.Alive || len(v.Cards) != 0 {
 		t.Fatalf("local down: %+v, %v", v, err)
 	}
 }
 
 func TestFleetDiscoveryIsParallel(t *testing.T) {
-	a := newFleetTestHost(t, "a", false, 0, 300*time.Millisecond)
-	b := newFleetTestHost(t, "b", true, 0, 300*time.Millisecond)
-	src := fleetTestSource(nil, a, b)
-	start := time.Now()
-	v, err := src.State()
-	if d := time.Since(start); d > 500*time.Millisecond {
-		t.Fatalf("discovery took %v; remotes must be asked in parallel", d)
+	// Each state answer waits until both requests are in flight. Asked one
+	// after the other, the first never sees the second and gives up.
+	var inFlight atomic.Int32
+	var gaveUp atomic.Bool
+	both := make(chan struct{})
+	gate := func() {
+		if inFlight.Add(1) == 2 {
+			close(both)
+		}
+		select {
+		case <-both:
+		case <-time.After(2 * time.Second):
+			gaveUp.Store(true)
+		}
+	}
+	a := newFleetTestHost(t, "a", false, 0, 0)
+	b := newFleetTestHost(t, "b", true, 0, 0)
+	a.gate.Store(&gate)
+	b.gate.Store(&gate)
+	v, err := fleetTestSource(nil, a, b).State()
+	if gaveUp.Load() {
+		t.Fatal("the two remotes were not asked at the same time")
 	}
 	if err != nil || v.Host != "b" {
 		t.Fatalf("State = %+v, %v", v, err)
@@ -263,5 +294,161 @@ func TestFleetViewHeaderRemote(t *testing.T) {
 	}
 	if strings.Contains(out, "No cards wait") {
 		t.Fatalf("ambiguous view shows the card list:\n%s", out)
+	}
+}
+
+func TestFleetDiscoveryStickyRemote(t *testing.T) {
+	local := newFleetTestHost(t, "local", false, 0, 0)
+	a := newFleetTestHost(t, "a", true, 0, 0)
+	b := newFleetTestHost(t, "b", false, 0, 0)
+	src := fleetTestSource(local, a, b)
+	if v, err := src.State(); err != nil || v.Host != "a" {
+		t.Fatalf("first: %+v, %v", v, err)
+	}
+
+	// A fails: an error naming it, never the local view, and sends still go
+	// to A (where they fail on their own).
+	for _, fail := range []string{"500", "timeout"} {
+		switch fail {
+		case "500":
+			a.status.Store(http.StatusInternalServerError)
+		case "timeout":
+			prev := fleetStateTimeout
+			fleetStateTimeout = 100 * time.Millisecond
+			defer func() { fleetStateTimeout = prev }()
+			a.status.Store(0)
+			a.delay.Store(int64(300 * time.Millisecond))
+		}
+		v, err := src.State()
+		var down *fleetHostDownError
+		if !errors.As(err, &down) || !strings.Contains(err.Error(), "a") || v.Host != "" || len(v.Cards) != 0 {
+			t.Fatalf("%s: State = %+v, %v; want A not reachable", fail, v, err)
+		}
+		if c, err := src.Client(); err != nil || c.base != a.srv.URL {
+			t.Fatalf("%s: Client = %v, %v; want A kept", fail, c, err)
+		}
+	}
+	a.delay.Store(0)
+	fleetStateTimeout = 5 * time.Second
+
+	// A answers again with FLEET stopped: A's own view, not the local one.
+	a.alive.Store(false)
+	if v, err := src.State(); err != nil || v.Host != "a" || v.Fleet.Alive || v.Source != a.srv.URL {
+		t.Fatalf("A stopped: %+v, %v", v, err)
+	}
+	// A recovers.
+	a.alive.Store(true)
+	if v, err := src.State(); err != nil || v.Host != "a" || !v.Fleet.Alive {
+		t.Fatalf("A recovered: %+v, %v", v, err)
+	}
+
+	// Another remote live while A is down: the normal rules.
+	a.status.Store(http.StatusInternalServerError)
+	b.alive.Store(true)
+	if v, err := src.State(); err != nil || v.Host != "b" {
+		t.Fatalf("B live: %+v, %v", v, err)
+	}
+	// B is now the remembered host.
+	b.status.Store(http.StatusBadGateway)
+	if _, err := src.State(); err == nil || !strings.Contains(err.Error(), "b") {
+		t.Fatalf("B down: %v", err)
+	}
+
+	// A live local FLEET wins and clears the memory.
+	local.alive.Store(true)
+	if v, err := src.State(); err != nil || v.Host != "" || !v.Fleet.Alive {
+		t.Fatalf("local live: %+v, %v", v, err)
+	}
+	local.alive.Store(false)
+	if v, err := src.State(); err != nil || v.Host != "" || v.Source != local.srv.URL {
+		t.Fatalf("after local: %+v, %v; want the local view", v, err)
+	}
+}
+
+func TestFleetDiscoveryStickyHostLeftConfig(t *testing.T) {
+	local := newFleetTestHost(t, "local", false, 0, 0)
+	a := newFleetTestHost(t, "a", true, 0, 0)
+	src := fleetTestSource(local, a)
+	if v, _ := src.State(); v.Host != "a" {
+		t.Fatalf("first: %+v", v)
+	}
+	src.remotes = func() []ServerConfig { return nil }
+	if v, err := src.State(); err != nil || v.Source != local.srv.URL {
+		t.Fatalf("A removed from servers.yaml: %+v, %v; want the local view", v, err)
+	}
+}
+
+func TestFleetSendAndDismissPinnedToHost(t *testing.T) {
+	a := newFleetTestHost(t, "a", true, 0, 0)
+	b := newFleetTestHost(t, "b", false, 0, 0)
+	src := fleetTestSource(nil, a, b)
+	va, err := src.State()
+	if err != nil || va.Host != "a" {
+		t.Fatalf("first: %+v, %v", va, err)
+	}
+	a.alive.Store(false)
+	b.alive.Store(true)
+	if v, err := src.State(); err != nil || v.Host != "b" {
+		t.Fatalf("moved: %+v, %v", v, err)
+	}
+	bStates := b.states.Load()
+
+	r := fleetSendVia(src)(fleetSayRequest{Text: "yes", CardID: "a", CardHash: "h-a", OptionKey: "yes", Source: va.Source})
+	if !r.Moved || r.Out.Result.OK {
+		t.Fatalf("send = %+v, want Moved", r)
+	}
+	if _, err := fleetDismissVia(src)("a", va.Source); !errors.Is(err, errFleetMoved) {
+		t.Fatalf("dismiss err = %v, want errFleetMoved", err)
+	}
+	if b.says.Load()+b.dismisss.Load()+a.says.Load()+a.dismisss.Load() != 0 || b.states.Load() != bStates {
+		t.Fatalf("a pinned request reached a host: b says %d dismisses %d states +%d",
+			b.says.Load(), b.dismisss.Load(), b.states.Load()-bStates)
+	}
+
+	// An empty source (no state applied) never sends either.
+	if r := fleetSendVia(src)(fleetSayRequest{CardID: "a"}); !r.Moved {
+		t.Fatalf("empty source: %+v", r)
+	}
+
+	now := time.Unix(1_800_000_000, 0)
+	st := &fleetViewState{}
+	st.applySend(fleetSendResult{CardID: "a", Moved: true}, now)
+	if st.toastKind != fleetToastWarn || !strings.Contains(st.toast, "moved") {
+		t.Fatalf("moved toast = %q %v", st.toast, st.toastKind)
+	}
+	if !st.applySend(fleetSendResult{CardID: "a", Moved: true}, now) {
+		t.Fatal("a moved send must refetch")
+	}
+	if msg, kind := fleetDismissToast(fleetDismissResult{Err: errFleetMoved}); kind != fleetToastWarn || !strings.Contains(msg, "moved") {
+		t.Fatalf("moved dismiss toast = %q %v", msg, kind)
+	}
+}
+
+func TestFleetViewStateCarriesSource(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	v := fleetTestView(fleetTestCard("a", "needs-you"), fleetTestCard("b", "needs-you"))
+	v.Answered["b"] = fleetAnswerWith(fleetAttemptUnconfirmed)
+	v.Source = "http://host-a:8765"
+	st := &fleetViewState{}
+	st.applyState(v, nil, now)
+	st.handleKey("1", false, now)
+	if st.panel == nil {
+		t.Fatal("no panel")
+	}
+	// A later state from another host does not move the open panel's pin.
+	v2 := v
+	v2.Source = "http://host-b:8765"
+	st.applyState(v2, nil, now)
+	if st.panel == nil {
+		t.Fatal("the panel closed on an unchanged card")
+	}
+	if cmd := st.handleKey(KeyEnter, false, now.Add(time.Second)); cmd != fleetCmdSend || st.send.Source != v.Source {
+		t.Fatalf("send = %v %+v", cmd, st.send)
+	}
+	st = &fleetViewState{}
+	st.applyState(v, nil, now)
+	st.sel = fleetItemIndex(st.items, "b")
+	if cmd := st.handleKey("x", false, now); cmd != fleetCmdDismiss || st.dismissSource != v.Source {
+		t.Fatalf("dismiss = %v %q", cmd, st.dismissSource)
 	}
 }

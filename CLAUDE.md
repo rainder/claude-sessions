@@ -1480,7 +1480,8 @@ remote host.
 
 **Finding FLEET.** Andy runs the TUI on his Mac; FLEET runs on another host.
 So every `State()` runs discovery (`fleetLocal.discoverLocked`). The local
-service goes first, and a live FLEET there wins outright: no remote is asked.
+service goes first, and a live FLEET there wins outright: no remote is asked,
+so a second FLEET on another host is not warned about from that machine.
 Otherwise every `servers.yaml` entry (`fleetRemoteServers`: `dropSelfServer`,
 entries with no host or token skipped) gets `GET /fleet/state` with its
 bearer token, all at once (`fleetAskRemotes`), each with
@@ -1489,10 +1490,31 @@ transport error means that host has no FLEET. Exactly one live FLEET is used.
 Two or more is `Ambiguous`: a view with no cards and a one-line warning, a
 fixed `FLEET ?` badge, and no client, because a guess could answer the wrong
 FLEET. With none live, the view is the local one when the service answered
-(it shows "not running"), else the first remote that answered, else the
-local error. The chosen host's client is remembered for say and dismiss
-(`chosen`); `Client()` without one runs discovery, and refuses while
-ambiguous. The send job re-reads the state and says on that same client.
+(it shows "not running"), else a not-running view with no cards when some
+remote answered (never that remote's old cards), else the local error. The
+chosen host's client is remembered for say and dismiss (`chosen`);
+`Client()` without one runs discovery, and refuses while ambiguous. The send
+job re-reads the state and says on that same client.
+
+**Sticky remote.** One failed poll of the remote FLEET must not swap in the
+local view: the open panel would close on a false "card changed" and the
+badge would blink. So the last remote chosen for a live FLEET is remembered
+(`sticky`, keyed by its base URL). While no FLEET is live anywhere it stays
+the answer: its own view when it answered 200 (FLEET stopped there, which is
+true), else `fleetHostDownError` ("FLEET host ws is not reachable") with
+`chosen` kept on it, so a send fails on its own and never goes to another
+host. Another remote going live follows the normal rules. A live local
+FLEET, or the host leaving `servers.yaml`, clears the memory; the local
+not-running view is the fallback only when no remote is remembered.
+
+**Host pin.** A dismiss carries only a card id, so if `chosen` moved between
+reading the card and pressing the key it could clear an answer record on
+another host. Every view carries `Source`, the base URL it came from (set by
+`fleetLocal`, never decoded, never drawn). The panel keeps the `Source` of
+the state it opened on and the send carries it; `x` takes the applied
+state's. `fleetSendVia` and `fleetDismissVia` refuse when `Client()` is
+another host (`Moved`, `errFleetMoved`): a warn toast and a refetch, and
+nothing reaches either host.
 The cost: while FLEET is not local, each poll is one GET per configured host,
 every 10 s from the badge and the view. The host name is user config, but it
 still reaches the terminal, so `fleetHostName` runs `fleetDisplayText` over

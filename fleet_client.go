@@ -89,6 +89,10 @@ type fleetStateView struct {
 	// Ambiguous names the hosts that each run a live FLEET when there is more
 	// than one. The rest of the view is then empty, and nothing is sent.
 	Ambiguous []string
+	// Source is the base URL of the service this state came from. Set by
+	// fleetLocal, never decoded, never drawn: a send or dismiss carries it,
+	// and is refused when FLEET has moved to another host since.
+	Source string
 }
 
 // decodeFleetStateView fails only when data is not a JSON object.
@@ -226,6 +230,9 @@ func (c *fleetClient) GetState() (fleetStateView, error) {
 }
 
 type fleetSayRequest struct {
+	// Source is the fleetStateView.Source the answer was prepared against.
+	// It pins the send to that host and never goes on the wire.
+	Source     string `json:"-"`
 	Text       string `json:"text"`
 	CardID     string `json:"cardId"`
 	CardHash   string `json:"cardHash,omitempty"`
@@ -382,6 +389,20 @@ func fleetRemoteServers() []ServerConfig {
 	return dropSelfServer(cfgs)
 }
 
+// fleetRemoteBase is the base URL a remote is asked at; it is also the
+// remembered host's key.
+func fleetRemoteBase(srv ServerConfig) string {
+	return "http://" + hostPort(srv.Host, srv.Port)
+}
+
+// fleetRemoteName is a remote's display name: its config name, else its host.
+func fleetRemoteName(srv ServerConfig) string {
+	if strings.TrimSpace(srv.Name) == "" {
+		return fleetHostName(srv.Host)
+	}
+	return fleetHostName(srv.Name)
+}
+
 // fleetRemoteAnswer is one remote host's 200 answer to /fleet/state.
 type fleetRemoteAnswer struct {
 	name string // fleetHostName of the config name
@@ -403,16 +424,12 @@ func fleetAskRemotes(cfgs []ServerConfig) []fleetRemoteAnswer {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c := newFleetClient("http://"+hostPort(srv.Host, srv.Port), srv.Token)
+			c := newFleetClient(fleetRemoteBase(srv), srv.Token)
 			v, err := c.GetState()
 			if err != nil {
 				return
 			}
-			name := srv.Name
-			if strings.TrimSpace(name) == "" {
-				name = srv.Host
-			}
-			answers[i] = &fleetRemoteAnswer{name: fleetHostName(name), c: c, v: v}
+			answers[i] = &fleetRemoteAnswer{name: fleetRemoteName(srv), c: c, v: v}
 		}()
 	}
 	wg.Wait()
@@ -424,6 +441,20 @@ func fleetAskRemotes(cfgs []ServerConfig) []fleetRemoteAnswer {
 	}
 	return out
 }
+
+// fleetHostDownError is the remembered FLEET host not answering. The view
+// shows it instead of falling back to another host's view: one failed poll
+// must not close an open panel or swap the cards under Andy.
+type fleetHostDownError struct{ host string }
+
+func (e *fleetHostDownError) Error() string {
+	return "FLEET host " + e.host + " is not reachable"
+}
+
+// errFleetMoved refuses a send or dismiss prepared against a state from
+// another host than the one FLEET is on now: a dismiss carries only a card
+// id, so it could clear another host's answer record.
+var errFleetMoved = errors.New("FLEET moved to another host — refresh")
 
 // fleetAmbiguousError is the refusal Client gives while more than one host
 // runs a live FLEET: nothing says which one Andy means.
@@ -456,6 +487,12 @@ type fleetLocal struct {
 	remotes func() []ServerConfig
 
 	chosen *fleetClient // the host say and dismiss use; nil when none or ambiguous
+	// sticky is the last remote chosen for a live FLEET (keyed by its base
+	// URL), stickyName its display name. While no FLEET is live anywhere it
+	// stays the answer, so a failed poll does not swap in the local view. A
+	// live local FLEET, or the host leaving servers.yaml, clears it.
+	sticky     *fleetClient
+	stickyName string
 }
 
 func (l *fleetLocal) dial() (*fleetClient, fleetStateView, error) {
@@ -485,15 +522,19 @@ func (l *fleetLocal) localStateLocked() (fleetStateView, error) {
 }
 
 // discoverLocked finds FLEET and sets chosen. A live local FLEET wins
-// outright and no remote is asked. Otherwise every remote is asked at once:
-// exactly one live FLEET is used; two or more is an Ambiguous view and no
-// client, because a guess could answer the wrong FLEET. With none live, the
-// local view when the service answered (it shows "not running"), else the
-// first remote view, else the local error.
+// outright, no remote is asked, and the remembered remote is forgotten.
+// Otherwise every remote is asked at once: exactly one live FLEET is used and
+// remembered; two or more is an Ambiguous view and no client, because a guess
+// could answer the wrong FLEET. With none live, a remembered remote is still
+// the answer: its own view when it answered, else a fleetHostDownError with
+// chosen kept on it. With no remote ever chosen, the local view when the
+// service answered (it shows "not running"), else a not-running view with no
+// cards when some remote answered, else the local error.
 func (l *fleetLocal) discoverLocked() (fleetStateView, error) {
 	lv, lerr := l.localStateLocked()
 	if lerr == nil && lv.Fleet.Alive {
-		l.chosen = l.c
+		l.chosen, l.sticky, l.stickyName = l.c, nil, ""
+		lv.Source = l.c.base
 		return lv, nil
 	}
 	var cfgs []ServerConfig
@@ -509,11 +550,23 @@ func (l *fleetLocal) discoverLocked() (fleetStateView, error) {
 	}
 	pick := func(a fleetRemoteAnswer) (fleetStateView, error) {
 		l.chosen = a.c
-		a.v.Host = a.name
+		a.v.Host, a.v.Source = a.name, a.c.base
 		return a.v, nil
+	}
+	if l.sticky != nil {
+		known := false
+		for _, srv := range cfgs {
+			if srv.Host != "" && srv.Token != "" && fleetRemoteBase(srv) == l.sticky.base {
+				known, l.stickyName = true, fleetRemoteName(srv)
+			}
+		}
+		if !known {
+			l.sticky, l.stickyName = nil, ""
+		}
 	}
 	switch {
 	case len(live) == 1:
+		l.sticky, l.stickyName = live[0].c, live[0].name
 		return pick(live[0])
 	case len(live) > 1:
 		l.chosen = nil
@@ -522,11 +575,23 @@ func (l *fleetLocal) discoverLocked() (fleetStateView, error) {
 			hosts[i] = a.name
 		}
 		return fleetStateView{Ambiguous: hosts}, nil
+	case l.sticky != nil:
+		for _, a := range answers {
+			if a.c.base == l.sticky.base {
+				return pick(a)
+			}
+		}
+		l.chosen = l.sticky
+		return fleetStateView{}, &fleetHostDownError{host: l.stickyName}
 	case lerr == nil:
 		l.chosen = l.c
+		lv.Source = l.c.base
 		return lv, nil
 	case len(answers) > 0:
-		return pick(answers[0])
+		l.chosen = nil
+		f := answers[0].v.Fleet
+		f.Alive = false
+		return fleetStateView{Fleet: f}, nil
 	}
 	l.chosen = nil
 	return fleetStateView{}, lerr

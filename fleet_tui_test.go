@@ -506,7 +506,7 @@ func TestFleetLoopDismiss(t *testing.T) {
 	var got string
 	l := &fleetLoop{st: fleetTestState(v, now), interval: time.Hour,
 		state:   func() (fleetStateView, error) { return fleetTestView(fleetTestCard("a", "needs-you")), nil },
-		dismiss: func(id string) (fleetSayResult, error) { got = id; return fleetSayResult{OK: true}, nil }}
+		dismiss: func(id, _ string) (fleetSayResult, error) { got = id; return fleetSayResult{OK: true}, nil }}
 	defer l.closeAll()
 	if l.run(l.st.handleKey("x", false, now), now) {
 		t.Fatal("dismiss closed the view")
@@ -551,7 +551,7 @@ func TestFleetLoopSendClientError(t *testing.T) {
 	if r.CardID != "a" || r.CheckErr == nil {
 		t.Fatalf("result = %+v", r)
 	}
-	res, err := fleetDismissVia(src)("a")
+	res, err := fleetDismissVia(src)("a", "")
 	if err == nil || res.OK {
 		t.Fatalf("dismiss = %+v, %v", res, err)
 	}
@@ -667,7 +667,7 @@ func TestFleetLoopDismissClearsFlag(t *testing.T) {
 	gate := make(chan struct{})
 	l := &fleetLoop{st: fleetTestState(v, now), interval: time.Hour,
 		state:   func() (fleetStateView, error) { return v, nil },
-		dismiss: func(string) (fleetSayResult, error) { <-gate; return fleetSayResult{OK: true}, nil }}
+		dismiss: func(string, string) (fleetSayResult, error) { <-gate; return fleetSayResult{OK: true}, nil }}
 	defer l.closeAll()
 	l.run(l.st.handleKey("x", false, now), now)
 	if cmd := l.st.handleKey("x", false, now); cmd != fleetCmdNone {
