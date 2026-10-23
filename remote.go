@@ -59,8 +59,13 @@ type RemoteResult struct {
 	GrokKnownAccounts      []KnownAccountUsage
 	GrokActiveSnapshotName string
 	GrokAccount            string
-	Error                  string // "" on success, short reason otherwise
-	Loading                bool   // true for a placeholder slot whose first fetch hasn't returned yet
+	// CachedClaude is the Claude numbers this host already holds on disk
+	// (GET /usage/numbers?cached=1), overlaid by the TUI only
+	// (overlayRemoteCachedUsage). dedupeAccounts uses them to fill a local
+	// line that has no usable numbers; they never add a line of their own.
+	CachedClaude []remoteClaudeReading
+	Error        string // "" on success, short reason otherwise
+	Loading      bool   // true for a placeholder slot whose first fetch hasn't returned yet
 	// Stale marks a result whose Sessions/HostUsage/Usage/CodexUsage/GrokUsage
 	// are carried over from the last successful fetch because the current one
 	// failed (see Error). Only ever set alongside a non-empty Error.

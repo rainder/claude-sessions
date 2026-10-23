@@ -3685,3 +3685,134 @@ func TestRenderHeaderShowsFleetBadge(t *testing.T) {
 		t.Fatalf("empty badge drew FLEET: %q", frame.lines[0])
 	}
 }
+
+func cachedReading(email string, pct float64, at time.Time) remoteClaudeReading {
+	return remoteClaudeReading{Account: email, Info: &UsageInfo{FiveHour: usageBucket{Pct: pct}}, FetchedAt: at}
+}
+
+func TestDedupeAccountsFillsFromRemoteCache(t *testing.T) {
+	now := time.Now()
+	fresh := &UsageInfo{FiveHour: usageBucket{Pct: 41}}
+	remote := func(name string, rs ...remoteClaudeReading) RemoteResult {
+		return RemoteResult{Name: name, CachedClaude: rs}
+	}
+
+	t.Run("expired local line is filled", func(t *testing.T) {
+		lines := dedupeAccounts(
+			AccountUsage{Account: "andy@avisoma.com", Info: fresh, FetchedAt: now},
+			[]KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Expired: true}},
+			[]RemoteResult{remote("agent-workstation", cachedReading("Andy@Trecs.Aero", 63, now.Add(-time.Minute)))},
+		)
+		if len(lines) != 2 {
+			t.Fatalf("lines = %#v", lines)
+		}
+		l := lines[1]
+		if l.placeholder != "" || l.info == nil || l.info.FiveHour.Pct != 63 || l.via != "agent-workstation" || l.label != "andy@trecs.aero" || l.email != "andy@trecs.aero" || l.mine {
+			t.Fatalf("filled line = %#v, want remote numbers under the local label", l)
+		}
+		if lines[0].via != "" || lines[0].info != fresh {
+			t.Fatalf("live line = %#v, want untouched", lines[0])
+		}
+	})
+
+	t.Run("fresh local line is not replaced", func(t *testing.T) {
+		lines := dedupeAccounts(
+			AccountUsage{Account: "andy@avisoma.com", Info: fresh, FetchedAt: now.Add(-time.Hour)},
+			nil,
+			[]RemoteResult{remote("ws", cachedReading("andy@avisoma.com", 99, now))},
+		)
+		if len(lines) != 1 || lines[0].info != fresh || lines[0].via != "" {
+			t.Fatalf("lines = %#v, want the fresh local line", lines)
+		}
+	})
+
+	t.Run("stale local line only yields to a newer reading", func(t *testing.T) {
+		local := AccountUsage{Account: "andy@avisoma.com", Info: fresh, Stale: true, FetchedAt: now.Add(-10 * time.Minute)}
+		older := dedupeAccounts(local, nil, []RemoteResult{remote("ws", cachedReading("andy@avisoma.com", 99, now.Add(-20*time.Minute)))})
+		if older[0].info != fresh || older[0].via != "" || !older[0].stale {
+			t.Fatalf("older remote replaced the line: %#v", older[0])
+		}
+		newer := dedupeAccounts(local, nil, []RemoteResult{remote("ws", cachedReading("andy@avisoma.com", 99, now.Add(-time.Minute)))})
+		if newer[0].info.FiveHour.Pct != 99 || newer[0].via != "ws" || newer[0].stale || !newer[0].mine {
+			t.Fatalf("newer remote did not fill: %#v", newer[0])
+		}
+	})
+
+	t.Run("newest of two remotes wins", func(t *testing.T) {
+		lines := dedupeAccounts(
+			AccountUsage{Account: "andy@avisoma.com", Info: fresh, FetchedAt: now},
+			[]KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Reason: "rate limited"}},
+			[]RemoteResult{
+				remote("old", cachedReading("andy@trecs.aero", 10, now.Add(-30*time.Minute))),
+				remote("new", cachedReading("andy@trecs.aero", 20, now.Add(-time.Minute))),
+				remote("older", cachedReading("andy@trecs.aero", 30, now.Add(-time.Hour))),
+			},
+		)
+		if l := lines[1]; l.via != "new" || l.info.FiveHour.Pct != 20 {
+			t.Fatalf("filled line = %#v, want host new's reading", l)
+		}
+	})
+
+	t.Run("remote-only account adds no line", func(t *testing.T) {
+		lines := dedupeAccounts(
+			AccountUsage{Account: "andy@avisoma.com", Info: fresh, FetchedAt: now},
+			nil,
+			[]RemoteResult{remote("ws", cachedReading("stranger@example.com", 50, now))},
+		)
+		if len(lines) != 1 {
+			t.Fatalf("lines = %#v, want the header not to grow", lines)
+		}
+	})
+}
+
+// The via marker hangs off the end like the stale one, adds "stale" once the
+// reading is past the stale bound, and takes part in bar sizing so a narrow
+// clip cannot eat it.
+func TestWriteUsageHeaderMarksRemoteFilledLine(t *testing.T) {
+	now := time.Now()
+	accounts := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, fetchedAt: now.Add(-time.Minute), via: "agent-workstation"},
+		{label: "spare", email: "andy@spare.dev", info: &UsageInfo{FiveHour: usageBucket{Pct: 5}}, fetchedAt: now.Add(-usageNumbersStaleAfter - 3*time.Minute), via: "ws"},
+	}
+	var b strings.Builder
+	writeUsageHeader(&b, accounts, nil, nil, 0)
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("lines = %#v", lines)
+	}
+	if !strings.HasSuffix(lines[1], " "+dim("via agent-workstation")) {
+		t.Fatalf("via line = %q", lines[1])
+	}
+	if !strings.HasSuffix(lines[2], " "+dim(usageStaleText+" 7m via ws")) {
+		t.Fatalf("old via line = %q, want stale age plus via", lines[2])
+	}
+
+	// The same shape as TestWriteUsageHeaderStaleMarkerSurvivesWidthClip:
+	// full-email labels that leave the bars all the room there is.
+	const cols = 64
+	narrow := []accountUsageLine{
+		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "andy@trecs.aero", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, fetchedAt: now.Add(-time.Minute), via: "agent-workstation"},
+	}
+	b.Reset()
+	writeUsageHeader(&b, narrow, nil, nil, cols)
+	lines = strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	line := clipLine(lines[1], cols)
+	if !strings.Contains(line, "via agent-workstation") || !strings.Contains(line, "63%") {
+		t.Fatalf("narrow via line = %q, want marker and numbers to survive the clip", line)
+	}
+}
+
+func TestUsageViaHostSanitizes(t *testing.T) {
+	for in, want := range map[string]string{
+		"agent-workstation":     "agent-workstation",
+		"evil\x1b[31m\x07x":     "evil[31mx",
+		"\x1b\x00":              "remote",
+		strings.Repeat("a", 40): strings.Repeat("a", 32),
+	} {
+		if got := usageViaHost(in); got != want {
+			t.Errorf("usageViaHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -2161,6 +2161,31 @@ account bars simply don't appear — only its heading label does
 That is the intended shape, not a regression: the header now shows bars only
 for accounts an actual poller somewhere is spending against.
 
+**Remote cached numbers fill a local line, display only.** In the same pass
+`RemoteUsageHub` also asks each host's `GET /usage/numbers?cached=1` (8s,
+bearer, concurrent with `/usage`): the Claude numbers that host already holds
+on disk, which costs it no Anthropic call. `claudeInfoFromNumbers` maps each
+entry back to a `UsageInfo` (credits come back in major units with
+`DecimalPlaces` 0, which renders the same); an entry with no `fetchedAt` or no
+windows is dropped, and the remote's `name`, `reason` and `expired` are never
+read. The email is used only to match; the two strings that do reach the
+terminal (scoped-limit label, currency) must pass a narrow pattern or are
+dropped. The readings land on `RemoteResult.CachedClaude`
+(`overlayRemoteCachedUsage`, TUI only — no one-shot path fetches them), and a
+failed or 404 leg clears that host's readings for the pass, like everything
+else this hub holds. `fillFromRemoteCache`, the last step of
+`dedupeAccounts`, fills only a line that already exists for an account this
+machine knows (its live account or its own snapshot), so the header never
+grows: a placeholder line (expired or a reason) always, a stale line only
+when the remote reading is newer, a fresh line never. The newest `fetchedAt`
+across remotes wins. The filled line keeps its label, email and `mine`, and
+always carries a dim `via <host>` marker (servers.yaml name, printable ASCII
+only), with `stale <age>` before it when the reading is past
+`usageNumbersStaleAfter` or the remote marked it stale — the same trailing
+mechanism and `suffixW` sizing as the stale marker. `localFreshAccountEmails`
+reads the hubs, not the lines, so a filled line never counts as local fresh
+data. No credential moves.
+
 **A mixed-version fleet has a transient window.** `RemoteUsageHub` still polls
 every configured remote's `/usage` regardless of that host's version. A remote
 still running the old handler answers with real numbers, spending its
@@ -2685,6 +2710,17 @@ Stale has one rule (`usageNumbersStale`): no `fetchedAt`, older than
 `usageNumbersStaleAfter` (two intervals), or marked stale by the fetcher in
 this pass. `loadAccountCache`'s own `Stale` is not an input — it is set on
 every disk read.
+
+`?cached=1` (exactly `1`) is the disk-only build (`newCachedUsageNumbersSource`:
+`noFetch`, `source: service`), built fresh per request — pure disk reads, so a
+remote TUI can ask it every pass. It never runs a Claude pass or a Grok/Codex
+fetch. The one state it does not share with the long-lived source is
+`lastLive`, so a live account with no snapshot answers identity only there.
+Mixed versions: a server older than this mode ignores the parameter and
+answers the plain route, which may run one Claude pass per interval on the
+client's behalf until it is upgraded — the deploy order upgrades it right
+after the local machine. A server older than the route answers 404, which the
+hub reads as no cached numbers.
 
 ### Account switching
 

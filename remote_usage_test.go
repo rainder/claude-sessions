@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // usageEndpointFixture stands up a /usage server that records the ignore
@@ -350,6 +351,11 @@ func TestRemoteUsageHubFetchesAndClearsPerPass(t *testing.T) {
 	fail := false
 	seenIgnore := [][]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/usage" {
+			// The cached-numbers leg, as a server predating the route.
+			http.NotFound(w, r)
+			return
+		}
 		mu.Lock()
 		seenIgnore = append(seenIgnore, r.URL.Query()["ignore"])
 		failing := fail
@@ -389,5 +395,98 @@ func TestRemoteUsageHubFetchesAndClearsPerPass(t *testing.T) {
 	h.fetchFrom(cfgs)
 	if got := h.Snapshot(); len(got) != 0 {
 		t.Fatalf("snapshot = %#v, want a failed pass to clear the host", got)
+	}
+}
+
+// cachedNumbersResponse is a /usage/numbers?cached=1 body: one usable entry,
+// one with no fetchedAt, and one with no account.
+func cachedNumbersResponse(at time.Time) usageNumbersResponse {
+	var good claudeUsageNumbers
+	good.Account = "Andy@Trecs.Aero"
+	good.Name = "\x1b[31mevil"
+	good.Reason = "\x1b]0;pwn\x07"
+	fillClaudeInfo(&good, &UsageInfo{FiveHour: usageBucket{Pct: 12}, SevenDay: usageBucket{Pct: 34}})
+	good.FetchedAt = &at
+	var undated claudeUsageNumbers
+	undated.Account = "andy@avisoma.com"
+	fillClaudeInfo(&undated, &UsageInfo{FiveHour: usageBucket{Pct: 1}})
+	var anon claudeUsageNumbers
+	fillClaudeInfo(&anon, &UsageInfo{FiveHour: usageBucket{Pct: 2}})
+	anon.FetchedAt = &at
+	return usageNumbersResponse{Claude: []claudeUsageNumbers{good, undated, anon}}
+}
+
+// The hub asks every host's cached numbers alongside /usage, keeps only the
+// usable entries, and drops a host's numbers on a pass where that leg fails
+// while its identity still lands.
+func TestRemoteUsageHubCarriesCachedNumbersPerPass(t *testing.T) {
+	at := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	var mu sync.Mutex
+	failNumbers := false
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/usage":
+			_ = json.NewEncoder(w).Encode(sampleUsageResponse())
+		case "/usage/numbers":
+			mu.Lock()
+			queries = append(queries, r.URL.RawQuery)
+			failing := failNumbers
+			mu.Unlock()
+			if failing {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(cachedNumbersResponse(at))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	cfg := serverConfigFor(t, "alias", srv.URL)
+	cfg.Token = "tok"
+	cfgs := []ServerConfig{cfg}
+
+	h := &RemoteUsageHub{kick: make(chan struct{}, 1), stop: make(chan struct{})}
+	h.fetchFrom(cfgs)
+	got := h.CachedSnapshot()["alias"]
+	if len(got) != 1 {
+		t.Fatalf("cached = %#v, want only the dated entry with an account", got)
+	}
+	if r := got[0]; r.Account != "Andy@Trecs.Aero" || !r.FetchedAt.Equal(at) || r.Info == nil || r.Info.FiveHour.Pct != 12 || r.Info.SevenDay.Pct != 34 {
+		t.Fatalf("reading = %#v", r)
+	}
+	mu.Lock()
+	q := append([]string(nil), queries...)
+	mu.Unlock()
+	if len(q) != 1 || q[0] != "cached=1" {
+		t.Fatalf("numbers queries = %q, want one cached=1", q)
+	}
+
+	mu.Lock()
+	failNumbers = true
+	mu.Unlock()
+	h.fetchFrom(cfgs)
+	if got := h.CachedSnapshot(); len(got) != 0 {
+		t.Fatalf("cached = %#v, want a failed leg to clear, not freeze", got)
+	}
+	if u, ok := h.Snapshot()["alias"]; !ok || u.ActiveSnapshotName != "work" {
+		t.Fatalf("identity = %#v, want /usage unaffected by the numbers leg", h.Snapshot())
+	}
+}
+
+func TestOverlayRemoteCachedUsageClearsAHostWithNone(t *testing.T) {
+	r := remoteClaudeReading{Account: "a@b.c", Info: &UsageInfo{}, FetchedAt: time.Now()}
+	remotes := []RemoteResult{
+		{Name: "one", CachedClaude: []remoteClaudeReading{r}},
+		{Name: "two"},
+	}
+	remotes = overlayRemoteCachedUsage(remotes, map[string][]remoteClaudeReading{"two": {r}})
+	if remotes[0].CachedClaude != nil || len(remotes[1].CachedClaude) != 1 {
+		t.Fatalf("remotes = %#v, want one cleared and two filled", remotes)
 	}
 }

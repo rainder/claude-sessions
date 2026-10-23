@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -148,6 +149,43 @@ func fillClaudeInfo(e *claudeUsageNumbers, info *UsageInfo) {
 	e.Credits = usageCreditsFrom(info.Credits)
 }
 
+// claudeInfoFromNumbers is fillClaudeInfo's inverse, for a remote host's
+// cached reading (RemoteUsageHub). ok is false unless the entry has both
+// windows and a fetchedAt. Credits come back in major units with
+// DecimalPlaces 0, which renders and scales exactly as the minor-unit original
+// did (moneyGrouped rounds to whole major units either way). The two strings
+// that reach the terminal are the remote's, so each must pass a narrow
+// pattern or is dropped: a scoped label that fails drops the scoped bar, a
+// currency that fails falls back to "$".
+func claudeInfoFromNumbers(e claudeUsageNumbers) (info *UsageInfo, fetchedAt time.Time, ok bool) {
+	if e.FiveHour == nil || e.SevenDay == nil || e.FetchedAt == nil || e.FetchedAt.IsZero() {
+		return nil, time.Time{}, false
+	}
+	bucket := func(w *usageWindowNumbers) usageBucket {
+		b := usageBucket{Pct: w.Pct}
+		if w.ResetsAt != nil {
+			b.ResetsAt = *w.ResetsAt
+		}
+		return b
+	}
+	info = &UsageInfo{FiveHour: bucket(e.FiveHour), SevenDay: bucket(e.SevenDay)}
+	if w := e.WeeklyScoped; w != nil && remoteScopedLabelRe.MatchString(w.Label) {
+		info.WeeklyScoped, info.WeeklyScopedLabel = bucket(w), w.Label
+	}
+	if c := e.Credits; c != nil && c.Enabled {
+		info.Credits = creditsInfo{Enabled: true, Used: c.Used, Limit: c.Limit}
+		if remoteCurrencyRe.MatchString(c.Currency) {
+			info.Credits.Currency = c.Currency
+		}
+	}
+	return info, *e.FetchedAt, true
+}
+
+var (
+	remoteScopedLabelRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9 .-]{0,15}$`)
+	remoteCurrencyRe    = regexp.MustCompile(`^[A-Z]{3}$`)
+)
+
 // usageNumbersSource builds usageNumbersResponse. One lives for the life of
 // the server; the CLI's local path builds a throwaway one.
 //
@@ -204,6 +242,18 @@ func newUsageNumbersSource(source string) *usageNumbersSource {
 func newDiskOnlyUsageNumbersSource() *usageNumbersSource {
 	s := newUsageNumbersSource(usageNumbersSourceLocal)
 	s.noFetch, s.fetchProviders = true, false
+	return s
+}
+
+// newCachedUsageNumbersSource answers GET /usage/numbers?cached=1: the
+// service's own disk-only build, for a remote TUI that wants whatever numbers
+// this host already holds. A fresh one per request costs only the closures'
+// construction and the disk reads build makes anyway; the one state it does
+// not share with s.numbers is lastLive, so a live account with no snapshot
+// answers identity only here.
+func newCachedUsageNumbersSource() *usageNumbersSource {
+	s := newDiskOnlyUsageNumbersSource()
+	s.source = usageNumbersSourceService
 	return s
 }
 
@@ -481,9 +531,18 @@ func codexUsageNumbers(now time.Time, fetch bool) []providerUsageNumbers {
 
 // usageNumbers is GET /usage/numbers. Bearer auth always, loopback included:
 // unlike GET /usage it can spend upstream budget.
+//
+// ?cached=1 (that exact value) never spends it: a disk-only build of what
+// this host already holds, which a remote TUI asks for every pass
+// (RemoteUsageHub). Without it the refresh rule usageNumbersSource documents
+// applies as before.
 func (s *server) usageNumbers(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.URL.Query().Get("cached") == "1" {
+		writeJSON(w, http.StatusOK, newCachedUsageNumbersSource().build())
 		return
 	}
 	s.serveUsageNumbers(w)
@@ -504,10 +563,13 @@ func (s *server) serveUsageNumbers(w http.ResponseWriter) {
 // seam so tests can point it at an httptest server.
 var usageNumbersServiceConfig = localServiceConfig
 
-// usageNumbersAttempt makes one GET /usage/numbers. status is the HTTP status
-// when a response arrived, 0 when none did.
-func usageNumbersAttempt(ctx context.Context, srv ServerConfig) (resp usageNumbersResponse, status int, err error) {
+// usageNumbersAttempt makes one GET /usage/numbers, with ?cached=1 when
+// cached. status is the HTTP status when a response arrived, 0 when none did.
+func usageNumbersAttempt(ctx context.Context, srv ServerConfig, cached bool) (resp usageNumbersResponse, status int, err error) {
 	u := fmt.Sprintf("http://%s/usage/numbers", hostPort(srv.Host, srv.Port))
+	if cached {
+		u += "?cached=1"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return resp, 0, err
@@ -568,7 +630,7 @@ func fetchServiceUsageNumbers() (usageNumbersResponse, usageNumbersFallback, err
 		func(ctx context.Context, srv ServerConfig) (int, error) {
 			var status int
 			var err error
-			resp, status, err = usageNumbersAttempt(ctx, srv)
+			resp, status, err = usageNumbersAttempt(ctx, srv, false)
 			return status, err
 		})
 	switch {

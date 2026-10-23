@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -640,5 +641,121 @@ func TestRenderUsageNumbers(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// ?cached=1 answers from disk with no Claude pass, even with no hub alive
+// (the case where the plain route would fetch); any other value, or none,
+// keeps the old refresh rule.
+func TestUsageNumbersCachedModeMakesNoFetch(t *testing.T) {
+	home := usageNumbersWorld(t, "main", "live@example.com")
+	writeSnapshotFixture(t, home, "other", "tok-other", "other@example.com")
+	saveAccountCache("main", accountCacheEntry{
+		Account: "live@example.com", FetchedAt: time.Now().Add(-time.Hour), Info: sampleUsageInfo(55),
+	})
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(accountCachePath("main"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	live := noLiveFetch(t)
+	known := stubKnownFetch(t, sampleUsageInfo(1))
+	s := &server{token: "secret", numbers: newUsageNumbersSource(usageNumbersSourceService)}
+
+	get := func(query string) usageNumbersResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/usage/numbers"+query, nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		s.usageNumbers(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, body %q", query, rec.Code, rec.Body.String())
+		}
+		var resp usageNumbersResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp := get("?cached=1")
+	if live.Load() != 0 || known.Load() != 0 {
+		t.Fatalf("cached fetches = live %d known %d, want none", live.Load(), known.Load())
+	}
+	if resp.Source != usageNumbersSourceService {
+		t.Errorf("source = %q, want service", resp.Source)
+	}
+	if l := resp.Claude[0]; l.FiveHour == nil || l.FiveHour.Pct != 55 || !l.Stale {
+		t.Errorf("live = %+v, want old disk numbers marked stale", l)
+	}
+
+	// cached=true is not the exact value 1: the plain route runs its pass.
+	live = stubLiveFetch(t, liveReading("live@example.com", sampleUsageInfo(20)))
+	resp = get("?cached=true")
+	if live.Load() != 1 || known.Load() != 1 {
+		t.Fatalf("plain fetches = live %d known %d, want one pass", live.Load(), known.Load())
+	}
+	if l := resp.Claude[0]; l.FiveHour == nil || l.FiveHour.Pct != 20 {
+		t.Errorf("live = %+v, want the pass's numbers", l)
+	}
+}
+
+// A reading round-trips UsageInfo → wire → UsageInfo with the same bars, and
+// credits come back in major units.
+func TestClaudeInfoFromNumbersRoundTrip(t *testing.T) {
+	reset := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	at := reset.Add(-time.Hour)
+	orig := &UsageInfo{
+		FiveHour:          usageBucket{Pct: 12, ResetsAt: reset},
+		SevenDay:          usageBucket{Pct: 34},
+		WeeklyScoped:      usageBucket{Pct: 56, ResetsAt: reset},
+		WeeklyScopedLabel: "Fable",
+		Credits:           creditsInfo{Enabled: true, Used: 123456, Limit: 500000, Currency: "EUR", DecimalPlaces: 2},
+	}
+	var e claudeUsageNumbers
+	fillClaudeInfo(&e, orig)
+	e.FetchedAt = &at
+	// Through JSON, as the hub receives it.
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire claudeUsageNumbers
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	got, gotAt, ok := claudeInfoFromNumbers(wire)
+	if !ok || !gotAt.Equal(at) {
+		t.Fatalf("ok = %v at = %v, want a usable reading at %v", ok, gotAt, at)
+	}
+	if got.FiveHour != orig.FiveHour || got.SevenDay != orig.SevenDay || got.WeeklyScoped != orig.WeeklyScoped || got.WeeklyScopedLabel != "Fable" {
+		t.Errorf("windows = %+v, want %+v", got, orig)
+	}
+	c := got.Credits
+	if !c.Enabled || c.Used != 1234.56 || c.Limit != 5000 || c.Currency != "EUR" || c.DecimalPlaces != 0 || c.Pct() != orig.Credits.Pct() {
+		t.Errorf("credits = %+v, want 1234.56/5000 EUR in major units", c)
+	}
+	if a, b := claudeSegs(orig), claudeSegs(got); fmt.Sprint(a) != fmt.Sprint(b) {
+		t.Errorf("segments differ:\n orig %+v\n got  %+v", a, b)
+	}
+
+	// Unusable entries: no fetchedAt, no windows.
+	noAt := wire
+	noAt.FetchedAt = nil
+	noWin := wire
+	noWin.SevenDay = nil
+	for name, bad := range map[string]claudeUsageNumbers{"no fetchedAt": noAt, "no window": noWin} {
+		if _, _, ok := claudeInfoFromNumbers(bad); ok {
+			t.Errorf("%s: ok = true, want an unusable entry", name)
+		}
+	}
+
+	// Remote strings that reach the terminal must pass a narrow pattern.
+	hostile := wire
+	ws, cr := *wire.WeeklyScoped, *wire.Credits
+	ws.Label, cr.Currency = "\x1b[31mX", "\x1b]0;t\x07"
+	hostile.WeeklyScoped, hostile.Credits = &ws, &cr
+	got, _, _ = claudeInfoFromNumbers(hostile)
+	if got.WeeklyScopedLabel != "" || got.WeeklyScoped != (usageBucket{}) || got.Credits.Currency != "" {
+		t.Errorf("hostile strings kept: %+v", got)
 	}
 }

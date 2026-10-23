@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -13,8 +15,13 @@ import (
 // entries never block the render loop.
 //
 // /usage never calls Anthropic (see server.go): it reports each host's account
-// identity only, never rate-limit percentages, so this hub carries no numbers
-// and contributes no bars — only names, emails, and which one is live.
+// identity only, never rate-limit percentages — names, emails, and which one
+// is live.
+//
+// The same pass also asks each host's GET /usage/numbers?cached=1: the Claude
+// numbers that host already holds on disk, served without any Anthropic call.
+// They are display-only fallback for a local header line that has none of its
+// own (see dedupeAccounts); no credential moves.
 //
 // It is RemoteHub's smaller sibling, deliberately without the wake pipe: an
 // account switch on a remote host wants a repaint eventually, not instantly,
@@ -24,6 +31,7 @@ import (
 type RemoteUsageHub struct {
 	mu      sync.Mutex
 	results map[string]usageResponse
+	cached  map[string][]remoteClaudeReading
 	paused  atomic.Bool
 	kick    chan struct{}
 	stop    chan struct{}
@@ -135,16 +143,19 @@ func (h *RemoteUsageHub) Shutdown() { close(h.stop) }
 func (h *RemoteUsageHub) fetchAll() {
 	cfgs, err := LoadServerConfigs()
 	if err != nil {
-		h.store(nil)
+		h.store(nil, nil)
 		return
 	}
 	h.fetchFrom(dropSelfServer(cfgs))
 }
 
-// fetchFrom is fetchAll with the host list already resolved.
+// fetchFrom is fetchAll with the host list already resolved. Each host's
+// /usage and /usage/numbers?cached=1 run concurrently and fail independently:
+// a host whose cached numbers fail (or 404 on an older server) simply has
+// none this pass, and its identity still lands.
 func (h *RemoteUsageHub) fetchFrom(cfgs []ServerConfig) {
 	if len(cfgs) == 0 {
-		h.store(nil)
+		h.store(nil, nil)
 		return
 	}
 	// One ignore list for the whole pass: every host is answering about the same
@@ -154,24 +165,42 @@ func (h *RemoteUsageHub) fetchFrom(cfgs []ServerConfig) {
 		ignore = h.ignore()
 	}
 	got := make([]*usageResponse, len(cfgs))
+	readings := make([][]remoteClaudeReading, len(cfgs))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		eachRemoteCachedClaude(cfgs, func(i int, rs []remoteClaudeReading, err error) {
+			if err == nil {
+				readings[i] = rs
+			}
+		})
+	}()
 	eachRemoteUsage(cfgs, ignore, func(i int, u usageResponse, err error) {
 		if err != nil {
 			return
 		}
 		got[i] = &u
 	})
+	wg.Wait()
 	fresh := make(map[string]usageResponse, len(cfgs))
 	for i, u := range got {
 		if u != nil {
 			fresh[cfgs[i].Name] = *u
 		}
 	}
-	h.store(fresh)
+	cached := make(map[string][]remoteClaudeReading, len(cfgs))
+	for i, rs := range readings {
+		if len(rs) > 0 {
+			cached[cfgs[i].Name] = rs
+		}
+	}
+	h.store(fresh, cached)
 }
 
-func (h *RemoteUsageHub) store(results map[string]usageResponse) {
+func (h *RemoteUsageHub) store(results map[string]usageResponse, cached map[string][]remoteClaudeReading) {
 	h.mu.Lock()
-	h.results = results
+	h.results, h.cached = results, cached
 	h.mu.Unlock()
 }
 
@@ -188,6 +217,87 @@ func (h *RemoteUsageHub) Snapshot() map[string]usageResponse {
 		out[name] = u
 	}
 	return out
+}
+
+// CachedSnapshot returns the latest pass's cached Claude readings keyed by
+// server name, as a copy of the map. The slices are never written after the
+// pass that built them, so sharing them is safe.
+func (h *RemoteUsageHub) CachedSnapshot() map[string][]remoteClaudeReading {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.cached) == 0 {
+		return nil
+	}
+	out := make(map[string][]remoteClaudeReading, len(h.cached))
+	for name, rs := range h.cached {
+		out[name] = rs
+	}
+	return out
+}
+
+// remoteClaudeReading is one Claude account's numbers as a remote host holds
+// them on disk. Account is used only to match a local header line, and Info
+// carries only what claudeInfoFromNumbers lets through: the remote's name,
+// reason and expired fields are never read.
+type remoteClaudeReading struct {
+	Account   string
+	Info      *UsageInfo
+	FetchedAt time.Time
+	// Stale is the remote's own stale verdict (usageNumbersStale on its side).
+	// The header also applies the age bound itself at render time.
+	Stale bool
+}
+
+// remoteCachedUsageTimeout matches FetchRemoteUsage's.
+const remoteCachedUsageTimeout = 8 * time.Second
+
+// FetchRemoteCachedClaude asks one host for the Claude numbers it already
+// holds (GET /usage/numbers?cached=1, bearer auth). That mode never calls
+// Anthropic on the remote. A server older than the cached mode ignores the
+// parameter and may run one Claude pass per interval of its own until it is
+// upgraded; a server older than the route answers 404, which is just an error
+// here, as is every unusable entry being dropped.
+func FetchRemoteCachedClaude(srv ServerConfig) ([]remoteClaudeReading, error) {
+	if srv.Host == "" || srv.Token == "" {
+		return nil, fmt.Errorf("config missing host or token")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), remoteCachedUsageTimeout)
+	defer cancel()
+	resp, _, err := usageNumbersAttempt(ctx, srv, true)
+	if err != nil {
+		return nil, err
+	}
+	return remoteClaudeReadings(resp.Claude), nil
+}
+
+// remoteClaudeReadings keeps the entries with an account and usable numbers.
+func remoteClaudeReadings(entries []claudeUsageNumbers) []remoteClaudeReading {
+	var out []remoteClaudeReading
+	for _, e := range entries {
+		if strings.TrimSpace(e.Account) == "" {
+			continue
+		}
+		info, at, ok := claudeInfoFromNumbers(e)
+		if !ok {
+			continue
+		}
+		out = append(out, remoteClaudeReading{Account: e.Account, Info: info, FetchedAt: at, Stale: e.Stale})
+	}
+	return out
+}
+
+// eachRemoteCachedClaude is eachRemoteUsage for FetchRemoteCachedClaude.
+func eachRemoteCachedClaude(cfgs []ServerConfig, fn func(i int, rs []remoteClaudeReading, err error)) {
+	var wg sync.WaitGroup
+	for i, c := range cfgs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rs, err := FetchRemoteCachedClaude(c)
+			fn(i, rs, err)
+		}()
+	}
+	wg.Wait()
 }
 
 // localFreshAccountEmails lists the accounts this machine currently holds good
@@ -233,6 +343,17 @@ func overlayRemoteUsage(remotes []RemoteResult, usage map[string]usageResponse) 
 		if u, ok := usage[remotes[i].Name]; ok {
 			remotes[i] = applyRemoteUsage(remotes[i], u)
 		}
+	}
+	return remotes
+}
+
+// overlayRemoteCachedUsage copies each host's cached Claude readings onto its
+// row, and clears them on a host with none this pass, so a failed host's
+// numbers drop out rather than freeze. TUI only: the one-shot paths never
+// fetch them.
+func overlayRemoteCachedUsage(remotes []RemoteResult, cached map[string][]remoteClaudeReading) []RemoteResult {
+	for i := range remotes {
+		remotes[i].CachedClaude = cached[remotes[i].Name]
 	}
 	return remotes
 }

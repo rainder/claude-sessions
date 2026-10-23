@@ -398,6 +398,7 @@ func RunTUI(interval time.Duration) error {
 		// them here — before anything reads `remotes`, whether that is the header's
 		// rate-limit bars, a host heading's account label, or the Ctrl+W picker.
 		remotes = overlayRemoteUsage(remotes, remoteUsageHub.Snapshot())
+		remotes = overlayRemoteCachedUsage(remotes, remoteUsageHub.CachedSnapshot())
 		// Badges and the group filter read one map keyed by session id, built
 		// from the rows now that every row carries its own host's assignment.
 		// Keeping long-lived entries alive under plain viewing is the store's

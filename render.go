@@ -707,6 +707,11 @@ type accountUsageLine struct {
 	// a line is deliberately never dropped, so the account's existence stays
 	// visible either way.
 	placeholder string
+	// via names the remote host whose cached reading filled this line
+	// (fillFromRemoteCache), already sanitized; "" for a line with its own
+	// numbers. Such a line is never fresh: it renders a dim "via <host>"
+	// marker, plus "stale" when the reading is past the stale bound.
+	via string
 }
 
 // knownAccountPlaceholder is the dim text a known account renders instead of
@@ -782,6 +787,8 @@ func accountLocalPart(email string) string {
 // identity only and never fetches numbers on a remote caller's behalf (see
 // addKnown). A remote host's own account bars therefore never appear in the
 // header; only its heading label does (Usage.Account, populated for free).
+// The one exception is fillFromRemoteCache, last: a remote's cached reading may
+// fill a line this machine already shows for its own account, never add one.
 func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes []RemoteResult) []accountUsageLine {
 	var lines []accountUsageLine
 	seen := make(map[string]bool)
@@ -859,6 +866,7 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 			addKnown(k)
 		}
 	}
+	fillFromRemoteCache(lines, local, localKnown, remotes)
 	labelCount := make(map[string]int)
 	for _, l := range lines {
 		labelCount[l.label]++
@@ -869,6 +877,109 @@ func dedupeAccounts(local AccountUsage, localKnown []KnownAccountUsage, remotes 
 		}
 	}
 	return lines
+}
+
+// fillFromRemoteCache gives a header line with no usable numbers the reading a
+// remote host already holds for the same account (RemoteResult.CachedClaude).
+// Display only: nothing is fetched and no credential moves.
+//
+// Only an account this machine itself knows (its live account or one of its
+// own snapshots) is filled, and only on a line that already exists, so the
+// header never grows. A line is filled when it has no numbers (a placeholder:
+// expired or a reason), or when its numbers are stale and the remote reading
+// is newer; a line with fresh numbers always wins. Among several remotes the
+// newest fetchedAt wins, the first in config order on a tie. A filled line
+// keeps its label, email and mine, and is marked via its host.
+func fillFromRemoteCache(lines []accountUsageLine, local AccountUsage, localKnown []KnownAccountUsage, remotes []RemoteResult) {
+	type best struct {
+		r    remoteClaudeReading
+		host string
+	}
+	readings := make(map[string]best)
+	for _, rr := range remotes {
+		for _, r := range rr.CachedClaude {
+			key := strings.ToLower(strings.TrimSpace(r.Account))
+			if key == "" || r.Info == nil || r.FetchedAt.IsZero() {
+				continue
+			}
+			if b, ok := readings[key]; !ok || r.FetchedAt.After(b.r.FetchedAt) {
+				readings[key] = best{r: r, host: rr.Name}
+			}
+		}
+	}
+	if len(readings) == 0 {
+		return
+	}
+	localEmails := make(map[string]bool)
+	if k := strings.ToLower(strings.TrimSpace(local.Account)); k != "" {
+		localEmails[k] = true
+	}
+	for _, k := range localKnown {
+		if e := strings.ToLower(strings.TrimSpace(k.Account)); e != "" {
+			localEmails[e] = true
+		}
+	}
+	for i, l := range lines {
+		key := strings.ToLower(strings.TrimSpace(l.email))
+		if key == "" || !localEmails[key] {
+			continue
+		}
+		b, ok := readings[key]
+		if !ok {
+			continue
+		}
+		noNumbers := l.placeholder != "" || l.info == nil
+		staleOlder := l.info != nil && l.stale && b.r.FetchedAt.After(l.fetchedAt)
+		if !noNumbers && !staleOlder {
+			continue
+		}
+		lines[i].info = b.r.Info
+		lines[i].fetchedAt = b.r.FetchedAt
+		lines[i].stale = b.r.Stale
+		lines[i].placeholder = ""
+		lines[i].via = usageViaHost(b.host)
+	}
+}
+
+// usageViaHost is the host name a "via" marker shows: printable ASCII only,
+// at most 32 bytes, "remote" when nothing is left. The name is this machine's
+// own servers.yaml entry, but it lands mid-header, so no byte of it may be a
+// control.
+func usageViaHost(name string) string {
+	var b strings.Builder
+	for i := 0; i < len(name) && b.Len() < 32; i++ {
+		if c := name[i]; c > 0x20 && c < 0x7f {
+			b.WriteByte(c)
+		}
+	}
+	if b.Len() == 0 {
+		return "remote"
+	}
+	return b.String()
+}
+
+// usageLineMarker is the dim trailing text of a Claude segment line, "" for
+// none: "stale <age>" for carried numbers, "via <host>" for a line filled
+// from a remote's cache, and both together. A via line also turns stale once
+// its reading passes usageNumbersStaleAfter, checked here against now because
+// the reading ages between the hub's passes.
+func usageLineMarker(a accountUsageLine, now time.Time) string {
+	stale := a.stale
+	if a.via != "" {
+		stale = stale || usageNumbersStale(now, a.fetchedAt, false)
+	}
+	var parts []string
+	if stale {
+		text := usageStaleText
+		if !a.fetchedAt.IsZero() {
+			text += " " + formatAge(now.Sub(a.fetchedAt).Seconds())
+		}
+		parts = append(parts, text)
+	}
+	if a.via != "" {
+		parts = append(parts, "via "+a.via)
+	}
+	return strings.Join(parts, " ")
 }
 
 // writeUsageHeader prints the header's account rate-limit line(s) for three
@@ -906,7 +1017,7 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		// alignment but in none of the bar/trailer sizing, which is all defined
 		// over segments.
 		placeholder string
-		// suffix hangs off the end of a segment line (the stale marker), and
+		// suffix hangs off the end of a segment line (the stale / via marker), and
 		// suffixW is its display width (the escapes in suffix are not width).
 		// It takes part in no alignment — the last segment is never padded, so
 		// nothing else moves because of it — but it does take part in sizing:
@@ -931,11 +1042,7 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		}
 		if segs := claudeSegs(a.info); len(segs) > 0 {
 			suffix, suffixW := "", 0
-			if a.stale {
-				text := usageStaleText
-				if !a.fetchedAt.IsZero() {
-					text += " " + formatAge(now.Sub(a.fetchedAt).Seconds())
-				}
+			if text := usageLineMarker(a, now); text != "" {
 				suffix, suffixW = " "+dim(text), 1+len(text)
 			}
 			entries = append(entries, entry{label: label, segs: segs, suffix: suffix, suffixW: suffixW})
