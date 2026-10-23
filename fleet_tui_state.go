@@ -369,6 +369,10 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		st.setToast("pick the correction (1-9)", fleetToastInfo, now)
 		return fleetCmdRender
 	case "a":
+		// A paste that holds an "a" must not hand the terminal away.
+		if inBatch {
+			return fleetCmdNone
+		}
 		// The attach hands the terminal away until Andy detaches; a send or
 		// dismiss result would land unseen behind it.
 		if st.sending || st.dismissing {

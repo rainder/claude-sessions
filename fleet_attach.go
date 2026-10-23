@@ -91,7 +91,9 @@ func fleetAttachTarget(c fleetCardView, sessions []fleetWorkSession) fleetAttach
 // command path (EQUALS), so the remote target is single-quoted; the regex
 // admits no quote, so the quotes cannot be closed early.
 func fleetAttachArgv(srv *ServerConfig, name string, insideTmux bool) ([]string, error) {
-	if !fleetSessionNameRe.MatchString(name) {
+	// tmux reads "." in a target as window.pane; it never puts one in a
+	// session name, so a name holding one is refused, not split.
+	if !fleetSessionNameRe.MatchString(name) || strings.Contains(name, ".") {
 		return nil, errFleetAttachName
 	}
 	target := tmuxExactTarget(name)

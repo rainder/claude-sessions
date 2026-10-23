@@ -99,7 +99,7 @@ func TestFleetAttachArgv(t *testing.T) {
 			}
 		})
 	}
-	for _, bad := range []string{"", "x;rm -rf ~", "a b", "a'b", "$(id)", "a:0.0", "=a", strings.Repeat("a", 129)} {
+	for _, bad := range []string{"", "x;rm -rf ~", "a b", "a'b", "$(id)", "a:0.0", "=a", "a.b", strings.Repeat("a", 129)} {
 		for _, s := range []*ServerConfig{nil, srv} {
 			if got, err := fleetAttachArgv(s, bad, false); err == nil || got != nil {
 				t.Fatalf("argv(%q, remote=%v) = %q, %v; want refused", bad, s != nil, got, err)
@@ -219,6 +219,12 @@ func TestFleetViewAttachKey(t *testing.T) {
 	}
 	if st.attach == nil || *st.attach != (fleetAttachRequest{Tmux: "dr-1", Source: "http://host-a:8765"}) {
 		t.Fatalf("attach = %+v", st.attach)
+	}
+
+	// A paste that holds an "a" never attaches.
+	st = fleetTestState(fleetAttachView(), now)
+	if cmd := st.handleKey("a", true, now); cmd != fleetCmdNone || st.attach != nil {
+		t.Fatalf("pasted a: cmd %v attach %+v", cmd, st.attach)
 	}
 
 	st = fleetTestState(fleetAttachView(), now)
