@@ -2622,6 +2622,9 @@ func cmdServer(args []string) int {
 	// Idle events for FLEET: off until idle-events.json enables them; while
 	// off, each poll is one stat of that file.
 	go s.runIdleEvents()
+	// Plain page messages held for FLEET until its input box is clear
+	// (fleet_outbox.go); a tick is a no-op while nothing is held.
+	go s.runFleetOutbox()
 	// ClickUp ticket events for FLEET: off until clickup-events.json enables
 	// them; same one-stat cost while off.
 	go s.runClickupEvents()

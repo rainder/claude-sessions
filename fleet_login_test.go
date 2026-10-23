@@ -293,6 +293,7 @@ func TestFleetLoginRevokeRotatesSecretAndDropsCodes(t *testing.T) {
 	s := fleetTestServer(t, nil)
 	s.fleet.secretPath = filepath.Join(t.TempDir(), "cfg", "fleet-secret")
 	pending := armFleetCode(t, s)
+	queued := s.fleet.outbox.enqueue("held before revoke", "input_busy", true, s.fleetNow())
 
 	revoke := func(mod func(*http.Request)) int {
 		r := httptest.NewRequest("POST", "/fleet/login/revoke", nil)
@@ -314,6 +315,14 @@ func TestFleetLoginRevokeRotatesSecretAndDropsCodes(t *testing.T) {
 		t.Fatalf("bearer: %d, want 204", c)
 	}
 
+	for _, v := range s.fleet.outbox.view(s.fleetNow()) {
+		if v.ID == queued && (v.Status != fleetOutboxDropped || v.Code != "revoked") {
+			t.Fatalf("queued item after revoke = %+v, want dropped/revoked", v)
+		}
+	}
+	if _, _, ok := s.fleet.outbox.head(s.fleetNow()); ok {
+		t.Fatal("revoke left a queued item for the worker")
+	}
 	fresh := s.fleet.secret
 	if fresh == "" || fresh == "sec" || fresh == "tok" {
 		t.Fatalf("secret after revoke = %q", fresh)

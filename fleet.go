@@ -55,6 +55,12 @@ type fleetDeps struct {
 	sayMu     sync.Mutex // one send at a time, so two devices never interleave keystrokes
 	lastSayAt time.Time
 	saidAt    map[string]time.Time // text → completion time, last 10 s only
+	// leftover: tmux session name → a text this server typed there but
+	// could not submit (fleetRecoverLeftover). Guarded by sayMu.
+	leftover map[string]fleetLeftover
+	// outbox holds plain page messages to FLEET until its box is clear
+	// (fleet_outbox.go). Lock order: sayMu, then outbox.mu.
+	outbox fleetOutbox
 
 	// Login (fleet_login.go). secretMu guards all three: revoke rotates the
 	// secret and drops the codes in one step.
@@ -448,6 +454,8 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 		cards = nil
 	}
 	out["answered"] = s.fleet.answered.view(cards, now)
+	// Plain page messages the server holds for FLEET, without their text.
+	out["outbox"] = s.fleet.outbox.view(now)
 	if stateErr != "" {
 		out["stateError"] = stateErr
 	} else {

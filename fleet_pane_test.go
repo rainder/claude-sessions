@@ -92,6 +92,11 @@ func TestPaneInputTextFixtures(t *testing.T) {
 		// A named session: Claude Code writes the name into the top rule
 		// ("──── FLEET ─"), and the box sits under a busy turn.
 		{"pane-named-session-busy.ansi", "", true},
+		// A message submitted while Claude is busy: the queued text is drawn
+		// above the top rule, and the box shows a dim placeholder.
+		{"pane-queued-placeholder.ansi", "", true},
+		// The same busy pane with text typed but not yet submitted.
+		{"pane-typed-busy.ansi", "queued probe one two three", true},
 	}
 	for _, c := range cases {
 		text, found := paneInputText(readFixture(t, c.file))
@@ -237,17 +242,18 @@ func TestGrokPaneInputTextWrapped(t *testing.T) {
 		t.Fatalf("got %d words, want 60 (three wrapped lines)", n)
 	}
 	sent := strings.TrimSpace(strings.Repeat("word ", 80))
-	if !fleetTextLanded(text, sent) {
+	grok := Session{Tool: toolGrok}
+	if !fleetTextLandedFor(grok, text, sent) {
 		t.Fatal("wrapped grok box text must read as landed for the text sent")
 	}
-	if fleetTextLanded(text, "other text") {
+	if fleetTextLandedFor(grok, text, "other text") {
 		t.Fatal("box text that is not ours must not read as landed")
 	}
 }
 
 // Grok caps its composer at about 30 lines and scrolls it: a 4 KB text
 // shows only a later part, with ❯ on the top visible line. That still reads
-// as landed for grok, never by claude's prefix rule.
+// as landed: the box text is a contiguous piece of the sent text.
 func TestGrokPaneInputTextScrolled(t *testing.T) {
 	text, found := grokPaneInputText(readFixture(t, "grok-typed-scrolled.ansi"))
 	if !found || !strings.HasPrefix(text, "w0208 ") {
@@ -261,9 +267,6 @@ func TestGrokPaneInputTextScrolled(t *testing.T) {
 	grok := Session{Tool: toolGrok}
 	if !fleetTextLandedFor(grok, text, sent) {
 		t.Fatal("scrolled grok box must read as landed")
-	}
-	if fleetTextLanded(text, sent) || fleetTextLandedFor(Session{}, text, sent) {
-		t.Fatal("claude's prefix rule must not accept a middle piece")
 	}
 	if fleetTextLandedFor(grok, text, "w0000 w0001") || fleetTextLandedFor(grok, "", sent) {
 		t.Fatal("text that is not ours, or an empty box, must not read as landed")
@@ -344,5 +347,47 @@ func TestPaneInputTextForDispatch(t *testing.T) {
 	}
 	if _, found := paneInputTextFor(claude, readFixture(t, "grok-idle-empty.ansi")); found {
 		t.Error("a grok pane must not read as a claude box")
+	}
+}
+
+// scrolledSent is the event line whose end pane-synth-scrolled-long.ansi
+// shows: Claude Code scrolled the long text, so the ❯ line starts mid-text.
+const scrolledSent = `question 1 fleet:0.0 (1 min) "Which direction do you want: A, B, or C?" ; 191829 ` +
+	`spawn-dr-5658-sb-shop-visit-fragment-c69ba7:0.0 (779 min) "Which direction do you want: A, B, C or C2? I recommend C." ; 213660 ` +
+	`spawn-dr-5659-continuation-title-gate-ca30a2:0.0 (785 min) "Which direction do you want: A (recommended), B, or C?" ; 2156608 ` +
+	`spawn-dr-5634-dr-5635-llp-rating-columns-374caa:0.0 (693 min) "Which direction: A, B or C? I recommend A."`
+
+// The stuck FLEET pane of 2026-10-23 (59 columns, a named top rule): the
+// box holds a later part of a long text. It reads as landed for that text,
+// which the old prefix rule refused, so Enter was never pressed.
+func TestPaneInputTextScrolledLongText(t *testing.T) {
+	text, found := paneInputText(readFixture(t, "pane-synth-scrolled-long.ansi"))
+	if !found || !strings.HasPrefix(text, `B, or C?" ; 191829 spawn-dr-5658`) || !strings.HasSuffix(text, `I recommend A."`) {
+		t.Fatalf("got (%q, %v)", text, found)
+	}
+	if !fleetTextLandedFor(Session{}, text, scrolledSent) {
+		t.Fatal("a scrolled claude box must read as landed for the text sent")
+	}
+	if fleetTextLandedFor(Session{}, text, "Which direction: A, B or C?") {
+		t.Fatal("a box longer than the sent text is not ours")
+	}
+}
+
+func TestFleetLeftoverMatches(t *testing.T) {
+	sent := "Andy decides: merge DR-5658 after the tests pass, then start DR-5659."
+	for box, want := range map[string]bool{
+		sent:                                 true,
+		"merge DR-5658 after the tests pass": true,
+		"DR-5659.":                           false, // ours, but too short to tell from someone's typing
+		"[Pasted text #1 +2 lines]":          false,
+		"":                                   false,
+		"Andy decides: no":                   false,
+	} {
+		if got := fleetLeftoverMatches(box, sent); got != want {
+			t.Errorf("%q: %v, want %v", box, got, want)
+		}
+	}
+	if !fleetLeftoverMatches("ok", "ok") {
+		t.Error("the whole text matches however short")
 	}
 }

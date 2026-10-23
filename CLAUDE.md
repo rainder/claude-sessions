@@ -1088,8 +1088,8 @@ restart sees the same answer. File `$XDG_STATE_HOME/claude-sessions/fleet-answer
 `cmdServer` sets the path, tests keep it in memory): `{"answered": {"<cardId>":
 {cardHash, cardChanged?, attempts}}}`, `attempts` the last 3 sends, newest
 last, each `{optionKey, label, comment?, at, status}`. `status` is `sent`
-(Enter was pressed) or `unconfirmed` (`not_submitted`: the text may sit in the
-box). The label comes from the card in state.json (`fleetOptionLabel`), never
+(Enter took) or `unconfirmed` (`not_submitted`: the text may sit in the box,
+either before Enter or after Enter did not take). The label comes from the card in state.json (`fleetOptionLabel`), never
 from the client; `comment` says only that text rode with the option's `send`.
 The text is never stored. A server attempt carries no `lean`, so the page's
 "FLEET's pick" tag on a sent answer disappears after the next poll.
@@ -1198,11 +1198,54 @@ permission dialog. A box that already holds text refuses (another device, or
 Andy at the terminal). A pane in tmux copy-mode (`#{pane_in_mode}`) refuses:
 keys then go to the copy-mode key table, a `q` in the text leaves copy-mode, and
 only the rest reaches Claude — a mangled message that could then be submitted.
-Then the text is typed, the pane is captured **again**, and Enter is pressed
-only if the box is still there and holds our text: with all whitespace removed,
-the box text is a non-empty prefix of the sent text (Claude may wrap it or still
-be drawing it), or it starts with `[Pasted text` (how Claude Code shows a long
-text). Other text keeps the poll going; a vanished box stops it. **Residual
+Then the text is typed, the pane is captured **again** (up to 30 polls, 100 ms
+apart, `fleetLandPolls`: a FLEET with a big context redraws slowly), and Enter
+is pressed only if the box is still there and holds our text
+(`fleetTextLandedFor`): with all whitespace removed, the box text is a
+non-empty contiguous piece of the sent text, or (claude) it starts with
+`[Pasted text` (how Claude Code shows a long text). A piece, not a prefix:
+Claude Code scrolls a long text in a short pane, so the `❯` line can start
+mid-text (`pane-synth-scrolled-long.ansi`, the 59-column FLEET of 2026-10-23).
+The prefix rule never saw that text land, so it answered `not_submitted`, the
+text stayed in the box, and every later send and event refused `input_busy`
+for hours. A piece is safe because the box was empty before typing. Other
+text keeps the poll going; a vanished box stops it.
+
+**Enter is verified** (`fleetVerifyEnter`). The box text read right before
+Enter (whitespace stripped) is the landed text. After Enter the box is read up
+to 10 times, 150 ms apart. Not found, empty (Claude Code's dim `Press up to
+edit queued messages` placeholder is empty, `pane-queued-placeholder.ansi`),
+or anything but **exactly** the landed text (shorter, longer, foreign) →
+delivered: another Enter goes only on the very text the server saw before its
+own Enter, never on someone's typing or an autocomplete. The landed text on
+two reads in a row → Enter again, at most 2 more times; still there after that
+→ `not_submitted`. So `not_submitted` now means "typed, and Enter was not
+pressed or did not take": either way the text may sit in the box. A grok row
+never gets a second Enter, whatever its status: the first Enter can make it
+busy, and a bare Enter in a busy composer can force-send a queued message. It
+is only read.
+
+**Our own leftover is recovered.** A `not_submitted` remembers `{text, at,
+tries}` per tmux session (`fleetDeps.leftover`, under `sayMu`, memory only,
+30 min). The next `fleetTypeInto` there that finds text in the box presses
+Enter on it only when the box is a piece of that text and either the whole
+text or at least 24 runes (`fleetLeftoverMatches`; never `[Pasted text`, never
+copy mode), then runs the verify with no retry. At most 2 such Enters per
+leftover, across every send (`fleetLeftoverTries`); after that the server
+never presses Enter on it again, and it stays remembered until the box is
+empty or the TTL passes. Left → the say log gets `recovered target=<tmux>
+len=<n>` (no text). When the leftover is this send's own text (a resend after
+`not_submitted`, e.g. the page's Send again or the outbox), that Enter **is**
+the delivery: the send answers OK and types nothing, since typing it again
+would deliver it twice. Otherwise the send goes on with a fresh capture; still
+there → `input_busy`, as before. An empty box drops the memory. The 24-rune
+floor is stricter than the land check on purpose: a short piece of ours
+cannot be told from someone's own typing, and Enter must never submit text
+the server did not type. **Residuals, accepted:** a leftover that Claude Code
+shows as a `[Pasted text` placeholder is never recovered (it cannot be told
+from a human paste), so it waits for someone at the terminal; and an Enter that
+only accepted an autocomplete or a menu item changes the box, so it reads as
+delivered. **Residual
 race, accepted:** a dialog that opens in the milliseconds between the first
 capture and typing, or between the second capture and Enter, still takes the
 keys — and typing alone can answer it, since digit keys select options.
@@ -1245,19 +1288,21 @@ An `ask_user_question` dialog hides the composer, so it reads as not found
 (`dialog`). A busy grok turn still draws an empty box, so the screen cannot
 tell busy, and Enter there is not safe: while a turn waits on background work
 or a subagent, Enter with text cancels it, and a bare Enter can force-send a
-queued message. So `fleetTypeInto` types into a grok row only when its Status
-is `idle` or `shell` (turn over, background work open — checked live: the line
-starts a new turn and the background command keeps running); anything else,
-including an empty status (no readable `events.jsonl`), refuses with code
-`busy` before it reads the pane (a claude busy row still types and queues).
+queued message. So `fleetTypeInto` types into a grok row when its Status is
+`idle` or `shell` (turn over, background work open — checked live: the line
+starts a new turn and the background command keeps running), and into a
+`busy` one only for a sender without `refuseBusyGrok` (a page send: grok
+queues it). Every automatic sender (idle, blocked, question and ClickUp
+events, the outbox worker) sets `refuseBusyGrok`. Anything else, including an
+empty status (no readable `events.jsonl`), refuses with code `busy` before it
+reads the pane (a claude busy row still types and queues).
 Residual, accepted: a `shell` grok can start a turn by itself when its
 background work ends, between the status read and Enter — the same window as
 the dialog race below. Grok caps the composer at about 30 lines and scrolls
 it: the top visible line keeps `❯` but shows a later part of the text, and a
 block-element scrollbar (`█`, `▇`, U+2580–U+259F) sits inside the right
-border and is dropped. So for grok the land check is `fleetTextLandedFor`: the
-box text is any non-empty piece of the sent text, not a prefix (the box was
-empty before typing). No fixture shows grok's tool-approval dialog
+border and is dropped; the piece rule above covers it, as it covers claude's
+own scroll. No fixture shows grok's tool-approval dialog
 (always-approve hid it); `WaitingFor` is the guard there. Fixtures:
 `testdata/fleet/grok-*.ansi`, real grok 1.0.60 panes.
 
@@ -1278,7 +1323,42 @@ in the unit, but nothing arrived), so the stderr log reached nobody.
 `service install` does not bake `XDG_STATE_HOME` into the unit (only `PATH`
 and `TMPDIR`), so the service writes the log under the default path even when
 your shell sets `XDG_STATE_HOME` — look there first.
-`fleetDeps.sayLogPath` points tests at a temp dir.
+`fleetDeps.sayLogPath` points tests at a temp dir. A sender with a `logGate`
+(the outbox worker, the event loops) writes these entries at most once per
+code per gap; the page path is ungated.
+
+**Outbox** (`fleet_outbox.go`). A plain page message (`/fleet/say` with no
+`cardId`) that cannot be typed now is held and typed later, so Andy can write
+while FLEET is busy. Held: `input_busy`, `dialog`, `busy`, `pane_mode`, the 1 s
+gap (`rate_limited`), and any message while earlier ones are still queued
+(FIFO). Every other check runs first and still refuses (`not_live`,
+`ambiguous`, `fleet_changed`, `double_tap`, …); the same text already queued
+is `double_tap`, and a text in the 10 s map inside the gap is `double_tap`, not
+held. The answer is 200 `{ok, held, outboxId}` (12 random bytes, base64url);
+more than 20 queued is `outbox_full`. Card answers are never held: their
+guards must run at the moment of typing, and the answer store has no queued
+state. `/fleet/session/say` and the event loops are unchanged (the loops keep
+their own pending batches). Items are memory only, so the text never reaches
+disk and a restart drops them; the page then finds the id gone and marks the
+bubble unconfirmed. A queued item older than 60 min is `dropped` (`expired`);
+a finished one stays visible for 10 min. The head item is marked in flight
+while the worker types it (`head` sets it; `retry`, `finish`, or a deferred
+`release` clears it), and the prune never expires an item in flight: one that
+crosses 60 min mid-send could be landing in the box, so it ends by its real
+outcome, not as dropped. `runFleetOutbox` (started in
+`cmdServer`) ticks every 2 s and at once on enqueue; `fleetOutboxTick` takes
+`sayMu`, applies the 1 s gap, resolves FLEET fresh (`fleetSendTarget`, the
+same discover → `resolveLivePID` → `findFleet` as `fleetSay`), and types the
+head item with `refuseBusyGrok` and a gated refusal log. OK → `sent` plus the
+`web-say` log line; `not_submitted` or `send_failed` → `unconfirmed` plus the
+`note` line, never typed again; anything else stays queued (`attempts`,
+`code`). `/fleet/state`'s `outbox` lists `{id, status, code, queuedAt,
+doneAt, attempts}` — never the text. Lock order: `sayMu`, then the outbox
+mutex; `/fleet/state` takes the outbox's only. The page keeps a held message
+as a "Queued" bubble (localStorage `fleet.chat.v1`, status `queued` with its
+`outboxId`) and moves it on from a state answer asked for after the hold:
+`sent` → gone, `unconfirmed` or missing → unconfirmed, `dropped` → "Not
+delivered" with Send again. A queued bubble has no Send again or Dismiss.
 
 **Web Push** (`webpush.go`, `fleet_push.go`). Stdlib only: RFC 8291
 encryption over RFC 8188 `aes128gcm` (one record; header plus ciphertext at most 4096 bytes, `crypto/ecdh`,
@@ -1619,8 +1699,8 @@ is no longer reported (went busy, went away, a new episode) is dropped, keys
 are deduped (newest wins), and minutes are counted to the send. When nothing is
 left, nothing is sent. Turning the feature off clears the batch on disk. A
 refused send keeps the batch and retries on every poll, except
-`not_submitted`: the text is typed but Enter was not pressed, so the batch
-counts as delivered (`lastSent` is set). A retry would duplicate the line if
+`not_submitted`: the text is typed but Enter was not pressed or did not take,
+so the batch counts as delivered (`lastSent` is set). A retry would duplicate the line if
 Andy presses Enter on the leftover. A `note` goes to `log.jsonl`, as
 `/fleet/say` does.
 
@@ -1754,7 +1834,8 @@ sessions are skipped with `idleSkipped`. A skipped row keeps its episode, so
 turning the skip off does not send the same prompt again. The target is
 `fleetEventTarget`, and
 the send is `idleDeliver`. `sent` and `not_submitted` clear the pending line
-(`not_submitted` must not be retried: the text is already in the box). Any
+(`not_submitted` must not be retried: the text may already be in the box,
+before Enter or after an Enter that did not take). Any
 other refusal keeps it and the next poll tries again. The log is counts and
 codes only. The question can be a shell command, so it is never written there.
 
@@ -1879,8 +1960,9 @@ batch window): `[claude-sessions event] ticket ` plus entries joined by ` ; `
 most 15 and within `sendKeysMaxLen`, then ` ; +N more`. Target and send are
 the idle events' (`fleetEventTarget`, `idleDeliver`): the same fresh collect,
 1 s gap and `fleetTypeInto` guards. `sent` clears pending and sets `lastSent`;
-`not_submitted` counts as delivered (a retry would duplicate the line if Andy
-presses Enter on the leftover) and appends a `note` to `log.jsonl`; any
+`not_submitted` (typed; Enter not pressed or did not take) counts as delivered
+(a retry would duplicate the line if Andy presses Enter on the leftover) and
+appends a `note` to `log.jsonl`; any
 refusal keeps the events in `pending` (persisted, one per kind+id, newest
 wins, at most 100, oldest dropped), logs `refused code=… n=…` once per 10
 minutes, and retries next tick.
