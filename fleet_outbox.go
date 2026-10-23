@@ -59,6 +59,10 @@ type fleetOutboxItem struct {
 	// pruneLocked never expires it then: an item past the TTL mid-send
 	// would read dropped while it may be landing in the box.
 	inflight bool
+	// revoked: a login revoke ran while the item was in flight. If that
+	// attempt does not deliver it, it is dropped, never queued again.
+	revoked   bool
+	revokedAt time.Time
 }
 
 // fleetOutboxView is one item in /fleet/state's outbox. No text: the page
@@ -185,6 +189,7 @@ func (o *fleetOutbox) release(id string) {
 	for _, it := range o.items {
 		if it.id == id {
 			it.inflight = false
+			o.dropIfRevokedLocked(it)
 		}
 	}
 }
@@ -198,6 +203,7 @@ func (o *fleetOutbox) retry(id, code string) {
 			it.attempts++
 			it.lastCode = code
 			it.inflight = false
+			o.dropIfRevokedLocked(it)
 		}
 	}
 }
@@ -217,14 +223,28 @@ func (o *fleetOutbox) finish(id, status, code string, at time.Time) {
 
 // dropQueued drops every queued item that is not in flight, with code. A
 // login revoke uses it: a message queued by a device that was just logged
-// out must not be typed later. An in-flight item is being typed already.
+// out must not be typed later. An in-flight item is flagged instead: if the
+// attempt in progress does not deliver it, retry or release drops it.
 func (o *fleetOutbox) dropQueued(code string, at time.Time) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, it := range o.items {
-		if it.status == fleetOutboxQueued && !it.inflight {
-			it.status, it.lastCode, it.doneAt, it.text = fleetOutboxDropped, code, at, ""
+		if it.status != fleetOutboxQueued {
+			continue
 		}
+		if it.inflight {
+			it.revoked, it.revokedAt = true, at
+			continue
+		}
+		it.status, it.lastCode, it.doneAt, it.text = fleetOutboxDropped, code, at, ""
+	}
+}
+
+// dropIfRevokedLocked drops a queued item that a revoke flagged while it was
+// in flight. Caller holds o.mu.
+func (o *fleetOutbox) dropIfRevokedLocked(it *fleetOutboxItem) {
+	if it.revoked && it.status == fleetOutboxQueued {
+		it.status, it.lastCode, it.doneAt, it.text = fleetOutboxDropped, "revoked", it.revokedAt, ""
 	}
 }
 

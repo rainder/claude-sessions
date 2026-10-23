@@ -601,3 +601,34 @@ func TestFleetOutboxEnqueueWakes(t *testing.T) {
 		t.Fatal("enqueue must signal the worker")
 	}
 }
+
+func TestFleetOutboxRevokeOutlastsInFlightAttempt(t *testing.T) {
+	var o fleetOutbox
+	now := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
+	a := o.enqueue("first", "input_busy", true, now)
+	b := o.enqueue("second", "input_busy", true, now)
+	if id, _, ok := o.head(now); !ok || id != a {
+		t.Fatalf("head = %q %v, want %q", id, ok, a)
+	}
+	o.dropQueued("revoked", now) // a is in flight, b is not
+	o.retry(a, "input_busy")     // the attempt in flight did not deliver
+	if _, _, ok := o.head(now); ok {
+		t.Fatal("an item survived the revoke")
+	}
+	for _, v := range o.view(now) {
+		if (v.ID == a || v.ID == b) && (v.Status != fleetOutboxDropped || v.Code != "revoked") {
+			t.Fatalf("%s = %+v, want dropped/revoked", v.ID, v)
+		}
+	}
+
+	// An in-flight item that the attempt delivers stays sent.
+	c := o.enqueue("third", "input_busy", true, now)
+	o.head(now)
+	o.dropQueued("revoked", now)
+	o.finish(c, fleetOutboxSent, "", now)
+	for _, v := range o.view(now) {
+		if v.ID == c && v.Status != fleetOutboxSent {
+			t.Fatalf("delivered in-flight item = %+v, want sent", v)
+		}
+	}
+}
