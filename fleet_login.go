@@ -178,6 +178,8 @@ func (s *server) fleetLoginRevoke(w http.ResponseWriter, r *http.Request) {
 	// cookies stop working now, and the 500 says a restart would bring them
 	// back. A server with no secretPath (tests) rotates in memory only.
 	f.secret, f.codes = sec, nil
+	// Messages queued by the devices just logged out are not typed later.
+	f.outbox.dropQueued("revoked", s.fleetNow())
 	if f.secretPath != "" {
 		if err := writeFleetSecret(f.secretPath, sec); err != nil {
 			http.Error(w, "revoked until restart; saving the new secret failed: "+err.Error(), http.StatusInternalServerError)

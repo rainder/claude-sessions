@@ -215,6 +215,19 @@ func (o *fleetOutbox) finish(id, status, code string, at time.Time) {
 	}
 }
 
+// dropQueued drops every queued item that is not in flight, with code. A
+// login revoke uses it: a message queued by a device that was just logged
+// out must not be typed later. An in-flight item is being typed already.
+func (o *fleetOutbox) dropQueued(code string, at time.Time) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, it := range o.items {
+		if it.status == fleetOutboxQueued && !it.inflight {
+			it.status, it.lastCode, it.doneAt, it.text = fleetOutboxDropped, code, at, ""
+		}
+	}
+}
+
 // view is /fleet/state's outbox: every item still kept, oldest first, never
 // nil.
 func (o *fleetOutbox) view(now time.Time) []fleetOutboxView {
