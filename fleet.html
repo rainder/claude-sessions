@@ -2877,6 +2877,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     start.retryUntil = fl && num(fl.retryAfter) && fl.retryAfter > 0 ? Date.now() + fl.retryAfter * 1000 : 0;
 
     const dropped = prunePending(seq);
+    if (reconcileOutbox(st.outbox, seq)) guard(renderChat);
     // An open sheet must not send an answer to a card that has moved on.
     if (sheet.card && !sheet.busy && $("sheet").open) {
       if (!sheetValid()) {
@@ -3162,7 +3163,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // A busy Grok turn accepts a send: Enter queues it. This text is for a
   // Grok session whose status is unknown or waiting.
   const GROK_BUSY = "The Grok session is busy. Try again when its turn ends.";
-  const say = (text, cardId) => postSay("/fleet/say", {text, cardId}, {busy: GROK_BUSY});
+  const OUTBOX_FULL = "Too many queued messages. Wait until FLEET reads them.";
+  const say = (text, cardId) => postSay("/fleet/say", {text, cardId}, {busy: GROK_BUSY, outbox_full: OUTBOX_FULL});
   // sayCard sends an answer to a card: the option's key, the card's hash as
   // the page showed it (the server refuses when the card moved since), and
   // whether it replaces an earlier answer.
@@ -3192,7 +3194,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     try { raw = await r.text(); } catch { clearTimeout(timer); if (r.ok) return unclear; raw = ""; }
     clearTimeout(timer);
     try { body = obj(JSON.parse(raw)); } catch { body = null; }
-    if (r.ok && body && body.ok === true) return {ok: true, queued: body.queued === true};
+    // held: the server keeps the text in its outbox and types it later
+    // (plain messages only; outboxId names it in /fleet/state's outbox).
+    if (r.ok && body && body.ok === true) return {ok: true, queued: body.queued === true, held: body.held === true, outboxId: str(body.outboxId)};
     // A 2xx the page cannot read (not JSON, no boolean ok) says the request
     // got through, not what became of the text: treat it as unknown.
     if (r.ok && !(body && typeof body.ok === "boolean")) return unclear;
@@ -3373,22 +3377,27 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // transcript, Andy dismisses it, or "Send again" (two taps) gets it
   // through. Every attempt is in localStorage before its POST goes out, so a
   // reload or a tab eviction mid-send still shows it. Entry: {id, text, sid
-  // (the FLEET session it went to), ts, status: "sending" | "unconfirmed",
+  // (the FLEET session it went to), ts, status: "sending" | "unconfirmed" |
+  // "queued" | "failed", outboxId (queued: the server's outbox item),
+  // heldSeq (the state request count when the hold answer came back),
   // hidden (a first send still in flight: no bubble yet), confirm, timer,
-  // busy}.
+  // busy}. queued: the server holds the text and types it when the FLEET
+  // input box is clear; failed: the server dropped it (expired).
   const CHAT_KEY = "fleet.chat.v1", CHAT_MAX = 10;
   const normText = t => t.replace(/\s+/g, " ").trim();
   function saveChatStore() {
     const now = Date.now();
     const out = chat.local.filter(m => now - m.ts <= PEND_MAX).slice(-CHAT_MAX)
-      .map(m => ({id: m.id, text: m.text, sessionId: m.sid, at: new Date(m.ts).toISOString(), status: m.status}));
+      .map(m => ({id: m.id, text: m.text, sessionId: m.sid, at: new Date(m.ts).toISOString(), status: m.status, outboxId: m.outboxId || undefined}));
     try {
       if (out.length) localStorage.setItem(CHAT_KEY, JSON.stringify(out));
       else localStorage.removeItem(CHAT_KEY);
     } catch { /* storage off: memory only */ }
   }
-  // An attempt from an earlier page load never got its answer here, so
-  // every restored entry is unconfirmed.
+  // An attempt from an earlier page load never got its answer here, so a
+  // restored "sending" entry is unconfirmed. A queued one keeps its outbox
+  // id: the next state answer says what became of it. A failed one stays
+  // failed.
   function loadChatStore() {
     let list = null;
     try { list = JSON.parse(localStorage.getItem(CHAT_KEY) || "null"); } catch { list = null; }
@@ -3399,9 +3408,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       if (!o || !str(o.text) || !str(o.id)) continue;
       const ts = Date.parse(str(o.at)), st = str(o.status);
       if (!isFinite(ts) || now - ts > PEND_MAX || now - ts < -PEND_MAX) continue;
-      if (st !== "sending" && st !== "unconfirmed") continue;
+      if (st !== "sending" && st !== "unconfirmed" && st !== "queued" && st !== "failed") continue;
       if (chat.local.some(m => m.id === str(o.id))) continue;
-      chat.local.push({id: str(o.id), text: str(o.text), sid: str(o.sessionId), ts, status: "unconfirmed", hidden: false, confirm: false, timer: 0, busy: false});
+      const oid = str(o.outboxId);
+      const status = st === "queued" && oid ? "queued" : st === "failed" ? "failed" : "unconfirmed";
+      chat.local.push({id: str(o.id), text: str(o.text), sid: str(o.sessionId), ts, status, outboxId: status === "queued" ? oid : "", heldSeq: 0, hidden: false, confirm: false, timer: 0, busy: false});
     }
     chat.local = chat.local.slice(-CHAT_MAX);
     saveChatStore();
@@ -3433,10 +3444,48 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     saveChatStore();
     guard(renderChat);
   }
+  // reconcileOutbox moves each queued bubble on with the server's outbox,
+  // from a state answer asked for after its hold answer came back (an
+  // older one may predate the item): sent → gone (the transcript shows
+  // it); unconfirmed → unconfirmed; dropped → failed; missing (the server
+  // restarted, which drops the in-memory outbox) → unconfirmed. A server
+  // with no outbox key changes nothing. True when a bubble changed.
+  function reconcileOutbox(list, seq) {
+    if (!Array.isArray(list)) return false;
+    const items = new Map(list.map(obj).filter(o => o && str(o.id)).map(o => [str(o.id), o]));
+    let dirty = false, sent = false;
+    for (const m of [...chat.local]) {
+      if (m.status !== "queued" || m.busy || !(seq > (m.heldSeq || 0))) continue;
+      const it = items.get(m.outboxId), st = it ? str(it.status) : "";
+      if (st === "queued") continue;
+      if (st === "sent") {
+        clearTimeout(m.timer);
+        chat.local = chat.local.filter(x => x !== m);
+        sent = true;
+      } else {
+        m.status = st === "dropped" ? "failed" : "unconfirmed";
+        m.outboxId = "";
+      }
+      dirty = true;
+    }
+    if (dirty) saveChatStore();
+    if (sent) afterSend();
+    return dirty;
+  }
   // The bubble names an earlier FLEET session when the chat now shows a
   // different one: sending it again goes to the current session.
   const otherSession = m => !!(m.sid && chat.sid && m.sid !== chat.sid);
   function localBubble(m) {
+    // A queued message is the server's to type: no Send again (it would
+    // queue a second copy) and no Dismiss (it would not stop the server).
+    if (m.status === "queued") {
+      const q = el("div", "turn user local",
+        el("div", "who", el("b", "", "Andy"), el("span", "", clockWithDay(new Date(m.ts).toISOString()))),
+        el("div", "body", m.text),
+        el("div", "local-warn", el("span", "dot"), el("span", "", "Queued — the server types it when the FLEET input box is clear")));
+      q.dataset.local = m.id;
+      return q;
+    }
     const other = otherSession(m);
     const again = el("button", "link-btn" + (m.confirm ? " confirm" : ""),
       m.busy ? "Sending…" : m.confirm ? "Tap again to send" : other ? "Send to the current session" : "Send again");
@@ -3462,15 +3511,18 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const w = el("div", "turn user local",
       el("div", "who", el("b", "", "Andy"), el("span", "", clockWithDay(new Date(m.ts).toISOString()))),
       el("div", "body", m.text),
-      el("div", "local-warn", el("span", "dot"), el("span", "", other
-        ? "Sent to an earlier FLEET session — not confirmed"
-        : "Not confirmed — check the chat before you send it again")),
+      el("div", "local-warn", el("span", "dot"), el("span", "", m.status === "failed"
+        ? "Not delivered — the FLEET input box did not clear in time"
+        : other
+          ? "Sent to an earlier FLEET session — not confirmed"
+          : "Not confirmed — check the chat before you send it again")),
       el("div", "local-acts", again, dis));
     w.dataset.local = m.id;
     return w;
   }
   // sendAttempt: one POST for entry m, stored as "sending" first. ok
-  // deletes the entry; no clear answer keeps it as an unconfirmed bubble;
+  // deletes the entry, held keeps it as a queued bubble with its outbox
+  // id; no clear answer keeps it as an unconfirmed bubble;
   // an HTTP error restores what was there before (a first send: no entry,
   // so the draft stays the only copy).
   async function sendAttempt(m) {
@@ -3479,7 +3531,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!chat.local.includes(m)) chat.local.push(m);
     saveChatStore();
     const res = await say(m.text, null);
-    if (res.ok) {
+    if (res.ok && res.held) {
+      // No id to follow is as good as no answer: unconfirmed.
+      m.status = res.outboxId ? "queued" : "unconfirmed";
+      m.outboxId = res.outboxId;
+      m.heldSeq = stateReqs;
+      m.hidden = false;
+      chat.follow = true;
+    } else if (res.ok) {
       chat.local = chat.local.filter(x => x !== m);
     } else if (res.unclear) {
       m.status = "unconfirmed";
@@ -3501,7 +3560,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     guard(renderChat);
     const res = await sendAttempt(m);
     chatBusy = false; m.busy = false;
-    if (res.ok) {
+    if (res.ok && res.held) {
+      toast(HELD_TEXT);
+      runNow("state");
+    } else if (res.ok) {
       toast(res.queued ? "Sent. FLEET is busy. It reads this next." : "Sent to FLEET.");
       afterSend();
     } else if (res.unclear) {
@@ -3532,6 +3594,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     ta.style.height = Math.min(ta.scrollHeight + 2, 200) + "px";
   }
 
+  const HELD_TEXT = "Queued. The server types it when the FLEET input box is clear.";
   let chatBusy = false;
   async function sendChat() {
     const ta = $("say");
@@ -3544,7 +3607,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const res = await sendAttempt(m);
     chatBusy = false;
     btn.textContent = "Send";
-    if (res.ok) {
+    if (res.ok && res.held) {
+      // The server has it: clear the input as for a sent message.
+      if (ta.value.trim() === text) ta.value = "";
+      grow();
+      guard(renderChat);
+      toast(HELD_TEXT);
+      runNow("state");
+    } else if (res.ok) {
       if (ta.value.trim() === text) ta.value = "";
       grow();
       toast(res.queued ? "Sent. FLEET is busy. It reads this next." : "Sent to FLEET.");

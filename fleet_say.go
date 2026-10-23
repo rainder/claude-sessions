@@ -20,8 +20,27 @@ import (
 const (
 	fleetSayGap       = time.Second
 	fleetSayDoubleTap = 10 * time.Second
-	fleetLandPolls    = 15
-	fleetLandEvery    = 100 * time.Millisecond
+	// fleetLandPolls × fleetLandEvery is how long a typed text has to show
+	// in the box before Enter: 3 s, for a slow-to-redraw FLEET.
+	fleetLandPolls = 30
+	fleetLandEvery = 100 * time.Millisecond
+	// After Enter the box is read fleetEnterPolls times, fleetEnterEvery
+	// apart. The exact text that landed still there on two reads in a row
+	// gets one more Enter, at most fleetEnterRetries times (never for grok).
+	fleetEnterPolls   = 10
+	fleetEnterEvery   = 150 * time.Millisecond
+	fleetEnterRetries = 2
+	// fleetLeftoverTTL: how long a text this server typed but could not
+	// submit may still be submitted by a later send (fleetRecoverLeftover).
+	fleetLeftoverTTL = 30 * time.Minute
+	// fleetLeftoverMinRunes: a leftover box shorter than this must be the
+	// whole text, so a short word someone else typed is never taken for a
+	// piece of ours.
+	fleetLeftoverMinRunes = 24
+	// fleetLeftoverTries: recovery Enters per leftover, across every send.
+	// After that the text is never submitted by the server again; it stays
+	// remembered until the box is empty or the TTL passes.
+	fleetLeftoverTries = 2
 )
 
 type fleetSayResult struct {
@@ -29,6 +48,19 @@ type fleetSayResult struct {
 	Queued bool   `json:"queued,omitempty"`
 	Error  string `json:"error,omitempty"`
 	Code   string `json:"code,omitempty"`
+	// Held: a plain page message went to the server outbox
+	// (fleet_outbox.go) instead of being typed now.
+	Held     bool   `json:"held,omitempty"`
+	OutboxID string `json:"outboxId,omitempty"`
+}
+
+// fleetLeftover is a text this server typed into a session but could not
+// submit (not_submitted). Keyed by tmux session name in fleetDeps.leftover,
+// guarded by sayMu.
+type fleetLeftover struct {
+	text  string
+	at    time.Time
+	tries int // recovery Enters pressed on it so far (fleetLeftoverTries)
 }
 
 // sanitizeFleetText makes page text safe to type as one prompt: a literal
@@ -123,30 +155,33 @@ func tmuxTypeLiteral(target, text string) error {
 	return exec.Command("tmux", "send-keys", "-t", tmuxExactTarget(target), "-l", "--", text).Run()
 }
 
-// fleetTextLandedFor is fleetTextLanded for row's tool. Grok caps its
-// composer at about 30 lines and scrolls it, so a long text shows only a
-// later part of it: for grok the box text has to be a non-empty piece of the
-// sent text, anywhere in it, whitespace ignored. The box was empty before
-// the text was typed, so whatever it holds now came from this send.
+// fleetTextLandedFor reports whether the input box holds what was just
+// typed: the box text is a non-empty contiguous piece of the sent text,
+// anywhere in it, whitespace ignored. Claude or grok may wrap a long line or
+// still be drawing it (a prefix), and both scroll a long text so the box
+// shows only a later part of it (Claude Code's ❯ line then starts mid-text).
+// The box was empty before the text was typed, so whatever it holds now came
+// from this send. A long paste shows in Claude Code as a "[Pasted text ...]"
+// placeholder instead; grok wraps it inside the box.
 func fleetTextLandedFor(row Session, box, sent string) bool {
-	if row.IsGrok() {
-		b := stripSpace(box)
-		return b != "" && strings.Contains(stripSpace(sent), b)
-	}
-	return fleetTextLanded(box, sent)
-}
-
-// fleetTextLanded reports whether the input box holds what was just typed.
-// Claude or grok may wrap a long line or still be drawing it, so the box
-// text only has to be a non-empty prefix of the sent text, whitespace
-// ignored. A long paste shows in Claude Code as a "[Pasted text ...]"
-// placeholder instead; grok wraps it inside the box (fleetTextLandedFor).
-func fleetTextLanded(box, sent string) bool {
-	if strings.HasPrefix(box, "[Pasted text") {
+	if !row.IsGrok() && strings.HasPrefix(box, "[Pasted text") {
 		return true
 	}
+	b := stripSpace(box)
+	return b != "" && strings.Contains(stripSpace(sent), b)
+}
+
+// fleetLeftoverMatches is the stricter check before Enter is pressed on a
+// box this send did not just type into: the box may hold someone else's
+// text by now. It must be a contiguous piece of our text, whitespace
+// ignored, and either the whole text or at least fleetLeftoverMinRunes long.
+// A "[Pasted text" placeholder never matches: anyone's paste looks like that.
+func fleetLeftoverMatches(box, sent string) bool {
 	b, t := stripSpace(box), stripSpace(sent)
-	return b != "" && strings.HasPrefix(t, b)
+	if b == "" || !strings.Contains(t, b) {
+		return false
+	}
+	return b == t || utf8.RuneCountInString(b) >= fleetLeftoverMinRunes
 }
 
 func stripSpace(s string) string {
@@ -371,13 +406,48 @@ type fleetSayWho struct {
 
 var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane", paneLog: true}
 
+// fleetPaneSeams are fleetDeps' tmux seams with the real defaults filled in.
+type fleetPaneSeams struct {
+	capture    func(string) (string, error)
+	typeText   func(target, text string) error
+	pressEnter func(target string) error
+	sleep      func(time.Duration)
+	inMode     func(target string) (bool, error)
+}
+
+func (s *server) fleetPaneSeams() fleetPaneSeams {
+	f := &s.fleet
+	sc := fleetPaneSeams{capture: f.capture, typeText: f.typeText, pressEnter: f.pressEnter, sleep: f.sleep, inMode: f.paneInMode}
+	if sc.capture == nil {
+		sc.capture = capturePane
+	}
+	if sc.typeText == nil {
+		sc.typeText = tmuxTypeLiteral
+	}
+	if sc.pressEnter == nil {
+		sc.pressEnter = tmuxPressEnter
+	}
+	if sc.sleep == nil {
+		sc.sleep = time.Sleep
+	}
+	if sc.inMode == nil {
+		sc.inMode = tmuxPaneInMode
+	}
+	return sc
+}
+
 // fleetTypeInto is the pane half of every page send: refuse a session that
 // waits on a dialog, is a grok session this sender must not type into, has
 // no pane, shows no empty input box (claude's or grok's, paneInputTextFor),
-// or is in copy mode; type the text; press Enter only once the box holds it.
+// or is in copy mode; type the text; press Enter only once the box holds it;
+// then check that Enter took (fleetVerifyEnter). A box that still holds a
+// text this server typed earlier and could not submit is submitted first
+// (fleetRecoverLeftover); when that text is this send's own text, that
+// Enter was this send's delivery and nothing is typed. Any other text in the
+// box refuses as input_busy.
 // row must be a freshly resolved session: its Tmux is the only pane address
 // used. Caller holds sayMu. The result is the response envelope; ok false
-// with code not_submitted means the text was typed but Enter was not pressed.
+// with code not_submitted means the text was typed but is still in the box.
 func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetSayResult {
 	f := &s.fleet
 	refuse := func(code, msg string) fleetSayResult { return fleetSayResult{Code: code, Error: msg} }
@@ -396,55 +466,64 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 		return refuse("no_pane", who.subject+" has no tmux pane")
 	}
 	pane := tmuxExactTarget(row.Tmux) // "=" so a gone session never prefix-matches another
-	capture := f.capture
-	if capture == nil {
-		capture = capturePane
-	}
-	screen, err := capture(pane)
+	key := tmuxSessionPart(row.Tmux)
+	sc := s.fleetPaneSeams()
+	screen, err := sc.capture(pane)
 	if err != nil {
 		return refuse("no_pane", "cannot read "+who.pane)
 	}
-	if typed, found := paneInputTextFor(row, screen); !found {
+	typed, found := paneInputTextFor(row, screen)
+	if found && typed != "" {
+		if old, ok := s.fleetRecoverLeftover(row, pane, key, typed, sc); ok {
+			// The leftover was this very text (a resend after not_submitted):
+			// submitting it was this send's delivery. Typing it again would
+			// deliver it twice.
+			if old == text {
+				return fleetSayResult{OK: true, Queued: row.Status == "busy"}
+			}
+			// Our old text left the box. Read it again for this send.
+			if screen, err = sc.capture(pane); err != nil {
+				return refuse("no_pane", "cannot read "+who.pane)
+			}
+			typed, found = paneInputTextFor(row, screen)
+		}
+	}
+	if !found {
 		s.logFleetSendRefusal(who, "dialog", row.Tmux, screen, text)
 		return refuse("dialog", who.subject+" input box is not visible")
 	} else if typed != "" {
 		s.logFleetSendRefusal(who, "input_busy", row.Tmux, screen, text)
 		return refuse("input_busy", "input box not empty")
 	}
-	inMode := f.paneInMode
-	if inMode == nil {
-		inMode = tmuxPaneInMode
-	}
-	if mode, err := inMode(pane); err != nil {
+	delete(f.leftover, key) // an empty box holds no leftover
+	if mode, err := sc.inMode(pane); err != nil {
 		return refuse("no_pane", "cannot read "+who.pane)
 	} else if mode {
 		return refuse("pane_mode", strings.ToUpper(who.pane[:1])+who.pane[1:]+" is in scroll mode. Press q in the terminal, then try again.")
 	}
 
-	typeText, pressEnter, sleep := f.typeText, f.pressEnter, f.sleep
-	if typeText == nil {
-		typeText = tmuxTypeLiteral
-	}
-	if pressEnter == nil {
-		pressEnter = tmuxPressEnter
-	}
-	if sleep == nil {
-		sleep = time.Sleep
-	}
-	if err := typeText(pane, text); err != nil {
+	if err := sc.typeText(pane, text); err != nil {
 		return refuse("send_failed", "send text: "+err.Error())
+	}
+	notSubmitted := func(screen string) fleetSayResult {
+		if f.leftover == nil {
+			f.leftover = map[string]fleetLeftover{}
+		}
+		f.leftover[key] = fleetLeftover{text: text, at: s.fleetNow()}
+		s.logFleetSendRefusal(who, "not_submitted", row.Tmux, screen, text)
+		return refuse("not_submitted", "Text was typed but not sent. "+who.subject+" changed state. Check the terminal.")
 	}
 	// The first capture is a snapshot: a dialog may have opened since, and
 	// Enter would pick its highlighted option. Press Enter only once the box
 	// is still there and holds what was just typed (it was empty before).
 	// Other text in the box is not ours: keep polling, then give up.
-	landed := false
+	landed, landedBox := false, ""
 	lastScreen := ""
 	for i := 0; i < fleetLandPolls && !landed; i++ {
 		if i > 0 {
-			sleep(fleetLandEvery)
+			sc.sleep(fleetLandEvery)
 		}
-		screen, err := capture(pane)
+		screen, err := sc.capture(pane)
 		if err != nil {
 			continue
 		}
@@ -454,33 +533,129 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 			break
 		}
 		landed = fleetTextLandedFor(row, typed, text)
+		landedBox = typed
 	}
 	if !landed {
-		s.logFleetSendRefusal(who, "not_submitted", row.Tmux, lastScreen, text)
-		return refuse("not_submitted", "Text was typed but not sent. "+who.subject+" changed state. Check the terminal.")
+		return notSubmitted(lastScreen)
 	}
-	if err := pressEnter(pane); err != nil {
+	if err := sc.pressEnter(pane); err != nil {
 		return refuse("send_failed", "send enter: "+err.Error())
 	}
+	stuck, lastScreen, err := s.fleetVerifyEnter(row, pane, landedBox, true, sc)
+	if err != nil {
+		return refuse("send_failed", "send enter: "+err.Error())
+	}
+	if stuck {
+		return notSubmitted(lastScreen)
+	}
 	return fleetSayResult{OK: true, Queued: row.Status == "busy"}
+}
+
+// fleetVerifyEnter reads the box after Enter was pressed on landed (the
+// box text read right before that Enter). The text left (no box: a turn
+// started; an empty box, which includes Claude Code's dim "Press up to edit
+// queued messages" placeholder) → delivered. Any box that is not exactly
+// landed, whitespace ignored (shorter, longer, foreign: someone typing, or
+// an autocomplete) → delivered too: the server presses Enter only on the
+// very text it saw before its own Enter, never on anything else. Exactly
+// landed on two reads in a row → Enter again, at most fleetEnterRetries
+// times, when retry is set and the row is not grok: a first Enter can make
+// a grok row busy, and a bare Enter in a busy grok composer can force-send
+// a queued message, so grok is only read. stuck is true when landed is
+// still in the box at the end; screen is the last screen read.
+func (s *server) fleetVerifyEnter(row Session, pane, landed string, retry bool, sc fleetPaneSeams) (stuck bool, screen string, err error) {
+	retry = retry && !row.IsGrok()
+	want := stripSpace(landed)
+	ours, retries, lastOurs := 0, 0, false
+	for i := 0; i < fleetEnterPolls; i++ {
+		sc.sleep(fleetEnterEvery)
+		got, cerr := sc.capture(pane)
+		if cerr != nil {
+			ours = 0 // an unread poll breaks the run
+			continue
+		}
+		screen = got
+		box, found := paneInputTextFor(row, got)
+		if !found || want == "" || stripSpace(box) != want {
+			return false, screen, nil
+		}
+		lastOurs = true
+		if ours++; ours < 2 || !retry {
+			continue
+		}
+		if retries >= fleetEnterRetries {
+			return true, screen, nil
+		}
+		if err := sc.pressEnter(pane); err != nil {
+			return false, screen, err
+		}
+		retries++
+		ours = 0
+	}
+	return lastOurs, screen, nil
+}
+
+// fleetRecoverLeftover submits a text this server typed into the session
+// under key earlier and could not submit, when the box (box) still holds it:
+// one Enter, then fleetVerifyEnter with no retry. It never presses Enter on
+// a box that is in copy mode or holds anything but a piece of that text
+// (fleetLeftoverMatches), and never more than fleetLeftoverTries times per
+// leftover, across every call. ok means our text left the box (memory
+// dropped, one say-log line); text is the leftover's text, so the caller
+// can tell a resend of the same text from a new one. Caller holds sayMu.
+func (s *server) fleetRecoverLeftover(row Session, pane, key, box string, sc fleetPaneSeams) (text string, ok bool) {
+	f := &s.fleet
+	lo, ok := f.leftover[key]
+	if !ok {
+		return "", false
+	}
+	if s.fleetNow().Sub(lo.at) > fleetLeftoverTTL {
+		delete(f.leftover, key)
+		return "", false
+	}
+	if lo.tries >= fleetLeftoverTries || !fleetLeftoverMatches(box, lo.text) {
+		return "", false
+	}
+	if mode, err := sc.inMode(pane); err != nil || mode {
+		return "", false
+	}
+	lo.tries++
+	f.leftover[key] = lo
+	if err := sc.pressEnter(pane); err != nil {
+		return "", false
+	}
+	if stuck, _, err := s.fleetVerifyEnter(row, pane, box, false, sc); err != nil || stuck {
+		return "", false
+	}
+	delete(f.leftover, key)
+	if path := s.fleetSayLogPath(); path != "" {
+		appendFleetSayLog(path, fmt.Sprintf("%s recovered target=%s len=%d\n",
+			s.fleetNow().UTC().Format(time.RFC3339), row.Tmux, utf8.RuneCountInString(lo.text)))
+	}
+	return lo.text, true
+}
+
+func (s *server) fleetSayLogPath() string {
+	if s.fleet.sayLogPath != "" {
+		return s.fleet.sayLogPath
+	}
+	return fleetSayLogDefault()
 }
 
 // logFleetSendRefusal logs a pane refusal. FLEET's own entries keep the
 // screen lines (logFleetRefusal). Any other session's entry is the header
 // line only, with the text length: its pane can hold the typed text, and
-// the say log must never hold what was sent to a session.
+// the say log must never hold what was sent to a session. who.logGate, when
+// set, applies to both.
 func (s *server) logFleetSendRefusal(who fleetSayWho, code, target, screen, text string) {
+	if who.logGate != nil && !who.logGate(code) {
+		return
+	}
 	if who.paneLog {
 		s.logFleetRefusal(code, target, screen)
 		return
 	}
-	if who.logGate != nil && !who.logGate(code) {
-		return
-	}
-	path := s.fleet.sayLogPath
-	if path == "" {
-		path = fleetSayLogDefault()
-	}
+	path := s.fleetSayLogPath()
 	if path == "" {
 		return
 	}
@@ -532,31 +707,31 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 	refuse := func(code, msg string) { writeJSON(w, http.StatusOK, fleetSayResult{Error: msg, Code: code}) }
 
 	now := s.fleetNow()
+	// A plain message (no cardId) that cannot be typed now goes to the
+	// outbox (fleet_outbox.go): hold is the code that held it. A card answer
+	// is never held: its guards must run at the moment of typing.
+	hold := ""
 	if res := s.fleetSayGateLocked(text); res != nil {
-		writeJSON(w, http.StatusOK, *res)
+		if cardID != "" || res.Code != "rate_limited" {
+			writeJSON(w, http.StatusOK, *res)
+			return
+		}
+		// The gate reports the 1 s gap before a double tap; a second tap
+		// right after the first finished is still a double tap.
+		if _, dup := f.saidAt[text]; dup {
+			refuse("double_tap", "same text sent less than 10 s ago")
+			return
+		}
+		hold = res.Code
+	}
+	if cardID == "" && f.outbox.hasQueued(text, now) {
+		refuse("double_tap", "same text is already queued")
 		return
 	}
 
-	row, fl := s.discoverFleet()
-	if !fl.Alive {
-		if fl.Reason == "ambiguous" {
-			refuse("ambiguous", "two sessions are named FLEET")
-		} else {
-			refuse("not_live", "FLEET is not running")
-		}
-		return
-	}
-	if row.SessionID == "" {
-		refuse("not_live", "FLEET has no session id")
-		return
-	}
-	fresh, all, refusal := s.resolveLivePID(row.PID, row.SessionID)
-	if refusal != nil {
-		refuse(refusal.Code, refusal.Error)
-		return
-	}
-	if again, reason := findFleet(all); reason != "" || again.PID != row.PID || again.SessionID != row.SessionID {
-		refuse("fleet_changed", "FLEET changed. Try again.")
+	fresh, code, msg := s.fleetSendTarget()
+	if fresh == nil {
+		refuse(code, msg)
 		return
 	}
 	// A card answer: the card must still be open and still ask what the
@@ -588,7 +763,18 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 			cards = nil // a bad state.json prunes nothing
 		}
 	}
+	if cardID == "" && hold == "" && f.outbox.queuedCount(now) > 0 {
+		hold = "queued" // FIFO: wait behind the messages already held
+	}
+	if hold != "" {
+		s.fleetHold(w, text, hold, false, now)
+		return
+	}
 	res := s.fleetTypeInto(*fresh, text, fleetSayFLEET)
+	if cardID == "" && !res.OK && fleetOutboxHoldCode(res.Code) {
+		s.fleetHold(w, text, res.Code, true, now)
+		return
+	}
 	if cardID != "" && (res.OK || res.Code == "not_submitted") {
 		s.fleetRecordAnswer(cardID, card, cards, body, text, res.OK)
 	}
@@ -605,6 +791,33 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "fleet: web-say log append failed: %v\n", err)
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// fleetSendTarget resolves FLEET for a send: discovery on the cached list,
+// then a fresh resolveLivePID (a recycled pid refuses), then findFleet again
+// on that fresh list (a second FLEET or a rename refuses as fleet_changed).
+// An empty session id is refused: it would switch off resolveLivePID's
+// check. nil with the refusal code and message when FLEET cannot take a
+// send; the code is "" when the session list failed.
+func (s *server) fleetSendTarget() (*Session, string, string) {
+	row, fl := s.discoverFleet()
+	if !fl.Alive {
+		if fl.Reason == "ambiguous" {
+			return nil, "ambiguous", "two sessions are named FLEET"
+		}
+		return nil, "not_live", "FLEET is not running"
+	}
+	if row.SessionID == "" {
+		return nil, "not_live", "FLEET has no session id"
+	}
+	fresh, all, refusal := s.resolveLivePID(row.PID, row.SessionID)
+	if refusal != nil {
+		return nil, refusal.Code, refusal.Error
+	}
+	if again, reason := findFleet(all); reason != "" || again.PID != row.PID || again.SessionID != row.SessionID {
+		return nil, "fleet_changed", "FLEET changed. Try again."
+	}
+	return fresh, "", ""
 }
 
 // fleetRecordAnswer stores a card answer that was typed: sent when Enter was

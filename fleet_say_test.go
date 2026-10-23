@@ -133,15 +133,23 @@ func TestFleetSayGrokFleet(t *testing.T) {
 		t.Fatalf("busy: %+v typed %q enters %d", res, rig.typed, rig.enters)
 	}
 
-	// An unknown status (no readable events.jsonl) fails closed as busy;
-	// shell (turn over, background work open) types.
+	// An unknown status (no readable events.jsonl) fails closed as busy:
+	// a plain message is held, a card answer refused. Shell (turn over,
+	// background work open) types.
 	for st, ok := range map[string]bool{"": false, "waiting": false, "shell": true} {
 		row.Status = st
 		rig = newSayRig(t, []Session{row})
 		useGrokScreens(t, rig, "grok-shell-commands-running.ansi")
 		_, res := rig.post(t, `{"text":"hi"}`, nil)
-		if res.OK != ok || (!ok && len(rig.typed) != 0) {
+		if !res.OK || res.Held == ok || (!ok && len(rig.typed) != 0) {
 			t.Fatalf("status %q: %+v typed %q", st, res, rig.typed)
+		}
+		if ok {
+			continue
+		}
+		sayCards(t, rig, dr1Card)
+		if _, res := rig.post(t, `{"text":"hi","cardId":"dr-1"}`, nil); res.OK || res.Code != "busy" || len(rig.typed) != 0 {
+			t.Fatalf("status %q card: %+v typed %q", st, res, rig.typed)
 		}
 	}
 }
@@ -242,16 +250,22 @@ func TestFleetSayRefusesWhenFreshListDisagrees(t *testing.T) {
 	}
 }
 
+// cardHi is a card answer to dr1Card: refusals a plain message would be
+// held for (fleet_outbox.go) still refuse a card answer.
+const cardHi = `{"text":"hi","cardId":"dr-1"}`
+
 func TestFleetSayRefusesDialog(t *testing.T) {
 	row := fleetRow()
 	row.Status, row.WaitingFor = "busy", "permission prompt"
 	rig := newSayRig(t, []Session{row})
-	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "dialog" {
+	sayCards(t, rig, dr1Card)
+	if _, res := rig.post(t, cardHi, nil); res.OK || res.Code != "dialog" {
 		t.Fatalf("%+v", res)
 	}
 	rig = newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
 	rig.captures = []string{dialogCapture}
-	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "dialog" {
+	if _, res := rig.post(t, cardHi, nil); res.OK || res.Code != "dialog" {
 		t.Fatalf("%+v", res)
 	}
 	if len(rig.typed) != 0 {
@@ -285,8 +299,9 @@ func TestFleetSayNoEnterWhenTextNeverLands(t *testing.T) {
 
 func TestFleetSayRefusesNonEmptyInput(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
 	rig.captures = []string{"────────────────────\n❯ half typed\n────────────────────\n"}
-	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "input_busy" || res.Error != "input box not empty" {
+	if _, res := rig.post(t, cardHi, nil); res.OK || res.Code != "input_busy" || res.Error != "input box not empty" {
 		t.Fatalf("%+v", res)
 	}
 }
@@ -301,13 +316,18 @@ func TestFleetSaySendFailure(t *testing.T) {
 
 func TestFleetSayRateLimitAndDoubleTap(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
 	rig.post(t, `{"text":"A"}`, nil)
 	rig.now = rig.now.Add(500 * time.Millisecond)
-	if _, res := rig.post(t, `{"text":"B"}`, nil); res.Code != "rate_limited" {
+	// A card answer inside the 1 s gap is refused; a plain message is held.
+	if _, res := rig.post(t, `{"text":"B","cardId":"dr-1"}`, nil); res.Code != "rate_limited" {
 		t.Fatalf("%+v", res)
 	}
+	if _, res := rig.post(t, `{"text":"A"}`, nil); res.Code != "double_tap" {
+		t.Fatalf("A again inside the gap must be a double tap, not held: %+v", res)
+	}
 	rig.now = rig.now.Add(1500 * time.Millisecond) // t=2s
-	if _, res := rig.post(t, `{"text":"B"}`, nil); !res.OK {
+	if _, res := rig.post(t, `{"text":"B","cardId":"dr-1"}`, nil); !res.OK || res.Held {
 		t.Fatalf("B at 2s: %+v", res)
 	}
 	rig.now = rig.now.Add(2 * time.Second) // t=4s: A, B, A
@@ -315,8 +335,11 @@ func TestFleetSayRateLimitAndDoubleTap(t *testing.T) {
 		t.Fatalf("A again at 4s must be a double tap: %+v", res)
 	}
 	rig.now = rig.now.Add(7 * time.Second) // t=11s
-	if _, res := rig.post(t, `{"text":"A"}`, nil); !res.OK {
+	if _, res := rig.post(t, `{"text":"A"}`, nil); !res.OK || res.Held {
 		t.Fatalf("after 10 s the same text is allowed: %+v", res)
+	}
+	if len(rig.typed) != 3 {
+		t.Fatalf("typed %q", rig.typed)
 	}
 }
 
@@ -327,9 +350,10 @@ func TestFleetSayStampsAtCompletion(t *testing.T) {
 		rig.now = rig.now.Add(3 * time.Second) // slow send
 		return nil
 	}
+	sayCards(t, rig, dr1Card)
 	rig.post(t, `{"text":"one"}`, nil)
 	rig.now = rig.now.Add(500 * time.Millisecond)
-	if _, res := rig.post(t, `{"text":"two"}`, nil); res.Code != "rate_limited" {
+	if _, res := rig.post(t, `{"text":"two","cardId":"dr-1"}`, nil); res.Code != "rate_limited" {
 		t.Fatalf("0.5 s after a slow send finished must still be rate limited: %+v", res)
 	}
 }
@@ -380,14 +404,15 @@ func TestFleetSayUnauthorized(t *testing.T) {
 
 func TestFleetSayRefusesCopyMode(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
 	rig.s.fleet.paneInMode = func(string) (bool, error) { return true, nil }
-	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "pane_mode" ||
+	if _, res := rig.post(t, cardHi, nil); res.OK || res.Code != "pane_mode" ||
 		res.Error != "The FLEET pane is in scroll mode. Press q in the terminal, then try again." {
 		t.Fatalf("%+v", res)
 	}
 	rig.s.fleet.paneInMode = func(string) (bool, error) { return false, errors.New("tmux gone") }
 	rig.now = rig.now.Add(time.Minute)
-	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.OK || res.Code != "no_pane" {
+	if _, res := rig.post(t, cardHi, nil); res.OK || res.Code != "no_pane" {
 		t.Fatalf("%+v", res)
 	}
 	if len(rig.typed) != 0 {
@@ -403,12 +428,14 @@ func TestFleetSayLandedCheck(t *testing.T) {
 	}{
 		"exact text":     {"hi there", "hi there", true},
 		"wrapped prefix": {strings.TrimSpace(long), strings.TrimSpace(long[:60]), true},
+		"scrolled piece": {strings.TrimSpace(long), strings.TrimSpace(long[50:]), true},
 		"pasted":         {"hi", "[Pasted text #1 +2 lines]", true},
 		"other text":     {"hi", "zzz", false},
 		"longer than":    {"hi", "hi there", false},
 	} {
 		rig := newSayRig(t, []Session{fleetRow()})
-		rig.captures = []string{emptyBoxCapture, boxCapture(tc.box)}
+		// Before typing, after typing, then after Enter: empty.
+		rig.captures = []string{emptyBoxCapture, boxCapture(tc.box), emptyBoxCapture}
 		_, res := rig.post(t, `{"text":"`+tc.text+`"}`, nil)
 		if tc.want {
 			if !res.OK || rig.enters != 1 {
@@ -454,8 +481,9 @@ func TestFleetSayRefusalLogsPaneLines(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		lines = append(lines, fmt.Sprintf("old line %02d", i))
 	}
+	sayCards(t, rig, dr1Card)
 	rig.captures = []string{strings.Join(lines, "\n") + "\n\x1b[38;5;244m" + dialogCapture}
-	code, res := rig.post(t, `{"text":"hi"}`, nil)
+	code, res := rig.post(t, cardHi, nil)
 	if code != http.StatusOK || res.Code != "dialog" {
 		t.Fatalf("%d %+v", code, res)
 	}
@@ -497,8 +525,9 @@ func TestFleetSayRefusalLogsPaneLines(t *testing.T) {
 
 func TestFleetSayInputBusyAndNotSubmittedLog(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
+	sayCards(t, rig, dr1Card)
 	rig.captures = []string{"\x1b[2mdim kept\x1b[0m\n" + boxCapture("someone typing")}
-	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.Code != "input_busy" {
+	if _, res := rig.post(t, cardHi, nil); res.Code != "input_busy" {
 		t.Fatalf("%+v", res)
 	}
 	if out := readSayLog(t, rig); !strings.Contains(out, " refused code=input_busy target=fleet:0.0\n") ||
@@ -778,7 +807,7 @@ func TestFleetSayRecordsUnconfirmed(t *testing.T) {
 	if a := rigAnswered(t, rig)["dr-1"]; a.latest().Status != fleetAttemptUnconfirmed {
 		t.Fatalf("answered = %+v", a)
 	}
-	rig.captures = []string{emptyBoxCapture, boxCapture(dr1Send)}
+	rig.captures = []string{emptyBoxCapture, boxCapture(dr1Send), emptyBoxCapture}
 	if _, res := rig.post(t, body, nil); res.Code != "already_answered" {
 		t.Fatalf("without correction: %+v", res)
 	}

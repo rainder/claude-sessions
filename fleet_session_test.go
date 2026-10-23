@@ -401,7 +401,8 @@ func TestFleetSessionSaySharesTheGapWithFleetSay(t *testing.T) {
 		t.Fatalf("after the gap: %v", out)
 	}
 	rig.now = rig.now.Add(500 * time.Millisecond)
-	if _, res := rig.post(t, `{"text":"to fleet again"}`, nil); res.Code != "rate_limited" {
+	// A plain FLEET message inside the gap is held in the outbox.
+	if _, res := rig.post(t, `{"text":"to fleet again"}`, nil); !res.OK || !res.Held {
 		t.Fatalf("FLEET within 1 s of a session send: %+v", res)
 	}
 	// The double-tap key is per target: the same text is fine for FLEET.
@@ -472,7 +473,8 @@ func TestFleetSessionRefusalLogNeverHoldsTheText(t *testing.T) {
 func TestFleetSayRefusalLogKeepsFleetPaneLines(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
 	rig.captures = []string{dialogCapture}
-	if _, res := rig.post(t, `{"text":"hi"}`, nil); res.Code != "dialog" {
+	// A plain message is held; the refusal that held it is still logged.
+	if _, res := rig.post(t, `{"text":"hi"}`, nil); !res.Held || len(rig.typed) != 0 {
 		t.Fatalf("%+v", res)
 	}
 	data, _ := os.ReadFile(rig.s.fleet.sayLogPath)
