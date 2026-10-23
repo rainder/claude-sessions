@@ -196,7 +196,7 @@ func RunTUI(interval time.Duration) error {
 
 	// FLEET badge: polled on the hub's own goroutine (fleetLocal.State holds a
 	// lock across a network call); the render path reads only Snapshot.
-	fleetSrc := &fleetLocal{}
+	fleetSrc := &fleetLocal{remotes: fleetRemoteServers}
 	fleetBadgeHub := NewFleetBadgeHub(fleetSrc.State, fleetBadgeInterval)
 	defer fleetBadgeHub.Shutdown()
 
