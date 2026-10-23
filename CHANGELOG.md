@@ -23,6 +23,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   header shows a `FLEET 1 approve · 2 decide` badge while FLEET is running
   and cards wait. The TUI strips terminal escapes from all FLEET text.
 
+- The FLEET view and badge find FLEET on a remote host. When this host's
+  service has no live FLEET, the TUI asks every `servers.yaml` host at once
+  and uses the one that runs FLEET; the badge reads `FLEET@<host>`. Two live
+  FLEETs show `FLEET ?` and a warning, and nothing is sent.
+
 - The FLEET page's Working section opens with a capacity strip: one tile
   per model family (Fable, Opus + Sonnet, Haiku, Grok, then any other
   model). A tile shows the busy sessions against FLEET's cap with a bar,

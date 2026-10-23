@@ -1540,9 +1540,9 @@ when it ended.
 ### FLEET view in the TUI
 
 The session list's `F` key opens the FLEET decision cards in the terminal, and
-a header badge (`FLEET 1 approve · 2 decide`) shows how many wait. Phase 1 is
-local only: it talks to this host's service. The server makes no new decision
-here; every guard in "Say guards" and "Answer store" applies to a TUI answer
+a header badge (`FLEET 1 approve · 2 decide`) shows how many wait. It talks
+to this host's service, or to the one remote host that runs FLEET. The server
+makes no new decision here; every guard in "Say guards" and "Answer store" applies to a TUI answer
 as to a page one, because the client is a bearer-token HTTP client of the same
 routes.
 
@@ -1555,13 +1555,58 @@ badge text. `server_client.go`'s `tryLocalService` is the loopback-then-
 Tailscale lookup (a `--bind tailscale` service answers loopback only for
 `/paste-request`, so status 0 or 404 retries on the Tailscale address, except
 after a timeout); `usage`, `list-sessions` and FLEET all call it. The client
-is `fleetClient{base, token}` over a base URL, not a "local" type, so Phase 2
-can point it at a remote host.
+is `fleetClient{base, token}` over a base URL, so the same client talks to a
+remote host.
+
+**Finding FLEET.** Andy runs the TUI on his Mac; FLEET runs on another host.
+So every `State()` runs discovery (`fleetLocal.discoverLocked`). The local
+service goes first, and a live FLEET there wins outright: no remote is asked,
+so a second FLEET on another host is not warned about from that machine.
+Otherwise every `servers.yaml` entry (`fleetRemoteServers`: `dropSelfServer`,
+entries with no host or token skipped) gets `GET /fleet/state` with its
+bearer token, all at once (`fleetAskRemotes`), each with
+`fleetStateTimeout`. Any non-200 (404 from an older server, 401, 5xx) or
+transport error means that host has no FLEET. Exactly one live FLEET is used.
+Two or more is `Ambiguous`: a view with no cards and a one-line warning, a
+fixed `FLEET ?` badge, and no client, because a guess could answer the wrong
+FLEET. With none live, the view is the local one when the service answered
+(it shows "not running"), else a not-running view with no cards when some
+remote answered (never that remote's old cards), else the local error. The
+chosen host's client is remembered for say and dismiss (`chosen`);
+`Client()` without one runs discovery, and refuses while ambiguous. The send
+job re-reads the state and says on that same client.
+
+**Sticky remote.** One failed poll of the remote FLEET must not swap in the
+local view: the open panel would close on a false "card changed" and the
+badge would blink. So the last remote chosen for a live FLEET is remembered
+(`sticky`, keyed by its base URL). While no FLEET is live anywhere it stays
+the answer: its own view when it answered 200 (FLEET stopped there, which is
+true), else `fleetHostDownError` ("FLEET host ws is not reachable") with
+`chosen` kept on it, so a send fails on its own and never goes to another
+host. Another remote going live follows the normal rules. A live local
+FLEET, or the host leaving `servers.yaml`, clears the memory; the local
+not-running view is the fallback only when no remote is remembered.
+
+**Host pin.** A dismiss carries only a card id, so if `chosen` moved between
+reading the card and pressing the key it could clear an answer record on
+another host. Every view carries `Source`, the base URL it came from (set by
+`fleetLocal`, never decoded, never drawn). The panel keeps the `Source` of
+the state it opened on and the send carries it; `x` takes the applied
+state's. `fleetSendVia` and `fleetDismissVia` refuse when `Client()` is
+another host (`Moved`, `errFleetMoved`): a warn toast and a refetch, and
+nothing reaches either host.
+The cost: while FLEET is not local, each poll is one GET per configured host,
+every 10 s from the badge and the view. The host name is user config, but it
+still reaches the terminal, so `fleetHostName` runs `fleetDisplayText` over
+it and caps it at 24 runes. The badge reads `FLEET@<name>`, the view header
+too; local stays `FLEET`. `remotes` nil asks no host, so no test reads the
+real `servers.yaml`; `RunTUI` sets it.
 
 **One connection, two users.** `fleetLocal` holds the client and re-dials
 after an error that carried no HTTP status (any status proves the service is
-there). Its mutex is held across the network call: up to 5 s for a state or
-a connect. A say and a dismiss hold it only to get the client. So its calls run only on the badge hub's goroutine or in a
+there). Its mutex is held across the network calls: the local call plus the
+parallel remote fan-out, up to 10 s for a state. A say and a dismiss hold it
+only to get the client. So its calls run only on the badge hub's goroutine or in a
 `fleetJob`, never on the render path, which reads `Snapshot()` alone. The hub
 pauses while the view is open and resumes, with a fetch, after: a badge poll
 holding the lock ahead of a send would delay it. The badge shows only for a
@@ -1588,8 +1633,8 @@ Every fetch has a `seq`. A send or dismiss result drops all fetches started
 before it (`dropOlderStates`) and reaps send and dismiss results first: a
 state read before the answer was recorded would still show the card open, take
 `nextAfter` early and let a second answer through. A dropped job keeps
-`fleetLocal`'s mutex until its HTTP timeout, so a fresh fetch can wait up to
-5 s; accepted. A send job re-reads the state first and refuses locally
+`fleetLocal`'s mutex until its HTTP timeouts, so a fresh fetch can wait up to
+10 s; accepted. A send job re-reads the state first and refuses locally
 (`Stale`) when the card is gone or its hash moved.
 
 **Keys.** An option is picked by digit `1`..`9` only; the comment box takes

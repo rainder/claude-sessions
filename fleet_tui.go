@@ -121,14 +121,16 @@ type fleetDismissResult struct {
 // fleetLoop is the modal loop's job bookkeeping, apart from the terminal so
 // the order of results can be tested.
 //
-// A state fetch holds fleetLocal's mutex across a network call of up to 5 s;
-// a send and a dismiss hold it only to get the client (a connect, up to 5 s).
+// A state fetch holds fleetLocal's mutex across discovery: the local call and,
+// when FLEET is not live here, the parallel remote fan-out, up to 10 s. A send
+// and a dismiss hold it only to get the client (a discovery when none is
+// remembered).
 // So they run only inside jobs, never on the loop.
 type fleetLoop struct {
 	st       *fleetViewState
 	state    func() (fleetStateView, error)
 	send     func(fleetSayRequest) fleetSendResult
-	dismiss  func(cardID string) (fleetSayResult, error)
+	dismiss  func(cardID, source string) (fleetSayResult, error)
 	interval time.Duration
 	nextPoll time.Time
 
@@ -224,15 +226,15 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 		send, r := l.send, *req
 		l.sends = append(l.sends, startFleetJob(func() fleetSendResult { return send(r) }))
 	case fleetCmdDismiss:
-		id := l.st.dismissID
-		l.st.dismissID = ""
+		id, source := l.st.dismissID, l.st.dismissSource
+		l.st.dismissID, l.st.dismissSource = "", ""
 		if id == "" {
 			l.st.dismissing = false
 			return false
 		}
 		dismiss := l.dismiss
 		l.dismisses = append(l.dismisses, startFleetJob(func() fleetDismissResult {
-			res, err := dismiss(id)
+			res, err := dismiss(id, source)
 			return fleetDismissResult{Res: res, Err: err}
 		}))
 	}
@@ -266,23 +268,34 @@ func (l *fleetLoop) closeAll() {
 	}
 }
 
-// fleetSendVia is the send job body for the local service: connect, then
-// fleetSendJob. A failed connect sent nothing.
+// fleetSendVia is the send job body: get the chosen host's client, then
+// fleetSendJob. A failed connect sent nothing. A client for another host than
+// the state the answer was prepared against (req.Source) is refused as
+// Moved: FLEET moved, and the card on the new host is another card.
 func fleetSendVia(src *fleetLocal) func(fleetSayRequest) fleetSendResult {
 	return func(req fleetSayRequest) fleetSendResult {
 		c, err := src.Client()
 		if err != nil {
 			return fleetSendResult{CardID: req.CardID, CheckErr: err}
 		}
+		if c.base != req.Source {
+			return fleetSendResult{CardID: req.CardID, Moved: true}
+		}
 		return fleetSendJob(c, req)
 	}
 }
 
-func fleetDismissVia(src *fleetLocal) func(string) (fleetSayResult, error) {
-	return func(cardID string) (fleetSayResult, error) {
+// fleetDismissVia is the dismiss job body, pinned to source like a send: a
+// dismiss carries only a card id, so on another host it could clear an
+// unrelated answer record.
+func fleetDismissVia(src *fleetLocal) func(cardID, source string) (fleetSayResult, error) {
+	return func(cardID, source string) (fleetSayResult, error) {
 		c, err := src.Client()
 		if err != nil {
 			return fleetSayResult{}, err
+		}
+		if c.base != source {
+			return fleetSayResult{}, errFleetMoved
 		}
 		return c.Dismiss(cardID)
 	}
@@ -294,6 +307,9 @@ func fleetDismissToast(r fleetDismissResult) (string, fleetToastKind) {
 	case r.Err != nil:
 		if errors.Is(r.Err, errFleetUnauthorized) {
 			return fleetToastTokenBad, fleetToastErr
+		}
+		if errors.Is(r.Err, errFleetMoved) {
+			return errFleetMoved.Error(), fleetToastWarn
 		}
 		return fleetDisplayText(r.Err.Error()), fleetToastErr
 	case r.Res.OK:
@@ -489,6 +505,8 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 		}
 	case !st.loaded:
 		body = []string{dim("loading…")}
+	case len(st.view.Ambiguous) > 0:
+		body = []string{colorize(fleetSGRAmber, fleetAmbiguousText(st.view.Ambiguous))}
 	case st.panel != nil:
 		body = fleetPanelLines(st, width, bodyRows, now)
 	default:
@@ -527,7 +545,14 @@ func fleetHeaderLine(st *fleetViewState, cols int, now time.Time) string {
 		return bold("FLEET")
 	}
 	v := st.view
-	left := bold("FLEET") + " "
+	if len(v.Ambiguous) > 0 {
+		return bold("FLEET") + " " + colorize(fleetSGRAmber, "?")
+	}
+	name := "FLEET"
+	if v.Host != "" {
+		name += "@" + v.Host // a fleetHostName
+	}
+	left := bold(name) + " "
 	if v.Fleet.Alive {
 		left += colorize(fleetSGRAlive, "●")
 		if v.Fleet.Status != "" {

@@ -52,30 +52,32 @@ type fleetPanel struct {
 	item       fleetItem
 	opt        int
 	hash       string // cardHashes value when the panel opened
+	source     string // the opening state's Source: the send is pinned to it
 	comment    string
 	openedAt   time.Time
 	correction bool // fixed when the panel opens: the card already had an answer
 }
 
 type fleetViewState struct {
-	view       fleetStateView
-	loaded     bool
-	err        string // non-empty: the one line shown instead of the cards
-	items      []fleetItem
-	sel        int
-	scroll     int
-	unlocked   string // card id a 'c' unlocked for one answer
-	panel      *fleetPanel
-	sending    bool
-	dismissing bool
-	send       *fleetSayRequest // set with fleetCmdSend; the loop takes it
-	dismissID  string           // set with fleetCmdDismiss
-	nextAfter  string           // card id just sent; the next applyState selects the next open card
-	justSent   string           // card id our own answer reached; locked until a state shows it answered or gone
-	unclear    string           // card id whose send result is unknown; locked until the next applied state
-	toast      string
-	toastKind  fleetToastKind
-	toastUntil time.Time
+	view          fleetStateView
+	loaded        bool
+	err           string // non-empty: the one line shown instead of the cards
+	items         []fleetItem
+	sel           int
+	scroll        int
+	unlocked      string // card id a 'c' unlocked for one answer
+	panel         *fleetPanel
+	sending       bool
+	dismissing    bool
+	send          *fleetSayRequest // set with fleetCmdSend; the loop takes it
+	dismissID     string           // set with fleetCmdDismiss
+	dismissSource string           // the applied state's Source when x was pressed
+	nextAfter     string           // card id just sent; the next applyState selects the next open card
+	justSent      string           // card id our own answer reached; locked until a state shows it answered or gone
+	unclear       string           // card id whose send result is unknown; locked until the next applied state
+	toast         string
+	toastKind     fleetToastKind
+	toastUntil    time.Time
 }
 
 // fleetSendResult is what a send job hands back to the loop.
@@ -83,6 +85,7 @@ type fleetSendResult struct {
 	CardID   string
 	CheckErr error // the pre-send state fetch failed; nothing was sent
 	Stale    bool  // card gone or its hash moved; nothing was sent
+	Moved    bool  // FLEET is on another host than the panel's state; nothing was sent
 	Out      fleetSayOutcome
 }
 
@@ -206,9 +209,13 @@ func fleetItemIndex(items []fleetItem, id string) int {
 func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time) {
 	st.loaded = true
 	if err != nil {
-		if errors.Is(err, errFleetUnauthorized) {
+		var down *fleetHostDownError
+		switch {
+		case errors.Is(err, errFleetUnauthorized):
 			st.err = fleetToastTokenBad
-		} else {
+		case errors.As(err, &down):
+			st.err = down.Error() // the host is a fleetHostName
+		default:
 			st.err = fleetErrNoService
 		}
 		return
@@ -354,7 +361,7 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		if it == nil || st.sending || st.dismissing || it.Answer == nil || it.Answer.latest().Status != fleetAttemptUnconfirmed {
 			return fleetCmdNone
 		}
-		st.dismissID = it.Card.ID
+		st.dismissID, st.dismissSource = it.Card.ID, st.view.Source
 		st.dismissing = true
 		return fleetCmdDismiss
 	}
@@ -389,6 +396,7 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		item:       *it,
 		opt:        opt,
 		hash:       st.view.CardHashes[it.Card.ID],
+		source:     st.view.Source,
 		openedAt:   now,
 		correction: it.Answer != nil,
 	}
@@ -407,6 +415,7 @@ func (st *fleetViewState) handlePanelKey(k string, inBatch bool, now time.Time) 
 			return fleetCmdNone
 		}
 		st.send = &fleetSayRequest{
+			Source:     p.source,
 			Text:       fleetSendText(opt.Send, p.comment),
 			CardID:     p.item.Card.ID,
 			CardHash:   p.hash,
@@ -437,6 +446,10 @@ func (st *fleetViewState) applySend(r fleetSendResult, now time.Time) (refetch b
 	}
 	if r.Stale {
 		st.setToast(fleetToastChanged, fleetToastErr, now)
+		return true
+	}
+	if r.Moved {
+		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
 		return true
 	}
 	msg, kind, refetch := fleetSendToast(r.Out)

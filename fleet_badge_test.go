@@ -9,13 +9,13 @@ import (
 )
 
 func TestFleetBadgeText(t *testing.T) {
-	if got := fleetBadgeText(fleetCardCounts{1, 2, 3}, false); got != "" {
+	if got := fleetBadgeText(fleetBadgeSnap{Counts: fleetCardCounts{1, 2, 3}, OK: false}); got != "" {
 		t.Fatalf("not ok: got %q, want empty", got)
 	}
-	if got := fleetBadgeText(fleetCardCounts{0, 0, 3}, true); got != "" {
+	if got := fleetBadgeText(fleetBadgeSnap{Counts: fleetCardCounts{0, 0, 3}, OK: true}); got != "" {
 		t.Fatalf("only sent: got %q, want empty", got)
 	}
-	got := fleetBadgeText(fleetCardCounts{1, 2, 0}, true)
+	got := fleetBadgeText(fleetBadgeSnap{Counts: fleetCardCounts{1, 2, 0}, OK: true})
 	if s := stripANSI(got); s != "FLEET 1 approve · 2 decide" {
 		t.Fatalf("plain text = %q", s)
 	}
@@ -24,7 +24,7 @@ func TestFleetBadgeText(t *testing.T) {
 			t.Fatalf("badge %q missing %q", got, want)
 		}
 	}
-	got = fleetBadgeText(fleetCardCounts{0, 2, 0}, true)
+	got = fleetBadgeText(fleetBadgeSnap{Counts: fleetCardCounts{0, 2, 0}, OK: true})
 	if !strings.Contains(got, dim("0 approve")) {
 		t.Fatalf("zero approve not dim: %q", got)
 	}
@@ -39,7 +39,8 @@ func waitFleetBadge(t *testing.T, h *FleetBadgeHub, want func(fleetCardCounts, b
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		c, ok := h.Snapshot()
+		snap := h.Snapshot()
+		c, ok := snap.Counts, snap.OK
 		if want(c, ok) || time.Now().After(deadline) {
 			return c, ok
 		}
