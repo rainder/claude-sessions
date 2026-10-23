@@ -640,8 +640,6 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   body.v-chat .banner.nr { display: none; }
   body.v-chat .banners:not(:has(> :not(.nr))) { display: none; }
   .turn { max-width: 90%; }
-
-  .toast { top: calc(var(--hdr) + 10px); bottom: auto; transform: translate(-50%, -12px); }
 }
 @media (max-width: 480px) { .ago-pre { display: none; } }
 /* Phone: the header is one row. The brand goes (the app is FLEET); the quota
@@ -3753,11 +3751,33 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
 
   // ---- toast -------------------------------------------------------------
+  // The toast sits at the bottom, above the nav and above a chat or session
+  // composer it would cover. With none in its way the CSS bottom (safe-area
+  // inset included) holds. It is placed by top, not bottom: with the iOS
+  // keyboard open the composer sits on the visual viewport, and a fixed
+  // bottom would put the toast behind the keyboard.
   let toastTimer = 0;
+  function placeToast() {
+    const t = $("toast");
+    t.style.top = t.style.bottom = "";
+    const w = t.offsetWidth, h = t.offsetHeight;
+    const left = (window.innerWidth - w) / 2, right = left + w;
+    let top = Infinity;
+    for (const el of [$("tabbar"), $("composer-row").closest(".composer"), $("sv-comp")]) {
+      if (!el || el.hidden) continue;
+      const r = el.getBoundingClientRect();
+      if (r.height === 0 || r.right <= left || r.left >= right) continue;
+      top = Math.min(top, r.top);
+    }
+    if (top === Infinity) return;
+    t.style.top = Math.max(0, Math.round(top - h - 10)) + "px";
+    t.style.bottom = "auto";
+  }
   function toast(text, isErr) {
     const t = $("toast");
     t.textContent = text;
     t.classList.toggle("err", !!isErr);
+    placeToast();
     t.classList.add("show");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove("show"), isErr ? 6000 : 3000);
@@ -3888,6 +3908,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     root.setProperty("--hdr", $("top").offsetHeight + "px");
     root.setProperty("--navh", $("tabbar").offsetHeight + "px");
     root.setProperty("--vvh", Math.round(vh) + "px");
+    if ($("toast").classList.contains("show")) placeToast();
     markCode();
     // iOS pans the page to show the focused input; the shell already fits.
     if (kb && (view === "chat" || sv.open) && window.scrollY !== 0) window.scrollTo(0, 0);
