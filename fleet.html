@@ -204,6 +204,10 @@ section { min-width: 0; }
 .card-meta { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
 .card-meta .sess { font-family: var(--mono); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta .wo { color: var(--amber); }
+/* Priority badge (FLEET's priority, 1 Urgent .. 4 Low; missing is 3). */
+.prio { padding: 0 6px; border: 1px solid var(--line); border-radius: 99px; font-size: 11px; font-weight: 650; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.prio.p1 { color: var(--red); background: var(--red-tint); border-color: var(--red-line); }
+.prio.p2 { color: var(--amber); background: var(--amber-tint); border-color: var(--amber-line); }
 .card .summary { margin: 10px 0 0; font-size: 14.5px; }
 /* Chat: opens the card's session, or the FLEET chat when none is live. */
 .btn.chat-btn { flex: none; min-height: 44px; padding: 0 14px; }
@@ -1897,6 +1901,24 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     return arr(c.options).map(obj).filter(Boolean);
   }
 
+  // cardPrio: FLEET's priority, 1 Urgent .. 4 Low. Anything else is 3, as
+  // in the TUI (fleetCardView); fleet-state.py refuses other values.
+  const cardPrio = c => Number.isInteger(c.priority) && c.priority >= 1 && c.priority <= 4 ? c.priority : 3;
+  const PRIO_NAMES = ["", "Urgent", "High", "Normal", "Low"];
+  function prioSpan(c) {
+    const p = cardPrio(c), sp = el("span", "prio p" + p, "P" + p);
+    sp.title = "Priority " + p + " (" + PRIO_NAMES[p] + ")";
+    return sp;
+  }
+  // byPrio: open cards by priority, then oldest firstSeenAt (fleet-state.py
+  // stamps it). A card with no readable time goes after the rest, and ties
+  // keep state.json order. fleetItems in fleet_view.go sorts the same way.
+  function byPrio(list) {
+    const at = c => { const t = parseTime(c.firstSeenAt); return t === null ? Infinity : t; };
+    return list.map((c, i) => ({c, i, p: cardPrio(c), t: at(c)}))
+      .sort((a, b) => a.p - b.p || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0) || a.i - b.i)
+      .map(x => x.c);
+  }
   function cardHead(c) {
     const ticket = str(c.ticket), title = str(c.title) || str(c.id) || "Untitled";
     return {ticket, title, name: ticket || title};
@@ -1916,11 +1938,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const title = el("div", "card-title",
       head.ticket ? linkText(el("span", "tk"), head.ticket) : null,
       linkText(el("span", "tt"), head.title));
-    const meta = el("div", "card-meta");
+    const meta = el("div", "card-meta", prioSpan(c));
     if (str(c.session)) { const se = el("span", "sess", str(c.session)); se.title = str(c.session); meta.append(se); }
     if (str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
-    if (str(c.updatedAt)) meta.append(relSpan(c.updatedAt));
-    if (meta.childNodes.length) title.append(meta);
+    // Age: since the card first showed (firstSeenAt, the sort key); a card
+    // without a readable one falls back to updatedAt.
+    const age = parseTime(c.firstSeenAt) !== null ? str(c.firstSeenAt) : str(c.updatedAt);
+    if (age) meta.append(relSpan(age));
+    title.append(meta);
     card.append(el("div", "card-top", title, chatBtn(c)));
 
     // Andy's answers, once sent: shown by the title until FLEET drops or
@@ -2816,6 +2841,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       else if (k === "needs-you") g.needs.push(c);
       else if (k === "done") { if (isToday(str(c.doneAt) || str(c.updatedAt))) g.done.push(c); }
     }
+    g.yes = byPrio(g.yes);
+    g.needs = byPrio(g.needs);
     const cid = c => str(c.id) ? "card:" + str(c.id) : "";
     $("list-yes").replaceChildren(...g.yes.map(c => fkey(decisionCard(c, true), cid(c))));
     $("list-needs").replaceChildren(...g.needs.map(c => fkey(decisionCard(c, false), cid(c))));

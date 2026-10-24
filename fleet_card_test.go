@@ -149,3 +149,45 @@ func TestFleetOptionLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestFleetCardViewDecodesPriority(t *testing.T) {
+	for _, c := range []struct {
+		raw  string
+		want int
+	}{
+		{`{"id":"x"}`, 3},
+		{`{"priority":1}`, 1},
+		{`{"priority":2}`, 2},
+		{`{"priority":4}`, 4},
+		{`{"priority":0}`, 3},
+		{`{"priority":5}`, 3},
+		{`{"priority":"2"}`, 3},
+		{`{"priority":2.5}`, 3},
+		{`{"priority":true}`, 3},
+		{`{"priority":null}`, 3},
+	} {
+		var v fleetCardView
+		if err := json.Unmarshal([]byte(c.raw), &v); err != nil {
+			t.Fatalf("%s: %v", c.raw, err)
+		}
+		if v.Priority != c.want {
+			t.Errorf("%s: priority %d, want %d", c.raw, v.Priority, c.want)
+		}
+	}
+	var v fleetCardView
+	_ = json.Unmarshal([]byte(`{"firstSeenAt":"2026-10-24T10:00:00Z"}`), &v)
+	if v.FirstSeenAt != "2026-10-24T10:00:00Z" {
+		t.Fatalf("firstSeenAt %q", v.FirstSeenAt)
+	}
+}
+
+// Priority and firstSeenAt order the cards; they do not change what a card
+// asks, so an answer recorded before FLEET set them still stands.
+func TestFleetCardHashIgnoresPriorityAndFirstSeen(t *testing.T) {
+	var a, b fleetCardView
+	_ = json.Unmarshal([]byte(`{"kind":"needs-you","title":"t"}`), &a)
+	_ = json.Unmarshal([]byte(`{"kind":"needs-you","title":"t","priority":1,"firstSeenAt":"2026-10-24T10:00:00Z"}`), &b)
+	if fleetCardHash(a) != fleetCardHash(b) {
+		t.Fatal("hash moved with priority or firstSeenAt")
+	}
+}

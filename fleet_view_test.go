@@ -183,3 +183,33 @@ func TestFleetEditOther(t *testing.T) {
 		t.Errorf("second byte accepted: %q", got)
 	}
 }
+
+func TestFleetItemsSortByPriorityThenAge(t *testing.T) {
+	sent := fleetAnswer{CardHash: "h", Attempts: []fleetAttempt{{OptionKey: "a", Status: fleetAttemptSent}}}
+	v := fleetStateView{
+		Cards: []fleetCardView{
+			{ID: "n-new", Kind: "needs-you", FirstSeenAt: "2026-10-24T12:00:00Z"},
+			{ID: "y-low", Kind: "explicit-yes", Priority: 4, FirstSeenAt: "2026-10-24T08:00:00Z"},
+			{ID: "n-none", Kind: "needs-you"},
+			{ID: "n-urgent", Kind: "needs-you", Priority: 1, FirstSeenAt: "2026-10-24T13:00:00Z"},
+			{ID: "s-2", Kind: "needs-you", Priority: 4},
+			{ID: "n-old", Kind: "needs-you", FirstSeenAt: "2026-10-24T09:00:00Z"},
+			{ID: "y-high", Kind: "explicit-yes", Priority: 2, FirstSeenAt: "2026-10-24T11:00:00Z"},
+			{ID: "s-1", Kind: "explicit-yes", Priority: 1},
+			{ID: "n-bad", Kind: "needs-you", FirstSeenAt: "yesterday"},
+		},
+		Answered: map[string]fleetAnswer{"s-1": sent, "s-2": sent},
+	}
+	var got []string
+	for _, it := range fleetItems(v) {
+		got = append(got, it.Card.ID)
+	}
+	want := []string{
+		"y-high", "y-low", // APPROVE: priority 2 before 4
+		"n-urgent", "n-old", "n-new", "n-none", "n-bad", // DECIDE: P1, then P3 oldest first, no time last in state order
+		"s-2", "s-1", // SENT: state.json order
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}

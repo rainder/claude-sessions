@@ -687,7 +687,16 @@ func fleetCollapsedRow(it fleetItem, selected bool, cols int, now time.Time) str
 		}
 		row = truncateRunes(row, cols)
 	} else {
-		row = fleetRowRight(head+it.Card.Title, fleetAge(it.Card.UpdatedAt, now), cols)
+		// An open card shows its priority (P1..P4) at the right, before its age.
+		right := "P" + strconv.Itoa(it.Card.priority())
+		age := fleetAge(it.Card.FirstSeenAt, now)
+		if age == "" {
+			age = fleetAge(it.Card.UpdatedAt, now)
+		}
+		if age != "" {
+			right += " · " + age
+		}
+		row = fleetRowRight(head+it.Card.Title, right, cols)
 	}
 	if selected {
 		return bold(row)

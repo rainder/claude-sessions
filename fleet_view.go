@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // fleetSection is the TUI list section a decision card sits in.
@@ -24,6 +25,9 @@ type fleetItem struct {
 
 // fleetItems lists the decision cards in state.json order, then stable-sorts
 // them APPROVE, DECIDE, SENT. A card whose latest attempt was sent is SENT.
+// Inside APPROVE and DECIDE, open cards sort by priority (1 first), then
+// oldest firstSeenAt first; a card with no readable firstSeenAt goes after
+// those with one. SENT keeps state.json order. The page sorts the same way.
 func fleetItems(v fleetStateView) []fleetItem {
 	var items []fleetItem
 	for _, c := range v.Cards {
@@ -44,8 +48,36 @@ func fleetItems(v fleetStateView) []fleetItem {
 		}
 		items = append(items, it)
 	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].Section < items[j].Section })
-	return items
+	seen := make([]time.Time, len(items))
+	for i := range items {
+		seen[i], _ = time.Parse(time.RFC3339, items[i].Card.FirstSeenAt)
+	}
+	idx := make([]int, len(items))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(x, y int) bool {
+		a, b := items[idx[x]], items[idx[y]]
+		if a.Section != b.Section {
+			return a.Section < b.Section
+		}
+		if a.Section == fleetSecSent {
+			return false
+		}
+		if pa, pb := a.Card.priority(), b.Card.priority(); pa != pb {
+			return pa < pb
+		}
+		ta, tb := seen[idx[x]], seen[idx[y]]
+		if ta.IsZero() != tb.IsZero() {
+			return !ta.IsZero()
+		}
+		return ta.Before(tb)
+	})
+	out := make([]fleetItem, len(items))
+	for i, k := range idx {
+		out[i] = items[k]
+	}
+	return out
 }
 
 type fleetCardCounts struct{ Approve, Decide, Sent int }

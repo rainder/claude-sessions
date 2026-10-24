@@ -17,6 +17,13 @@ type fleetCardView struct {
 	ID, Kind, Status, Ticket, Title, Summary, Lean, WaitingOn, Session, UpdatedAt string
 	Options                                                                       []fleetOptionView
 
+	// Priority is 1 Urgent, 2 High, 3 Normal, 4 Low; anything else decodes
+	// as 3. FirstSeenAt is when fleet-state.py first saw the card id. The
+	// two order the open cards (fleetItems); neither is in the card hash,
+	// because they do not change what the card asks.
+	Priority    int
+	FirstSeenAt string
+
 	// rawSession and rawTicket are session and ticket as decoded, before the
 	// TUI sanitizes the drawn fields. The Fleet view's attach matches them
 	// against the server's working list; they are never drawn.
@@ -40,6 +47,12 @@ func (c *fleetCardView) UnmarshalJSON(b []byte) error {
 		WaitingOn: fleetPushStr(m["waitingOn"]),
 		Session:   fleetPushStr(m["session"]),
 		UpdatedAt: fleetPushStr(m["updatedAt"]),
+
+		Priority:    fleetPriorityNormal,
+		FirstSeenAt: fleetPushStr(m["firstSeenAt"]),
+	}
+	if p, ok := m["priority"].(float64); ok && p == float64(int(p)) && fleetPriorityValid(int(p)) {
+		c.Priority = int(p)
 	}
 	c.rawSession, c.rawTicket = c.Session, c.Ticket
 	if list, ok := m["options"].([]any); ok {
@@ -57,6 +70,20 @@ func (c *fleetCardView) UnmarshalJSON(b []byte) error {
 		}
 	}
 	return nil
+}
+
+// fleetPriorityNormal is the priority of a card that sets none.
+const fleetPriorityNormal = 3
+
+func fleetPriorityValid(p int) bool { return p >= 1 && p <= 4 }
+
+// priority is the card's priority, with an out-of-range value (a card built
+// in code, not decoded) read as normal.
+func (c fleetCardView) priority() int {
+	if fleetPriorityValid(c.Priority) {
+		return c.Priority
+	}
+	return fleetPriorityNormal
 }
 
 // fleetCardHash identifies what a card asks, so an answer can tell whether

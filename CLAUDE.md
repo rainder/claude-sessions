@@ -1143,6 +1143,22 @@ note to FLEET goes with no `cardId` on purpose: any `cardId` says "this is an
 answer to the card", and the server would record Chat as one and move the card
 to SENT.
 
+**Priority and order.** A card may hold `priority`, an integer 1..4 (1
+Urgent, 2 High, 3 Normal, 4 Low, the spawn-group scale). `fleet-state.py`
+refuses any other value; a missing field is 3. The script also stamps
+`firstSeenAt` the first time it sees a card id and keeps it from the previous
+state.json after that (`updatedAt` cannot age a card: every card carries the
+write time). The server passes both fields through unchanged. Inside the
+explicit-yes and needs-you sections, the page (`byPrio`) and the TUI
+(`fleetItems`) sort open cards by priority, then oldest `firstSeenAt`; a card
+with no readable time goes after the rest, and ties keep state.json order.
+Sent and done cards keep state.json order. A decoder reads a bad priority as
+3, so a hand-edited file cannot hide a card. Neither field is in `cardHash`:
+they do not change what a card asks, so an answer stays on record when FLEET
+sets them. Each open card shows `P1`..`P4` (the page in its meta line, the
+TUI at the right of its row), and its age counts from `firstSeenAt`, else
+`updatedAt`.
+
 **Session view** (`fleet_session.go`). A card's `session` field (a tmux
 session name; a `name:0.0` form counts only before `:`) opens that session:
 `GET /fleet/session?t=` shows it, `POST /fleet/session/say` types into it.

@@ -198,7 +198,7 @@ func (v *fleetStateView) sanitize() {
 		c.Status, c.Ticket, c.Title = fleetDisplayText(c.Status), fleetDisplayText(c.Ticket), fleetDisplayText(c.Title)
 		c.Summary, c.Lean = fleetDisplayText(c.Summary), fleetDisplayText(c.Lean)
 		c.WaitingOn, c.Session = fleetDisplayText(c.WaitingOn), fleetDisplayText(c.Session)
-		c.UpdatedAt = fleetDisplayText(c.UpdatedAt)
+		c.UpdatedAt, c.FirstSeenAt = fleetDisplayText(c.UpdatedAt), fleetDisplayText(c.FirstSeenAt)
 		for j := range c.Options {
 			o := &c.Options[j]
 			o.Key, o.Label, o.Line = fleetDisplayText(o.Key), fleetDisplayText(o.Label), fleetDisplayText(o.Line)
