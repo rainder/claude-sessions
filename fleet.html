@@ -21,7 +21,8 @@
   --line: #e2e2dc; --accent: #2a5fd3; --accent-tint: #e9effc; --on-accent: #ffffff;
   --red: #c0302a; --red-tint: #fcecea; --red-line: #efc3bf;
   --amber: #a25a00; --amber-tint: #fdf3e2; --amber-line: #ecd3a5;
-  --green: #2d8649; --shadow: 0 10px 30px rgba(20, 20, 30, .18);
+  --green: #2d8649; --green-tint: #e6f4ea; --shadow: 0 10px 30px rgba(20, 20, 30, .18);
+  --cyan: #0b7285; --magenta: #9c36b5;
   --status-bar: #0f1012;
   --hdr: 84px; --navh: 0px; --r: 12px;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
@@ -33,7 +34,8 @@
     --line: #2b2d32; --accent: #86abff; --accent-tint: #1b2741; --on-accent: #0f1012;
     --red: #ff7b72; --red-tint: #2b1716; --red-line: #5c2b28;
     --amber: #f0b45b; --amber-tint: #2a2114; --amber-line: #5a4422;
-    --green: #63c585; --shadow: 0 10px 30px rgba(0, 0, 0, .5);
+    --green: #63c585; --green-tint: #14281b; --shadow: 0 10px 30px rgba(0, 0, 0, .5);
+    --cyan: #66d9e8; --magenta: #e599f7;
     --status-bar: transparent;
   }
 }
@@ -282,6 +284,27 @@ section { min-width: 0; }
 .rich strong { font-weight: 650; }
 .rich em { font-style: italic; }
 .rich .md-h { margin-top: .2em; }
+/* Card summary blocks (renderSummary): section headings, label grids,
+   option keys and the colours the terminal card uses. */
+.summary .md-sec { margin: 14px 0 6px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--amber); }
+.summary .md-sec:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.summary .md-blocks { display: grid; grid-template-columns: fit-content(9.5em) minmax(0, 1fr); gap: 5px 12px; margin: 0 0 .5em; }
+.summary .md-lbl { font-weight: 650; color: var(--muted); overflow-wrap: normal; }
+.summary .md-val { min-width: 0; }
+.summary .md-val > ul, .summary .md-val > ol, .summary .md-val > .codebox { margin: .25em 0 0; }
+.summary li::marker { color: var(--muted); }
+.summary :not(pre) > code { color: var(--cyan); }
+.summary .md-ref, .summary a.md-ref { color: var(--magenta); }
+.summary .md-lean { display: inline-block; padding: 0 7px; border-radius: 99px; background: var(--green-tint); color: var(--green); font-size: .82em; font-weight: 700; line-height: 1.5; white-space: nowrap; }
+.summary .md-st { font-weight: 700; color: var(--amber); }
+.summary .md-st-hold { color: var(--red); }
+.summary .md-st-ready { color: var(--green); }
+.summary .md-key { display: inline-grid; place-items: center; min-width: 22px; height: 20px; padding: 0 5px; border-radius: 6px; background: var(--surface2); border: 1px solid var(--line); font-family: var(--mono); font-size: 11.5px; font-weight: 700; vertical-align: 1px; }
+.summary .md-opt { margin-bottom: .45em; }
+@media (max-width: 479.98px) {
+  .summary .md-blocks { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .summary .md-val { margin-bottom: 6px; }
+}
 .card .links { margin-top: 10px; font-size: 13px; }
 
 /* Compact lists */
@@ -1005,10 +1028,22 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const tr = (cells, tag) => el("tr", "", ...cells.map(c => richInline(el(tag), c)));
     return el("div", "tbl", el("table", "", el("thead", "", tr(tableCells(head), "th")), el("tbody", "", ...rows.map(r => tr(tableCells(r), "td")))));
   }
-  function renderRich(text) {
+  //
+  // With card set (card summaries only), three more blocks: a line of only
+  // bold text is a section heading (md-sec); a run of "**Label:** text"
+  // lines is a two-column grid (md-blocks), and the bullets, numbered items
+  // and fences right under a label line go in its value cell (md-val); an
+  // option bullet "- **A** — ..." shows its key as a pill (md-key).
+  const CARD_SEC = /^\s*\*\*([^*]+)\*\*\s*$/;
+  const CARD_LABEL = /^\*\*([^*]{1,24}):\*\* +(.*)$/;
+  const CARD_OPT = /^\*\*([^*\s]{1,6})\*\* *[\u2014\u2013-] *(.*)$/;
+  function renderRich(text, card) {
     const frag = document.createDocumentFragment();
     const lines = str(text).split(/\r?\n/);
-    let para = null, list = null;
+    // target is where blocks go: the fragment, or the value cell of the
+    // last label line (val) while lines under it belong to it.
+    let para = null, list = null, grid = null, val = null, target = frag;
+    const top = () => { grid = val = null; target = frag; };
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const fence = /^\s*```\s*([\w.+#-]*)\s*$/.exec(line);
@@ -1017,12 +1052,33 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         while (j < lines.length && !/^\s*```\s*$/.test(lines[j])) j++;
         if (j < lines.length) {
           para = list = null;
-          frag.append(codeBox(fence[1], lines.slice(i + 1, j).join("\n")));
+          if (!val) top();
+          target.append(codeBox(fence[1], lines.slice(i + 1, j).join("\n")));
           i = j;
           continue;
         }
       }
-      if (!line.trim()) { para = list = null; continue; }
+      if (!line.trim()) { para = list = null; top(); continue; }
+      if (card) {
+        const sec = CARD_SEC.exec(line), lab = sec ? null : CARD_LABEL.exec(line);
+        if (sec) {
+          para = list = null;
+          top();
+          frag.append(richInline(el("p", "md-sec"), sec[1].trim()));
+          continue;
+        }
+        if (lab) {
+          para = list = null;
+          if (!grid) { grid = el("div", "md-blocks"); frag.append(grid); }
+          val = el("div", "md-val");
+          grid.append(richInline(el("div", "md-lbl"), lab[1]), richInline(val, lab[2]));
+          target = val;
+          continue;
+        }
+        // Under a label line only indented lines and numbered items stay in
+        // its value cell; anything else ends the grid.
+        if (val && !/^\s/.test(line) && !/^\d{1,9}[.)] /.test(line)) { top(); para = list = null; }
+      }
       // Linear on purpose: a lazy group before "[ #]*$" rescans long runs
       // of spaces or "#" quadratically. The closing "#"s are trimmed after.
       const head = /^ {0,3}#{1,3} +(.*)$/.exec(line);
@@ -1048,9 +1104,11 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
           para = null;
           list = el(tag.toLowerCase());
           if (ol && ol[1] !== "1") list.start = parseInt(ol[1], 10);
-          frag.append(list);
+          target.append(list);
         }
-        list.append(richInline(el("li"), ul ? ul[1] : ol[2]));
+        const opt = card && ul && target === frag ? CARD_OPT.exec(ul[1]) : null;
+        if (opt) list.append(richInline(el("li", "md-opt", el("span", "md-key", opt[1]), " "), opt[2]));
+        else list.append(richInline(el("li"), ul ? ul[1] : ol[2]));
         continue;
       }
       // An indented line right after a list item continues that item.
@@ -1060,11 +1118,63 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         continue;
       }
       list = null;
+      if (val) { val.append(el("br")); richInline(val, line.trim()); continue; }
       if (para) para.append(el("br"));
       else { para = el("p"); frag.append(para); }
       richInline(para, line);
     }
     return frag;
+  }
+
+  // renderSummary renders a card summary: renderRich in card mode, then
+  // cardMarks colours what the terminal card colours.
+  function renderSummary(text) {
+    return cardMarks(renderRich(text, true));
+  }
+
+  // cardMarks walks the text nodes (never markup) outside code and links: a
+  // leading HOLD / READY / UPDATE / RESULT on the first text is the status
+  // (md-st), "(FLEET lean)" is a badge (md-lean), and DR-123 or #123 not
+  // already a link is tinted (md-ref). A link that shows a ticket or PR id
+  // gets the md-ref tint too.
+  const CARD_MARK = /\(FLEET lean\)|\bDR-\d{3,5}(?![\w-])|(?:^|[^\w\/#&])(#\d{3,5})(?!\w)/g;
+  function cardMarks(frag) {
+    for (const a of frag.querySelectorAll("a")) {
+      if (/^(DR-\d+|(PR ?)?#\d+)$/.test(a.textContent)) a.classList.add("md-ref");
+    }
+    const texts = [];
+    const walk = document.createTreeWalker(frag, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      if (!n.parentElement || !n.parentElement.closest("a, code, pre")) texts.push(n);
+    }
+    texts.forEach((n, idx) => {
+      const s = n.data, out = [];
+      let last = 0, m;
+      if (idx === 0 && n === firstText(frag)) {
+        const st = /^(\s*)(HOLD|READY|UPDATE|RESULT)\b/.exec(s);
+        if (st) {
+          if (st[1]) out.push(document.createTextNode(st[1]));
+          out.push(el("span", "md-st md-st-" + st[2].toLowerCase(), st[2]));
+          last = st[0].length;
+        }
+      }
+      CARD_MARK.lastIndex = last;
+      while ((m = CARD_MARK.exec(s))) {
+        const start = m[1] ? m.index + m[0].length - m[1].length : m.index, tok = m[1] || m[0];
+        if (start > last) out.push(document.createTextNode(s.slice(last, start)));
+        out.push(el("span", tok === "(FLEET lean)" ? "md-lean" : "md-ref", tok === "(FLEET lean)" ? "FLEET lean" : tok));
+        last = start + tok.length;
+      }
+      if (!out.length) return;
+      if (last < s.length) out.push(document.createTextNode(s.slice(last)));
+      n.replaceWith(...out);
+    });
+    return frag;
+  }
+  function firstText(frag) {
+    const walk = document.createTreeWalker(frag, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) if (n.data.trim()) return n;
+    return null;
   }
 
   // richInline appends one line to parent: `code`, [label](url) through
@@ -1990,7 +2100,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     }
 
     const sum = str(c.summary);
-    if (sum) card.append(el("div", "summary rich", renderRich(sum)));
+    if (sum) card.append(el("div", "summary rich", renderSummary(sum)));
 
     // A lean that names an option shows as that option's tag; a "Lean:" line
     // is only for a lean that matches no option.
@@ -2165,7 +2275,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     // Chat stops its click, so a tap does not also toggle the row.
     row.append(el("summary", "", el("div", "row-main", l1, l2.childNodes.length ? l2 : null), chat, el("span", "chev")));
     const body = el("div", "row-body");
-    if (sum) body.append(el("div", "summary rich", renderRich(sum)));
+    if (sum) body.append(el("div", "summary rich", renderSummary(sum)));
     if (links) body.append(links);
     row.append(body);
     return row;
@@ -4176,7 +4286,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (k !== sv.sumKey) {
       sv.sumKey = k;
       const body = [];
-      if (sum) body.push(el("div", "summary rich", renderRich(sum)));
+      if (sum) body.push(el("div", "summary rich", renderSummary(sum)));
       if (links) body.push(links);
       $("sv-sum-body").replaceChildren(...body);
       $("sv-sum").hidden = !body.length;

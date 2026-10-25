@@ -30,7 +30,7 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		"since=", ".pct", ".account", ".windows",
 		// Card summaries and chat turns go through the one markdown renderer,
 		// which knows fenced blocks and [label](url) links (via safeLink).
-		"function renderRich(", "renderRich(sum)", "renderRich(t.text)", "```", "](", `\]\(`,
+		"function renderRich(", "renderSummary(sum)", "renderRich(text, true)", "renderRich(t.text)", "```", "](", `\]\(`,
 		"safeLink(m[3], m[2])",
 		// Autolinks: ClickUp custom ids and trecs-brain PR numbers.
 		"https://app.clickup.com/t/90181100858/", "https://github.com/TRECS-SOFTWARE-LABS/trecs-brain/pull/", "function linkText(",
