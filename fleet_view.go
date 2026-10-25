@@ -171,20 +171,31 @@ func fleetEditText(text, key string, fits func(string) bool) (string, bool) {
 
 var fleetListMarkerRe = regexp.MustCompile(`^\s*([-*] |\d+\. )`)
 
-// fleetSummaryLines wraps a card summary to width for the terminal. Fenced
-// blocks stay verbatim; elsewhere ** and backticks are removed and list
-// items hang-indent under their marker.
+// fleetCodeIndent marks a fenced code line in a card summary.
+const fleetCodeIndent = "    "
+
+// fleetSummaryLines wraps a card summary to width for the terminal. A fence
+// line (```) is dropped and its block's lines indent by fleetCodeIndent, kept
+// unchanged when they fit and wrapped under the same indent when not;
+// elsewhere ** and backticks are removed and list items hang-indent under
+// their marker.
 func fleetSummaryLines(s string, width int) []string {
 	var out []string
 	fence := false
 	for _, line := range strings.Split(s, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
 			fence = !fence
-			out = append(out, line)
 			continue
 		}
 		if fence {
-			out = append(out, line)
+			cw := width - len(fleetCodeIndent)
+			if len([]rune(line)) <= cw || strings.TrimSpace(line) == "" {
+				out = append(out, fleetCodeIndent+line)
+				continue
+			}
+			for _, w := range wrapRunes(line, cw) {
+				out = append(out, fleetCodeIndent+w)
+			}
 			continue
 		}
 		line = strings.NewReplacer("**", "", "`", "").Replace(line)

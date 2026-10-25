@@ -144,9 +144,8 @@ func TestFleetSummaryLines(t *testing.T) {
 			t.Errorf("continuation indent != 4: %q", l)
 		}
 	}
-	long := strings.Repeat("y", 30)
-	got = fleetSummaryLines("```\n"+long+"\n**x**\n```", w)
-	want := []string{"```", long, "**x**", "```"}
+	got = fleetSummaryLines("run:\n```\n**x**  y\ngh pr merge 3230 --merge\n```\nend", w)
+	want := []string{"run:", "    **x**  y", "    gh pr merge 3230", "    --merge", "end"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("fence: %q", got)
 	}
