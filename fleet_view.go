@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // fleetSection is the TUI list section a decision card sits in.
@@ -174,49 +176,285 @@ var fleetListMarkerRe = regexp.MustCompile(`^\s*([-*] |\d+\. )`)
 // fleetCodeIndent marks a fenced code line in a card summary.
 const fleetCodeIndent = "    "
 
-// fleetSummaryLines wraps a card summary to width for the terminal. A fence
-// line (```) is dropped and its block's lines indent by fleetCodeIndent, kept
-// unchanged when they fit and wrapped under the same indent when not;
-// elsewhere ** and backticks are removed and list items hang-indent under
-// their marker.
+// The summary's colours. A heading is a line that is only bold text.
+const (
+	fleetSGRHeading = "33" // bold comes from the ** span
+	fleetSGRCode    = "36"
+	fleetSGRURL     = "34"
+	fleetSGRRef     = "35"
+	fleetSGRLean    = "32"
+	fleetSGRHold    = "31"
+	fleetSGRReady   = "32"
+	fleetSGRStatus  = "33"
+)
+
+var (
+	fleetURLRe    = regexp.MustCompile(`https?://\S+`)
+	fleetTicketRe = regexp.MustCompile(`\bDR-\d{3,5}\b`)
+	fleetPRRe     = regexp.MustCompile(`(?:^|[^\w/#&])(#\d{3,5})\b`)
+	fleetStatusRe = regexp.MustCompile(`^\s*(HOLD|READY|UPDATE|RESULT)\b`)
+)
+
+// fleetStyle is one summary rune's look: bold, dim and underline add up, fg
+// is one SGR colour code.
+type fleetStyle struct {
+	bold, dim, under bool
+	fg               string
+}
+
+func (s fleetStyle) sgr() string {
+	var codes []string
+	if s.bold {
+		codes = append(codes, "1")
+	}
+	if s.dim {
+		codes = append(codes, "2")
+	}
+	if s.under {
+		codes = append(codes, "4")
+	}
+	if s.fg != "" {
+		codes = append(codes, s.fg)
+	}
+	return strings.Join(codes, ";")
+}
+
+// fleetSummaryLines wraps a card summary to width for the terminal, as plain
+// text. A fence line (```) is dropped and its block's lines indent by
+// fleetCodeIndent, kept unchanged when they fit and wrapped under the same
+// indent when not; elsewhere ** and backticks are removed and list items
+// hang-indent under their marker.
 func fleetSummaryLines(s string, width int) []string {
+	return fleetSummaryRender(s, width, false)
+}
+
+// fleetSummaryStyledLines is fleetSummaryLines with colour: the same visible
+// text, styled as fleetLineStyles says. Each styled run ends with a reset, so
+// no style leaks into the next line, the indent or the panel border.
+func fleetSummaryStyledLines(s string, width int) []string {
+	return fleetSummaryRender(s, width, true)
+}
+
+func fleetSummaryRender(s string, width int, styled bool) []string {
 	var out []string
-	fence := false
+	fence, first := false, true
 	for _, line := range strings.Split(s, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
-			fence = !fence
+			fence, first = !fence, false
 			continue
 		}
 		if fence {
+			code := fleetStyle{fg: fleetSGRCode}
+			if !styled || strings.TrimSpace(line) == "" {
+				code = fleetStyle{}
+			}
 			cw := width - len(fleetCodeIndent)
 			if len([]rune(line)) <= cw || strings.TrimSpace(line) == "" {
-				out = append(out, fleetCodeIndent+line)
+				out = append(out, fleetCodeIndent+colorize(code.sgr(), line))
 				continue
 			}
 			for _, w := range wrapRunes(line, cw) {
-				out = append(out, fleetCodeIndent+w)
+				out = append(out, fleetCodeIndent+colorize(code.sgr(), w))
 			}
 			continue
 		}
-		line = strings.NewReplacer("**", "", "`", "").Replace(line)
-		if m := fleetListMarkerRe.FindString(line); m != "" {
+		vis, sty := fleetLineStyles(line, first)
+		if strings.TrimSpace(string(vis)) != "" {
+			first = false
+		}
+		if !styled {
+			sty = make([]fleetStyle, len(vis))
+		}
+		if m := fleetListMarkerRe.FindString(string(vis)); m != "" {
 			mw := len([]rune(m))
-			wrapped := wrapRunes(line[len(m):], width-mw)
+			wrapped := fleetWrapStyled(vis[mw:], sty[mw:], width-mw)
 			pad := strings.Repeat(" ", mw)
 			for i, w := range wrapped {
 				if i == 0 {
-					out = append(out, m+w)
+					out = append(out, fleetStyledText(vis[:mw], sty[:mw])+w)
 				} else {
 					out = append(out, pad+w)
 				}
 			}
 			continue
 		}
-		if strings.TrimSpace(line) == "" {
+		if strings.TrimSpace(string(vis)) == "" {
 			out = append(out, "")
 			continue
 		}
-		out = append(out, wrapRunes(line, width)...)
+		out = append(out, fleetWrapStyled(vis, sty, width)...)
 	}
 	return out
+}
+
+// fleetLineStyles removes ** and backticks from one summary line and styles
+// each remaining rune. A ** or backtick opens bold or code only when a closing
+// one follows on the line; an unpaired one is just removed. On top of that: a
+// line of only bold text is a heading; URLs, DR-1234 and #1234 (outside a
+// URL) and "(FLEET lean)" are coloured; on the summary's first line (first)
+// a leading HOLD, READY, UPDATE or RESULT is its status; a list marker is
+// dim. Inside code only the code colour shows.
+func fleetLineStyles(line string, first bool) ([]rune, []fleetStyle) {
+	var vis []rune
+	var bold, code []bool
+	b, c := false, false
+	for i := 0; i < len(line); {
+		switch {
+		case strings.HasPrefix(line[i:], "**"):
+			b = !b && strings.Contains(line[i+2:], "**")
+			i += 2
+		case line[i] == '`':
+			c = !c && strings.Contains(line[i+1:], "`")
+			i++
+		default:
+			r, sz := utf8.DecodeRuneInString(line[i:])
+			vis = append(vis, r)
+			bold, code = append(bold, b), append(code, c)
+			i += sz
+		}
+	}
+	sty := make([]fleetStyle, len(vis))
+	for i := range sty {
+		sty[i].bold = bold[i]
+	}
+	text := string(vis)
+	// runeAt maps a byte offset in text, as regexp returns, to a rune index.
+	runeAt := func(byteOff int) int { return utf8.RuneCountInString(text[:byteOff]) }
+	paint := func(from, to int, f func(*fleetStyle)) {
+		for i := runeAt(from); i < runeAt(to); i++ {
+			f(&sty[i])
+		}
+	}
+
+	marker := fleetListMarkerRe.FindStringIndex(text)
+	heading := marker == nil && strings.TrimSpace(text) != ""
+	for i, r := range vis {
+		if !unicode.IsSpace(r) && !bold[i] {
+			heading = false
+		}
+	}
+	if heading {
+		paint(0, len(text), func(s *fleetStyle) { s.fg = fleetSGRHeading })
+	}
+	if first {
+		if m := fleetStatusRe.FindStringSubmatchIndex(text); m != nil {
+			fg, strong := fleetSGRStatus, false
+			switch text[m[2]:m[3]] {
+			case "HOLD":
+				fg, strong = fleetSGRHold, true
+			case "READY":
+				fg, strong = fleetSGRReady, true
+			}
+			paint(m[2], m[3], func(s *fleetStyle) { s.fg, s.bold = fg, s.bold || strong })
+		}
+	}
+	urls := fleetURLRe.FindAllStringIndex(text, -1)
+	for _, u := range urls {
+		// Sentence punctuation after a URL, and a ")" that closes a bracket
+		// the URL did not open, are not part of it.
+		for u[1] > u[0] {
+			last := text[u[1]-1]
+			if !strings.ContainsRune(".,;:!?", rune(last)) &&
+				(last != ')' || strings.Contains(text[u[0]:u[1]], "(")) {
+				break
+			}
+			u[1]--
+		}
+	}
+	inURL := func(from, to int) bool {
+		for _, u := range urls {
+			if from < u[1] && to > u[0] {
+				return true
+			}
+		}
+		return false
+	}
+	var refs [][]int
+	for _, m := range fleetTicketRe.FindAllStringIndex(text, -1) {
+		refs = append(refs, m)
+	}
+	for _, m := range fleetPRRe.FindAllStringSubmatchIndex(text, -1) {
+		refs = append(refs, m[2:4])
+	}
+	for _, m := range refs {
+		if !inURL(m[0], m[1]) {
+			paint(m[0], m[1], func(s *fleetStyle) { s.fg = fleetSGRRef })
+		}
+	}
+	for _, u := range urls {
+		paint(u[0], u[1], func(s *fleetStyle) { s.fg, s.under = fleetSGRURL, true })
+	}
+	for off := 0; ; {
+		i := strings.Index(text[off:], "(FLEET lean)")
+		if i < 0 {
+			break
+		}
+		from := off + i
+		off = from + len("(FLEET lean)")
+		if !inURL(from, off) {
+			paint(from, off, func(s *fleetStyle) { s.fg, s.bold = fleetSGRLean, true })
+		}
+	}
+	for i := range sty {
+		if code[i] {
+			sty[i].fg, sty[i].under = fleetSGRCode, false
+		}
+	}
+	if marker != nil {
+		paint(marker[0], marker[1], func(s *fleetStyle) {
+			*s = fleetStyle{dim: true}
+		})
+	}
+	return vis, sty
+}
+
+// fleetWrapStyled is wrapRunes over vis, with each output rune given the style
+// of the visible rune it came from. A space wrapRunes puts between two words
+// keeps the style only when both sides share it, so an underline or a colour
+// never runs past its span's last rune.
+func fleetWrapStyled(vis []rune, sty []fleetStyle, width int) []string {
+	if width < 1 {
+		return []string{fleetStyledText(vis, sty)}
+	}
+	wrapped := wrapRunes(string(vis), width)
+	out := make([]string, 0, len(wrapped))
+	src := 0
+	next := func() int {
+		for src < len(vis) && unicode.IsSpace(vis[src]) {
+			src++
+		}
+		return src
+	}
+	for _, w := range wrapped {
+		rs := []rune(w)
+		ls := make([]fleetStyle, len(rs))
+		for i, r := range rs {
+			if unicode.IsSpace(r) {
+				if i > 0 && next() < len(vis) && sty[src] == ls[i-1] {
+					ls[i] = ls[i-1]
+				}
+				continue
+			}
+			if next() < len(vis) {
+				ls[i] = sty[src]
+				src++
+			}
+		}
+		out = append(out, fleetStyledText(rs, ls))
+	}
+	return out
+}
+
+// fleetStyledText writes rs with one colorize call per run of equal styles.
+func fleetStyledText(rs []rune, sty []fleetStyle) string {
+	var b strings.Builder
+	for i := 0; i < len(rs); {
+		j := i + 1
+		for j < len(rs) && sty[j] == sty[i] {
+			j++
+		}
+		b.WriteString(colorize(sty[i].sgr(), string(rs[i:j])))
+		i = j
+	}
+	return b.String()
 }

@@ -9,6 +9,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The FLEET view colours the selected card's summary like light markdown: a
+  bold-only line is a yellow heading, `**bold**` is bold, code is cyan, URLs
+  are blue and underlined, `DR-1234` and `#1234` are magenta, "(FLEET lean)"
+  is green, a leading HOLD / READY / UPDATE / RESULT gets its status colour,
+  and list markers are dim. The text and its wrapping do not change.
+
 - The FLEET view offers Other on every card with options, as the page does:
   `o` opens a box for Andy's own answer, and Enter sends it to FLEET as
   `Andy decides on <card id>: <text>`. It is a plain line, so the card does

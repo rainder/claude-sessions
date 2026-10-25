@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -148,6 +149,232 @@ func TestFleetSummaryLines(t *testing.T) {
 	want := []string{"run:", "    **x**  y", "    gh pr merge 3230", "    --merge", "end"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("fence: %q", got)
+	}
+}
+
+// fleetSummarySample is a card body with every markup the TUI styles.
+const fleetSummarySample = "**READY (2026-10-25)** Head 13f786194, shared 0.522.0.\n" +
+	"\n" +
+	"**Issue**\n" +
+	"- DR-5692: PR #3230 adds counters. See https://github.com/TRECS-SOFTWARE-LABS/trecs-brain/pull/3230 for `module-exchange` rows.\n" +
+	"\n" +
+	"**Fix**\n" +
+	"1. Run:\n" +
+	"```\n" +
+	"gh pr merge 3230 --merge --delete-branch\n" +
+	"```\n" +
+	"\n" +
+	"**Options**\n" +
+	"- **done** — Merged. (FLEET lean) It is green."
+
+// fleetSummaryLinesV1 is fleetSummaryLines before the styled variant, kept to
+// prove the plain path did not change.
+func fleetSummaryLinesV1(s string, width int) []string {
+	var out []string
+	fence := false
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			fence = !fence
+			continue
+		}
+		if fence {
+			cw := width - len(fleetCodeIndent)
+			if len([]rune(line)) <= cw || strings.TrimSpace(line) == "" {
+				out = append(out, fleetCodeIndent+line)
+				continue
+			}
+			for _, w := range wrapRunes(line, cw) {
+				out = append(out, fleetCodeIndent+w)
+			}
+			continue
+		}
+		line = strings.NewReplacer("**", "", "`", "").Replace(line)
+		if m := fleetListMarkerRe.FindString(line); m != "" {
+			mw := len([]rune(m))
+			wrapped := wrapRunes(line[len(m):], width-mw)
+			pad := strings.Repeat(" ", mw)
+			for i, w := range wrapped {
+				if i == 0 {
+					out = append(out, m+w)
+				} else {
+					out = append(out, pad+w)
+				}
+			}
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, wrapRunes(line, width)...)
+	}
+	return out
+}
+
+var fleetSummaryCorpus = []string{
+	fleetSummarySample,
+	"**Bold** and `code`",
+	"one\n\ntwo",
+	"- alpha beta gamma delta epsilon",
+	"12. alpha beta gamma delta",
+	"run:\n```\n**x**  y\ngh pr merge 3230 --merge\n```\nend",
+	"HOLD **unpaired and `open code",
+	"  * nested  item with   gaps and ***stars***",
+	"**a very long bold heading that wraps across lines**",
+	"see https://example.com/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z.",
+	"tab\tseparated\u00a0nbsp and émoji ✓ DR-12345 #12",
+	"```\nunterminated fence with a long line that must wrap somewhere",
+	"",
+	"- ",
+}
+
+func TestFleetSummaryPlainUnchanged(t *testing.T) {
+	for _, s := range fleetSummaryCorpus {
+		for _, w := range []int{0, 1, 3, 8, 20, 40, 77, 200} {
+			want := fleetSummaryLinesV1(s, w)
+			if got := fleetSummaryLines(s, w); !reflect.DeepEqual(got, want) {
+				t.Errorf("plain w=%d %q:\n got %q\nwant %q", w, s, got, want)
+			}
+			styled := fleetSummaryStyledLines(s, w)
+			if len(styled) != len(want) {
+				t.Fatalf("styled w=%d %q: %d lines, want %d", w, s, len(styled), len(want))
+			}
+			for i, l := range styled {
+				if p := stripANSI(l); p != want[i] {
+					t.Errorf("styled w=%d %q line %d: visible %q, want %q", w, s, i, p, want[i])
+				}
+				if fleetOpenStyle(l) {
+					t.Errorf("styled w=%d line %q ends with an open style", w, l)
+				}
+				if w >= 8 && visibleWidth(l) > w {
+					t.Errorf("styled w=%d line %q is %d wide", w, l, visibleWidth(l))
+				}
+			}
+		}
+	}
+}
+
+// fleetOpenStyle reports whether line's last SGR is not a reset, so its style
+// would leak past the line's end.
+func fleetOpenStyle(line string) bool {
+	i := strings.LastIndex(line, "\033[")
+	return i >= 0 && !strings.HasPrefix(line[i:], ansiReset)
+}
+
+// fleetRunStyle is the SGR in force at the first byte of needle in line.
+func fleetRunStyle(t *testing.T, line, needle string) string {
+	t.Helper()
+	i := strings.Index(line, needle)
+	if i < 0 {
+		t.Fatalf("%q not in %q", needle, line)
+	}
+	open := strings.LastIndex(line[:i], "\033[")
+	if open < 0 {
+		return ""
+	}
+	code := line[open+2 : open+strings.IndexByte(line[open:], 'm')]
+	if code == "0" {
+		return ""
+	}
+	return code
+}
+
+func TestFleetSummaryStyles(t *testing.T) {
+	one := func(s string) string {
+		t.Helper()
+		l := fleetSummaryStyledLines(s, 80)
+		if len(l) != 1 {
+			t.Fatalf("%q: %d lines", s, len(l))
+		}
+		return l[0]
+	}
+	for _, c := range []struct{ in, needle, sgr string }{
+		{"**Issue**", "Issue", "1;33"},
+		{"**Decision (Andy)**", "(Andy)", "1;33"},
+		{"plain **bold** text", "bold", "1"},
+		{"plain **bold** text", " text", ""},
+		{"run `make` now", "make", "36"},
+		{"see https://h/x.", "https://h/x", "4;34"},
+		{"see https://h/x.", ".", ""},
+		{"(see https://h/x)", ")", ""},
+		{"ticket DR-5692 done", "DR-5692", "35"},
+		{"pr #3230 open", "#3230", "35"},
+		{"pr #12 open", "#12", ""},
+		{"https://h/pull/3230#1234 DR-1234", "DR-1234", "35"},
+		{"go (FLEET lean) now", "(FLEET lean)", "1;32"},
+		{"HOLD the merge", "HOLD", "1;31"},
+		{"**READY (x)** go", "READY", "1;32"},
+		{"**READY (x)** go", "(x)", "1"},
+		{"UPDATE: x", "UPDATE", "33"},
+		{"RESULT x", "RESULT", "33"},
+		{"- item", "-", "2"},
+		{"- item", "item", ""},
+		{"12. item", "12.", "2"},
+		{"`DR-1234 https://x.y`", "DR-1234", "36"},
+	} {
+		if got := fleetRunStyle(t, one(c.in), c.needle); got != c.sgr {
+			t.Errorf("%q: %q has SGR %q, want %q", c.in, c.needle, got, c.sgr)
+		}
+	}
+	// The URL contains a ref; it stays URL-blue.
+	if got := fleetRunStyle(t, one("https://h/pull/3230#1234"), "3230"); got != "4;34" {
+		t.Errorf("ref inside URL: %q", got)
+	}
+	// A status word counts only on the summary's first line.
+	l := fleetSummaryStyledLines("first\nHOLD later", 80)
+	if got := fleetRunStyle(t, l[1], "HOLD"); got != "" {
+		t.Errorf("status on line 2: %q", got)
+	}
+	// A fenced code line is cyan; the indent is not styled.
+	l = fleetSummaryStyledLines("```\nmake test\n```", 80)
+	if l[0] != fleetCodeIndent+"\033[36mmake test"+ansiReset {
+		t.Errorf("fence: %q", l[0])
+	}
+	// A bold span wrapped across lines keeps bold on each line.
+	l = fleetSummaryStyledLines("x **alpha beta gamma delta** y", 12)
+	if len(l) < 3 {
+		t.Fatalf("wrap: %q", l)
+	}
+	for _, w := range []string{"alpha", "gamma"} {
+		found := false
+		for _, line := range l {
+			if strings.Contains(line, w) {
+				found = true
+				if got := fleetRunStyle(t, line, w); got != "1" {
+					t.Errorf("wrapped %q: SGR %q in %q", w, got, line)
+				}
+				if !strings.HasSuffix(line, ansiReset) {
+					t.Errorf("wrapped line %q has no reset", line)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%q missing from %q", w, l)
+		}
+	}
+	// The underline stops at the URL's end, not on the space after it.
+	if got := one("https://x.y z"); got != "\033[4;34mhttps://x.y"+ansiReset+" z" {
+		t.Errorf("URL space: %q", got)
+	}
+}
+
+// TestFleetSummaryFrame renders a card with the sample body in the TUI at
+// several widths: no frame line is wider than the terminal, and none carries
+// an open style at its end.
+func TestFleetSummaryFrame(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	c := fleetTestCard("a", "needs-you")
+	c.Summary = fleetSummarySample
+	for _, cols := range []int{20, 33, 60, 120} {
+		frame := renderFleetView(fleetTestState(fleetTestView(c), now), cols, 60, now)
+		for _, l := range strings.Split(frame, "\n") {
+			if visibleWidth(l) > cols {
+				t.Errorf("cols=%d: line %q is %d wide", cols, l, visibleWidth(l))
+			}
+			if fleetOpenStyle(l) {
+				t.Errorf("cols=%d: line %q ends with an open style", cols, l)
+			}
+		}
 	}
 }
 

@@ -848,7 +848,7 @@ func fleetExpandedLines(st *fleetViewState, it fleetItem, cols int) []string {
 	var out []string
 	c := it.Card
 	if strings.TrimSpace(c.Summary) != "" {
-		for _, l := range fleetSummaryLines(c.Summary, cols-len(fleetIndent)) {
+		for _, l := range fleetSummaryStyledLines(c.Summary, cols-len(fleetIndent)) {
 			out = append(out, fleetIndent+l)
 		}
 	}
