@@ -451,22 +451,6 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 	}
 }
 
-// fleetWindow is the first body line to show so the selected card's lines
-// [selStart, selEnd) stay on screen. A card taller than rows scrolls inside
-// itself by scroll lines.
-func fleetWindow(total, selStart, selEnd, rows, scroll int) int {
-	if rows <= 0 {
-		return 0
-	}
-	if h := selEnd - selStart; h > rows {
-		return selStart + min(max(scroll, 0), h-rows)
-	}
-	if selEnd <= rows {
-		return 0
-	}
-	return selEnd - rows
-}
-
 const (
 	fleetSGRApprove = "1;31"
 	fleetSGRDecide  = "1;33"
@@ -506,9 +490,11 @@ func fleetRowRight(left, right string, cols int) string {
 	return left
 }
 
-// renderFleetView draws the whole Fleet view for a cols×rows terminal. It
-// clamps st.scroll to what the selected card can scroll, so PgUp after
-// over-scrolling moves at once.
+// renderFleetView draws the whole Fleet view for a cols×rows terminal: the
+// header, the card list, a rule, the details panel (or the confirm panel) and
+// the bottom row. It moves st.listTop to keep the selected row in the list
+// window and clamps st.scroll to what the panel can scroll, so PgUp after
+// over-scrolling moves at once. With rows > 0 the frame is exactly rows lines.
 func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	width := cols
 	if width <= 0 {
@@ -536,20 +522,8 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 		body = []string{dim("loading…")}
 	case len(st.view.Ambiguous) > 0:
 		body = []string{colorize(fleetSGRAmber, fleetAmbiguousText(st.view.Ambiguous))}
-	case st.panel != nil:
-		body = fleetPanelLines(st, width, bodyRows, now)
 	default:
-		var selStart, selEnd int
-		body, selStart, selEnd = fleetListLines(st, width, now)
-		if bodyRows >= 0 {
-			if h := selEnd - selStart; h > bodyRows {
-				st.scroll = min(max(st.scroll, 0), h-bodyRows)
-			} else {
-				st.scroll = 0
-			}
-			start := fleetWindow(len(body), selStart, selEnd, bodyRows, st.scroll)
-			body = body[min(start, len(body)):]
-		}
+		body = fleetStackedBody(st, width, bodyRows, now)
 	}
 	if bodyRows >= 0 {
 		if len(body) > bodyRows {
@@ -562,10 +536,141 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 
 	lines := append(top, body...)
 	lines = append(lines, sep, fleetBottomRow(st, now))
+	if rows > 0 && len(lines) > rows {
+		// A screen shorter than the header and footer: keep the bottom row,
+		// which carries the toast.
+		lines = append(lines[:rows-1], lines[len(lines)-1])
+	}
 	for i, l := range lines {
 		lines[i] = clipLine(l, width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// fleetStackedLayout splits body rows between the card list, the rule under
+// it and the panel. need is the list's line count (cards plus headings). The
+// list gets need rows, at most 40% of the body rounded down but never fewer
+// than 3, so its height (and the panel's first row) never depends on which
+// card is selected. On a tiny screen the list gives way so the panel keeps
+// minPanel rows: 1 for the details, 2 for the confirm panel (its comment and
+// key lines); the details also keep 1 list row, the selected one. confirm
+// changes the split only on such a screen. body < 0 (unknown size) shows all.
+func fleetStackedLayout(body, need int, confirm bool) (listH int, rule bool, panelH int) {
+	if body < 0 {
+		return need, true, -1
+	}
+	minList, minPanel := 1, 1
+	if confirm {
+		minList, minPanel = 0, 2
+	}
+	listH = min(need, max(3, body*2/5))
+	if listH+1+minPanel > body {
+		listH = min(need, max(body-1-minPanel, minList))
+	}
+	listH = min(listH, body)
+	rem := body - listH
+	rule = listH > 0 && rem >= 2
+	panelH = rem
+	if rule {
+		panelH--
+	}
+	return listH, rule, panelH
+}
+
+// fleetListWindow is the first list line to show in an h-row window over
+// need lines so line sel stays visible. The window moves only when sel leaves
+// it; moving up to a section's first card (headAbove) shows its heading too.
+func fleetListWindow(top, sel, need, h int, headAbove bool) int {
+	if h <= 0 || need <= h {
+		return 0
+	}
+	switch {
+	case sel < top:
+		top = sel
+		if headAbove && h >= 2 {
+			top = sel - 1
+		}
+	case sel >= top+h:
+		top = sel - h + 1
+	}
+	return min(max(top, 0), need-h)
+}
+
+// fleetPanelWindow cuts the panel's lines to h rows from scroll. When they do
+// not fit, a dim "↑ more" takes the first row while scrolled and a dim
+// "↓ more" the last while more lies below (a panel under 3 rows has no room
+// for them). It returns the rows and the clamped scroll. h < 0 shows all.
+func fleetPanelWindow(lines []string, h, scroll int) ([]string, int) {
+	if h < 0 || len(lines) <= h {
+		return lines, 0
+	}
+	if h < 3 {
+		s := min(max(scroll, 0), len(lines)-h)
+		return lines[s : s+h], s
+	}
+	s := min(max(scroll, 0), len(lines)-(h-1))
+	var out []string
+	avail := h
+	if s > 0 {
+		out = append(out, dim("↑ more"))
+		avail--
+	}
+	end := s + avail
+	below := end < len(lines)
+	if below {
+		end--
+	}
+	out = append(out, lines[s:end]...)
+	if below {
+		out = append(out, dim("↓ more"))
+	}
+	return out, s
+}
+
+// fleetStackedBody is the list window, the rule and the panel, in exactly
+// bodyRows rows (bodyRows < 0: everything).
+func fleetStackedBody(st *fleetViewState, cols, bodyRows int, now time.Time) []string {
+	list, selRow := fleetListLines(st, cols, now)
+	listH, rule, panelH := fleetStackedLayout(bodyRows, len(list), st.panel != nil)
+	headAbove := len(st.items) > 0 && (st.sel == 0 || st.items[st.sel-1].Section != st.items[st.sel].Section)
+	st.listTop = fleetListWindow(st.listTop, selRow, len(list), listH, headAbove)
+	st.panelRows = max(panelH, 0)
+
+	out := append([]string(nil), list[st.listTop:st.listTop+listH]...)
+	if rule {
+		out = append(out, fleetListRule(cols, st.listTop, len(list)-st.listTop-listH))
+	}
+	if panelH == 0 {
+		return out
+	}
+	if st.panel != nil {
+		return append(out, fleetPanelLines(st, cols, panelH, now)...)
+	}
+	var panel []string
+	if it := st.selected(); it != nil {
+		panel, st.scroll = fleetPanelWindow(fleetDetailLines(st, *it, cols, now), panelH, st.scroll)
+	}
+	return append(out, panel...)
+}
+
+// fleetListRule is the rule under the list. When list lines are scrolled off
+// it says how many, above and below, at its right end.
+func fleetListRule(cols, above, below int) string {
+	var marks []string
+	if above > 0 {
+		marks = append(marks, "↑"+strconv.Itoa(above))
+	}
+	if below > 0 {
+		marks = append(marks, "↓"+strconv.Itoa(below))
+	}
+	label := ""
+	if len(marks) > 0 {
+		label = " " + strings.Join(marks, " ") + " "
+	}
+	if n := len([]rune(label)); label == "" || n+4 > cols {
+		return dim(strings.Repeat("─", cols))
+	}
+	return dim(strings.Repeat("─", cols-len([]rune(label))-2) + label + "──")
 }
 
 // fleetHeaderLine is FLEET's status, the state file's age and the counts.
@@ -643,11 +748,11 @@ var fleetSectionTitles = map[fleetSection]string{
 	fleetSecSent:    dim("SENT — WAITING FOR FLEET"),
 }
 
-// fleetListLines is the card list with the selected card expanded, and the
-// selected card's line range.
-func fleetListLines(st *fleetViewState, cols int, now time.Time) (lines []string, selStart, selEnd int) {
+// fleetListLines is one line per card under its section headings, and the
+// selected card's line index.
+func fleetListLines(st *fleetViewState, cols int, now time.Time) (lines []string, selRow int) {
 	if len(st.items) == 0 {
-		return []string{dim("No cards wait for you.")}, 0, 1
+		return []string{dim("No cards wait for you.")}, 0
 	}
 	sec := fleetSection(-1)
 	for i, it := range st.items {
@@ -655,17 +760,12 @@ func fleetListLines(st *fleetViewState, cols int, now time.Time) (lines []string
 			sec = it.Section
 			lines = append(lines, fleetSectionTitles[sec])
 		}
-		selected := i == st.sel
-		if selected {
-			selStart = len(lines)
+		if i == st.sel {
+			selRow = len(lines)
 		}
-		lines = append(lines, fleetCollapsedRow(it, selected, cols, now))
-		if selected {
-			lines = append(lines, fleetExpandedLines(st, it, cols)...)
-			selEnd = len(lines)
-		}
+		lines = append(lines, fleetCollapsedRow(it, i == st.sel, cols, now))
 	}
-	return lines, selStart, selEnd
+	return lines, selRow
 }
 
 // fleetCollapsedRow is one card's list row.
@@ -689,11 +789,7 @@ func fleetCollapsedRow(it fleetItem, selected bool, cols int, now time.Time) str
 	} else {
 		// An open card shows its priority (P1..P4) at the right, before its age.
 		right := "P" + strconv.Itoa(it.Card.priority())
-		age := fleetAge(it.Card.FirstSeenAt, now)
-		if age == "" {
-			age = fleetAge(it.Card.UpdatedAt, now)
-		}
-		if age != "" {
+		if age := fleetCardAge(it.Card, now); age != "" {
 			right += " · " + age
 		}
 		row = fleetRowRight(head+it.Card.Title, right, cols)
@@ -714,7 +810,40 @@ func fleetAttemptLabel(a fleetAttempt) string {
 	return a.OptionKey
 }
 
-// fleetExpandedLines is the selected card's body under its row.
+// fleetCardAge is how long the card has been up: firstSeenAt, else updatedAt.
+func fleetCardAge(c fleetCardView, now time.Time) string {
+	if age := fleetAge(c.FirstSeenAt, now); age != "" {
+		return age
+	}
+	return fleetAge(c.UpdatedAt, now)
+}
+
+// fleetDetailLines is the selected card in full for the details panel: its
+// title, a line with section, ticket, priority and age, then its body.
+func fleetDetailLines(st *fleetViewState, it fleetItem, cols int, now time.Time) []string {
+	c := it.Card
+	var out []string
+	if strings.TrimSpace(c.Title) != "" {
+		for _, l := range wrapRunes(c.Title, cols) {
+			out = append(out, bold(l))
+		}
+	}
+	meta := []string{fleetSectionTitles[it.Section]}
+	if c.Ticket != "" {
+		meta = append(meta, c.Ticket)
+	}
+	if it.Section != fleetSecSent {
+		meta = append(meta, "P"+strconv.Itoa(c.priority()))
+	}
+	if age := fleetCardAge(c, now); age != "" {
+		meta = append(meta, age+" old")
+	}
+	out = append(out, strings.Join(meta, dim(" · ")))
+	return append(out, fleetExpandedLines(st, it, cols)...)
+}
+
+// fleetExpandedLines is the selected card's body: summary, meta, answers and
+// options.
 func fleetExpandedLines(st *fleetViewState, it fleetItem, cols int) []string {
 	var out []string
 	c := it.Card

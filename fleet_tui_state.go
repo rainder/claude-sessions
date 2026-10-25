@@ -16,7 +16,7 @@ import (
 // (the page's SHEET_ARM_MS), so one stray key cannot send.
 const fleetArmDelay = 400 * time.Millisecond
 
-const fleetPageStep = 10 // lines per PgUp/PgDn
+const fleetPageStep = 10 // lines per PgUp/PgDn before the panel height is known
 
 // fleetCmd is what the modal loop does after a key.
 type fleetCmd int
@@ -68,7 +68,9 @@ type fleetViewState struct {
 	err           string // non-empty: the one line shown instead of the cards
 	items         []fleetItem
 	sel           int
-	scroll        int
+	scroll        int    // details panel scroll, in lines; 0 on a new selection
+	listTop       int    // first list line in the list window (renderFleetView keeps it)
+	panelRows     int    // the details panel's height at the last render; 0 before one
 	unlocked      string // card id a 'c' unlocked for one answer
 	panel         *fleetPanel
 	sending       bool
@@ -314,6 +316,15 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	}
 }
 
+// pageStep is PgUp/PgDn's scroll in the details panel: its height less the
+// two more lines, so a page skips no line; fleetPageStep before a render.
+func (st *fleetViewState) pageStep() int {
+	if st.panelRows <= 0 {
+		return fleetPageStep
+	}
+	return max(st.panelRows-2, 1)
+}
+
 // selected is the selected item, nil when the list is empty or not shown.
 func (st *fleetViewState) selected() *fleetItem {
 	if st.err != "" || st.sel < 0 || st.sel >= len(st.items) {
@@ -342,13 +353,13 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		st.scroll = 0
 		return fleetCmdRender
 	case KeyPageUp:
-		st.scroll -= fleetPageStep
+		st.scroll -= st.pageStep()
 		if st.scroll < 0 {
 			st.scroll = 0
 		}
 		return fleetCmdRender
 	case KeyPageDown:
-		st.scroll += fleetPageStep
+		st.scroll += st.pageStep()
 		return fleetCmdRender
 	case KeyEsc, "q", "Q", "\x03":
 		if st.sending {

@@ -10,27 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestFleetWindow(t *testing.T) {
-	cases := []struct {
-		total, selStart, selEnd, rows, scroll, want int
-	}{
-		{50, 10, 14, 20, 0, 0},
-		{50, 40, 45, 20, 0, 25},
-		{50, 10, 40, 20, 0, 10},
-		{50, 10, 40, 20, 5, 15},
-		{50, 10, 40, 20, 99, 20},
-		{50, 10, 14, 0, 0, 0},
-		{50, 10, 40, 20, -3, 10},
-	}
-	for _, c := range cases {
-		if got := fleetWindow(c.total, c.selStart, c.selEnd, c.rows, c.scroll); got != c.want {
-			t.Errorf("fleetWindow(%d, %d-%d, rows %d, scroll %d) = %d, want %d",
-				c.total, c.selStart, c.selEnd, c.rows, c.scroll, got, c.want)
-		}
-	}
-}
-
-// fleetRenderView is the layout-A example: an alive, idle FLEET, one APPROVE,
+// fleetRenderView is the example: an alive, idle FLEET, one APPROVE,
 // one DECIDE and one SENT card.
 func fleetRenderView(now time.Time) fleetStateView {
 	approve := fleetCardView{ID: "a", Kind: "explicit-yes", Ticket: "DR-5241", Title: "Merge PR #2786 into develop",
@@ -237,8 +217,8 @@ func TestRenderFleetViewPanel(t *testing.T) {
 			t.Errorf("panel lacks %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "APPROVE") {
-		t.Errorf("the panel replaces the list:\n%s", out)
+	if !strings.Contains(out, "APPROVE") || !strings.Contains(out, "▸ DR-5241") {
+		t.Errorf("the list stays above the panel:\n%s", out)
 	}
 	if out := fleetRendered(st, 100, 30, opened.Add(500*time.Millisecond)); strings.Contains(out, "ready in") {
 		t.Errorf("armed panel still counts down:\n%s", out)
@@ -299,8 +279,8 @@ func TestRenderFleetViewKeepsSelectionOnScreen(t *testing.T) {
 		t.Errorf("frame has %d lines, want 15", n)
 	}
 
-	// A card taller than the screen scrolls inside with PgDn, and the scroll
-	// is clamped so PgUp works at once.
+	// A card taller than the panel scrolls inside it with PgDn while its list
+	// row stays, and the scroll is clamped so PgUp works at once.
 	c := fleetTestCard("tall", "needs-you")
 	c.Ticket = "DR-7000"
 	for i := 0; i < 40; i++ {
@@ -315,7 +295,7 @@ func TestRenderFleetViewKeepsSelectionOnScreen(t *testing.T) {
 		st.handleKey(KeyPageDown, false, now)
 	}
 	bottom := fleetRendered(st, 80, 15, now)
-	if !strings.Contains(bottom, "2  not-yet") || strings.Contains(bottom, "▸ DR-7000") {
+	if !strings.Contains(bottom, "2  not-yet") || !strings.Contains(bottom, "▸ DR-7000") || strings.Contains(bottom, "line 00") {
 		t.Errorf("tall card bottom:\n%s", bottom)
 	}
 	st.handleKey(KeyPageUp, false, now)

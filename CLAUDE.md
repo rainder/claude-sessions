@@ -1653,6 +1653,25 @@ state read before the answer was recorded would still show the card open, take
 10 s; accepted. A send job re-reads the state first and refuses locally
 (`Stale`) when the card is gone or its hash moved.
 
+**Layout** (`renderFleetView`, stacked). Top to bottom: the header, the card
+list (one line per card under its section headings, `▸` on the selected one),
+a rule, the details panel (the selected card in full), and the bottom row. The
+selected card used to expand in place, so every row under it moved by a
+different amount on each Up/Down. Now the list height depends only on the
+list's line count and the screen (`fleetStackedLayout`): `min(lines, max(3,
+body*2/5))`, the 40% rounded down, body being the rows between the header's
+rule and the footer's. So the rule and the panel start on the same row for
+every selection. A longer list scrolls a window over its lines
+(`fleetListWindow`, `st.listTop`): it moves only when the selection leaves
+it, and the rule shows `↑n ↓n` for lines off screen. The panel gets the rest
+and scrolls with PgUp/PgDn (`st.scroll`, a page is the panel height less 2,
+so no line is skipped), with dim `↑ more` / `↓ more` rows; a new selection
+starts it at the top. The confirm and Other panels draw in the panel area and
+leave the list as it was. On a tiny screen the list gives way first: the
+details keep the selected row and one panel row, the confirm panel its
+comment and key lines (so only there does opening it shrink the list). A
+frame is exactly `rows` lines whatever the size.
+
 **Keys.** An option is picked by digit `1`..`9` only; the comment box takes
 printable ASCII, and its whitespace collapses to one space in the send text.
 Enter on the panel is ignored for 400 ms (`fleetArmDelay`, the page's

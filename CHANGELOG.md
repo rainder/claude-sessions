@@ -383,6 +383,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The FLEET view no longer moves the list when the selection changes. Each
+  card is one list line; the selected card shows in full in a details panel
+  under a rule, which starts on the same row for every card. A long list
+  scrolls around the selection, PgUp/PgDn scroll the panel, and the confirm
+  panel opens in the panel area with the list left in place.
 - The `/fleet` page header is one row on a phone; a tap on the quota
   values shows the rest.
 - STATUS now shows `waiting` with no reason suffix. A blocked session used
