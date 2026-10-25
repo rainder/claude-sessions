@@ -443,7 +443,7 @@ func TestFleetShipWhen(t *testing.T) {
 	if !st.shipOn() || !strings.Contains(out, "2 sent · waiting for FLEET · Enter shows them") || strings.Contains(out, "SENT — WAITING") {
 		t.Fatalf("sent only: ship %v\n%s", st.shipOn(), out)
 	}
-	if !strings.HasSuffix(out, fleetHelpShip) {
+	if !strings.HasSuffix(out, fleetHelpShipSent) {
 		t.Errorf("help row:\n%s", out)
 	}
 

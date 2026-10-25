@@ -774,6 +774,11 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 		return ""
 	}
 	if st.shipOn() {
+		// The sent line is the first to go on a small screen; the help
+		// row still says Enter opens the sent cards.
+		if len(st.items) > 0 {
+			return dim(fleetHelpShipSent)
+		}
 		return dim(fleetHelpShip)
 	}
 	if st.attachable() {

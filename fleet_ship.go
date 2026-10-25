@@ -21,6 +21,7 @@ const (
 	fleetShipFrame = 250 * time.Millisecond // one animation frame (4 fps)
 
 	fleetHelpShip     = "Esc back"
+	fleetHelpShipSent = "Enter sent cards · Esc back"
 	fleetShipTitle    = "all clear, captain"
 	fleetShipTitleCut = 30 // a done card with no ticket shows this much of its title
 
