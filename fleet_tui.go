@@ -522,6 +522,8 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 		body = []string{dim("loading…")}
 	case len(st.view.Ambiguous) > 0:
 		body = []string{colorize(fleetSGRAmber, fleetAmbiguousText(st.view.Ambiguous))}
+	case st.harborOn():
+		body = fleetHarborBody(st, width, bodyRows, now)
 	default:
 		body = fleetStackedBody(st, width, bodyRows, now)
 	}
@@ -735,6 +737,12 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 	}
 	if st.panel != nil {
 		return ""
+	}
+	if st.harborOn() {
+		if st.harborAttachable() {
+			return dim(fleetHelpHarborAttach)
+		}
+		return dim(fleetHelpHarbor)
 	}
 	if st.attachable() {
 		return dim(fleetHelpRowAttach)

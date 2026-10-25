@@ -2660,16 +2660,17 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 }
 
 // visualLen returns the display width of a string with ANSI escapes stripped.
+// A wide rune (runeCells) counts as two columns.
 func visualLen(s string) int {
 	out := s
 	for {
 		i := strings.Index(out, "\033[")
 		if i < 0 {
-			return utf8.RuneCountInString(out)
+			return cellWidth(out)
 		}
 		j := strings.IndexByte(out[i:], 'm')
 		if j < 0 {
-			return utf8.RuneCountInString(out)
+			return cellWidth(out)
 		}
 		out = out[:i] + out[i+j+1:]
 	}
@@ -2678,7 +2679,9 @@ func visualLen(s string) int {
 // clipLine truncates s to at most width visible columns. ANSI escape
 // sequences never count toward the width, and sequences past the cut point
 // are still emitted so color state (e.g. the trailing reset on a dimmed or
-// colorized row) survives truncation. Runes count as one column each.
+// colorized row) survives truncation. A wide rune (runeCells) counts as two
+// columns; one that would straddle the edge is dropped, and so is everything
+// visible after it.
 func clipLine(s string, width int) string {
 	var b strings.Builder
 	vis := 0
@@ -2693,10 +2696,12 @@ func clipLine(s string, width int) string {
 			i += j + 1
 			continue
 		}
-		_, sz := utf8.DecodeRuneInString(s[i:])
-		if vis < width {
+		r, sz := utf8.DecodeRuneInString(s[i:])
+		if c := runeCells(r); vis+c <= width {
 			b.WriteString(s[i : i+sz])
-			vis++
+			vis += c
+		} else {
+			vis = width
 		}
 		i += sz
 	}

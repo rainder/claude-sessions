@@ -167,7 +167,14 @@ func TestRenderFleetViewGreyedAndNotes(t *testing.T) {
 		}
 	})
 	t.Run("no cards", func(t *testing.T) {
-		if out := render(fleetTestView()); !strings.Contains(out, "No cards wait for you.") {
+		// A live FLEET with no card shows the harbor (fleet_harbor_test.go);
+		// FLEET down keeps the plain note.
+		if out := render(fleetTestView()); !strings.Contains(out, "nothing needs you") || strings.Contains(out, "No cards wait") {
+			t.Errorf("no harbor:\n%s", out)
+		}
+		v := fleetTestView()
+		v.Fleet.Alive = false
+		if out := render(v); !strings.Contains(out, "No cards wait for you.") || strings.Contains(out, "nothing needs you") {
 			t.Errorf("no empty note:\n%s", out)
 		}
 	})

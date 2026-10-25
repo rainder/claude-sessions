@@ -17,11 +17,17 @@ import (
 // prefix (tmuxExactTarget), so a gone session never prefix-matches another
 // and a name that starts with "-" is never read as a flag.
 
-// fleetWorkSession is one working-list row as the attach needs it, raw as
-// the server sent it and never drawn.
+// fleetWorkSession is one working-list row. Tmux and Tickets are raw as the
+// server sent them, for the attach's matching, and never drawn. The rest is
+// what the harbor (the view with no cards) draws, already passed through
+// fleetDisplayText with its whitespace collapsed by the decoder: Label is
+// the first ticket, else the tmux name; Since and StartedAt are RFC 3339
+// stamps ("" when absent).
 type fleetWorkSession struct {
 	Tmux    string
 	Tickets []string
+
+	Label, Name, NameSource, Tool, Model, Status, Since, StartedAt string
 }
 
 // fleetAttachPick is where a card's attach goes: Tmux for exactly one live

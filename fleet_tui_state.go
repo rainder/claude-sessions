@@ -85,6 +85,12 @@ type fleetViewState struct {
 	toast         string
 	toastKind     fleetToastKind
 	toastUntil    time.Time
+
+	// The harbor (fleet_harbor.go), shown for a live FLEET with no card.
+	harbor    []fleetWorkSession // the working list in harbor order; nil when the server's list failed
+	harborSel int                // selected row
+	harborTop int                // first row in the rows window (renderFleetView keeps it)
+	wave      int                // the wave's phase: one step per applied state
 }
 
 // fleetSendResult is what a send job hands back to the loop.
@@ -239,6 +245,8 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	old := st.items
 	oldSel := st.sel
 	st.err, st.view, st.items = "", v, fleetItems(v)
+	st.syncHarbor()
+	st.wave++
 
 	// Keep the selection on its card; an id-less card keeps its index.
 	selID := ""
@@ -339,6 +347,11 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 	if st.panel != nil {
 		return st.handlePanelKey(k, inBatch, now)
 	}
+	if st.harborOn() {
+		if cmd, ok := st.handleHarborKey(k); ok {
+			return cmd
+		}
+	}
 	switch k {
 	case KeyUp:
 		if st.sel > 0 {
@@ -393,6 +406,15 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 			}
 			st.setToast(msg, fleetToastWarn, now)
 			return fleetCmdRender
+		}
+		if st.harborOn() {
+			// A harbor row is a working-list row by construction; its raw
+			// tmux name still passes the attach's own checks.
+			if !st.harborAttachable() {
+				return fleetCmdNone
+			}
+			st.attach = &fleetAttachRequest{Tmux: st.harborSelected().Tmux, Source: st.view.Source}
+			return fleetCmdAttach
 		}
 		it := st.selected()
 		if it == nil {

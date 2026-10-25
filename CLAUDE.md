@@ -1685,7 +1685,7 @@ and not while a send or dismiss runs.
 **Attach** (`fleet_attach.go`). `a` opens the tmux session a card belongs
 to; the view comes back, redrawn and refetched, when Andy detaches. The
 session is resolved against `/fleet/state`'s `sessions` (the server's
-working list; the decoder keeps only `tmux` and `tickets`, raw and never
+working list; the attach reads only its raw `tmux` and `tickets`, never
 drawn): first the card's `session` (before any `:`, as the server reads it)
 when a row has that tmux name; else, also when `session` names no live row,
 the one tmux session whose row lists the card's ticket (case-insensitive;
@@ -1711,6 +1711,36 @@ refetch. It reads that host from `fleetLocal.host`, a lock-free mirror of
 loop and `mu` can be held by a state job for 10 s. `tui.go` injects the
 handoff (`runFleetAttach` over `makeCtx()`), with a pause/resume that leaves
 the FLEET badge paused, since the view is still open when the attach returns.
+
+**Harbor** (`fleet_harbor.go`). A live FLEET with no decision card at all
+(`harborOn`) draws the working list instead of "No cards wait for you.":
+a centered dim `~  nothing needs you  ~`, a counters line (⛵ at sea = `busy`
++ `shell`, ⚓ in port = `idle`, ⏳ waiting, ✓ done today), one row per
+`sessions` row, and a dim wave on the last body row. Not running, ambiguous,
+host-down and error views keep their own bodies. Done today counts done
+cards whose `doneAt` (else `updatedAt`) is on or after local midnight
+(`time.Local`, not the page's Vilnius); the decoder keeps those stamps in
+`DoneAt`, and a done card is never a list item. Rows go waiting, at sea, in
+port, unknown (`·`, counted nowhere), oldest stamp first inside a group,
+ties by tmux; the stamp is `since`, else `startedAt`, because the server
+sends no `since` for a busy row. Columns: glyph, first ticket (else tmux),
+name, model (`grok` for a grok row with none), status word, age. Before a
+name is cut the model goes, then the status word. Every drawn field is the
+decoder's sanitized copy (`Label`, `Name`, …, `fleetDisplayText` plus
+whitespace collapse); raw `Tmux`/`Tickets` stay for matching and the attach
+only. ↑↓ move `harborSel` (kept on its tmux name across a refetch, else
+clamped), `a` sends the selected row's raw tmux through the same attach
+request, host pin and checks as a card's (`harborAttachable` mirrors
+`fleetAttachArgv`'s regex and `.` refusal), and the card keys (digits, o, c,
+x, PgUp/PgDn) do nothing. Rows that overflow scroll a window kept on the
+selection (`fleetListWindow`, `harborTop`) with a dim right-aligned
+`⇡ n more · ⇣ n more · a attach` line. The wave's phase (`st.wave`) moves
+one step per applied state, never on a timer or a failed fetch. On a short
+screen the gaps go first, then the wave, the counters and the title; the
+rows keep at least one line. `sessions` null shows "session list
+unavailable". ⛵ ⚓ ⏳ are East Asian Wide: `runeCells` (`cellwidth.go`)
+counts them, and CJK, as two columns, and `visualLen` and `clipLine` use it
+everywhere, so the renderer's clip can no longer let a wide line wrap.
 
 **Other.** Every card with options ends its list with `o Other`, the page's
 Other button: `o` opens a panel whose box is the whole answer, and it sends

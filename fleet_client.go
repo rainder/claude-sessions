@@ -82,10 +82,14 @@ type fleetStateView struct {
 	Cards       []fleetCardView
 	CardHashes  map[string]string
 	Answered    map[string]fleetAnswer
-	// Sessions is the server's working list, raw and never drawn: only what
-	// the attach key needs. nil when the server sent null (its session list
-	// failed) or no list at all, which allows no attach.
+	// Sessions is the server's working list: raw tmux and tickets for the
+	// attach key, sanitized text for the harbor. nil when the server sent
+	// null (its session list failed) or no list at all, which allows no
+	// attach.
 	Sessions []fleetWorkSession
+	// DoneAt is when each done card finished (its doneAt, else updatedAt),
+	// for the harbor's "done today". A done card is never a list item.
+	DoneAt []time.Time
 
 	// Host is the servers.yaml name of the remote host this state came from,
 	// "" for this host's service. Set by fleetLocal, never decoded, and
@@ -117,6 +121,9 @@ func decodeFleetStateView(data []byte) (fleetStateView, error) {
 			var c fleetCardView
 			if json.Unmarshal(raw, &c) == nil {
 				v.Cards = append(v.Cards, c)
+				if t, ok := fleetDoneAt(c, raw); ok {
+					v.DoneAt = append(v.DoneAt, t)
+				}
 			}
 		}
 	}
@@ -145,10 +152,26 @@ func decodeFleetStateView(data []byte) (fleetStateView, error) {
 	return v, nil
 }
 
+// fleetDoneAt is when done card c (raw is its JSON) finished: its doneAt,
+// else its updatedAt. false for any other kind, or when neither parses.
+func fleetDoneAt(c fleetCardView, raw json.RawMessage) (time.Time, bool) {
+	if c.Kind != "done" {
+		return time.Time{}, false
+	}
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	for _, s := range []string{fleetPushStr(m["doneAt"]), c.UpdatedAt} {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // decodeFleetWorkSessions reads /fleet/state's "sessions" as leniently as
 // the cards: a row that is not an object or has no string tmux is skipped,
-// and a ticket that is not a string is dropped. Not an array (null, absent,
-// anything else) is nil.
+// a ticket that is not a string is dropped, and a text field of the wrong
+// type is "". Not an array (null, absent, anything else) is nil.
 func decodeFleetWorkSessions(data json.RawMessage) []fleetWorkSession {
 	var rows []json.RawMessage
 	if json.Unmarshal(data, &rows) != nil || rows == nil {
@@ -172,6 +195,12 @@ func decodeFleetWorkSessions(data json.RawMessage) []fleetWorkSession {
 					row.Tickets = append(row.Tickets, s)
 				}
 			}
+		}
+		for key, f := range map[string]*string{
+			"name": &row.Name, "nameSource": &row.NameSource, "tool": &row.Tool, "model": &row.Model,
+			"status": &row.Status, "since": &row.Since, "startedAt": &row.StartedAt,
+		} {
+			_ = json.Unmarshal(m[key], f)
 		}
 		out = append(out, row)
 	}
@@ -202,6 +231,16 @@ func (v *fleetStateView) sanitize() {
 		for j := range c.Options {
 			o := &c.Options[j]
 			o.Key, o.Label, o.Line = fleetDisplayText(o.Key), fleetDisplayText(o.Label), fleetDisplayText(o.Line)
+		}
+	}
+	for i := range v.Sessions {
+		w := &v.Sessions[i]
+		w.Label = w.Tmux
+		if len(w.Tickets) > 0 {
+			w.Label = w.Tickets[0]
+		}
+		for _, f := range []*string{&w.Label, &w.Name, &w.NameSource, &w.Tool, &w.Model, &w.Status, &w.Since, &w.StartedAt} {
+			*f = strings.Join(strings.Fields(fleetDisplayText(*f)), " ")
 		}
 	}
 	for id, a := range v.Answered {
