@@ -86,11 +86,9 @@ type fleetViewState struct {
 	toastKind     fleetToastKind
 	toastUntil    time.Time
 
-	// The harbor (fleet_harbor.go), shown for a live FLEET with no card.
-	harbor    []fleetWorkSession // the working list in harbor order; nil when the server's list failed
-	harborSel int                // selected row
-	harborTop int                // first row in the rows window (renderFleetView keeps it)
-	wave      int                // the wave's phase: one step per applied state
+	// The ship screen (fleet_ship.go), shown while no card needs Andy.
+	frame    int  // animation frame; the loop advances it every fleetShipFrame while the ship shows
+	listMode bool // Enter on the ship screen: show the SENT cards as the normal list
 }
 
 // fleetSendResult is what a send job hands back to the loop.
@@ -245,8 +243,12 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	old := st.items
 	oldSel := st.sel
 	st.err, st.view, st.items = "", v, fleetItems(v)
-	st.syncHarbor()
-	st.wave++
+	if len(st.items) == 0 || !fleetOnlySent(st.items) {
+		// An open or unconfirmed card shows the list anyway; with no card
+		// at all there is nothing to list. Either way the next all-sent
+		// state starts on the ship again.
+		st.listMode = false
+	}
 
 	// Keep the selection on its card; an id-less card keeps its index.
 	selID := ""
@@ -347,8 +349,8 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 	if st.panel != nil {
 		return st.handlePanelKey(k, inBatch, now)
 	}
-	if st.harborOn() {
-		if cmd, ok := st.handleHarborKey(k); ok {
+	if st.shipOn() {
+		if cmd, ok := st.handleShipKey(k); ok {
 			return cmd
 		}
 	}
@@ -383,6 +385,11 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 			st.unlocked = ""
 			return fleetCmdRender
 		}
+		if st.listMode {
+			// The SENT list opened from the ship screen: one level back.
+			st.listMode = false
+			return fleetCmdRender
+		}
 		return fleetCmdClose
 	case "c":
 		it := st.selected()
@@ -406,15 +413,6 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 			}
 			st.setToast(msg, fleetToastWarn, now)
 			return fleetCmdRender
-		}
-		if st.harborOn() {
-			// A harbor row is a working-list row by construction; its raw
-			// tmux name still passes the attach's own checks.
-			if !st.harborAttachable() {
-				return fleetCmdNone
-			}
-			st.attach = &fleetAttachRequest{Tmux: st.harborSelected().Tmux, Source: st.view.Source}
-			return fleetCmdAttach
 		}
 		it := st.selected()
 		if it == nil {

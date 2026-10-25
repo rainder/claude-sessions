@@ -82,14 +82,15 @@ type fleetStateView struct {
 	Cards       []fleetCardView
 	CardHashes  map[string]string
 	Answered    map[string]fleetAnswer
-	// Sessions is the server's working list: raw tmux and tickets for the
-	// attach key, sanitized text for the harbor. nil when the server sent
-	// null (its session list failed) or no list at all, which allows no
-	// attach.
+	// Sessions is the server's working list, raw and never drawn: only what
+	// the attach key needs, and its length for the empty view's count. nil
+	// when the server sent null (its session list failed) or no list at
+	// all, which allows no attach.
 	Sessions []fleetWorkSession
-	// DoneAt is when each done card finished (its doneAt, else updatedAt),
-	// for the harbor's "done today". A done card is never a list item.
-	DoneAt []time.Time
+	// Done is every done card with a readable finish stamp, in state.json
+	// order, for the empty view's "done today" and "last done". A done card
+	// is never a list item.
+	Done []fleetDoneCard
 
 	// Host is the servers.yaml name of the remote host this state came from,
 	// "" for this host's service. Set by fleetLocal, never decoded, and
@@ -122,7 +123,7 @@ func decodeFleetStateView(data []byte) (fleetStateView, error) {
 			if json.Unmarshal(raw, &c) == nil {
 				v.Cards = append(v.Cards, c)
 				if t, ok := fleetDoneAt(c, raw); ok {
-					v.DoneAt = append(v.DoneAt, t)
+					v.Done = append(v.Done, fleetDoneCard{At: t, Ticket: c.Ticket, Title: c.Title})
 				}
 			}
 		}
@@ -152,6 +153,14 @@ func decodeFleetStateView(data []byte) (fleetStateView, error) {
 	return v, nil
 }
 
+// fleetDoneCard is one done card as the empty view draws it. Ticket and Title
+// are passed through fleetDisplayText with their whitespace collapsed by
+// sanitize.
+type fleetDoneCard struct {
+	At            time.Time
+	Ticket, Title string
+}
+
 // fleetDoneAt is when done card c (raw is its JSON) finished: its doneAt,
 // else its updatedAt. false for any other kind, or when neither parses.
 func fleetDoneAt(c fleetCardView, raw json.RawMessage) (time.Time, bool) {
@@ -170,8 +179,8 @@ func fleetDoneAt(c fleetCardView, raw json.RawMessage) (time.Time, bool) {
 
 // decodeFleetWorkSessions reads /fleet/state's "sessions" as leniently as
 // the cards: a row that is not an object or has no string tmux is skipped,
-// a ticket that is not a string is dropped, and a text field of the wrong
-// type is "". Not an array (null, absent, anything else) is nil.
+// and a ticket that is not a string is dropped. Not an array (null, absent,
+// anything else) is nil.
 func decodeFleetWorkSessions(data json.RawMessage) []fleetWorkSession {
 	var rows []json.RawMessage
 	if json.Unmarshal(data, &rows) != nil || rows == nil {
@@ -195,12 +204,6 @@ func decodeFleetWorkSessions(data json.RawMessage) []fleetWorkSession {
 					row.Tickets = append(row.Tickets, s)
 				}
 			}
-		}
-		for key, f := range map[string]*string{
-			"name": &row.Name, "nameSource": &row.NameSource, "tool": &row.Tool, "model": &row.Model,
-			"status": &row.Status, "since": &row.Since, "startedAt": &row.StartedAt,
-		} {
-			_ = json.Unmarshal(m[key], f)
 		}
 		out = append(out, row)
 	}
@@ -233,15 +236,10 @@ func (v *fleetStateView) sanitize() {
 			o.Key, o.Label, o.Line = fleetDisplayText(o.Key), fleetDisplayText(o.Label), fleetDisplayText(o.Line)
 		}
 	}
-	for i := range v.Sessions {
-		w := &v.Sessions[i]
-		w.Label = w.Tmux
-		if len(w.Tickets) > 0 {
-			w.Label = w.Tickets[0]
-		}
-		for _, f := range []*string{&w.Label, &w.Name, &w.NameSource, &w.Tool, &w.Model, &w.Status, &w.Since, &w.StartedAt} {
-			*f = strings.Join(strings.Fields(fleetDisplayText(*f)), " ")
-		}
+	for i := range v.Done {
+		d := &v.Done[i]
+		d.Ticket = strings.Join(strings.Fields(fleetDisplayText(d.Ticket)), " ")
+		d.Title = strings.Join(strings.Fields(fleetDisplayText(d.Title)), " ")
 	}
 	for id, a := range v.Answered {
 		attempts := make([]fleetAttempt, len(a.Attempts))

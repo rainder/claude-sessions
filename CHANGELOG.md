@@ -9,13 +9,15 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- The FLEET view shows a harbor when FLEET is live and no card waits: a
-  centered "nothing needs you", counters (at sea, in port, waiting, done
-  today), one row per working session with a status glyph (⛵ busy or shell,
-  ⚓ idle, ⏳ waiting), its ticket, name, model, status and age, and a calm
-  wave that moves on each new state. ↑↓ select a row and `a` attaches to it.
-  Width math now counts wide runes (⛵, CJK) as two columns everywhere, so a
-  line with them no longer runs past the right edge.
+- The FLEET view shows an animated ship when FLEET is live and no card
+  needs you: a tall ship, a sailboat or a one-line boat (whichever fits)
+  over scrolling waves, bobbing, with a fluttering flag and a passing gull,
+  above "all clear, captain", FLEET's status with the session and
+  done-today counts, and the last done card. Cards that are only SENT do
+  not hide it: a line counts them, Enter lists them, and Esc comes back.
+  The animation runs only while the ship shows. Width math now counts wide
+  runes (⛵, CJK) as two columns everywhere, so a line with them no longer
+  runs past the right edge.
 
 - The FLEET view colours the selected card's summary like light markdown: a
   bold-only line is a yellow heading, `**bold**` is bold, code is cyan, URLs

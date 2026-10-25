@@ -1712,35 +1712,37 @@ loop and `mu` can be held by a state job for 10 s. `tui.go` injects the
 handoff (`runFleetAttach` over `makeCtx()`), with a pause/resume that leaves
 the FLEET badge paused, since the view is still open when the attach returns.
 
-**Harbor** (`fleet_harbor.go`). A live FLEET with no decision card at all
-(`harborOn`) draws the working list instead of "No cards wait for you.":
-a centered dim `~  nothing needs you  ~`, a counters line (⛵ at sea = `busy`
-+ `shell`, ⚓ in port = `idle`, ⏳ waiting, ✓ done today), one row per
-`sessions` row, and a dim wave on the last body row. Not running, ambiguous,
-host-down and error views keep their own bodies. Done today counts done
-cards whose `doneAt` (else `updatedAt`) is on or after local midnight
-(`time.Local`, not the page's Vilnius); the decoder keeps those stamps in
-`DoneAt`, and a done card is never a list item. Rows go waiting, at sea, in
-port, unknown (`·`, counted nowhere), oldest stamp first inside a group,
-ties by tmux; the stamp is `since`, else `startedAt`, because the server
-sends no `since` for a busy row. Columns: glyph, first ticket (else tmux),
-name, model (`grok` for a grok row with none), status word, age. Before a
-name is cut the model goes, then the status word. Every drawn field is the
-decoder's sanitized copy (`Label`, `Name`, …, `fleetDisplayText` plus
-whitespace collapse); raw `Tmux`/`Tickets` stay for matching and the attach
-only. ↑↓ move `harborSel` (kept on its tmux name across a refetch, else
-clamped), `a` sends the selected row's raw tmux through the same attach
-request, host pin and checks as a card's (`harborAttachable` mirrors
-`fleetAttachArgv`'s regex and `.` refusal), and the card keys (digits, o, c,
-x, PgUp/PgDn) do nothing. Rows that overflow scroll a window kept on the
-selection (`fleetListWindow`, `harborTop`) with a dim right-aligned
-`⇡ n more · ⇣ n more · a attach` line. The wave's phase (`st.wave`) moves
-one step per applied state, never on a timer or a failed fetch. On a short
-screen the gaps go first, then the wave, the counters and the title; the
-rows keep at least one line. `sessions` null shows "session list
-unavailable". ⛵ ⚓ ⏳ are East Asian Wide: `runeCells` (`cellwidth.go`)
-counts them, and CJK, as two columns, and `visualLen` and `clipLine` use it
-everywhere, so the renderer's clip can no longer let a wide line wrap.
+**Empty view** (`fleet_ship.go`). A live FLEET with no card that needs Andy
+(`shipOn`: no open card and no `unconfirmed` answer; SENT cards do not
+count, and an open panel keeps its list) draws an animated ship instead of
+the list: the tall ship, the sailboat or a one-line boat, whichever is the
+largest that fits with the text lines and a blank line, else text only.
+Text, centered: `all clear, captain`; `FLEET <status> · N sessions · M done
+today` (no session part when `sessions` is null; done today counts done
+cards whose `doneAt`, else `updatedAt`, is on or after local midnight,
+`time.Local`); `last done: <ticket> · <age>` for the newest done card (its
+title cut to 30 runes when it has no ticket; none without a done card); and,
+with SENT cards, `N sent · waiting for FLEET · Enter shows them`. On a short
+body the last done line drops first, then the SENT line, then the status
+line. Done cards come from the decoder's `Done` (sanitized ticket and title;
+a done card is never a list item). Enter opens the SENT cards as the normal
+list (`listMode`); Esc there goes back to the ship, a second Esc closes. A
+state with an open or unconfirmed card (or no card) clears `listMode`. On
+the ship every other key does nothing; the help row is `Esc back`. The
+scene is a pure function of `st.frame` and the size: waves scroll at
+different speeds per row, the ship bobs one row up and back every 1.5 s
+(the scene reserves that row, so the text never moves), the sailboat's flag
+flutters, and a gull crosses the sky row every 25 s. **Frame timer:**
+`fleetLoop.animate` runs before each draw; while `shipOn` it advances
+`st.frame` every `fleetShipFrame` (250 ms) and `timeout` caps the wait at
+the next frame; otherwise `nextFrame` is zero and the wait is exactly what
+it was, so cards, panels, list mode, error views and a closed view cost no
+wakeups. No goroutine ticks. A frame redraw goes through `screenRenderer`,
+which rewrites only the rows that changed inside a synchronized update and
+never clears the screen, so the animation does not flicker over ssh. Wide
+runes (⛵, CJK) count as two columns everywhere: `runeCells`
+(`cellwidth.go`) drives `visualLen` and `clipLine`, so the renderer's clip
+never lets a wide line wrap.
 
 **Other.** Every card with options ends its list with `o Other`, the page's
 Other button: `o` opens a panel whose box is the whole answer, and it sends

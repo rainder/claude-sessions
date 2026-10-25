@@ -90,6 +90,7 @@ func TestFleetViewDigitOpensPanel(t *testing.T) {
 		v := fleetTestView(fleetTestCard("a", "needs-you"))
 		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
 		st := fleetTestState(v, now)
+		st.handleKey(KeyEnter, false, now) // a SENT card alone shows the ship; Enter lists it
 		st.handleKey("1", false, now)
 		if st.panel != nil {
 			t.Fatal("an answered card must not open a panel")
@@ -675,7 +676,9 @@ func TestFleetViewOtherOpens(t *testing.T) {
 	t.Run("answered card", func(t *testing.T) {
 		v := fleetTestView(fleetTestCard("a", "needs-you"))
 		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
-		if st := open(v); st.panel == nil || !st.panel.other {
+		st := fleetTestState(v, now)
+		st.handleKey(KeyEnter, false, now) // the SENT list, from the ship screen
+		if st.handleKey("o", false, now); st.panel == nil || !st.panel.other {
 			t.Fatal("Other must stay on for an answered card")
 		}
 	})

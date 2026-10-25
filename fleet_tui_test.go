@@ -152,7 +152,9 @@ func TestRenderFleetViewGreyedAndNotes(t *testing.T) {
 		v.Answered["a"] = fleetAnswer{CardHash: "h", Attempts: []fleetAttempt{
 			{Label: "one", Status: fleetAttemptSent}, {Label: "two", Status: fleetAttemptSent}, {Label: "three", Status: fleetAttemptSent},
 		}}
-		out := render(v)
+		st := fleetTestState(v, now)
+		st.handleKey(KeyEnter, false, now) // a SENT card alone shows the ship; Enter lists it
+		out := fleetRendered(st, 120, 60, now)
 		for _, want := range []string{"You chose: one", "Correction: two", "Correction: three"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("lacks %q:\n%s", want, out)
@@ -167,14 +169,14 @@ func TestRenderFleetViewGreyedAndNotes(t *testing.T) {
 		}
 	})
 	t.Run("no cards", func(t *testing.T) {
-		// A live FLEET with no card shows the harbor (fleet_harbor_test.go);
+		// A live FLEET with no card shows the ship screen (fleet_ship_test.go);
 		// FLEET down keeps the plain note.
-		if out := render(fleetTestView()); !strings.Contains(out, "nothing needs you") || strings.Contains(out, "No cards wait") {
-			t.Errorf("no harbor:\n%s", out)
+		if out := render(fleetTestView()); !strings.Contains(out, fleetShipTitle) || strings.Contains(out, "No cards wait") {
+			t.Errorf("no ship screen:\n%s", out)
 		}
 		v := fleetTestView()
 		v.Fleet.Alive = false
-		if out := render(v); !strings.Contains(out, "No cards wait for you.") || strings.Contains(out, "nothing needs you") {
+		if out := render(v); !strings.Contains(out, "No cards wait for you.") || strings.Contains(out, fleetShipTitle) {
 			t.Errorf("no empty note:\n%s", out)
 		}
 	})

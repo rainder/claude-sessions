@@ -136,6 +136,9 @@ type fleetLoop struct {
 	attach   func(fleetAttachRequest) error
 	interval time.Duration
 	nextPoll time.Time
+	// nextFrame is when the ship screen's next animation frame is due; zero
+	// while the ship screen is not showing, so no frame timer runs then.
+	nextFrame time.Time
 
 	// seq numbers state fetches in the order they started. A fetch below
 	// dropBelow started before a send or dismiss result landed: it may show
@@ -345,7 +348,8 @@ const fleetNoPipePoll = 250 * time.Millisecond
 // timeout is the loop's wait. The next poll counts only while no state fetch
 // is held: tick does not start a second one, so an overdue nextPoll would
 // otherwise turn every select into 1 ms until the fetch lands. A held job's
-// pipe wakes the loop; a job without a pipe gets fleetNoPipePoll.
+// pipe wakes the loop; a job without a pipe gets fleetNoPipePoll. While the
+// ship screen shows, the next animation frame (nextFrame) caps it too.
 func (l *fleetLoop) timeout(now time.Time) time.Duration {
 	var pollAt time.Time
 	if len(l.states) == 0 {
@@ -356,7 +360,34 @@ func (l *fleetLoop) timeout(now time.Time) time.Duration {
 			pollAt = c
 		}
 	}
+	if c := l.nextFrame; !c.IsZero() && (pollAt.IsZero() || c.Before(pollAt)) {
+		pollAt = c
+	}
 	return fleetLoopTimeout(l.st, pollAt, now)
+}
+
+// animate keeps the ship screen's frame timer: while the ship shows it
+// advances st.frame once nextFrame has passed and schedules the next one;
+// otherwise it clears nextFrame, so timeout waits exactly as before. After a
+// stall (an attach, a slow pass) it skips the missed frames instead of
+// replaying them in a burst.
+func (l *fleetLoop) animate(now time.Time) {
+	if !l.st.shipOn() {
+		l.nextFrame = time.Time{}
+		return
+	}
+	if l.nextFrame.IsZero() {
+		l.nextFrame = now.Add(fleetShipFrame)
+		return
+	}
+	if now.Before(l.nextFrame) {
+		return
+	}
+	l.st.frame++
+	l.nextFrame = l.nextFrame.Add(fleetShipFrame)
+	if !l.nextFrame.After(now) {
+		l.nextFrame = now.Add(fleetShipFrame)
+	}
 }
 
 // pipeless reports whether a running job has no wake pipe.
@@ -420,6 +451,10 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 	l.startState()
 	l.nextPoll = time.Now().Add(l.interval)
 	for {
+		// Before the draw, so a frame that fell due is the one drawn, and
+		// before timeout, so a ship screen that just appeared or went away
+		// starts or stops its timer on this pass.
+		l.animate(time.Now())
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
 			cols, rows = 0, 0
@@ -522,8 +557,8 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 		body = []string{dim("loading…")}
 	case len(st.view.Ambiguous) > 0:
 		body = []string{colorize(fleetSGRAmber, fleetAmbiguousText(st.view.Ambiguous))}
-	case st.harborOn():
-		body = fleetHarborBody(st, width, bodyRows, now)
+	case st.shipOn():
+		body = fleetShipBody(st, width, bodyRows, now)
 	default:
 		body = fleetStackedBody(st, width, bodyRows, now)
 	}
@@ -738,11 +773,8 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 	if st.panel != nil {
 		return ""
 	}
-	if st.harborOn() {
-		if st.harborAttachable() {
-			return dim(fleetHelpHarborAttach)
-		}
-		return dim(fleetHelpHarbor)
+	if st.shipOn() {
+		return dim(fleetHelpShip)
 	}
 	if st.attachable() {
 		return dim(fleetHelpRowAttach)

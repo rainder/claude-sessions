@@ -351,7 +351,7 @@ func TestDecodeFleetStateViewSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []fleetWorkSession{{Tmux: "dr-1", Tickets: []string{"DR-1"}, Label: "DR-1"}, {Tmux: "dr-3", Label: "dr-3"}}
+	want := []fleetWorkSession{{Tmux: "dr-1", Tickets: []string{"DR-1"}}, {Tmux: "dr-3"}}
 	if !reflect.DeepEqual(v.Sessions, want) {
 		t.Fatalf("sessions = %+v, want %+v", v.Sessions, want)
 	}
