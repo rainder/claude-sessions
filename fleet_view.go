@@ -173,6 +173,12 @@ func fleetEditText(text, key string, fits func(string) bool) (string, bool) {
 
 var fleetListMarkerRe = regexp.MustCompile(`^\s*([-*] |\d+\. )`)
 
+// fleetLabelRe matches a labelled block line ("**Cause:** ..."); its
+// wrapped lines indent by fleetLabelIndent so the label stands out.
+var fleetLabelRe = regexp.MustCompile(`^\*\*[^*]{1,24}:\*\* `)
+
+const fleetLabelIndent = "  "
+
 // fleetCodeIndent marks a fenced code line in a card summary.
 const fleetCodeIndent = "    "
 
@@ -280,6 +286,15 @@ func fleetSummaryRender(s string, width int, styled bool) []string {
 		}
 		if strings.TrimSpace(string(vis)) == "" {
 			out = append(out, "")
+			continue
+		}
+		if fleetLabelRe.MatchString(line) {
+			for i, w := range fleetWrapStyled(vis, sty, width-len(fleetLabelIndent)) {
+				if i > 0 {
+					w = fleetLabelIndent + w
+				}
+				out = append(out, w)
+			}
 			continue
 		}
 		out = append(out, fleetWrapStyled(vis, sty, width)...)
