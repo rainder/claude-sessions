@@ -12,15 +12,16 @@ var clarifyNow = time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 
 func clarifyAskDone(t *testing.T, st *fleetClarifyStore, id string) {
 	t.Helper()
-	if _, code := st.begin(id, "ask", &clarifyEntry{CardHash: "h1"}, "why?", nil, clarifyNow); code != "" {
+	_, tok, code := st.begin(id, "ask", &clarifyEntry{CardHash: "h1"}, "why?", nil, clarifyNow)
+	if code != "" {
 		t.Fatalf("begin %s: %q", id, code)
 	}
-	st.finish(id, "f1", &clarifyTurn{Role: "fleet", Text: "because", At: "x"}, nil, clarifyNow)
+	st.finish(id, tok, "f1", &clarifyTurn{Role: "fleet", Text: "because", At: "x"}, nil, clarifyNow)
 }
 
 func TestClarifyStoreBeginFinish(t *testing.T) {
 	st := &fleetClarifyStore{}
-	e, code := st.begin("c1", "ask", &clarifyEntry{Tool: "claude", CardHash: "h1"}, "why?", nil, clarifyNow)
+	e, tok, code := st.begin("c1", "ask", &clarifyEntry{Tool: "claude", CardHash: "h1"}, "why?", nil, clarifyNow)
 	if code != "" {
 		t.Fatalf("code %q", code)
 	}
@@ -30,18 +31,19 @@ func TestClarifyStoreBeginFinish(t *testing.T) {
 	if e.Pending == nil || e.Pending.Kind != "ask" {
 		t.Fatalf("pending %+v", e.Pending)
 	}
-	if _, code := st.begin("c1", "ask", nil, "again", nil, clarifyNow); code != "busy" {
+	if _, _, code := st.begin("c1", "ask", nil, "again", nil, clarifyNow); code != "busy" {
 		t.Fatalf("second begin: %q", code)
 	}
-	st.finish("c1", "f1", &clarifyTurn{Role: "fleet", Text: "a", At: "x"}, nil, clarifyNow)
+	st.finish("c1", tok, "f1", &clarifyTurn{Role: "fleet", Text: "a", At: "x"}, nil, clarifyNow)
 	got, ok := st.get("c1")
 	if !ok || got.ForkID != "f1" || len(got.Turns) != 2 || got.Pending != nil {
 		t.Fatalf("after finish: %+v", got)
 	}
-	if _, code := st.begin("c1", "ask", nil, "more", nil, clarifyNow); code != "" {
+	_, tok2, code := st.begin("c1", "ask", nil, "more", nil, clarifyNow)
+	if code != "" {
 		t.Fatalf("begin 2: %q", code)
 	}
-	st.finish("c1", "f2", &clarifyTurn{Role: "fleet", Text: "b", At: "x"}, nil, clarifyNow)
+	st.finish("c1", tok2, "f2", &clarifyTurn{Role: "fleet", Text: "b", At: "x"}, nil, clarifyNow)
 	if got, _ := st.get("c1"); got.ForkID != "f1" {
 		t.Fatalf("ForkID %q, want f1", got.ForkID)
 	}
@@ -59,34 +61,37 @@ func TestClarifyStoreGetIsACopy(t *testing.T) {
 
 func TestClarifyStoreGlobalCap(t *testing.T) {
 	st := &fleetClarifyStore{}
+	toks := map[string]uint64{}
 	for _, id := range []string{"a", "b"} {
-		if _, code := st.begin(id, "ask", nil, "q", nil, clarifyNow); code != "" {
+		_, tok, code := st.begin(id, "ask", nil, "q", nil, clarifyNow)
+		if code != "" {
 			t.Fatalf("begin %s: %q", id, code)
 		}
+		toks[id] = tok
 	}
-	if _, code := st.begin("c", "ask", nil, "q", nil, clarifyNow); code != "busy" {
+	if _, _, code := st.begin("c", "ask", nil, "q", nil, clarifyNow); code != "busy" {
 		t.Fatalf("third: %q", code)
 	}
-	st.finish("a", "", nil, nil, clarifyNow)
-	if _, code := st.begin("c", "ask", nil, "q", nil, clarifyNow); code != "" {
+	st.finish("a", toks["a"], "", nil, nil, clarifyNow)
+	if _, _, code := st.begin("c", "ask", nil, "q", nil, clarifyNow); code != "" {
 		t.Fatalf("third after finish: %q", code)
 	}
 }
 
 func TestClarifyStoreDraftNeedsTurns(t *testing.T) {
 	st := &fleetClarifyStore{}
-	if _, code := st.begin("c1", "draft", &clarifyEntry{}, "", nil, clarifyNow); code != "empty" {
+	if _, _, code := st.begin("c1", "draft", &clarifyEntry{}, "", nil, clarifyNow); code != "empty" {
 		t.Fatalf("new card draft: %q", code)
 	}
 	if _, ok := st.get("c1"); ok {
 		t.Fatal("refused draft created an entry")
 	}
 	clarifyAskDone(t, st, "c1")
-	e, code := st.begin("c1", "draft", nil, "", nil, clarifyNow)
+	e, tok, code := st.begin("c1", "draft", nil, "", nil, clarifyNow)
 	if code != "" || e.Pending == nil || e.Pending.Kind != "draft" || len(e.Turns) != 1+1 {
 		t.Fatalf("draft begin: %q %+v", code, e)
 	}
-	st.finish("c1", "", nil, &clarifyDraft{Text: "go with A", At: "x"}, clarifyNow)
+	st.finish("c1", tok, "", nil, &clarifyDraft{Text: "go with A", At: "x"}, clarifyNow)
 	if got, _ := st.get("c1"); got.Draft == nil || got.Draft.Text != "go with A" || len(got.Turns) != 2 {
 		t.Fatalf("after draft: %+v", got)
 	}
@@ -103,12 +108,13 @@ func TestClarifyStorePrune(t *testing.T) {
 	cancelled := 0
 	cancel := func() { cancelled++ }
 	for _, id := range []string{"gone", "sent", "unc", "chg"} {
-		if _, code := st.begin(id, "ask", &clarifyEntry{CardHash: "h1"}, "q", cancel, clarifyNow); code != "" {
+		_, tok, code := st.begin(id, "ask", &clarifyEntry{CardHash: "h1"}, "q", cancel, clarifyNow)
+		if code != "" {
 			// the cap is 2: finish each so the next can begin
 			t.Fatalf("begin %s: %q", id, code)
 		}
 		if id != "gone" {
-			st.finish(id, "", &clarifyTurn{Role: "fleet", Text: "a", At: "x"}, nil, clarifyNow)
+			st.finish(id, tok, "", &clarifyTurn{Role: "fleet", Text: "a", At: "x"}, nil, clarifyNow)
 		}
 	}
 	cards := map[string]fleetDecisionCard{
@@ -173,7 +179,7 @@ func TestClarifyStoreLoadTurnsPendingIntoError(t *testing.T) {
 	if st.running != 0 {
 		t.Fatalf("running %d", st.running)
 	}
-	if _, code := st.begin("c1", "ask", nil, "again", nil, clarifyNow); code != "" {
+	if _, _, code := st.begin("c1", "ask", nil, "again", nil, clarifyNow); code != "" {
 		t.Fatalf("begin after load: %q", code)
 	}
 	fi, err := os.Stat(path)
@@ -189,15 +195,42 @@ func TestClarifyStoreLoadTurnsPendingIntoError(t *testing.T) {
 
 func TestClarifyStoreFinishAfterPruneIsNoop(t *testing.T) {
 	st := &fleetClarifyStore{}
-	if _, code := st.begin("c1", "ask", nil, "q", func() {}, clarifyNow); code != "" {
+	if _, _, code := st.begin("c1", "ask", nil, "q", func() {}, clarifyNow); code != "" {
 		t.Fatal(code)
 	}
 	st.prune(map[string]fleetDecisionCard{}, nil, clarifyNow)
-	st.finish("c1", "f1", &clarifyTurn{Role: "fleet", Text: "a", At: "x"}, nil, clarifyNow)
+	st.finish("c1", 0, "f1", &clarifyTurn{Role: "fleet", Text: "a", At: "x"}, nil, clarifyNow)
 	if _, ok := st.get("c1"); ok {
 		t.Fatal("entry came back")
 	}
 	if st.running != 0 {
 		t.Fatalf("running %d after prune+finish", st.running)
+	}
+}
+
+func TestClarifyStoreStaleFinishIgnored(t *testing.T) {
+	st := &fleetClarifyStore{}
+	cancelled := 0
+	_, t1, code := st.begin("c1", "ask", nil, "q1", func() { cancelled++ }, clarifyNow)
+	if code != "" {
+		t.Fatal(code)
+	}
+	st.prune(map[string]fleetDecisionCard{}, nil, clarifyNow)
+	if cancelled != 1 || st.running != 0 {
+		t.Fatalf("after prune: cancelled %d running %d", cancelled, st.running)
+	}
+	_, t2, code := st.begin("c1", "ask", nil, "q2", nil, clarifyNow)
+	if code != "" || t2 == t1 {
+		t.Fatalf("second begin: %q tokens %d %d", code, t1, t2)
+	}
+	st.finish("c1", t1, "stale", &clarifyTurn{Role: "fleet", Text: "old", At: "x"}, nil, clarifyNow)
+	e, _ := st.get("c1")
+	if e.Pending == nil || len(e.Turns) != 1 || e.ForkID != "" || st.running != 1 {
+		t.Fatalf("stale finish landed: %+v running %d", e, st.running)
+	}
+	st.finish("c1", t2, "f2", &clarifyTurn{Role: "fleet", Text: "new", At: "x"}, nil, clarifyNow)
+	e, _ = st.get("c1")
+	if e.Pending != nil || len(e.Turns) != 2 || e.Turns[1].Text != "new" || e.ForkID != "f2" || st.running != 0 {
+		t.Fatalf("real finish: %+v running %d", e, st.running)
 	}
 }

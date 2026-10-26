@@ -78,6 +78,8 @@ type fleetClarifyStore struct {
 	loaded  bool
 	entries map[string]*clarifyEntry
 	cancels map[string]context.CancelFunc // forks in flight, by card id
+	tokens  map[string]uint64             // begin's token for the fork in flight, by card id
+	seq     uint64                        // last token handed out
 	running int                           // begun and not yet finished or pruned
 }
 
@@ -122,6 +124,7 @@ func (st *fleetClarifyStore) loadLocked() {
 	st.loaded = true
 	st.entries = map[string]*clarifyEntry{}
 	st.cancels = map[string]context.CancelFunc{}
+	st.tokens = map[string]uint64{}
 	if st.path == "" {
 		return
 	}
@@ -186,23 +189,25 @@ func (st *fleetClarifyStore) get(cardID string) (clarifyEntry, bool) {
 
 // begin marks a fork as started for the card. init seeds an entry that does
 // not exist yet and is ignored otherwise. An ask adds the question as a you
-// turn. It returns a copy of the entry and a refusal code: "busy" (the card
+// turn. It returns a copy of the entry, a token for finish (a fork that was
+// pruned away and replaced must not finish into its successor) and a refusal
+// code: "busy" (the card
 // already has a fork, or clarifyMaxRunning are in flight) or "empty" (a draft
 // of a chat with no turns). cancel is called if the entry is pruned while the
 // fork runs; it may be nil.
-func (st *fleetClarifyStore) begin(cardID, kind string, init *clarifyEntry, question string, cancel context.CancelFunc, now time.Time) (clarifyEntry, string) {
+func (st *fleetClarifyStore) begin(cardID, kind string, init *clarifyEntry, question string, cancel context.CancelFunc, now time.Time) (clarifyEntry, uint64, string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
 	e, ok := st.entries[cardID]
 	if ok && e.Pending != nil {
-		return clarifyEntry{}, "busy"
+		return clarifyEntry{}, 0, "busy"
 	}
 	if kind == clarifyKindDraft && (!ok || len(e.Turns) == 0) {
-		return clarifyEntry{}, "empty"
+		return clarifyEntry{}, 0, "empty"
 	}
 	if st.running >= clarifyMaxRunning {
-		return clarifyEntry{}, "busy"
+		return clarifyEntry{}, 0, "busy"
 	}
 	if !ok {
 		var seed clarifyEntry
@@ -220,24 +225,28 @@ func (st *fleetClarifyStore) begin(cardID, kind string, init *clarifyEntry, ques
 	if cancel != nil {
 		st.cancels[cardID] = cancel
 	}
+	st.seq++
+	st.tokens[cardID] = st.seq
 	st.running++
 	st.saveLocked()
-	return copyClarify(*e), ""
+	return copyClarify(*e), st.seq, ""
 }
 
 // finish ends the card's fork: it clears Pending, sets ForkID when the entry
-// has none, and adds the turn and/or the draft. It does nothing when the entry
-// is gone or has no fork in flight (a prune already ended it).
-func (st *fleetClarifyStore) finish(cardID string, forkID string, turn *clarifyTurn, draft *clarifyDraft, now time.Time) {
+// has none, and adds the turn and/or the draft. It does nothing, and does not
+// touch running, unless the entry exists, has a fork in flight and token is
+// the one begin handed out for it (a prune already ended any other).
+func (st *fleetClarifyStore) finish(cardID string, token uint64, forkID string, turn *clarifyTurn, draft *clarifyDraft, now time.Time) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
 	e, ok := st.entries[cardID]
-	if !ok || e.Pending == nil {
+	if !ok || e.Pending == nil || st.tokens[cardID] != token {
 		return
 	}
 	e.Pending = nil
 	delete(st.cancels, cardID)
+	delete(st.tokens, cardID)
 	if st.running > 0 {
 		st.running--
 	}
@@ -277,6 +286,7 @@ func (st *fleetClarifyStore) dropLocked(id string) {
 		cancel()
 	}
 	delete(st.cancels, id)
+	delete(st.tokens, id)
 	delete(st.entries, id)
 }
 
