@@ -1731,7 +1731,13 @@ only the label and `https://…` shows itself; both draw as OSC 8 hyperlinks
 (`ESC]8;;URL ESC\`), so iTerm2 opens them on Cmd+click. The match rule is
 the page's (`fleet.html` `RICH_RE`), and the target must pass `safeLinkURL`:
 http or https, a host, printable ASCII, no space. Any other target shows the
-label with no link, as the page's `safeLink` does. Short entity ids cannot
+label with no link, as the page's `safeLink` does. A label that reads as a
+URL or a domain (`fleetDomainLabelRe`, the page's `LABEL_HOST`) and names a
+host other than the target's shows the target instead (`fleetLinkLabel`, the
+page's `linkLabel`), so `[docs.example.com](https://evil.io)` cannot show one
+host and open another; a short id, a word or "PR 3301" shows as written.
+`TestFleetPageLinkLabel` runs the page's rule under node against the TUI's.
+Short entity ids cannot
 be linked by the TUI (no full id, no env), so FLEET writes them as
 `[4388c878](https://brain.dev.trecs.dev/document-pages/<full id>)`. The link
 is a field of `fleetStyle`, so `fleetStyledText` closes it at the end of each

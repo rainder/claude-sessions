@@ -58,6 +58,33 @@ func safeLinkURL(u string) bool {
 // the url no space and at most one level of balanced parentheses.
 var fleetMDLinkRe = regexp.MustCompile(`^\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)`)
 
+// fleetDomainLabelRe is a label that reads as a web address: an optional
+// scheme, a host with a dot and a letter TLD, an optional port and path. Its
+// group 1 is the host. A short id such as 4388c878 has no dot and no match.
+// fleet.html's LABEL_HOST is the same rule.
+var fleetDomainLabelRe = regexp.MustCompile(`(?i)^(?:[a-z][a-z0-9+.-]*://)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})(?::\d+)?(?:[/?#]\S*)?$`)
+
+// fleetLinkLabel is what a markdown link shows. A label that reads as a URL
+// or a domain must not point somewhere else: [docs.example.com](https://evil)
+// would show one host and open another. So when the label names a host other
+// than href's, or holds a URL whose host cannot be read, the link shows href
+// itself. Any other label (a short id, a word, "PR 3301") shows as written.
+func fleetLinkLabel(label, href string) string {
+	t := strings.TrimSpace(label)
+	m := fleetDomainLabelRe.FindStringSubmatch(t)
+	if m == nil {
+		if strings.Contains(t, "://") || fleetURLRe.MatchString(t) {
+			return href
+		}
+		return label
+	}
+	p, err := url.Parse(href)
+	if err != nil || !strings.EqualFold(m[1], p.Hostname()) {
+		return href
+	}
+	return label
+}
+
 // fleetMDLink matches a markdown link at the start of s. It returns the
 // label, the url and the byte length of the whole link.
 func fleetMDLink(s string) (label, href string, n int, ok bool) {

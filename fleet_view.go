@@ -308,7 +308,8 @@ func fleetSummaryRender(s string, width int, styled bool) []string {
 // one follows on the line; an unpaired one is just removed. A markdown link
 // [label](url) outside code shows only its label, taken literally, and links
 // it to url when safeLinkURL allows (the page's safeLink rule: http and https
-// only); a bare URL links to itself. On top of that: a line of only bold text
+// only); a label that names another host shows url instead (fleetLinkLabel).
+// A bare URL links to itself. On top of that: a line of only bold text
 // is a heading; URLs, link labels, DR-1234 and #1234 (outside a URL or link)
 // and "(FLEET lean)" are coloured; on the summary's first line (first) a
 // leading HOLD, READY, UPDATE or RESULT is its status; a list marker is dim.
@@ -325,6 +326,8 @@ func fleetLineStyles(line string, first bool) ([]rune, []fleetStyle) {
 			if label, href, n, ok := fleetMDLink(line[i:]); ok {
 				if !safeLinkURL(href) {
 					href = ""
+				} else {
+					label = fleetLinkLabel(label, href)
 				}
 				start := visBytes
 				for _, r := range label {

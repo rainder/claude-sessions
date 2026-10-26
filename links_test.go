@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -99,10 +101,15 @@ func TestFleetSummaryBareURLLink(t *testing.T) {
 	if strings.Count(l[0], osc8Prefix) != 2 { // one open, one close
 		t.Errorf("ftp URL got a link: %q", l[0])
 	}
-	// A URL used as a link's label links to the link's target, once.
-	l = fleetSummaryStyledLines("[https://a.b/c](https://d.e/f)", 80)
-	if l[0] != osc8Open("https://d.e/f")+"\033[4;34mhttps://a.b/c"+ansiReset+osc8Close {
+	// A URL label on the target's own host shows as written, linked once.
+	l = fleetSummaryStyledLines("[https://docs.trecs.dev/x](https://docs.trecs.dev/f)", 80)
+	if l[0] != osc8Open("https://docs.trecs.dev/f")+"\033[4;34mhttps://docs.trecs.dev/x"+ansiReset+osc8Close {
 		t.Errorf("URL label: %q", l[0])
+	}
+	// A URL label on another host shows the real target instead.
+	l = fleetSummaryStyledLines("[https://a.b/c](https://d.e/f)", 80)
+	if l[0] != osc8Open("https://d.e/f")+"\033[4;34mhttps://d.e/f"+ansiReset+osc8Close {
+		t.Errorf("mismatched URL label: %q", l[0])
 	}
 }
 
@@ -205,6 +212,69 @@ func TestFleetSummaryFrameLinks(t *testing.T) {
 			if !fleetLinksBalanced(l) {
 				t.Errorf("cols=%d: unbalanced link in %q", cols, l)
 			}
+		}
+	}
+}
+
+func TestFleetLinkLabel(t *testing.T) {
+	const href = "https://brain.dev.trecs.dev/document-pages/4388c878-1111"
+	for _, c := range []struct{ label, want string }{
+		{"4388c878", "4388c878"},
+		{"PR 3301", "PR 3301"},
+		{"dev page", "dev page"},
+		{"brain.dev.trecs.dev", "brain.dev.trecs.dev"},
+		{"BRAIN.dev.trecs.dev/document-pages/x", "BRAIN.dev.trecs.dev/document-pages/x"},
+		{"https://brain.dev.trecs.dev", "https://brain.dev.trecs.dev"},
+		{"docs.example.com", href},
+		{"https://example.com/login", href},
+		{"http://brain.dev.trecs.dev.evil.io/x", href},
+		{"see https://example.com now", href},
+		{"javascript://x", href},
+	} {
+		if got := fleetLinkLabel(c.label, href); got != c.want {
+			t.Errorf("fleetLinkLabel(%q) = %q, want %q", c.label, got, c.want)
+		}
+	}
+	// In a summary the deceptive label is gone and the target shows.
+	l := fleetSummaryStyledLines("open [github.com/x](https://evil.io/y)", 80)
+	if got := stripANSI(l[0]); got != "open https://evil.io/y" {
+		t.Errorf("summary = %q", got)
+	}
+}
+
+// TestFleetPageLinkLabel runs the page's linkLabel (fleet.html) under node on
+// the same cases as fleetLinkLabel, so the two rules cannot drift apart.
+// Skipped where node is not installed.
+func TestFleetPageLinkLabel(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	page := string(fleetPageHTML)
+	start := strings.Index(page, "  const LABEL_HOST")
+	fn := strings.Index(page, "function linkLabel(")
+	if start < 0 || fn < start {
+		t.Fatal("fleet.html has no LABEL_HOST / linkLabel")
+	}
+	end := fn + strings.Index(page[fn:], "\n  }\n") + len("\n  }\n")
+	const href = "https://brain.dev.trecs.dev/document-pages/4388c878-1111"
+	labels := []string{"4388c878", "PR 3301", "brain.dev.trecs.dev", "https://brain.dev.trecs.dev",
+		"docs.example.com", "https://example.com/login", "http://brain.dev.trecs.dev.evil.io/x",
+		"see https://example.com now", "javascript://x"}
+	js, _ := json.Marshal(labels)
+	src := `const str = v => typeof v === "string" ? v : "";` + page[start:end] +
+		`const u = new URL("` + href + `");console.log(JSON.stringify(` + string(js) + `.map(l => linkLabel(l, u))));`
+	out, err := exec.Command(node, "-e", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v: %s", err, out)
+	}
+	var got []string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("node output %q: %v", out, err)
+	}
+	for i, l := range labels {
+		if want := fleetLinkLabel(l, href); got[i] != want {
+			t.Errorf("page linkLabel(%q) = %q, TUI shows %q", l, got[i], want)
 		}
 	}
 }

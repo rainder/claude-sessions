@@ -1326,8 +1326,21 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     try { u = new URL(url); } catch { return document.createTextNode(label); }
     if (u.protocol !== "http:" && u.protocol !== "https:") return document.createTextNode(label);
     const a = document.createElement("a");
-    a.href = u.href; a.textContent = label; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.href = u.href; a.textContent = linkLabel(label, u); a.target = "_blank"; a.rel = "noopener noreferrer";
     return a;
+  }
+
+  // linkLabel is what a link shows. A label that reads as a URL or a domain
+  // must not point somewhere else ([docs.example.com](https://evil) shows one
+  // host and opens another), so when it names a host other than u's, or
+  // holds a URL whose host cannot be read, the link shows u itself. Any other
+  // label (a short id, a word, "PR 3301") shows as written. The TUI's
+  // fleetLinkLabel (links.go) is the same rule.
+  const LABEL_HOST = /^(?:[a-z][a-z0-9+.-]*:\/\/)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})(?::\d+)?(?:[\/?#]\S*)?$/i;
+  function linkLabel(label, u) {
+    const t = str(label).trim(), m = LABEL_HOST.exec(t);
+    if (!m) return t.includes("://") || /https?:\/\/\S/.test(t) ? u.href : label;
+    return m[1].toLowerCase() === u.hostname.toLowerCase() ? label : u.href;
   }
 
   // ---- time --------------------------------------------------------------
