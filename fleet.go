@@ -27,7 +27,7 @@ const (
 	// healthy FLEET writes state.json at least that often.
 	fleetStaleAfter = 40 * time.Minute
 	fleetPageCSP    = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
-		"connect-src 'self'; img-src 'self' data:; manifest-src 'self'; worker-src 'self'; " +
+		"connect-src 'self'; img-src 'self' data: blob:; manifest-src 'self'; worker-src 'self'; " +
 		"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
@@ -295,6 +295,7 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("POST /fleet/start", s.fleetStart)
 	mux.HandleFunc("GET /fleet/session", s.fleetSessionGet)
 	mux.HandleFunc("POST /fleet/session/say", s.fleetSessionSay)
+	mux.HandleFunc("POST /fleet/upload", s.fleetUpload)
 	mux.HandleFunc("POST /fleet/login", s.fleetLogin)
 	mux.HandleFunc("POST /fleet/login/arm", s.fleetLoginArm)
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)

@@ -9,6 +9,17 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The FLEET page can send images to a session. In the FLEET chat and in
+  the session view, paste a screenshot, drop images on the chat, or tap the
+  attach button (on a phone it offers the photo library and screenshots).
+  Up to 5 PNG, JPEG, WebP or GIF images show as thumbnails with a remove
+  button before the send. The page uploads each one to the new
+  `POST /fleet/upload` (fleet auth, 10 MB cap, type sniffed from the bytes,
+  a random name in `~/.claude/fleet/uploads/`, mode 0600), then types the
+  message with one `Image: <path>` per image after the text, so Claude Code
+  or grok reads the image from that path. Uploads older than 7 days are
+  removed at server start and on each upload.
+
 - The FLEET view shows an animated ship when FLEET is live and no card
   needs you: a tall ship, a sailboat or a one-line boat (whichever fits)
   over scrolling waves, bobbing, with a fluttering flag and a passing gull,

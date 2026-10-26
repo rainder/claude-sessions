@@ -527,6 +527,18 @@ body.sv-open { overflow: hidden; }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .composer textarea { flex: 1; min-width: 0; min-height: 46px; max-height: 200px; resize: none; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: 16px/1.35 var(--sans); }
 .composer textarea:disabled { opacity: .6; }
+/* Images waiting to go with the next send (paste, drop or the attach
+   button), above the input. A long row scrolls sideways. */
+.att-strip { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 8px; scrollbar-width: none; }
+.att-strip::-webkit-scrollbar { display: none; }
+.att { position: relative; flex: none; width: 64px; height: 64px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface2); overflow: hidden; }
+.att img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.att-x { position: absolute; top: 3px; right: 3px; width: 24px; height: 24px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 99px; background: rgba(15, 16, 18, .72); color: #fff; font-size: 16px; line-height: 1; cursor: pointer; }
+.att-x::before { content: ""; position: absolute; inset: -10px; }
+.att-x:disabled { opacity: .5; cursor: not-allowed; }
+.att-btn { flex: none; width: 46px; padding: 0; display: grid; place-items: center; color: var(--muted); }
+.att-btn svg { width: 20px; height: 20px; }
+.composer.drop { box-shadow: inset 0 0 0 2px var(--accent); background: var(--accent-tint); }
 /* Shown in place of the input while FLEET is down. */
 .ro-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .ro-strip .ro-t { flex: 1 1 170px; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--red); }
@@ -845,11 +857,14 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
           <span class="ro-t"><span class="dot"></span><span id="ro-text">Read only — FLEET is not running</span></span>
           <button class="btn btn-primary" id="ro-start" type="button">Start FLEET</button>
         </div>
+        <div class="att-strip" id="say-att" aria-label="Images to send" hidden></div>
         <div class="composer-row" id="composer-row">
+          <button class="btn att-btn" id="say-attach" type="button" aria-label="Attach images" title="Attach images"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button>
+          <input type="file" id="say-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <textarea id="say" rows="1" maxlength="4096" placeholder="Write to FLEET" aria-label="Message to FLEET"></textarea>
           <button class="btn btn-primary" id="say-send" type="button">Send</button>
         </div>
-        <p class="hint" id="say-hint"><span class="kbd-hint">Ctrl+Enter sends. </span>New lines become spaces.</p>
+        <p class="hint" id="say-hint"><span class="kbd-hint">Ctrl+Enter sends. Paste or drop images to attach them. </span>New lines become spaces.</p>
       </div>
     </section>
 
@@ -898,7 +913,10 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   </div>
   <div class="composer sv-comp" id="sv-comp" hidden>
     <p class="local-warn sv-warn" id="sv-warn" hidden><span class="dot"></span><span>Not confirmed — check the transcript before you send again</span></p>
+    <div class="att-strip" id="sv-att" aria-label="Images to send" hidden></div>
     <div class="composer-row">
+      <button class="btn att-btn" id="sv-attach" type="button" aria-label="Attach images" title="Attach images"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button>
+      <input type="file" id="sv-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
       <textarea id="sv-say" rows="1" maxlength="4096" aria-label="Message to this session"></textarea>
       <button class="btn btn-primary" id="sv-send" type="button">Send</button>
     </div>
@@ -3729,36 +3747,158 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     ta.style.height = Math.min(ta.scrollHeight + 2, 200) + "px";
   }
 
+  // ---- image attachments -------------------------------------------------
+  // attachBox wires one composer for images: paste into its textarea, drop
+  // on its zone, or the attach button's file picker. The picker has no
+  // capture attribute, so a phone offers its photo library and screenshots,
+  // not only the camera. Pending images show as thumbnails above the input
+  // until they are sent or removed. o: {strip, button, input, ta, zone,
+  // comp, enabled() (may Andy add images now), after() (redraw the send
+  // button)}. Items are {file, url, path}; path is set once the image is
+  // stored, so a send that fails after the upload does not upload again.
+  const ATT_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+  const ATT_MAX = 5, ATT_BYTES = 10 << 20;
+  function attachBox(o) {
+    const box = {items: [], busy: false};
+    box.render = () => {
+      o.strip.replaceChildren(...box.items.map(it => {
+        const img = el("img");
+        img.src = it.url;
+        img.alt = "Image to send";
+        const x = el("button", "att-x", "×");
+        x.type = "button";
+        x.disabled = box.busy;
+        x.setAttribute("aria-label", "Remove image");
+        x.addEventListener("click", () => { if (!box.busy) { attRevoke([it]); box.items = box.items.filter(y => y !== it); box.render(); } });
+        return el("div", "att", img, x);
+      }));
+      o.strip.hidden = !box.items.length;
+      if (o.after) o.after();
+    };
+    box.set = items => { box.items = items; box.render(); };
+    // drop removes items that went out with a send.
+    box.drop = items => { attRevoke(items); box.items = box.items.filter(y => !items.includes(y)); box.render(); };
+    box.add = files => {
+      if (!o.enabled()) return;
+      let msg = "";
+      for (const f of files) {
+        // An empty type (some drag sources) is the server's to sniff.
+        if (f.type && !ATT_TYPES.includes(f.type)) { msg = "Only PNG, JPEG, WebP and GIF images can be sent."; continue; }
+        if (f.size > ATT_BYTES) { msg = "The image is larger than 10 MB."; continue; }
+        if (box.items.length >= ATT_MAX) { msg = "At most " + ATT_MAX + " images per message."; break; }
+        box.items.push({file: f, url: URL.createObjectURL(f), path: ""});
+      }
+      if (msg) toast(msg, true);
+      box.render();
+    };
+    o.button.addEventListener("click", () => { if (o.enabled()) o.input.click(); });
+    o.input.addEventListener("change", () => { box.add([...o.input.files]); o.input.value = ""; });
+    // A pasted image is taken; pasted text still lands as usual.
+    o.ta.addEventListener("paste", e => {
+      const cd = e.clipboardData;
+      const files = cd ? [...cd.items].filter(i => i.kind === "file").map(i => i.getAsFile()).filter(Boolean) : [];
+      if (!files.length) return;
+      if (![...cd.types].includes("text/plain")) e.preventDefault();
+      box.add(files);
+    });
+    const hasFiles = e => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+    o.zone.addEventListener("dragover", e => {
+      if (!hasFiles(e) || !o.enabled()) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      o.comp.classList.add("drop");
+    });
+    o.zone.addEventListener("dragleave", e => { if (!o.zone.contains(e.relatedTarget)) o.comp.classList.remove("drop"); });
+    o.zone.addEventListener("drop", e => {
+      o.comp.classList.remove("drop");
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      box.add([...e.dataTransfer.files]);
+    });
+    return box;
+  }
+  function attRevoke(items) { for (const it of items) URL.revokeObjectURL(it.url); }
+
+  // uploadImages stores each item that has no path yet (POST /fleet/upload,
+  // one at a time) and answers {ok, paths} or {ok: false, error}.
+  const UPLOAD_TIMEOUT = 60000;
+  async function uploadImages(items) {
+    for (const it of items) {
+      if (it.path) continue;
+      const ctl = typeof AbortController === "function" ? new AbortController() : null;
+      const timer = ctl ? setTimeout(() => ctl.abort(), UPLOAD_TIMEOUT) : 0;
+      let r, body = null;
+      try {
+        r = await fetch("/fleet/upload", {method: "POST", credentials: "same-origin",
+          headers: {"Content-Type": it.file.type || "application/octet-stream"}, body: it.file, signal: ctl ? ctl.signal : undefined});
+        body = obj(JSON.parse(await r.text()));
+      } catch {
+        if (!r) { clearTimeout(timer); return {ok: false, error: "The image did not upload. Check the connection, then send again."}; }
+      }
+      clearTimeout(timer);
+      if (r.status === 401) { expire(); return {ok: false, error: "Session expired. Run claude-sessions fleet-url on the host."}; }
+      if (!(r.ok && body && body.ok === true && str(body.path))) {
+        const code = body ? str(body.code) : "";
+        return {ok: false, error: code === "origin" ? "The server refused the request. Reload the page."
+          : (body && str(body.error)) || "The image did not upload (HTTP " + r.status + ")."};
+      }
+      it.path = str(body.path);
+    }
+    return {ok: true, paths: items.map(it => it.path)};
+  }
+  // withImages is the text a send types: Andy's words, then one line per
+  // image path (the server flattens new lines to spaces). The words come
+  // first: a text that starts with "/" reads as a slash command.
+  const withImages = (text, paths) => [text, ...paths.map(p => "Image: " + p)].filter(Boolean).join("\n");
+  const tooLong = text => new TextEncoder().encode(text).length > 4096;
+  const TOO_LONG = "The message is too long with the image paths. Shorten it.";
+
   const HELD_TEXT = "Queued. The server types it when the FLEET input box is clear.";
   let chatBusy = false;
   async function sendChat() {
     const ta = $("say");
-    const text = ta.value.trim();
-    if (!text || chatBusy || !alive || expired) return;
+    const typed = ta.value.trim();
+    const imgs = sayAtt.items.slice();
+    if ((!typed && !imgs.length) || chatBusy || !alive || expired) return;
     chatBusy = true;
     const btn = $("say-send");
-    btn.disabled = true; btn.textContent = "Sending…";
+    btn.disabled = true; btn.textContent = imgs.length ? "Uploading…" : "Sending…";
+    applyEnabled();
+    let text = typed;
+    if (imgs.length) {
+      // Images first: the message carries their stored paths.
+      const up = await uploadImages(imgs);
+      text = up.ok ? withImages(typed, up.paths) : "";
+      if (!up.ok || tooLong(text)) {
+        chatBusy = false;
+        btn.textContent = "Send";
+        toast(up.ok ? TOO_LONG : up.error, true);
+        applyEnabled();
+        return;
+      }
+      btn.textContent = "Sending…";
+    }
     const m = {id: newLocalID(), text, sid: "", ts: 0, status: "sending", hidden: true, confirm: false, timer: 0, busy: false};
     const res = await sendAttempt(m);
     chatBusy = false;
     btn.textContent = "Send";
+    // The bubble (held, unclear) carries the text with the paths, so the
+    // pending images go with the typed words.
+    const done = () => { if (ta.value.trim() === typed) ta.value = ""; sayAtt.drop(imgs); grow(); };
     if (res.ok && res.held) {
       // The server has it: clear the input as for a sent message.
-      if (ta.value.trim() === text) ta.value = "";
-      grow();
+      done();
       guard(renderChat);
       toast(HELD_TEXT);
       runNow("state");
     } else if (res.ok) {
-      if (ta.value.trim() === text) ta.value = "";
-      grow();
+      done();
       toast(res.queued ? "Sent. FLEET is busy. It reads this next." : "Sent to FLEET.");
       afterSend();
     } else if (res.unclear) {
       // It may have reached FLEET: move it from the input to a marked
       // bubble, so a plain Send cannot repeat it by accident.
-      if (ta.value.trim() === text) ta.value = "";
-      grow();
+      done();
       guard(renderChat);
       toast("Delivery not confirmed. Check the chat before you send it again.", true);
       afterSend();
@@ -3773,6 +3913,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChat(); }
   });
   $("say-send").addEventListener("click", sendChat);
+  const sayAtt = attachBox({strip: $("say-att"), button: $("say-attach"), input: $("say-file"), ta: $("say"),
+    zone: $("chat"), comp: $("chat").querySelector(".composer"), enabled: () => alive && !expired && !chatBusy});
 
   // While FLEET is down (not_live) or the chat is the read-only copy, one
   // compact strip with a Start button stands in for the input.
@@ -3787,6 +3929,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("say").disabled = expired || ro;
     $("say").placeholder = expired ? "Session expired." : (can ? "Write to FLEET" : "FLEET is not running.");
     $("say-send").disabled = !can || chatBusy;
+    $("say-attach").disabled = !can || chatBusy;
+    if (sayAtt.busy !== chatBusy) { sayAtt.busy = chatBusy; sayAtt.render(); }
+    $("say-att").hidden = strip || !sayAtt.items.length;
     $("ro-strip").hidden = !strip;
     $("composer-row").hidden = strip;
     $("say-hint").hidden = strip;
@@ -4078,6 +4223,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", sumKey: "", follow: true, unseen: false, rev: 0,
     foldOpen: new Set(), loadingOlder: false, confirm: false, confirmTimer: 0, sending: false,
     drafts: new Map(), warned: new Set(), pending: new Set(), // per tmux name, kept for the page's life
+    attDrafts: new Map(), // tmux name → pending images of a closed view
     textRev: 0}; // bumps when a turn's text changes, even to the same length
   const SV_POLL = 3000;
   const svCard = t => arr(state && state.cards).map(obj).find(c => c && (sessOf(c.tmux) === t || sessOf(c.session) === t)) || null;
@@ -4121,6 +4267,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     $("sv").hidden = false;
     document.querySelector("main").inert = !wideMQ.matches;
     $("sv-say").value = sv.drafts.get(t) || "";
+    svAtt.set(sv.attDrafts.get(t) || []);
+    sv.attDrafts.delete(t);
     $("sv-warn").hidden = !sv.warned.has(t);
     svGrow();
     $("sv-sum").open = false;
@@ -4146,6 +4294,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     if (!sv.open) return;
     const draft = $("sv-say").value;
     if (draft.trim()) sv.drafts.set(sv.tmux, draft); else sv.drafts.delete(sv.tmux);
+    if (svAtt.items.length) sv.attDrafts.set(sv.tmux, svAtt.items);
     if ($("sv-warn").hidden) sv.warned.delete(sv.tmux); else sv.warned.add(sv.tmux);
     sv.open = false; sv.gen++;
     clearTimeout(sv.timer); clearTimeout(sv.confirmTimer);
@@ -4373,7 +4522,9 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     const ta = $("sv-say"), btn = $("sv-send");
     ta.disabled = !can;
     ta.placeholder = !can ? "Send is not available." : window.innerWidth < 600 ? "Write to this session" : "Write to " + sv.tmux;
-    btn.disabled = !can || sv.sending || !ta.value.trim();
+    btn.disabled = !can || sv.sending || (!ta.value.trim() && !svAtt.items.length);
+    $("sv-attach").disabled = !can || sv.sending;
+    if (svAtt.busy !== sv.sending) { svAtt.busy = sv.sending; svAtt.render(); }
     btn.classList.toggle("confirm", sv.confirm && !sv.sending);
     btn.textContent = sv.sending ? "Sending…" : sv.confirm ? "Tap again to send to " + sv.tmux : "Send";
     const note = !t ? "" : !can ? (str(t.sendNote) || "Send is not available for this session.") : "";
@@ -4382,7 +4533,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   }
   function svSendTap() {
     const text = $("sv-say").value.trim();
-    if (sv.sending || !text || !svCanSend()) return;
+    if (sv.sending || (!text && !svAtt.items.length) || !svCanSend()) return;
     clearTimeout(sv.confirmTimer);
     if (!sv.confirm) {
       sv.confirm = true;
@@ -4391,22 +4542,33 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       return;
     }
     sv.confirm = false;
-    svSend(text);
+    svSend(text, svAtt.items.slice());
   }
   // The answer belongs to tmux, whichever view is open when it lands: a
   // closed view's draft and warning are settled in the maps, an open view
   // of tmux (even one reopened since) in the composer.
-  async function svSend(text) {
+  // imgs are the pending images that go with text: uploaded first, their
+  // paths typed after the words, and dropped from the view once sent.
+  async function svSend(text, imgs) {
     const tmux = sv.tmux;
     sv.sending = true; sv.pending.add(tmux);
     svApplySend();
-    const res = await postSay("/fleet/session/say", {target: tmux, text}, svSendErrors);
+    const up = imgs.length ? await uploadImages(imgs) : {ok: true, paths: []};
+    const full = up.ok ? withImages(text, up.paths) : "";
+    const res = !up.ok ? {ok: false, error: up.error} : tooLong(full) ? {ok: false, error: TOO_LONG}
+      : await postSay("/fleet/session/say", {target: tmux, text: full}, svSendErrors);
     sv.pending.delete(tmux);
     const here = sv.open && sv.tmux === tmux, gen = sv.gen;
     if (here) sv.sending = false;
     if (res.ok) {
       if (here && $("sv-say").value.trim() === text) { $("sv-say").value = ""; svGrow(); }
       if (!here && str(sv.drafts.get(tmux)).trim() === text) sv.drafts.delete(tmux);
+      if (here) svAtt.drop(imgs);
+      else {
+        attRevoke(imgs);
+        const left = (sv.attDrafts.get(tmux) || []).filter(it => !imgs.includes(it));
+        if (left.length) sv.attDrafts.set(tmux, left); else sv.attDrafts.delete(tmux);
+      }
       sv.warned.delete(tmux);
       if (here) $("sv-warn").hidden = true;
       toast("Sent to " + tmux + "." + (res.queued ? " It is busy and reads this next." : ""));
@@ -4426,6 +4588,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     ta.style.height = Math.min(ta.scrollHeight + 2, 160) + "px";
   }
   $("sv-send").addEventListener("click", svSendTap);
+  const svAtt = attachBox({strip: $("sv-att"), button: $("sv-attach"), input: $("sv-file"), ta: $("sv-say"),
+    zone: $("sv"), comp: $("sv-comp"), enabled: () => sv.open && svCanSend() && !sv.sending, after: svApplySend});
   $("sv-say").addEventListener("input", () => {
     svGrow();
     if (!$("sv-say").value.trim()) $("sv-warn").hidden = true;

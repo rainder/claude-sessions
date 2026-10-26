@@ -856,6 +856,7 @@ writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 start FLEET when it is down. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
 `POST /fleet/card/dismiss`, `POST /fleet/start`, `/fleet/session`, `POST /fleet/session/say`,
+`POST /fleet/upload`,
 `POST /fleet/login`, `POST /fleet/login/arm`,
 `POST /fleet/login/revoke`, `/fleet/accounts`, `POST /fleet/account/switch`,
 `/fleet/push/key`, `POST /fleet/push/subscribe`, `POST /fleet/push/unsubscribe`,
@@ -1342,6 +1343,37 @@ your shell sets `XDG_STATE_HOME` — look there first.
 `fleetDeps.sayLogPath` points tests at a temp dir. A sender with a `logGate`
 (the outbox worker, the event loops) writes these entries at most once per
 code per gap; the page path is ungated.
+
+**Image uploads** (`fleet_upload.go`). Both composers (the FLEET chat and
+the session view) take images: paste into the textarea, drop on the chat or
+the session panel, or the attach button's file picker (`accept` lists PNG,
+JPEG, WebP and GIF; **no `capture` attribute**: on a phone it would open only
+the camera, not the photo library and screenshots). At most 5 per message;
+each shows as a `blob:` thumbnail with a remove button (the page CSP's
+`img-src` has `blob:` for this). On send the page uploads each image with
+`POST /fleet/upload` (the body is the bytes, one image per request), then
+sends the usual `/fleet/say` or `/fleet/session/say` text: Andy's words, then
+one `Image: <absolute path>` line per image (flattened to spaces like any new
+line). The words come first because a text that starts with `/` reads as a
+slash command. The page composes the text, not the server, so the bubble,
+Send again, the outbox and `reconcileLocal` all carry the exact typed text,
+and a send with no clear answer still knows it. A path is kept on its
+pending item, so a send that fails after the upload does not upload again.
+Checked live (Claude Code, 2026-10-26): a path typed with `send-keys -l`
+stays text in the box; it does not turn into an `[Image #1]` attachment, so
+the land check holds. Upload guards, in order: fleet auth (401 JSON
+`unauthorized`), a cookie needs `sameOrigin` (403 `origin`), a declared
+length over 10 MiB or a body that passes it (`MaxBytesReader`) → 413
+`too_large`, empty → 400 `empty`, and the type sniffed from the bytes with
+`http.DetectContentType` (the header is never read) must be one of the four →
+415 `bad_type`. The file goes to `~/.claude/fleet/uploads/` (`fleetUploadDir`,
+`fleet.dir` in tests; dir 0700, file 0600, `O_EXCL`) as 32 random hex plus
+the extension of the sniffed type: nothing from the request reaches the path.
+The answer is `{ok, path}`. Every session the page types into is a local row
+of this server, so this host is the host the session runs on; a remote host
+never takes a page send. **Prune:** at server start and on every upload,
+`pruneFleetUploads` removes files older than 7 days whose name matches
+`fleetUploadNameRe` only (a regular file the server wrote).
 
 **Outbox** (`fleet_outbox.go`). A plain page message (`/fleet/say` with no
 `cardId`) that cannot be typed now is held and typed later, so Andy can write

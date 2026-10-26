@@ -2586,6 +2586,10 @@ func cmdServer(args []string) int {
 	// Card answers survive a restart, so an answered card does not come
 	// back to Decide; tests keep the store in memory.
 	s.fleet.answered.path = fleetAnsweredPathDefault()
+	// Page uploads older than a week go now, and again on each upload.
+	if dir := s.fleetUploadDir(); dir != "" {
+		s.pruneFleetUploads(dir)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", s.sessions)
 	mux.HandleFunc("GET /usage", s.usage)

@@ -68,7 +68,16 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		"/fleet/card/dismiss", "state.answered", "state.cardHashes", "optionKey:", "correction:",
 		"already_answered:", "card_changed:", "card_gone:", "Already answered on another device",
 		"function loadLegacyPending(", "function answerOf(", "function hashOf(", `" + tm + ")", null)`,
-		"sheet.correction = correcting.has(id) || answerOf(id) !== null", "correction = sheet.correction;", "sayCard(text, id, str(o.key), hash, correction)", "!sheet.correction && answerOf(", `"Already answered on another device.", true)`} {
+		"sheet.correction = correcting.has(id) || answerOf(id) !== null", "correction = sheet.correction;", "sayCard(text, id, str(o.key), hash, correction)", "!sheet.correction && answerOf(", `"Already answered on another device.", true)`,
+		// Both composers take images: paste, drop and a file picker. The
+		// picker has no capture attribute (a phone must offer its photo
+		// library and screenshots), the images upload first, and the text
+		// carries their stored paths after Andy's words.
+		`id="say-attach"`, `id="sv-attach"`, `id="say-att"`, `id="sv-att"`,
+		`accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>`,
+		`addEventListener("paste"`, `addEventListener("drop"`, "URL.createObjectURL(f)", "URL.revokeObjectURL(",
+		`fetch("/fleet/upload"`, "function uploadImages(", "withImages(typed, up.paths)", "withImages(text, up.paths)",
+		"const ATT_MAX = 5", "sayAtt.drop(imgs)", "svAtt.drop(imgs)"} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}
@@ -117,5 +126,16 @@ func TestFleetPageReadsRealAnswerKeys(t *testing.T) {
 		if !strings.Contains(page, "."+key) {
 			t.Errorf("fleet.html does not read .%s", key)
 		}
+	}
+}
+
+// TestFleetPageCSPAllowsThumbnails: the pending-image thumbnails are blob:
+// URLs, which an img-src without blob: blocks with no error on the page.
+func TestFleetPageCSPAllowsThumbnails(t *testing.T) {
+	if !strings.Contains(fleetPageCSP, "img-src 'self' data: blob:;") {
+		t.Fatalf("CSP %q must allow blob: images", fleetPageCSP)
+	}
+	if strings.Contains(fleetPageCSP, "connect-src 'self' blob:") || strings.Contains(fleetPageCSP, "script-src 'unsafe-inline' blob:") {
+		t.Fatal("blob: is for images only")
 	}
 }
