@@ -151,7 +151,7 @@ func TestScreenRendererClipsStyledRowsAndResetsStyle(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := w.last()
-	if !strings.Contains(out, "\x1b[31mabc"+ansiReset+screenEraseLine) {
+	if !strings.Contains(out, "\x1b[31mabc"+ansiReset) || strings.Contains(out, screenEraseLine) {
 		t.Fatalf("styled clipped row = %q", out)
 	}
 }
@@ -232,4 +232,24 @@ func TestScreenRendererWriteFailuresInvalidateCache(t *testing.T) {
 			t.Fatal("short write left cache valid")
 		}
 	})
+}
+
+// With autowrap off the cursor stays on the last cell after a full row, so an
+// erase there would wipe the row's last character.
+func TestScreenRendererKeepsLastColumnOfAFullRow(t *testing.T) {
+	w := &recordingScreenWriter{}
+	r := newScreenRenderer(w)
+	if err := r.Draw("abcde\nab", 5, 2); err != nil {
+		t.Fatal(err)
+	}
+	out := w.last()
+	if strings.Contains(out, "abcde"+ansiReset+screenEraseLine) {
+		t.Fatalf("full row erased after its last cell: %q", out)
+	}
+	if !strings.Contains(out, "\x1b[1;1Habcde"+ansiReset) {
+		t.Fatalf("full row not written: %q", out)
+	}
+	if !strings.Contains(out, "ab"+ansiReset+screenEraseLine) {
+		t.Fatalf("short row lost its erase: %q", out)
+	}
 }
