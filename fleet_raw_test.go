@@ -84,6 +84,9 @@ func TestFleetRawFrame(t *testing.T) {
 	if _, top, _ := fleetRawFrame(lines, 99, 80, 24); top != len(lines)-1 {
 		t.Fatalf("clamped top = %d", top)
 	}
+	if _, _, shown := fleetRawFrame(lines, 0, 0, 0); shown != len(lines) {
+		t.Fatalf("unknown size: shown = %d", shown)
+	}
 	if _, top, shown := fleetRawFrame(nil, 3, 80, 24); top != 0 || shown != 0 {
 		t.Fatalf("no lines: top %d shown %d", top, shown)
 	}

@@ -75,10 +75,14 @@ func fleetRawRows(line string, cols int) int {
 // lines[top] at the top: the lines that fit above the help row, unclipped and
 // with autowrap on, then the help row on the last row. It returns the bytes
 // to write, top clamped to the lines, and how many lines it showed. The first
-// line always shows, even when it is taller than the screen.
+// line always shows, even when it is taller than the screen; rows <= 0
+// (unknown size) shows every line and no help row.
 func fleetRawFrame(lines []string, top, cols, rows int) (frame string, clamped, shown int) {
 	top = min(max(top, 0), max(len(lines)-1, 0))
 	room := rows - 1
+	if rows <= 0 {
+		room = int(^uint(0) >> 1) // unknown size: show every line
+	}
 	used := 0
 	var b strings.Builder
 	b.WriteString(screenSyncBegin + "\x1b[?7h" + screenHome + "\x1b[2J")

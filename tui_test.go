@@ -182,7 +182,7 @@ func TestSortDescStatus(t *testing.T) {
 
 func TestSessionDisableFooterAndHelp(t *testing.T) {
 	footer := sessionFooter()
-	for _, want := range []string{"-/+ disable/enable", "d hide disabled", "1-9 only", "h1-9 hide", "⇧0-9 group", "/ search"} {
+	for _, want := range []string{"-/+ disable/enable", "d hide disabled", "1-9 only", "h1-9 hide", "⇧0-9 group", "/ search", "v select"} {
 		if !strings.Contains(footer, want) {
 			t.Fatalf("footer %q missing %q", footer, want)
 		}

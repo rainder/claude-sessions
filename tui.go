@@ -1518,7 +1518,7 @@ func groupsOfRows(local []Session, remotes []RemoteResult) map[string]int {
 }
 
 func sessionFooter() string {
-	return dim("-/+ disable/enable  ·  d hide disabled  ·  1-9 only  ·  h1-9 hide  ·  ⇧0-9 group  ·  / search  ·  ? help")
+	return dim("-/+ disable/enable  ·  d hide disabled  ·  1-9 only  ·  h1-9 hide  ·  ⇧0-9 group  ·  / search  ·  v select  ·  ? help")
 }
 
 // sessionBottomRow is the toast, else the select-mode hint (selectHint, ""
