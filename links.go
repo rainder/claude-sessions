@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // Terminal hyperlinks (OSC 8): ESC ]8;params;URI ST text ESC ]8;; ST. The
@@ -58,29 +59,41 @@ func safeLinkURL(u string) bool {
 // the url no space and at most one level of balanced parentheses.
 var fleetMDLinkRe = regexp.MustCompile(`^\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)`)
 
-// fleetDomainLabelRe is a label that reads as a web address: an optional
-// scheme, a host with a dot and a letter TLD, an optional port and path. Its
-// group 1 is the host. A short id such as 4388c878 has no dot and no match.
-// fleet.html's LABEL_HOST is the same rule.
-var fleetDomainLabelRe = regexp.MustCompile(`(?i)^(?:[a-z][a-z0-9+.-]*://)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})(?::\d+)?(?:[/?#]\S*)?$`)
+// fleetLabelTokenSep splits a link label into the runs a host could hide in.
+var fleetLabelTokenSep = regexp.MustCompile(`[^A-Za-z0-9.-]+`)
 
-// fleetLinkLabel is what a markdown link shows. A label that reads as a URL
-// or a domain must not point somewhere else: [docs.example.com](https://evil)
-// would show one host and open another. So when the label names a host other
-// than href's, or holds a URL whose host cannot be read, the link shows href
-// itself. Any other label (a short id, a word, "PR 3301") shows as written.
+// fleetLabelDomainRe marks a token as domain-like: a dot followed by a letter.
+var fleetLabelDomainRe = regexp.MustCompile(`\.[A-Za-z]`)
+
+// fleetLinkLabel is what a markdown link shows. A label must not show one
+// place and open another ([docs.example.com](https://evil.io)), so the rule
+// fails closed: the link shows href itself when the label has "://", any
+// non-ASCII letter (a confusable such as Cyrillic а), or any domain-like
+// token (a dot followed by a letter, anywhere: "click a.b.evil.io here",
+// "e.g.") that is not href's own host. A label equal to href shows as it is.
+// A short id (4388c878), words without dots and "PR 3301" show as written.
+// fleet.html's linkLabel is the same rule (TestFleetPageLinkLabel).
 func fleetLinkLabel(label, href string) string {
-	t := strings.TrimSpace(label)
-	m := fleetDomainLabelRe.FindStringSubmatch(t)
-	if m == nil {
-		if strings.Contains(t, "://") || fleetURLRe.MatchString(t) {
-			return href
-		}
+	if label == href {
 		return label
 	}
-	p, err := url.Parse(href)
-	if err != nil || !strings.EqualFold(m[1], p.Hostname()) {
+	if strings.Contains(label, "://") {
 		return href
+	}
+	for _, r := range label {
+		if r > unicode.MaxASCII && unicode.IsLetter(r) {
+			return href
+		}
+	}
+	p, err := url.Parse(href)
+	if err != nil {
+		return href
+	}
+	for _, tok := range fleetLabelTokenSep.Split(label, -1) {
+		tok = strings.TrimRight(tok, ".")
+		if fleetLabelDomainRe.MatchString(tok) && !strings.EqualFold(tok, p.Hostname()) {
+			return href
+		}
 	}
 	return label
 }

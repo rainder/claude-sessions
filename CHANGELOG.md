@@ -21,9 +21,9 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - FLEET card summaries in the TUI have clickable links (OSC 8): a markdown
   link `[4388c878](https://…)` shows only `4388c878`, and a bare http(s) URL
   links to itself; Cmd+click opens it in iTerm2. Other URL schemes show the
-  label without a link. A label that looks like a URL or domain but names
-  another host shows the real target instead, in the TUI and on the FLEET
-  page. Escapes count as zero width, and a link cut by the
+  label without a link. A label with a scheme, a non-ASCII letter or any
+  dotted name other than the target's host shows the real target instead,
+  in the TUI and on the FLEET page. Escapes count as zero width, and a link cut by the
   edge or a wrap is closed (and opened again on the next line). Under tmux
   this needs tmux 3.4+ with `set -as terminal-features 'xterm*:hyperlinks'`.
 

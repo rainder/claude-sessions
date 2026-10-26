@@ -33,7 +33,7 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		"function renderRich(", "renderSummary(sum)", "renderRich(text, true)", "renderRich(t.text)", "```", "](", `\]\(`,
 		"safeLink(m[3], m[2])",
 		// A link label that names another host shows the real target.
-		"function linkLabel(", "a.textContent = linkLabel(label, u)",
+		"function linkLabel(", "a.textContent = linkLabel(label, url, u)",
 		// Autolinks: ClickUp custom ids and trecs-brain PR numbers.
 		"https://app.clickup.com/t/90181100858/", "https://github.com/TRECS-SOFTWARE-LABS/trecs-brain/pull/", "function linkText(",
 		// The empty Decide view shows the fleet's busy and idle counts.
