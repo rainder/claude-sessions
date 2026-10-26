@@ -1,6 +1,85 @@
 # FLEET Clarify: a side chat about a decision card
 
-Status: design, awaiting Andy's approval. Date: 2026-10-26.
+Status: approved by Andy 2026-10-26, amended the same day by the live checks
+below.
+
+## Amendment: live checks, 2026-10-26 (these win over the text further down)
+
+Checked live on claude 2.1.310 and grok 1.0.70, on throwaway sessions.
+Raw notes: the scratchpad `clarify-live/claude-findings.md` and
+`grok-findings.md` of the planning session.
+
+- **Claude FLEET only, for now (my call).** A grok fork cannot be held to
+  look-ups:
+  - Grok ignores `--permission-mode dontAsk`, because
+    `~/.claude/settings.json` sets `defaultMode: auto`.
+  - It takes allow rules from `~/.grok/config.toml` (`git push *`,
+    `gh pr *`) and from the project's `settings.local.json`, and no flag
+    turns these off.
+  - Its auto mode approved `touch`, `tee`, `git push` and file writes.
+  - `--sandbox read-only` cannot fork a session made without it, and it
+    blocks `gh`'s network.
+  
+  Locking it down needs an isolated HOME plus a fail-closed hook, and hooks
+  fail open. That breaks the "the fork changes nothing" anti-goal. So a grok
+  FLEET answers `unsupported_tool`, and both clients hide Clarify when
+  `fleet.tool` is `grok`. Everything below about grok is deferred to a
+  follow-up.
+- **The claude argv**, checked end to end. cwd is FLEET's transcript folder,
+  stdin is `/dev/null`, and it runs with exec, never through a shell:
+  ```
+  claude -p --output-format json --resume <id> [--fork-session]
+    --model <FLEET's model, "opus" when empty>
+    --setting-sources "" --strict-mcp-config --disable-slash-commands
+    --permission-mode dontAsk --tools Bash,Read,Grep,Glob
+    --settings '{"permissions":{"deny":[<deny list>]}}'
+    --allowedTools Read Grep Glob <one "Bash(<cmd>:*)" per allowed look-up>
+    --append-system-prompt <preamble>
+    -- <question>
+  ```
+  - `--fork-session` goes on the first ask only.
+  - The `--` is required, because `--allowedTools` is variadic and would
+    otherwise eat the question.
+  - The cu rule is `Bash(<cu path>:*)` with `fetch`. The path is
+    clickup-events.json's `cu` when set (on agent-workstation that is
+    `~/.local/bin/cu-with-token`), else `cu`. A bare `cu` fails under the
+    service with a keyring error.
+  - Output JSON keys: `session_id`, `result`, `is_error`,
+    `permission_denials`.
+- **Deny list:**
+  - `Bash(*--output*)`: `git diff/log/show --output` writes a file.
+  - `Bash(rg *--pre*)`: `rg --pre` runs any program. Not `*--pre*`, which
+    would also block `git log --pretty`.
+  - Tools: `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`,
+    `Agent`, `Task`, `Workflow`, `ScheduleWakeup`, `Skill`, `ListAgents`,
+    `ReportFindings`.
+  
+  Redirects, `;`, `&&`, pipes into unlisted commands, `$()`, backticks, env
+  prefixes, `git -c` and `gh pr merge/comment/api` are already refused by
+  the matcher under dontAsk.
+- **Isolation works.**
+  - `--setting-sources ""` still logs in with OAuth and keeps the
+    conversation, and it loads no hooks, no CLAUDE.md and no allow rules.
+  - `--bare` fails to log in, so it is not used.
+  - User settings are not loaded, so `--model` must be passed.
+- **Mid-turn fork works** (about 4.5 s). The CLI adds a synthetic
+  "interrupted" result for the unfinished step. The fork then offered to
+  re-run that step, so the preamble must tell it never to resume or redo
+  FLEET's unfinished work. The "retry once, then error" fallback stays as
+  cheap insurance.
+- **Invisibility needs no fork-id list (my call; supersedes "After the chat
+  is gone").**
+  - While it runs, the claude fork writes `~/.claude/sessions/<pid>.json`
+    with `entrypoint: sdk-cli`, and removes it on exit.
+  - Every line of the fork's transcript is rewritten to `sdk-cli`.
+  - The fork's transcript copies the parent's `custom-title` (FLEET).
+  - `Session.Headless()` and the resume picker's entrypoint filter already
+    hide all of this.
+  
+  Tests pin it, with a fork-shaped session file and transcript named FLEET,
+  rather than a second mechanism.
+- **Service env:** `claude`, `gh` (logged in), `claude-sessions` and
+  `cu-with-token` all work from the unit's environment.
 
 ## Why
 
