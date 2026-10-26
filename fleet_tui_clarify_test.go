@@ -329,7 +329,7 @@ func TestClarifyDraftSourcePin(t *testing.T) {
 	draft := fleetClarifyView{Draft: &clarifyDraft{Text: "Pick B"}}
 	st := clarifyOpen(now, draft)
 	st.view.Source = "http://elsewhere"
-	if cmd := st.handleKey("s", false, now); cmd != fleetCmdRender || st.clarify != nil || st.panel != nil || st.toast != "FLEET moved" {
+	if cmd := st.handleKey("s", false, now); cmd != fleetCmdRender || st.clarify != nil || st.panel != nil || st.toast != errFleetMoved.Error() {
 		t.Errorf("s after a move: %v clarify %v panel %v toast %q", cmd, st.clarify, st.panel, st.toast)
 	}
 
@@ -337,7 +337,7 @@ func TestClarifyDraftSourcePin(t *testing.T) {
 	v := fleetTestView(fleetTestCard("c1", "needs-you"))
 	v.Source = "http://elsewhere"
 	st.applyState(v, nil, now)
-	if st.clarify != nil || st.toast != "FLEET moved" {
+	if st.clarify != nil || st.toast != errFleetMoved.Error() {
 		t.Errorf("applyState on another host: clarify %v toast %q", st.clarify, st.toast)
 	}
 }

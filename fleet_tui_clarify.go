@@ -152,7 +152,7 @@ func (st *fleetViewState) draftToOther(now time.Time) fleetCmd {
 	if st.view.Source != c.source {
 		// FLEET is on another host than the chat was opened on.
 		st.clarify = nil
-		st.setToast("FLEET moved", fleetToastWarn, now)
+		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
 		return fleetCmdRender
 	}
 	if len(c.item.Card.Options) == 0 {
