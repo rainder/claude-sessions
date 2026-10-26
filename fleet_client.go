@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -87,6 +88,12 @@ type fleetStateView struct {
 	// when the server sent null (its session list failed) or no list at
 	// all, which allows no attach.
 	Sessions []fleetWorkSession
+	// Clarify is /fleet/state's per-card Clarify summary (counts and flags,
+	// never text), by card id; nil when the server sent none.
+	Clarify map[string]clarifySummary
+	// FleetTool is fleet.tool: "grok" for a grok FLEET, "" for claude.
+	// Clarify needs a claude FLEET.
+	FleetTool string
 	// Done is every done card with a readable finish stamp, in state.json
 	// order, for the empty view's "done today" and "last done". A done card
 	// is never a list item.
@@ -149,7 +156,18 @@ func decodeFleetStateView(data []byte) (fleetStateView, error) {
 		}
 	}
 	v.Sessions = decodeFleetWorkSessions(m["sessions"])
+	var clarify map[string]json.RawMessage
+	if json.Unmarshal(m["clarify"], &clarify) == nil {
+		v.Clarify = map[string]clarifySummary{}
+		for id, raw := range clarify {
+			var c clarifySummary
+			if json.Unmarshal(raw, &c) == nil {
+				v.Clarify[id] = c
+			}
+		}
+	}
 	v.sanitize()
+	v.FleetTool = v.Fleet.Tool
 	return v, nil
 }
 
@@ -419,6 +437,116 @@ func (c *fleetClient) Dismiss(cardID string) (fleetSayResult, error) {
 		return fleetSayResult{}, &fleetStatusError{Status: resp.StatusCode}
 	}
 	return fleetSayResult{}, errors.New("bad dismiss answer")
+}
+
+// fleetClarifyView is GET /fleet/clarify as the TUI reads it. Every string
+// has passed through fleetDisplayText; Card is an id and unchanged by it.
+type fleetClarifyView struct {
+	Card    string
+	Turns   []clarifyTurn
+	Pending *clarifyPending
+	Draft   *clarifyDraft
+}
+
+func decodeFleetClarifyView(data []byte) (fleetClarifyView, error) {
+	var r struct {
+		Card    string          `json:"card"`
+		Turns   []clarifyTurn   `json:"turns"`
+		Pending *clarifyPending `json:"pending"`
+		Draft   *clarifyDraft   `json:"draft"`
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(data, &m) != nil || m == nil || json.Unmarshal(data, &r) != nil {
+		return fleetClarifyView{}, errors.New("bad clarify answer")
+	}
+	v := fleetClarifyView{Card: fleetDisplayText(r.Card)}
+	for _, t := range r.Turns {
+		v.Turns = append(v.Turns, clarifyTurn{
+			Role: fleetDisplayText(t.Role), Text: fleetDisplayText(t.Text), At: fleetDisplayText(t.At)})
+	}
+	if r.Pending != nil {
+		v.Pending = &clarifyPending{Kind: fleetDisplayText(r.Pending.Kind), StartedAt: fleetDisplayText(r.Pending.StartedAt)}
+	}
+	if r.Draft != nil {
+		v.Draft = &clarifyDraft{Text: fleetDisplayText(r.Draft.Text), At: fleetDisplayText(r.Draft.At)}
+	}
+	return v, nil
+}
+
+// ClarifyGet reads one card's Clarify chat. A non-200 answer is a
+// *fleetStatusError.
+func (c *fleetClient) ClarifyGet(cardID string) (fleetClarifyView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fleetStateTimeout)
+	defer cancel()
+	hr, err := c.newRequest(ctx, http.MethodGet, "/fleet/clarify?card="+url.QueryEscape(cardID), nil)
+	if err != nil {
+		return fleetClarifyView{}, err
+	}
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		return fleetClarifyView{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fleetClarifyView{}, &fleetStatusError{Status: resp.StatusCode}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, fleetStateBodyMax))
+	if err != nil {
+		return fleetClarifyView{}, err
+	}
+	return decodeFleetClarifyView(data)
+}
+
+// ClarifyAsk starts a fork on a question. The code is the server's refusal
+// ("" means accepted), kept raw for applyClarifyRefusal; an error means the
+// service gave no usable answer.
+func (c *fleetClient) ClarifyAsk(cardID, text string) (string, error) {
+	return c.clarifyPost("/fleet/clarify/ask", struct {
+		CardID string `json:"cardId"`
+		Text   string `json:"text"`
+	}{cardID, text})
+}
+
+// ClarifyDraft asks the fork for a draft answer, or with discard drops the
+// draft there is (a 404 not_found when there is none).
+func (c *fleetClient) ClarifyDraft(cardID string, discard bool) (string, error) {
+	return c.clarifyPost("/fleet/clarify/draft", struct {
+		CardID  string `json:"cardId"`
+		Discard bool   `json:"discard,omitempty"`
+	}{cardID, discard})
+}
+
+// clarifyPost sends one clarify POST. 2xx is accepted (""); a 4xx whose body
+// holds a code is that refusal. Anything else, a 401 included, is an error.
+func (c *fleetClient) clarifyPost(path string, payload any) (string, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fleetStateTimeout)
+	defer cancel()
+	hr, err := c.newRequest(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 == 2 {
+		return "", nil
+	}
+	if resp.StatusCode/100 == 4 && resp.StatusCode != http.StatusUnauthorized {
+		data, err := io.ReadAll(io.LimitReader(resp.Body, fleetSayBodyMax))
+		var r struct {
+			Code string `json:"code"`
+		}
+		if err == nil && json.Unmarshal(data, &r) == nil && r.Code != "" {
+			return r.Code, nil
+		}
+	}
+	return "", &fleetStatusError{Status: resp.StatusCode}
 }
 
 // connectLocalFleet finds this host's service (loopback, then Tailscale) and
