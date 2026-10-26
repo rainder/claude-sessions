@@ -712,7 +712,7 @@ func TestFleetClarifyViaMoved(t *testing.T) {
 	}}
 	via := fleetClarifyVia(src)
 	for _, k := range []fleetCmd{fleetCmdClarifyGet, fleetCmdClarifyAsk, fleetCmdClarifyDraft, fleetCmdClarifyDiscard} {
-		if r := via(fleetClarifyRequest{Source: "http://elsewhere", CardID: "c1", Text: "q"}, k); !r.Moved || r.Kind != k {
+		if r := via(fleetClarifyRequest{Source: "http://elsewhere", CardID: "c1", Text: "q"}, k); !r.Moved || r.Posted || r.Kind != k {
 			t.Errorf("kind %v: %+v, want Moved", k, r)
 		}
 	}
@@ -720,7 +720,7 @@ func TestFleetClarifyViaMoved(t *testing.T) {
 		t.Fatalf("a pinned request reached the host: %d calls", calls.Load())
 	}
 	r := via(fleetClarifyRequest{Source: srv.URL, CardID: "c1", Text: "q"}, fleetCmdClarifyAsk)
-	if r.Moved || r.Err != nil || r.Code != "" || len(r.View.Turns) != 1 || calls.Load() != 2 {
+	if r.Moved || !r.Posted || r.Err != nil || r.Code != "" || len(r.View.Turns) != 1 || calls.Load() != 2 {
 		t.Fatalf("same host: %+v calls %d", r, calls.Load())
 	}
 }
@@ -767,5 +767,120 @@ func TestFleetClarifyWheel(t *testing.T) {
 	}
 	if cmd := st.handleMouse(mouseEvent{button: mouseLeft}); cmd != fleetCmdNone {
 		t.Errorf("click = %v", cmd)
+	}
+}
+
+// A POST the server took whose follow-up read failed is not a failed
+// request: no failure toast, the question is not put back, and the chat
+// keeps polling until a read lands.
+func TestFleetClarifyPostedReadFailed(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	late := now.Add(time.Second)
+	for _, kind := range []fleetCmd{fleetCmdClarifyAsk, fleetCmdClarifyDraft} {
+		var kinds []fleetCmd
+		readOK := false
+		run := func(r fleetClarifyRequest, k fleetCmd) fleetClarifyJobResult {
+			kinds = append(kinds, k)
+			if k == fleetCmdClarifyGet && readOK {
+				return fleetClarifyJobResult{Kind: k, View: fleetClarifyView{Card: r.CardID,
+					Turns: []clarifyTurn{{Role: clarifyRoleFleet, Text: "answer"}}}}
+			}
+			return fleetClarifyJobResult{Kind: k, Posted: k != fleetCmdClarifyGet, Err: errors.New("read failed")}
+		}
+		l := clarifyLoop(now, fleetClarifyView{Turns: []clarifyTurn{{Role: clarifyRoleYou, Text: "hi"}}}, run)
+		l.nextPoll = now.Add(time.Hour)
+		if kind == fleetCmdClarifyAsk {
+			for _, k := range "why" {
+				l.st.handleKey(string(k), false, late)
+			}
+			l.run(l.st.handleKey(KeyEnter, false, late), late)
+		} else {
+			l.run(l.st.handleKey("\x04", false, late), late)
+		}
+		waitFleetJobs(t, l)
+		l.reap(late)
+		c := l.st.clarify
+		if l.st.toast != "" || c.input != "" {
+			t.Errorf("kind %v: toast %q input %q", kind, l.st.toast, c.input)
+		}
+		if at := l.clarifyPollAt(late); at.IsZero() || at.After(late.Add(fleetClarifyPoll)) {
+			t.Errorf("kind %v: poll at %v, want within 2 s", kind, at)
+		}
+		readOK = true
+		l.tick(late)
+		l.tick(late.Add(fleetClarifyPoll))
+		waitFleetJobs(t, l)
+		l.reap(late.Add(fleetClarifyPoll))
+		if len(kinds) != 2 || kinds[1] != fleetCmdClarifyGet || c.err != "" || c.view.Turns[0].Text != "answer" {
+			t.Errorf("kind %v: kinds %v err %q view %+v", kind, kinds, c.err, c.view)
+		}
+		// The read landed and nothing is pending: the poll stops.
+		if at := l.clarifyPollAt(late.Add(fleetClarifyPoll)); !at.IsZero() {
+			t.Errorf("kind %v: still polling after the read landed", kind)
+		}
+		l.closeAll()
+	}
+}
+
+// A refusal whose follow-up read failed still says why it was refused.
+func TestFleetClarifyRefusedReadFailed(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	late := now.Add(time.Second)
+	run := func(r fleetClarifyRequest, k fleetCmd) fleetClarifyJobResult {
+		return fleetClarifyJobResult{Kind: k, Posted: true, Code: "busy", Err: errors.New("read failed")}
+	}
+	l := clarifyLoop(now, fleetClarifyView{}, run)
+	defer l.closeAll()
+	for _, k := range "why" {
+		l.st.handleKey(string(k), false, late)
+	}
+	l.run(l.st.handleKey(KeyEnter, false, late), late)
+	waitFleetJobs(t, l)
+	l.reap(late)
+	if l.st.toast != "a question is already running" || l.st.clarify.input != "why" {
+		t.Fatalf("toast %q input %q", l.st.toast, l.st.clarify.input)
+	}
+}
+
+// Ctrl-D and x while a clarify request is still held say so instead of
+// doing nothing.
+func TestFleetClarifyHeldJobToast(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	gate := make(chan struct{})
+	run := func(r fleetClarifyRequest, k fleetCmd) fleetClarifyJobResult {
+		<-gate
+		return fleetClarifyJobResult{Kind: k, View: fleetClarifyView{Card: r.CardID}}
+	}
+	l := clarifyLoop(now, fleetClarifyView{Turns: []clarifyTurn{{Role: clarifyRoleYou, Text: "hi"}},
+		Draft: &clarifyDraft{Text: "d"}}, run)
+	defer l.closeAll()
+	defer close(gate)
+	l.run(fleetCmdClarifyGet, now)
+	for _, k := range []string{"\x04", "x"} {
+		l.st.toast = ""
+		l.run(l.st.handleKey(k, false, now), now)
+		if l.st.toast != "wait for the last request" || len(l.clarifies) != 1 {
+			t.Errorf("%q: toast %q jobs %d", k, l.st.toast, len(l.clarifies))
+		}
+	}
+}
+
+// An overdue chat read does not make timeout spin while a clarify job is
+// held: that job's pipe wakes the loop.
+func TestFleetClarifyTimeoutIgnoresOverdueWhileHeld(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	gate := make(chan struct{})
+	run := func(r fleetClarifyRequest, k fleetCmd) fleetClarifyJobResult {
+		<-gate
+		return fleetClarifyJobResult{Kind: k, View: fleetClarifyView{Card: r.CardID}}
+	}
+	l := clarifyLoop(now, fleetClarifyView{Pending: &clarifyPending{Kind: "ask"}}, run)
+	defer l.closeAll()
+	defer close(gate)
+	l.nextPoll = now.Add(time.Hour)
+	l.nextClarify = now.Add(-time.Minute)
+	l.run(fleetCmdClarifyGet, now)
+	if d := l.timeout(now); d < time.Minute {
+		t.Fatalf("timeout with an overdue read and a held job = %v", d)
 	}
 }

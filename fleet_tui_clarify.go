@@ -22,6 +22,9 @@ type fleetClarifyMode struct {
 	openedAt time.Time
 	scroll   int    // lines scrolled up from the newest; fleetClarifyLines clamps it
 	err      string // a fixed line when the chat could not be read
+	// reread: a POST was taken but the read after it failed; the loop polls
+	// until a read lands.
+	reread bool
 }
 
 // fleetClarifyRequest is a question to ask; the loop takes it.
@@ -62,6 +65,9 @@ func (st *fleetViewState) openClarify(now time.Time) fleetCmd {
 // busy is true while a fork runs for the card.
 func (c *fleetClarifyMode) busy() bool { return c.view.Pending != nil }
 
+// polling is true while the loop reads the chat every fleetClarifyPoll.
+func (c *fleetClarifyMode) polling() bool { return c.busy() || c.reread }
+
 // applyClarify takes a chat read for card, the raw id the request used. A
 // late result, an error too, for a chat that has since closed or been
 // reopened on another card is dropped.
@@ -78,7 +84,7 @@ func (st *fleetViewState) applyClarify(card string, v fleetClarifyView, err erro
 		}
 		return
 	}
-	c.view, c.loaded, c.err = v, true, ""
+	c.view, c.loaded, c.err, c.reread = v, true, "", false
 }
 
 // applyClarifyRefusal toasts a refusal code from ask, draft or discard.

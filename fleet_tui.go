@@ -121,14 +121,17 @@ type fleetDismissResult struct {
 // fleetClarifyJobResult is what a clarify job hands back. Every job ends with
 // a ClarifyGet, so View is the chat as it is after the ask, draft or discard.
 // Code is the server's refusal of that POST; Err is a POST that got no usable
-// answer (then no read was made) or a failed read. Moved: FLEET is on another
-// host than the chat was opened on, and nothing was sent.
+// answer (then no read was made) or a failed read. Posted: the server
+// answered the POST (taken, or refused with Code), so an Err is the read's.
+// Moved: FLEET is on another host than the chat was opened on, and nothing
+// was sent.
 type fleetClarifyJobResult struct {
-	Kind  fleetCmd
-	View  fleetClarifyView
-	Code  string
-	Err   error
-	Moved bool
+	Kind   fleetCmd
+	View   fleetClarifyView
+	Code   string
+	Err    error
+	Posted bool
+	Moved  bool
 }
 
 // fleetClarifyDone is a finished clarify job with the request it ran, so the
@@ -270,7 +273,7 @@ func (l *fleetLoop) applyClarifyJob(d fleetClarifyDone, now time.Time) {
 		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
 		l.startState()
 		return
-	case r.Err != nil && r.Kind != fleetCmdClarifyGet:
+	case r.Err != nil && r.Kind != fleetCmdClarifyGet && !r.Posted:
 		// The POST got no usable answer, so no read was made: the chat stays
 		// as it was.
 		keep()
@@ -285,6 +288,11 @@ func (l *fleetLoop) applyClarifyJob(d fleetClarifyDone, now time.Time) {
 		st.applyClarifyRefusal(r.Code, now)
 	}
 	st.applyClarify(d.req.CardID, r.View, r.Err, now)
+	if r.Posted && r.Err != nil {
+		// The server took the request but the chat could not be read after
+		// it: poll until a read lands, so the answer shows without a key.
+		c.reread = true
+	}
 }
 
 // startClarify starts the clarify job for a command: an ask takes
@@ -318,9 +326,9 @@ func (l *fleetLoop) startClarify(kind fleetCmd) {
 }
 
 // clarifyPollAt is when the open chat's next read is due: zero unless a fork
-// runs for it.
+// runs for it or a read after a POST failed.
 func (l *fleetLoop) clarifyPollAt(now time.Time) time.Time {
-	if c := l.st.clarify; c == nil || !c.busy() {
+	if c := l.st.clarify; c == nil || !c.polling() {
 		return time.Time{}
 	}
 	if l.nextClarify.IsZero() {
@@ -330,9 +338,9 @@ func (l *fleetLoop) clarifyPollAt(now time.Time) time.Time {
 }
 
 // tickClarify reads the open chat every fleetClarifyPoll while a fork runs
-// for it, and never otherwise.
+// for it or a read after a POST failed, and never otherwise.
 func (l *fleetLoop) tickClarify(now time.Time) {
-	if c := l.st.clarify; c == nil || !c.busy() {
+	if c := l.st.clarify; c == nil || !c.polling() {
 		l.nextClarify = time.Time{}
 		return
 	}
@@ -397,6 +405,10 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 		l.st.applyAttach(err, time.Now())
 		l.startState()
 	case fleetCmdClarifyGet, fleetCmdClarifyAsk, fleetCmdClarifyDraft, fleetCmdClarifyDiscard:
+		if (cmd == fleetCmdClarifyDraft || cmd == fleetCmdClarifyDiscard) && len(l.clarifies) > 0 {
+			l.st.setToast("wait for the last request", fleetToastWarn, now)
+			return false
+		}
 		l.startClarify(cmd)
 	}
 	return false
@@ -495,6 +507,7 @@ func fleetClarifyVia(src *fleetLocal) func(fleetClarifyRequest, fleetCmd) fleetC
 		if r.Err != nil {
 			return r
 		}
+		r.Posted = kind != fleetCmdClarifyGet
 		r.View, r.Err = c.ClarifyGet(req.CardID)
 		return r
 	}
