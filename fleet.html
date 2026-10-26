@@ -3482,6 +3482,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // clarifyLoad reads the card's chat and, while a fork runs, reads it
   // again in CLARIFY_POLL ms. A failed read keeps what the sheet shows and
   // keeps polling: the fork runs on whether or not this page can see it.
+  // A failed first read retries on the same timer until one lands.
   async function clarifyLoad() {
     if (!clarify.id) return;
     clearTimeout(clarify.poll);
@@ -3497,12 +3498,14 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     let b = null;
     if (text !== null) { try { b = obj(JSON.parse(text)); } catch { b = null; } }
     if (b) {
+      if (!clarify.chat) clarifyNote("");
       clarify.chat = {turns: arr(b.turns).map(obj).filter(Boolean), pending: obj(b.pending), draft: obj(b.draft)};
       if (text !== clarify.raw) { clarify.raw = text; renderClarify(); } else renderClarifyControls();
     } else if (!clarify.chat) {
       clarifyNote(clarifyCodeText(""));
     }
-    if (clarify.chat && clarify.chat.pending) clarify.poll = setTimeout(clarifyLoad, CLARIFY_POLL);
+    // No chat yet (the first read failed): try again on the same timer.
+    if (!clarify.chat || clarify.chat.pending) clarify.poll = setTimeout(clarifyLoad, CLARIFY_POLL);
   }
 
   function renderClarifyHead() {
@@ -3666,13 +3669,23 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   }
 
   // clarifyUse never sends: the sheet closes and the draft waits in the
-  // FLEET chat box as an Other answer, for Andy to read and send.
+  // FLEET chat box as an Other answer, for Andy to read and send. It sets
+  // the box rather than adding to it: text left there would be sent as part
+  // of the decision (a newline flattens to a space). A bare "Andy decides
+  // on <id>: " that Other left goes silently; other text gets a toast.
+  const CLARIFY_BARE = /^Andy decides on [A-Za-z0-9._-]{1,100}:$/;
   function clarifyUse() {
     const id = clarify.id, ch = clarify.chat;
     if (!id || !clarify.armed || !ch || !ch.draft) return;
     const draft = {text: str(ch.draft.text)};
     closeClarify();
-    prefillChat("Andy decides on " + id + ": " + draft.text.replace(/\s+/g, " ").trim());
+    const ta = $("say"), old = ta.value.trim();
+    ta.value = "Andy decides on " + id + ": " + draft.text.replace(/\s+/g, " ").trim();
+    if (old && !CLARIFY_BARE.test(old)) toast("Replaced the text in the chat box.");
+    grow();
+    if (isPhone()) setView("chat", true);
+    else $("chat").scrollIntoView({behavior: "smooth", block: "nearest"});
+    if (!ta.disabled) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
   }
 
   $("clarify-close").addEventListener("click", closeClarify);

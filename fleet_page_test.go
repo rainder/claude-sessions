@@ -18,7 +18,9 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// send time, an answer from another device that landed while the
 		// sheet was open would turn this send into a correction and slip
 		// past the server's already_answered guard.
-		"correction = answerOf(", "correction: answerOf("} {
+		"correction = answerOf(", "correction: answerOf(",
+		// prefillChat keeps what is in the box, so Use as answer must not use it.
+		`prefillChat("Andy decides on " + id + ": " + `} {
 		if strings.Contains(page, bad) {
 			t.Errorf("fleet.html must not contain %q", bad)
 		}
@@ -86,7 +88,10 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		"/fleet/clarify", "/fleet/clarify/ask", "/fleet/clarify/draft",
 		`id="clarify-sheet"`, "function openClarify(", "CLARIFY_POLL",
 		"fork of FLEET · read-only · FLEET does not see this",
-		`"Andy decides on " + id + ": " + `, `state.fleet.tool === "grok"`} {
+		`"Andy decides on " + id + ": " + `, `state.fleet.tool === "grok"`,
+		// Use as answer sets the chat box, never adds to what is there:
+		// leftover text would ride along inside the decision.
+		`ta.value = "Andy decides on " + id + ": " + draft.text`, `"Replaced the text in the chat box."`} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}
