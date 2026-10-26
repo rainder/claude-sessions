@@ -79,7 +79,14 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		`accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>`,
 		`addEventListener("paste"`, `addEventListener("drop"`, "URL.createObjectURL(f)", "URL.revokeObjectURL(",
 		`fetch("/fleet/upload"`, "function uploadImages(", "withImages(typed, up.paths)", "withImages(text, up.paths)",
-		"const ATT_MAX = 5", "sayAtt.drop(imgs)", "svAtt.drop(imgs)"} {
+		"const ATT_MAX = 5", "sayAtt.drop(imgs)", "svAtt.drop(imgs)",
+		// Clarify: a side chat about one card with a read-only fork of FLEET,
+		// in its own sheet. Use as answer only prefills the chat; a grok
+		// FLEET has no Clarify.
+		"/fleet/clarify", "/fleet/clarify/ask", "/fleet/clarify/draft",
+		`id="clarify-sheet"`, "function openClarify(", "CLARIFY_POLL",
+		"fork of FLEET · read-only · FLEET does not see this",
+		`"Andy decides on " + id + ": " + `, `state.fleet.tool === "grok"`} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}
