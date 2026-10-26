@@ -40,6 +40,7 @@ var fleetClarifyToasts = map[string]string{
 	"empty":            "nothing to draft yet",
 	"too_long":         "question too long",
 	"not_found":        "no draft",
+	"bad_text":         "question has control characters",
 }
 
 // canClarify reports whether k opens Clarify on the selected item: an open

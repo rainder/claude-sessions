@@ -79,7 +79,7 @@ func newClarifyRig(t *testing.T) *clarifyRig {
 // clarifyFleet is a live claude FLEET row whose transcript head says /w.
 func (rig *clarifyRig) clarifyFleet(t *testing.T, sid string) {
 	t.Helper()
-	rig.sessions = []Session{{PID: 7, Name: "FLEET", SessionID: sid, Model: "M", CWD: "/fallback", Status: "shell", Tmux: "fleet:0.0"}}
+	rig.sessions = []Session{{PID: 7, Name: "FLEET", SessionID: sid, Model: "claude-m", CWD: "/fallback", Status: "shell", Tmux: "fleet:0.0"}}
 	putFleetTranscript(t, rig.s.fleet.home, sid, `{"type":"user","cwd":"/w"}`)
 }
 
@@ -219,7 +219,7 @@ func TestClarifyAskFirstForksFleet(t *testing.T) {
 	if c.cwd != "/w" {
 		t.Fatalf("cwd %q, want the transcript head's /w", c.cwd)
 	}
-	if !hasRun(c.argv, "--resume", fleetUUID(7001), "--fork-session", "--model", "M") {
+	if !hasRun(c.argv, "--resume", fleetUUID(7001), "--fork-session", "--model", "claude-m") {
 		t.Fatalf("argv %q", c.argv)
 	}
 	if n := len(c.argv); n < 2 || c.argv[n-2] != "--" || c.argv[n-1] != "why now?" {
@@ -268,7 +268,7 @@ func TestClarifyLaterAskNeedsNoLiveFleet(t *testing.T) {
 	if !hasRun(c.argv, "--resume", clarifyForkID) || slices.Contains(c.argv, "--fork-session") || c.cwd != "/w" {
 		t.Fatalf("cwd %q argv %q", c.cwd, c.argv)
 	}
-	if !hasRun(c.argv, "--model", "M") {
+	if !hasRun(c.argv, "--model", "claude-m") {
 		t.Fatalf("a resumed fork must keep the stored model: %q", c.argv)
 	}
 	if chat, _ := rig.chat(t, "dr-1"); len(chat.Turns) != 4 {
@@ -545,5 +545,39 @@ func TestClarifyWorkerPanicFinishes(t *testing.T) {
 	}
 	if code, c := rig.ask(t, "dr-1", "again?"); code != http.StatusAccepted {
 		t.Fatalf("ask after a panic: %d %s (the running count leaked?)", code, c)
+	}
+}
+
+func TestClarifySyntheticModelIsNotStored(t *testing.T) {
+	rig := newClarifyRig(t)
+	rig.cards(t, dr1Card)
+	rig.clarifyFleet(t, fleetUUID(7020))
+	rig.sessions[0].Model = "<synthetic>"
+	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
+		t.Fatalf("ask: %d %s", code, c)
+	}
+	if c := lastCall(t, rig); !hasRun(c.argv, "--model", "opus") {
+		t.Fatalf("argv %q, want --model opus", c.argv)
+	}
+	if e, _ := rig.s.fleet.clarify.get("dr-1"); e.Model != "" {
+		t.Fatalf("stored model %q, want empty", e.Model)
+	}
+}
+
+func TestClarifyAskRefusesControlCharacters(t *testing.T) {
+	rig := newClarifyRig(t)
+	rig.cards(t, dr1Card)
+	rig.clarifyFleet(t, fleetUUID(7021))
+	for _, text := range []string{`why\u0000?`, `why\u001b[2J?`, `why\r?`, `why\u007f?`, `why\u0085?`} {
+		code, out := rig.do(t, "POST", "/fleet/clarify/ask", `{"cardId":"dr-1","text":"`+text+`"}`)
+		if code != http.StatusBadRequest || rawCode(out) != "bad_text" {
+			t.Fatalf("text %s: %d %v", text, code, out)
+		}
+	}
+	if len(rig.calls) != 0 {
+		t.Fatalf("a refused ask ran a fork: %+v", rig.calls)
+	}
+	if code, c := rig.ask(t, "dr-1", "line one\n\tline two?"); code != http.StatusAccepted {
+		t.Fatalf("newline and tab: %d %s", code, c)
 	}
 }

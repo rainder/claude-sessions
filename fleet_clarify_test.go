@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -250,5 +252,39 @@ func TestClarifyStoreStaleFinishIgnored(t *testing.T) {
 	e, _ = st.get("c1")
 	if e.Pending != nil || len(e.Turns) != 2 || e.Turns[1].Text != "new" || e.ForkID != "f2" || st.running != 0 {
 		t.Fatalf("real finish: %+v running %d", e, st.running)
+	}
+}
+
+func TestClarifyStoreTrimsOldestTurnsPastTheCap(t *testing.T) {
+	st := &fleetClarifyStore{}
+	big := strings.Repeat("a", 300<<10)
+	clarifyAskDone(t, st, "c1")
+	for i := 0; i < 4; i++ {
+		_, tok, code := st.begin("c1", "ask", nil, "q"+strconv.Itoa(i), nil, clarifyNow)
+		if code != "" {
+			t.Fatalf("begin %d: %q", i, code)
+		}
+		st.finish("c1", tok, "", &clarifyTurn{Role: "fleet", Text: big + strconv.Itoa(i), At: "x"}, nil, clarifyNow)
+	}
+	got, _ := st.get("c1")
+	total := 0
+	for _, tr := range got.Turns {
+		total += len(tr.Text)
+	}
+	if total > clarifyTurnsMaxBytes {
+		t.Fatalf("turn text %d bytes, cap %d", total, clarifyTurnsMaxBytes)
+	}
+	if last := got.Turns[len(got.Turns)-1]; last.Text != big+"3" {
+		t.Fatalf("newest turn lost: %q", last.Text[len(last.Text)-4:])
+	}
+	if got.Turns[0].Text == "why?" {
+		t.Fatalf("oldest turn kept: %d turns", len(got.Turns))
+	}
+
+	// A single turn over the cap is still kept: the newest always stays.
+	e := &clarifyEntry{}
+	appendClarifyTurn(e, clarifyTurn{Role: "fleet", Text: strings.Repeat("b", clarifyTurnsMaxBytes+1)})
+	if len(e.Turns) != 1 {
+		t.Fatalf("turns %d, want the newest kept", len(e.Turns))
 	}
 }

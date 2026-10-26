@@ -91,7 +91,12 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		`"Andy decides on " + id + ": " + `, `state.fleet.tool === "grok"`,
 		// Use as answer sets the chat box, never adds to what is there:
 		// leftover text would ride along inside the decision.
-		`ta.value = "Andy decides on " + id + ": " + draft.text`, `"Replaced the text in the chat box."`} {
+		`"Andy decides on " + id + ": " + draft.text`, `"Replaced the text in the chat box."`,
+		// A draft longer than a send can carry is cut, on a code point, to
+		// the server's byte cap, as the TUI cuts it; else Send would fail.
+		"const SAY_MAX_BYTES = 4096;", "function cutUTF8(s, max)",
+		`ta.value = cutUTF8("Andy decides on " + id + ": " + draft.text`,
+		`bad_text: "Question has control characters"`} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}

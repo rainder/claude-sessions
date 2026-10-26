@@ -3409,6 +3409,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     empty: "Nothing to draft yet",
     too_long: "Question too long",
     not_found: "No draft",
+    bad_text: "Question has control characters",
   };
   const clarifyCodeText = code => clarifyText[code] || "Clarify failed";
   // card: the card the sheet opened on; chat: {turns, pending, draft} as
@@ -3674,13 +3675,29 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // of the decision (a newline flattens to a space). A bare "Andy decides
   // on <id>: " that Other left goes silently; other text gets a toast.
   const CLARIFY_BARE = /^Andy decides on [A-Za-z0-9._-]{1,100}:$/;
+  // SAY_MAX_BYTES is the server's send cap (sendKeysMaxLen), in UTF-8
+  // bytes as /fleet/say counts them. cutUTF8 cuts on a code point, so a
+  // long draft fits and Send works; the TUI cuts the same way.
+  const SAY_MAX_BYTES = 4096;
+  function cutUTF8(s, max) {
+    const enc = new TextEncoder();
+    if (enc.encode(s).length <= max) return s;
+    let n = 0, out = "";
+    for (const ch of s) {
+      const b = enc.encode(ch).length;
+      if (n + b > max) break;
+      n += b;
+      out += ch;
+    }
+    return out;
+  }
   function clarifyUse() {
     const id = clarify.id, ch = clarify.chat;
     if (!id || !clarify.armed || !ch || !ch.draft) return;
     const draft = {text: str(ch.draft.text)};
     closeClarify();
     const ta = $("say"), old = ta.value.trim();
-    ta.value = "Andy decides on " + id + ": " + draft.text.replace(/\s+/g, " ").trim();
+    ta.value = cutUTF8("Andy decides on " + id + ": " + draft.text.replace(/\s+/g, " ").trim(), SAY_MAX_BYTES);
     if (old && !CLARIFY_BARE.test(old)) toast("Replaced the text in the chat box.");
     grow();
     if (isPhone()) setView("chat", true);

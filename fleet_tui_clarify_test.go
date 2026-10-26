@@ -319,7 +319,7 @@ func TestClarifyApplyAndRefusals(t *testing.T) {
 	for code, want := range map[string]string{
 		"busy": "a question is already running", "card_gone": "card is gone", "not_live": "FLEET is not running",
 		"ambiguous": "two FLEETs are running", "unsupported_tool": "Clarify needs a Claude FLEET",
-		"empty": "nothing to draft yet", "too_long": "question too long", "not_found": "no draft", "weird": "clarify failed",
+		"empty": "nothing to draft yet", "too_long": "question too long", "not_found": "no draft", "bad_text": "question has control characters", "weird": "clarify failed",
 	} {
 		st.applyClarifyRefusal(code, now)
 		if st.toast != want {

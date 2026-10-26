@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -32,10 +33,14 @@ var (
 )
 
 // clarifyDenyJSON is the --settings value. Bash(*--output*): git diff, log
-// and show --output write a file. The rest are the tools that change the
+// and show --output write a file. The gh rules keep gh on the repo's own
+// host: a URL or -R/--repo makes gh call any host it is given, and with cat
+// or Read of a secret that is an exfil path for a prompt-injected fork. A
+// false positive only refuses a look-up; the cwd is the repo, so a plain
+// `gh pr view 123` still works. The rest are the tools that change the
 // fleet or start more work. rg is not a Bash look-up at all: --pre and
 // --hostname-bin run a program, and the Grep tool already searches.
-const clarifyDenyJSON = `{"permissions":{"deny":["Bash(*--output*)","Edit","Write","NotebookEdit","WebFetch","WebSearch","Agent","Task","Workflow","ScheduleWakeup","Skill","ListAgents","ReportFindings"]}}`
+const clarifyDenyJSON = `{"permissions":{"deny":["Bash(*--output*)","Bash(gh *://*)","Bash(gh *-R*)","Bash(gh *--repo*)","Edit","Write","NotebookEdit","WebFetch","WebSearch","Agent","Task","Workflow","ScheduleWakeup","Skill","ListAgents","ReportFindings"]}}`
 
 // clarifyAllowedBash are the Bash look-ups the fork may run, each as a
 // `Bash(<cmd>:*)` prefix rule. The cu rule is added by clarifyArgv, since it
@@ -45,25 +50,35 @@ var clarifyAllowedBash = []string{
 	"gh pr view", "gh pr diff", "gh pr checks", "gh pr list", "gh run view",
 }
 
+// claude-sessions usage is left off: `usage --local` runs the known-accounts
+// pass, which can rotate a parked credential snapshot, a write.
 var clarifyAllowedBashTail = []string{
-	"claude-sessions list-sessions", "claude-sessions usage",
+	"claude-sessions list-sessions",
 	"grep", "ls", "cat", "head", "tail", "wc", "jq",
 }
 
 type clarifyRunParams struct {
 	ResumeID string // FLEET's session id, or the fork's own on a later question
 	Fork     bool   // true on the first question only
-	Model    string // FLEET's model; "" means opus
+	Model    string // FLEET's model; "" or not clarifyModelOK means opus
 	CuPath   string // the cu binary the fork may run `fetch` with
 	Preamble string
 	Question string
 }
 
+// clarifyModelRe is a plain model name. Claude Code writes "<synthetic>" as
+// the model of an API-error or rate-limit line, and that is no model to run.
+var clarifyModelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.\[\]_-]{0,99}$`)
+
+func clarifyModelOK(m string) bool { return clarifyModelRe.MatchString(m) }
+
 // clarifyArgv returns the arguments after the binary name. The `--` before
 // the question is required: --allowedTools is variadic and would eat it.
+// The model is checked here too, since a store file written before the
+// check could hold a bad one.
 func clarifyArgv(p clarifyRunParams) []string {
 	model := p.Model
-	if model == "" {
+	if !clarifyModelOK(model) {
 		model = "opus"
 	}
 	argv := []string{"-p", "--output-format", "json", "--resume", p.ResumeID}

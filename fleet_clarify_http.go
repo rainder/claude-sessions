@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -91,6 +92,21 @@ func (s *server) fleetClarifyGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// clarifyTextOK refuses invalid UTF-8 and any control character but a
+// newline or a tab: a NUL fails the exec, and the retry would then answer
+// "FLEET is mid-step".
+func clarifyTextOK(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
 // fleetClarifyAsk is POST /fleet/clarify/ask {cardId, text}.
 func (s *server) fleetClarifyAsk(w http.ResponseWriter, r *http.Request) {
 	if !s.clarifyGuard(w, r) {
@@ -102,6 +118,10 @@ func (s *server) fleetClarifyAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeStrictJSONLimit(w, r, &body, clarifyBodyMax); err != nil || body == nil || !clarifyCardIDOK(body.CardID) {
 		clarifyRefuse(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if !clarifyTextOK(body.Text) {
+		clarifyRefuse(w, http.StatusBadRequest, "bad_text")
 		return
 	}
 	text := strings.TrimSpace(body.Text)
@@ -183,7 +203,11 @@ func (s *server) clarifyStart(cardID, kind, question string) (clarifyEntry, stri
 			// It becomes an argv value: never anything a flag could hide in.
 			return clarifyEntry{}, "not_live", http.StatusConflict
 		}
-		init = &clarifyEntry{Tool: "", FleetSessionID: sess.SessionID, Model: sess.Model, CardHash: card.Hash, Cwd: s.clarifyCwd(sess)}
+		model := sess.Model
+		if !clarifyModelOK(model) {
+			model = "" // <synthetic> and the like: run opus
+		}
+		init = &clarifyEntry{Tool: "", FleetSessionID: sess.SessionID, Model: model, CardHash: card.Hash, Cwd: s.clarifyCwd(sess)}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), clarifyTimeout)
 	e, token, code := s.fleet.clarify.begin(cardID, kind, init, question, cancel, s.fleetNow())

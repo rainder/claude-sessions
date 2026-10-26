@@ -1241,13 +1241,24 @@ The fork (`fleet_clarify_run.go`) is exec'd, never through a shell, stdin
 <preamble> -- <question>`. `--setting-sources ""` drops Andy's settings,
 which allow `gh pr merge` and `claude-sessions:*` (`--allowedTools` adds to
 them, never replaces), plus hooks and CLAUDE.md; OAuth still works, `--bare`
-does not. So `--model` must be given: FLEET's, `opus` when empty. The `--`
+does not. So `--model` must be given: FLEET's, `opus` when empty or not a
+plain model name (`^[a-z0-9][a-z0-9.\[\]_-]{0,99}$`; Claude Code writes
+`<synthetic>` on an API-error line), checked at the first ask and again when
+the argv is built from a stored chat. The `--`
 keeps the variadic `--allowedTools` from eating the question. Look-ups
 (`clarifyAllowedBash`) are read-only `git`, `gh pr`/`gh run view`,
-`claude-sessions list-sessions/usage`, plain readers and `<cu> fetch` with
-clickup-events' `cu` (a bare one has no token under the service). The deny
-list (`clarifyDenyJSON`) is `Bash(*--output*)` (`git diff/log/show --output`
-writes a file) plus the editing, web and agent tools. `rg` is left off
+`claude-sessions list-sessions`, plain readers and `<cu> fetch` with
+clickup-events' `cu` (a bare one has no token under the service).
+`claude-sessions usage` is left off: `usage --local` runs the known-accounts
+pass, which can rotate a parked credential snapshot. The deny list
+(`clarifyDenyJSON`) is `Bash(*--output*)` (`git diff/log/show --output`
+writes a file); `Bash(gh *://*)`, `Bash(gh *-R*)` and `Bash(gh *--repo*)`
+(a URL or `-R`/`--repo` sends gh to any host; a false positive only refuses
+a look-up, and a plain `gh pr view 123` works from the repo cwd); plus the
+editing, web and agent tools. The look-ups can still read secrets on this
+host; the deny rules keep gh to the repo's own host, and `cu fetch` and
+`list-sessions` only talk to their configured hosts. Accepted residual:
+FLEET itself has wider tools on the same inputs. `rg` is left off
 rather than denied by flag: `--pre` and `--hostname-bin` run a program, and
 Grep already searches. The
 matcher already refuses redirects, `;`, `&&`, `$()`, `git -c` and `gh pr
@@ -1258,8 +1269,12 @@ from the folder it started in.
 
 Only the first ask needs a live FLEET (409 `not_live`, `ambiguous`); later
 ones resume the chat's fork, even across a FLEET restart. Limits: 1..4000
-runes (400 `empty`, `too_long`), one fork per card and 2 in all (409
-`busy`), answers cut to 32 KiB. A first ask that fails with an exit or bad
+runes (400 `empty`, `too_long`), no control character but a newline or a
+tab and valid UTF-8 (400 `bad_text`: a NUL fails the exec), one fork per
+card and 2 in all (409 `busy`), answers cut to 32 KiB, and a chat's turn
+text kept to 1 MiB (`clarifyTurnsMaxBytes`; the oldest turns go, the newest
+always stays, and the fork keeps its own context): every change rewrites the
+whole store file, and the TUI reads with a 2 MiB cap. A first ask that fails with an exit or bad
 output retries once after 5 s, then answers "FLEET is mid-step; ask again in
 a moment". A fork id is stored only if it is a UUID and not FLEET's own id,
 so a later ask can never `--resume` FLEET itself. **Draft** asks the fork
@@ -1279,7 +1294,8 @@ resume picker already hide it (`fleet_clarify_invisible_test.go`).
 
 The page polls the chat every 2 s while the sheet is open and a reply is
 pending, and a failed first read retries on that timer. Use as answer sets
-the FLEET chat box to exactly `Andy decides on <id>: <draft>`; it never
+the FLEET chat box to exactly `Andy decides on <id>: <draft>`, cut on a
+code point to 4096 UTF-8 bytes (the send cap, as the TUI cuts it); it never
 appends or sends. A bare `Andy decides on <id>:` from Other is dropped
 silently; other text is replaced with the toast "Replaced the text in the
 chat box.", since it would go out as part of the decision.

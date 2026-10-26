@@ -22,6 +22,12 @@ const (
 	// clarifyMaxRunning is the global cap on forks in flight at once.
 	clarifyMaxRunning = 2
 
+	// clarifyTurnsMaxBytes bounds the turn text a chat keeps: every change
+	// rewrites the whole store file, and the TUI reads a chat with a 2 MiB
+	// cap. The oldest turns go first. The fork keeps its own context, so
+	// this trims only what is shown.
+	clarifyTurnsMaxBytes = 1 << 20
+
 	clarifyInterrupted = "interrupted by a restart"
 	clarifyCardChanged = "card changed since this chat started"
 )
@@ -117,6 +123,24 @@ func copyClarify(e clarifyEntry) clarifyEntry {
 	return e
 }
 
+// appendClarifyTurn adds t to the chat, then drops the oldest turns until the
+// turn text is at most clarifyTurnsMaxBytes. The newest turn always stays.
+func appendClarifyTurn(e *clarifyEntry, t clarifyTurn) {
+	e.Turns = append(e.Turns, t)
+	total := 0
+	for _, x := range e.Turns {
+		total += len(x.Text)
+	}
+	drop := 0
+	for total > clarifyTurnsMaxBytes && drop < len(e.Turns)-1 {
+		total -= len(e.Turns[drop].Text)
+		drop++
+	}
+	if drop > 0 {
+		e.Turns = append([]clarifyTurn(nil), e.Turns[drop:]...)
+	}
+}
+
 func (st *fleetClarifyStore) loadLocked() {
 	if st.loaded {
 		return
@@ -152,7 +176,7 @@ func (st *fleetClarifyStore) loadLocked() {
 		// for an answer that will never come.
 		if e.Pending != nil {
 			e.Pending = nil
-			e.Turns = append(e.Turns, clarifyTurn{Role: clarifyRoleError, Text: clarifyInterrupted, At: now})
+			appendClarifyTurn(e, clarifyTurn{Role: clarifyRoleError, Text: clarifyInterrupted, At: now})
 		}
 		st.entries[id] = e
 	}
@@ -221,7 +245,7 @@ func (st *fleetClarifyStore) begin(cardID, kind string, init *clarifyEntry, ques
 	}
 	at := now.UTC().Format(time.RFC3339)
 	if kind == clarifyKindAsk {
-		e.Turns = append(e.Turns, clarifyTurn{Role: clarifyRoleYou, Text: question, At: at})
+		appendClarifyTurn(e, clarifyTurn{Role: clarifyRoleYou, Text: question, At: at})
 	}
 	e.Pending = &clarifyPending{Kind: kind, StartedAt: at}
 	if cancel != nil {
@@ -256,7 +280,7 @@ func (st *fleetClarifyStore) finish(cardID string, token uint64, forkID string, 
 		e.ForkID = forkID
 	}
 	if turn != nil {
-		e.Turns = append(e.Turns, *turn)
+		appendClarifyTurn(e, *turn)
 	}
 	if draft != nil {
 		d := *draft
@@ -317,7 +341,7 @@ func (st *fleetClarifyStore) prune(cards map[string]fleetDecisionCard, answered 
 			continue
 		}
 		if e.CardHash != cur.Hash && !e.Changed {
-			e.Turns = append(e.Turns, clarifyTurn{Role: clarifyRoleNote, Text: clarifyCardChanged, At: now.UTC().Format(time.RFC3339)})
+			appendClarifyTurn(e, clarifyTurn{Role: clarifyRoleNote, Text: clarifyCardChanged, At: now.UTC().Format(time.RFC3339)})
 			e.Changed = true
 			changed = true
 		}

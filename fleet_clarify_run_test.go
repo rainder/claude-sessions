@@ -19,11 +19,11 @@ func TestClarifyArgv(t *testing.T) {
 		"-p", "--output-format", "json", "--resume", "abc", "--fork-session", "--model", "claude-opus-5-5",
 		"--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
 		"--permission-mode", "dontAsk", "--tools", "Bash,Read,Grep,Glob",
-		"--settings", `{"permissions":{"deny":["Bash(*--output*)","Edit","Write","NotebookEdit","WebFetch","WebSearch","Agent","Task","Workflow","ScheduleWakeup","Skill","ListAgents","ReportFindings"]}}`,
+		"--settings", `{"permissions":{"deny":["Bash(*--output*)","Bash(gh *://*)","Bash(gh *-R*)","Bash(gh *--repo*)","Edit","Write","NotebookEdit","WebFetch","WebSearch","Agent","Task","Workflow","ScheduleWakeup","Skill","ListAgents","ReportFindings"]}}`,
 		"--allowedTools", "Read", "Grep", "Glob",
 		"Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git blame:*)",
 		"Bash(gh pr view:*)", "Bash(gh pr diff:*)", "Bash(gh pr checks:*)", "Bash(gh pr list:*)", "Bash(gh run view:*)",
-		"Bash(/x/cu-with-token fetch:*)", "Bash(claude-sessions list-sessions:*)", "Bash(claude-sessions usage:*)",
+		"Bash(/x/cu-with-token fetch:*)", "Bash(claude-sessions list-sessions:*)",
 		"Bash(grep:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(jq:*)",
 		"--append-system-prompt", "P", "--", "-rf what?",
 	}
@@ -45,6 +45,19 @@ func TestClarifyArgv(t *testing.T) {
 		if a == "--model" && argv[i+1] != "opus" {
 			t.Fatalf("empty model gave %q", argv[i+1])
 		}
+	}
+	// A model that is not a plain model name (Claude Code writes
+	// "<synthetic>" on an API-error line, and a store file from before the
+	// check may hold one) falls back to opus too.
+	for _, bad := range []string{"<synthetic>", "--dangerously-skip-permissions", "Opus", strings.Repeat("a", 101)} {
+		p.Model = bad
+		if !hasRun(clarifyArgv(p), "--model", "opus") {
+			t.Errorf("model %q not replaced by opus: %q", bad, clarifyArgv(p))
+		}
+	}
+	p.Model = "claude-opus-4-1[1m]"
+	if !hasRun(clarifyArgv(p), "--model", "claude-opus-4-1[1m]") {
+		t.Errorf("a plain model name was dropped")
 	}
 	if n := len(argv); argv[n-2] != "--" || argv[n-1] != "-rf what?" {
 		t.Fatalf("tail = %q", argv[n-2:])
