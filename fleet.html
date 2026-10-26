@@ -612,9 +612,45 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
 .acct-opt .ao-w b { font-weight: 700; }
 .acct-opt .ao-w.ok b { color: var(--green); } .acct-opt .ao-w.warn b { color: var(--amber); } .acct-opt .ao-w.high b { color: var(--red); }
 .acct-hint { margin: 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+/* Clarify sheet: the card pinned on top, the side chat scrolling under it,
+   the question box at the bottom. Purple marks the fork's answers, a dashed
+   amber box a draft Andy may use as his answer. */
+dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
+.cl-in { box-sizing: border-box; height: 100%; display: flex; flex-direction: column; gap: 8px; padding: 14px 14px 12px; }
+.cl-grab { display: none; flex: none; width: 36px; height: 4px; margin: -4px auto 2px; border-radius: 2px; background: var(--line); }
+.cl-head { flex: none; padding: 8px 10px; border-radius: 10px; background: var(--surface2); }
+.cl-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.clarify h2 { font-size: 15px; overflow-wrap: anywhere; }
+.cl-close { min-height: 36px; margin-right: -8px; }
+.cl-ttl { margin: 2px 0 0; font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.cl-opts { margin: 4px 0 0; font-size: 12.5px; line-height: 1.4; color: var(--muted); overflow-wrap: anywhere; }
+.cl-opts b { color: var(--text); }
+.cl-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; padding: 2px 0; }
+.cl-turn { max-width: 88%; font-size: 14.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.cl-you { align-self: flex-end; padding: 7px 11px; border-radius: 12px 12px 4px 12px; background: var(--accent-tint); white-space: pre-wrap; }
+.cl-fleet { align-self: flex-start; max-width: 94%; padding: 7px 11px; border-left: 3px solid var(--magenta); border-radius: 4px 10px 10px 4px; background: var(--surface2); }
+.cl-error { align-self: flex-start; padding: 6px 10px; border-radius: 8px; background: var(--amber-tint); color: var(--amber); white-space: pre-wrap; }
+.cl-dim { align-self: center; max-width: 100%; color: var(--muted); font-size: 12.5px; text-align: center; white-space: pre-wrap; }
+.cl-think { align-self: flex-start; padding: 4px 10px; border-left: 3px solid var(--magenta); color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.cl-empty { margin: auto 0; color: var(--muted); font-size: 13.5px; text-align: center; }
+.cl-draft { display: grid; gap: 6px; padding: 9px 11px; border: 1.5px dashed var(--amber); border-radius: 10px; }
+.cl-dl { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: var(--amber); }
+.cl-dt { font-size: 14.5px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cl-dacts { display: flex; gap: 8px; }
+.cl-dacts .btn { flex: 1; min-height: 44px; }
+.cl-note { flex: none; margin: 0; font-size: 13.5px; color: var(--red); font-weight: 550; }
+.cl-ask { flex: none; display: flex; align-items: flex-end; gap: 8px; }
+.cl-ask textarea { flex: 1; min-width: 0; box-sizing: border-box; min-height: 46px; max-height: 30vh; resize: none; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: 16px/1.35 var(--sans); }
+#clarify-draft { flex: none; min-height: 42px; }
+.cl-foot { flex: none; margin: 0; font-size: 11.5px; color: var(--muted); text-align: center; }
+.opt.clarify-btn { background: transparent; border-style: dashed; }
+.opt.clarify-btn .k { background: transparent; border-color: var(--magenta); color: var(--magenta); }
 @media (max-width: 760px) {
   dialog.sheet { width: 100%; max-width: 100%; margin: auto 0 0; border-radius: 18px 18px 0 0; max-height: calc(100% - max(32px, env(safe-area-inset-top, 0px) + 12px)); }
   .sheet-in { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  dialog.sheet.clarify { height: calc(100% - max(72px, env(safe-area-inset-top, 0px) + 48px)); }
+  .cl-in { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  .cl-grab { display: block; }
 }
 
 /* Toast */
@@ -967,6 +1003,28 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
       <button class="btn btn-primary" id="acct-go" type="button">Switch</button>
       <button class="btn" id="acct-cancel" type="button">Cancel</button>
     </div>
+  </div>
+</dialog>
+
+<dialog class="sheet clarify" id="clarify-sheet" aria-labelledby="clarify-title" tabindex="-1">
+  <div class="cl-in">
+    <div class="cl-grab" aria-hidden="true"></div>
+    <div class="cl-head">
+      <div class="cl-top">
+        <h2 id="clarify-title">Clarify</h2>
+        <button class="link-btn cl-close" id="clarify-close" type="button" aria-label="Close Clarify">Close</button>
+      </div>
+      <p class="cl-ttl" id="clarify-ttl"></p>
+      <p class="cl-opts" id="clarify-opts"></p>
+    </div>
+    <div class="cl-log" id="clarify-log" aria-live="polite"></div>
+    <p class="cl-note" id="clarify-note" hidden></p>
+    <div class="cl-ask">
+      <textarea id="clarify-text" rows="2" maxlength="4000" placeholder="Ask about this card…" aria-label="Question about this card"></textarea>
+      <button class="btn btn-primary" id="clarify-ask" type="button">Ask</button>
+    </div>
+    <button class="btn" id="clarify-draft" type="button" hidden>Draft for FLEET</button>
+    <p class="cl-foot">fork of FLEET · read-only · FLEET does not see this</p>
   </div>
 </dialog>
 
@@ -1868,7 +1926,7 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
   // press the button that gets the focus in it. On the confirm sheet,
   // Enter and Space do nothing until the confirm button is armed, except
   // on Cancel and on a real link.
-  for (const id of ["sheet", "start-sheet", "acct-sheet"]) $(id).addEventListener("keydown", e => {
+  for (const id of ["sheet", "start-sheet", "acct-sheet", "clarify-sheet"]) $(id).addEventListener("keydown", e => {
     if (e.repeat) { e.preventDefault(); e.stopPropagation(); return; }
     if (id !== "sheet" || sheet.armed || (e.key !== "Enter" && e.key !== " ")) return;
     const t = e.target;
@@ -2168,6 +2226,8 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     other.setAttribute("aria-label", "Other: write your own answer about " + head.name + " in the chat");
     other.addEventListener("click", () => prefillChat(id ? "Andy decides on " + id + ": " : "About " + head.name + ": "));
     box.append(other);
+    const cl = clarifyBtn(c);
+    if (cl) box.append(cl);
     card.append(box);
     // Without an id the page cannot tie an answer to the card, lock it or
     // track its delivery, so the options only show.
@@ -3061,6 +3121,17 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
         toast("Already answered on another device.", true);
       }
     }
+    // Clarify goes with its card: gone, or no longer a decision.
+    if (clarify.id && $("clarify-sheet").open) {
+      const cur = currentCard(clarify.id);
+      if (!cur || !isDecision(cur)) {
+        closeClarify();
+        toast("Card is gone.", true);
+      } else {
+        clarify.card = cur;
+        guard(renderClarifyHead);
+      }
+    }
     if (changed) {
       guard(renderStatus);
       guard(renderBanners);
@@ -3320,6 +3391,340 @@ dialog.sheet::backdrop { background: rgba(10, 10, 14, .5); }
     sheet.openerKey = ""; sheet.openerIdx = -1;
   });
   $("sheet").addEventListener("click", e => { if (e.target === $("sheet") && !sheet.busy) closeSheet(); });
+
+  // ---- clarify -----------------------------------------------------------
+  // Clarify is a side chat about one decision card with a read-only fork of
+  // FLEET (fleet_clarify_http.go). FLEET never sees it. Use as answer only
+  // fills the FLEET chat box; Andy sends from there. A grok FLEET cannot be
+  // forked, so its cards show no Clarify button.
+  // While a fork runs (pending) the open sheet reads the chat every
+  // CLARIFY_POLL ms; closing the sheet stops it, and the fork goes on.
+  const CLARIFY_POLL = 2000;
+  const clarifyText = {
+    busy: "A question is already running",
+    card_gone: "Card is gone",
+    not_live: "FLEET is not running",
+    ambiguous: "Two FLEETs are running",
+    unsupported_tool: "Clarify needs a Claude FLEET",
+    empty: "Nothing to draft yet",
+    too_long: "Question too long",
+    not_found: "No draft",
+    bad_text: "Question has control characters",
+  };
+  const clarifyCodeText = code => clarifyText[code] || "Clarify failed";
+  // card: the card the sheet opened on; chat: {turns, pending, draft} as
+  // last read (null until the first read lands); raw: that read's body, so
+  // an unchanged poll redraws nothing; flight: a POST is out. gen moves on
+  // every open and close, so an answer for an older sheet is dropped; seq
+  // moves on every read and POST, so an older read never replaces a newer
+  // one.
+  const clarify = {card: null, id: "", chat: null, raw: "", flight: false, armed: false, gen: 0, seq: 0,
+    poll: 0, tick: 0, armTimer: 0, openerKey: "", openerIdx: -1};
+
+  // clarifyBtn: the Clarify button beside Other, with the chat's turn count.
+  function clarifyBtn(c) {
+    const id = str(c.id);
+    if (!id || (state && obj(state.fleet) && state.fleet.tool === "grok")) return null;
+    const all = obj(state && state.clarify), s = all && obj(all[id]);
+    const n = s && num(s.turns) ? s.turns : 0;
+    const label = n > 0 ? "Clarify · " + n : "Clarify";
+    const sub = s && s.pending === true ? "A question is running" : s && s.draft === true ? "A draft is waiting" : "Ask a read-only fork of FLEET";
+    const b = el("button", "opt clarify-btn", el("span", "k", "?"), el("span", "ob", el("span", "ol", label), el("span", "oline", sub)));
+    b.type = "button";
+    b.disabled = expired;
+    b.setAttribute("aria-label", label + ": ask about " + cardHead(c).name + " without telling FLEET");
+    b.addEventListener("click", () => openClarify(c));
+    return b;
+  }
+
+  function openClarify(c) {
+    const id = str(c.id);
+    if (!id || expired) return;
+    clarifyStop();
+    clarify.card = c; clarify.id = id;
+    // Focus goes back to the opener on close, as on the confirm sheet.
+    const op = document.activeElement, oh = op && op !== document.body ? op.closest("[data-fkey]") : null;
+    clarify.openerKey = oh ? oh.dataset.fkey : ""; clarify.openerIdx = oh ? focusablesIn(oh).indexOf(op) : -1;
+    $("clarify-text").value = "";
+    $("clarify-text").style.height = "";
+    clarifyNote("");
+    renderClarifyHead();
+    renderClarify();
+    const d = $("clarify-sheet");
+    if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
+    // The buttons stay off for SHEET_ARM_MS, so the tap that opened the
+    // sheet cannot land on one of them.
+    const gen = clarify.gen;
+    clarify.armTimer = setTimeout(() => { if (gen === clarify.gen) { clarify.armed = true; renderClarifyControls(); } }, SHEET_ARM_MS);
+    d.focus();
+    clarifyLoad();
+  }
+
+  function closeClarify() {
+    const d = $("clarify-sheet");
+    if (d.open) { if (typeof d.close === "function") d.close(); else d.removeAttribute("open"); }
+    clarifyStop();
+  }
+
+  // clarifyStop forgets the open sheet: every timer stops, and any answer
+  // still on its way is dropped (gen).
+  function clarifyStop() {
+    clarify.gen++;
+    clearTimeout(clarify.poll); clearInterval(clarify.tick); clearTimeout(clarify.armTimer);
+    clarify.poll = clarify.tick = clarify.armTimer = 0;
+    clarify.card = null; clarify.id = ""; clarify.chat = null; clarify.raw = ""; clarify.flight = false; clarify.armed = false;
+  }
+
+  function clarifyNote(text) {
+    $("clarify-note").textContent = text;
+    $("clarify-note").hidden = !text;
+  }
+
+  // clarifyLoad reads the card's chat and, while a fork runs, reads it
+  // again in CLARIFY_POLL ms. A failed read keeps what the sheet shows and
+  // keeps polling: the fork runs on whether or not this page can see it.
+  // A failed first read retries on the same timer until one lands.
+  async function clarifyLoad() {
+    if (!clarify.id) return;
+    clearTimeout(clarify.poll);
+    clarify.poll = 0;
+    const gen = clarify.gen, seq = ++clarify.seq;
+    let text = null;
+    try {
+      text = await getJSON("/fleet/clarify?card=" + encodeURIComponent(clarify.id));
+    } catch (e) {
+      if (gen === clarify.gen && e instanceof AuthError) { closeClarify(); return; }
+    }
+    if (gen !== clarify.gen || seq !== clarify.seq) return;
+    let b = null;
+    if (text !== null) { try { b = obj(JSON.parse(text)); } catch { b = null; } }
+    if (b) {
+      if (!clarify.chat) clarifyNote("");
+      clarify.chat = {turns: arr(b.turns).map(obj).filter(Boolean), pending: obj(b.pending), draft: obj(b.draft)};
+      if (text !== clarify.raw) { clarify.raw = text; renderClarify(); } else renderClarifyControls();
+    } else if (!clarify.chat) {
+      clarifyNote(clarifyCodeText(""));
+    }
+    // No chat yet (the first read failed): try again on the same timer.
+    if (!clarify.chat || clarify.chat.pending) clarify.poll = setTimeout(clarifyLoad, CLARIFY_POLL);
+  }
+
+  function renderClarifyHead() {
+    const c = clarify.card;
+    if (!c) return;
+    const head = cardHead(c), lean = str(c.lean), opts = optionList(c);
+    $("clarify-title").textContent = "Clarify · " + (head.ticket || clarify.id);
+    $("clarify-ttl").replaceChildren(linkText(document.createDocumentFragment(), head.title));
+    const parts = [];
+    opts.forEach((o, i) => {
+      const k = str(o.key), lab = optLabel(o), t = k && lab !== k ? k + " " + lab : lab;
+      if (i) parts.push(document.createTextNode(" · "));
+      parts.push(lean && k === lean ? linkText(el("b"), t + " ★") : linkText(document.createDocumentFragment(), t));
+    });
+    $("clarify-opts").replaceChildren(...parts);
+    $("clarify-opts").hidden = !parts.length;
+  }
+
+  // renderClarify draws the chat. Only the fork's own turns go through
+  // renderRich; Andy's questions, errors and notes are plain text.
+  function renderClarify() {
+    const log = $("clarify-log"), ch = clarify.chat, nodes = [];
+    if (!ch) nodes.push(el("p", "cl-empty", "Loading…"));
+    else {
+      for (const t of ch.turns) {
+        const role = str(t.role);
+        if (role === "you") nodes.push(el("div", "cl-turn cl-you", str(t.text)));
+        else if (role === "fleet") nodes.push(el("div", "cl-turn cl-fleet rich", renderRich(t.text)));
+        else if (role === "error") nodes.push(el("div", "cl-turn cl-error", str(t.text)));
+        else nodes.push(el("div", "cl-turn cl-dim", str(t.text)));
+      }
+      if (!ch.turns.length && !ch.pending) nodes.push(el("p", "cl-empty", "Ask anything about this card. The fork reads what FLEET knows and changes nothing."));
+      if (ch.pending) {
+        const th = el("div", "cl-think", "thinking…");
+        th.dataset.since = str(ch.pending.startedAt);
+        nodes.push(th);
+      }
+      const dt = ch.draft ? str(ch.draft.text) : "";
+      if (dt) {
+        const use = el("button", "btn btn-primary", "Use as answer"), dis = el("button", "btn", "Discard");
+        use.type = dis.type = "button";
+        use.id = "clarify-use"; dis.id = "clarify-discard";
+        use.addEventListener("click", clarifyUse);
+        dis.addEventListener("click", clarifyDiscard);
+        nodes.push(el("div", "cl-draft", el("span", "cl-dl", "DRAFT FOR FLEET"), el("div", "cl-dt", dt), el("div", "cl-dacts", use, dis)));
+      }
+    }
+    log.replaceChildren(...nodes);
+    log.scrollTop = log.scrollHeight;
+    clearInterval(clarify.tick);
+    clarify.tick = 0;
+    if (ch && ch.pending) { clarifyTick(); clarify.tick = setInterval(clarifyTick, 1000); }
+    renderClarifyControls();
+  }
+
+  // clarifyTick counts the running fork's seconds, from the server's
+  // startedAt (a clock ahead of the server's reads 0, never less).
+  function clarifyTick() {
+    const n = $("clarify-log").querySelector(".cl-think");
+    if (!n) return;
+    const t0 = parseTime(n.dataset.since);
+    n.textContent = "thinking… " + (t0 === null ? 0 : Math.max(0, Math.floor((Date.now() - t0) / 1000))) + "s";
+  }
+
+  function renderClarifyControls() {
+    const ch = clarify.chat, on = clarify.armed && !expired && !!ch && !clarify.flight, running = !!(ch && ch.pending);
+    $("clarify-ask").disabled = !on || running || !$("clarify-text").value.trim();
+    $("clarify-draft").hidden = !(ch && ch.turns.length);
+    $("clarify-draft").disabled = !on || running;
+    for (const b of ["clarify-use", "clarify-discard"]) if ($(b)) $(b).disabled = !on;
+  }
+
+  // clarifyPost: status 0 when no answer came back. code is the refusal's.
+  async function clarifyPost(url, payload) {
+    const ctl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), SAY_TIMEOUT) : 0;
+    let r, body = null;
+    try {
+      r = await fetch(url, {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload), signal: ctl ? ctl.signal : undefined});
+    } catch {
+      clearTimeout(timer);
+      return {status: 0, code: "", body: null};
+    }
+    if (r.status === 401) { clearTimeout(timer); expire(); return {status: 401, code: "", body: null}; }
+    try { body = obj(JSON.parse(await r.text())); } catch { body = null; }
+    clearTimeout(timer);
+    return {status: r.status, code: body ? str(body.code) : "", body};
+  }
+
+  // clarifyFailed shows why a POST did not start anything.
+  function clarifyFailed(res) {
+    if (res.status === 0) clarifyNote("The page did not get an answer. The chat below shows what happened.");
+    else if (res.status === 401) clarifyNote("Session expired. Run claude-sessions fleet-url on the host.");
+    else clarifyNote(clarifyCodeText(res.code));
+  }
+
+  // clarifyStarted: a 202. The fork runs, so the sheet shows it as running
+  // at once, and keeps polling even if the read after it fails.
+  function clarifyStarted(res, kind, you) {
+    const now = new Date().toISOString();
+    const ch = clarify.chat || {turns: [], pending: null, draft: null};
+    if (you) ch.turns = ch.turns.concat([{role: "you", text: you, at: now}]);
+    ch.pending = obj(res.body && res.body.pending) || {kind, startedAt: now};
+    clarify.chat = ch;
+    clarify.raw = "";
+    renderClarify();
+  }
+
+  async function clarifyAsk() {
+    const text = $("clarify-text").value.trim(), id = clarify.id, gen = clarify.gen;
+    if (!id || !text || !clarify.armed || clarify.flight || (clarify.chat && clarify.chat.pending)) return;
+    clarifyNote("");
+    clarify.flight = true;
+    clarify.seq++;
+    renderClarifyControls();
+    const res = await clarifyPost("/fleet/clarify/ask", {cardId: id, text});
+    if (gen !== clarify.gen) return;
+    clarify.flight = false;
+    if (res.status === 202) {
+      $("clarify-text").value = "";
+      $("clarify-text").style.height = "";
+      clarifyStarted(res, "ask", text);
+    } else clarifyFailed(res);
+    renderClarifyControls();
+    if (res.status !== 401) clarifyLoad();
+  }
+
+  async function clarifyDraft() {
+    const id = clarify.id, gen = clarify.gen;
+    if (!id || !clarify.armed || clarify.flight || !clarify.chat || clarify.chat.pending) return;
+    clarifyNote("");
+    clarify.flight = true;
+    clarify.seq++;
+    renderClarifyControls();
+    const res = await clarifyPost("/fleet/clarify/draft", {cardId: id});
+    if (gen !== clarify.gen) return;
+    clarify.flight = false;
+    if (res.status === 202) clarifyStarted(res, "draft", "");
+    else clarifyFailed(res);
+    renderClarifyControls();
+    if (res.status !== 401) clarifyLoad();
+  }
+
+  async function clarifyDiscard() {
+    const id = clarify.id, gen = clarify.gen;
+    if (!id || !clarify.armed || clarify.flight) return;
+    clarifyNote("");
+    clarify.flight = true;
+    clarify.seq++;
+    renderClarifyControls();
+    const res = await clarifyPost("/fleet/clarify/draft", {cardId: id, discard: true});
+    if (gen !== clarify.gen) return;
+    clarify.flight = false;
+    if (res.status === 200 && res.body && res.body.ok === true) {
+      if (clarify.chat) clarify.chat.draft = null;
+      clarify.raw = "";
+      renderClarify();
+    } else clarifyFailed(res);
+    renderClarifyControls();
+    if (res.status !== 401) clarifyLoad();
+  }
+
+  // clarifyUse never sends: the sheet closes and the draft waits in the
+  // FLEET chat box as an Other answer, for Andy to read and send. It sets
+  // the box rather than adding to it: text left there would be sent as part
+  // of the decision (a newline flattens to a space). A bare "Andy decides
+  // on <id>: " that Other left goes silently; other text gets a toast.
+  const CLARIFY_BARE = /^Andy decides on [A-Za-z0-9._-]{1,100}:$/;
+  // SAY_MAX_BYTES is the server's send cap (sendKeysMaxLen), in UTF-8
+  // bytes as /fleet/say counts them. cutUTF8 cuts on a code point, so a
+  // long draft fits and Send works; the TUI cuts the same way.
+  const SAY_MAX_BYTES = 4096;
+  function cutUTF8(s, max) {
+    const enc = new TextEncoder();
+    if (enc.encode(s).length <= max) return s;
+    let n = 0, out = "";
+    for (const ch of s) {
+      const b = enc.encode(ch).length;
+      if (n + b > max) break;
+      n += b;
+      out += ch;
+    }
+    return out;
+  }
+  function clarifyUse() {
+    const id = clarify.id, ch = clarify.chat;
+    if (!id || !clarify.armed || !ch || !ch.draft) return;
+    const draft = {text: str(ch.draft.text)};
+    closeClarify();
+    const ta = $("say"), old = ta.value.trim();
+    ta.value = cutUTF8("Andy decides on " + id + ": " + draft.text.replace(/\s+/g, " ").trim(), SAY_MAX_BYTES);
+    if (old && !CLARIFY_BARE.test(old)) toast("Replaced the text in the chat box.");
+    grow();
+    if (isPhone()) setView("chat", true);
+    else $("chat").scrollIntoView({behavior: "smooth", block: "nearest"});
+    if (!ta.disabled) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }
+
+  $("clarify-close").addEventListener("click", closeClarify);
+  $("clarify-ask").addEventListener("click", clarifyAsk);
+  $("clarify-draft").addEventListener("click", clarifyDraft);
+  $("clarify-text").addEventListener("input", () => {
+    const ta = $("clarify-text");
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight + 2, 160) + "px";
+    renderClarifyControls();
+  });
+  $("clarify-sheet").addEventListener("close", () => {
+    if ($("clarify-sheet").open) return;
+    if (clarify.id) clarifyStop();
+    const ae = document.activeElement;
+    if ((!ae || ae === document.body || $("clarify-sheet").contains(ae)) && clarify.openerIdx >= 0) {
+      const h = fkeyHost(clarify.openerKey), f = h && focusablesIn(h)[clarify.openerIdx];
+      if (f) f.focus({preventScroll: true});
+    }
+    clarify.openerKey = ""; clarify.openerIdx = -1;
+  });
+  $("clarify-sheet").addEventListener("click", e => { if (e.target === $("clarify-sheet")) closeClarify(); });
 
   // ---- send --------------------------------------------------------------
   const friendly = {

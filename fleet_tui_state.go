@@ -29,6 +29,13 @@ const (
 	fleetCmdDismiss          // dismiss st.dismissID
 	fleetCmdAttach           // attach to st.attach, then refetch
 	fleetCmdRawText          // show the selected card's raw text (fleetRawLines)
+
+	// Clarify (fleet_tui_clarify.go). The loop starts a job for each; ask
+	// takes st.clarifyReq, the rest use st.clarify.
+	fleetCmdClarifyGet     // read the open card's chat
+	fleetCmdClarifyAsk     // send st.clarifyReq as a question
+	fleetCmdClarifyDraft   // ask the fork for a draft answer
+	fleetCmdClarifyDiscard // drop the draft
 )
 
 type fleetToastKind int
@@ -76,13 +83,15 @@ type fleetViewState struct {
 	panel         *fleetPanel
 	sending       bool
 	dismissing    bool
-	send          *fleetSayRequest    // set with fleetCmdSend; the loop takes it
-	dismissID     string              // set with fleetCmdDismiss
-	dismissSource string              // the applied state's Source when x was pressed
-	attach        *fleetAttachRequest // set with fleetCmdAttach; the loop takes it
-	nextAfter     string              // card id just sent; the next applyState selects the next open card
-	justSent      string              // card id our own answer reached; locked until a state shows it answered or gone
-	unclear       string              // card id whose send result is unknown; locked until the next applied state
+	send          *fleetSayRequest     // set with fleetCmdSend; the loop takes it
+	dismissID     string               // set with fleetCmdDismiss
+	dismissSource string               // the applied state's Source when x was pressed
+	attach        *fleetAttachRequest  // set with fleetCmdAttach; the loop takes it
+	clarify       *fleetClarifyMode    // the open Clarify side chat; nil in the list
+	clarifyReq    *fleetClarifyRequest // set with fleetCmdClarifyAsk; the loop takes it
+	nextAfter     string               // card id just sent; the next applyState selects the next open card
+	justSent      string               // card id our own answer reached; locked until a state shows it answered or gone
+	unclear       string               // card id whose send result is unknown; locked until the next applied state
 	toast         string
 	toastKind     fleetToastKind
 	toastUntil    time.Time
@@ -315,6 +324,18 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		}
 	}
 
+	if c := st.clarify; c != nil {
+		if i := fleetItemIndex(st.items, c.item.Card.ID); i < 0 {
+			st.clarify = nil
+			st.setToast("card is gone", fleetToastWarn, now)
+		} else if v.Source != c.source {
+			st.clarify = nil
+			st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
+		} else {
+			c.item = st.items[i]
+		}
+	}
+
 	if p := st.panel; p != nil {
 		id := p.item.Card.ID
 		if !fleetCardStillAsked(v, id, p.hash) {
@@ -353,6 +374,9 @@ func (st *fleetViewState) selected() *fleetItem {
 // handleKey applies one key. inBatch is true while the key arrived in the
 // same read as others (a paste), which never presses Enter on the panel.
 func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleetCmd {
+	if st.clarify != nil {
+		return st.handleClarifyKey(k, inBatch, now)
+	}
 	if st.panel != nil {
 		return st.handlePanelKey(k, inBatch, now)
 	}
@@ -446,6 +470,8 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return fleetCmdDismiss
 	case "o":
 		return st.openOther(now)
+	case "k":
+		return st.openClarify(now)
 	case "t":
 		// The ship screen shows no card, so there is no card text to show.
 		if inBatch || st.shipOn() || st.selected() == nil {
@@ -641,6 +667,20 @@ func (st *fleetViewState) handleEvent(ev inputEvent, inBatch bool, now time.Time
 // Releases, other buttons, and every row outside the list and the panel do
 // nothing, and so does every body but the card list (st.hit.on).
 func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
+	if c := st.clarify; c != nil {
+		// The chat is the whole body: the wheel scrolls it anywhere, as
+		// PgUp/PgDn do, and nothing else does anything.
+		switch {
+		case m.release:
+		case m.button == mouseWheelUp:
+			c.scroll += fleetMouseStep
+			return fleetCmdRender
+		case m.button == mouseWheelDown:
+			c.scroll = max(c.scroll-fleetMouseStep, 0)
+			return fleetCmdRender
+		}
+		return fleetCmdNone
+	}
 	h := st.hit
 	if m.release || !h.on || st.panel != nil || st.shipOn() || st.selected() == nil {
 		return fleetCmdNone

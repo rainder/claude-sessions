@@ -49,7 +49,11 @@ func (r *screenRenderer) Draw(content string, cols, rows int) error {
 		fmt.Fprintf(&patch, "\x1b[%d;1H", i+1)
 		patch.WriteString(line)
 		patch.WriteString(ansiReset)
-		patch.WriteString(screenEraseLine)
+		// A full row leaves the cursor on its last cell (autowrap is off),
+		// and erase-to-end would wipe that cell; a full row has no tail.
+		if visualLen(line) < cols {
+			patch.WriteString(screenEraseLine)
+		}
 	}
 	if patch.Len() == 0 {
 		return nil

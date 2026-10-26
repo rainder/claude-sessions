@@ -9,6 +9,17 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- FLEET Clarify: a side chat about one open decision card, in the TUI's
+  FLEET view (`k`) and on the `/fleet` page (the Clarify button). The
+  answers come from a read-only fork of FLEET's own conversation, so FLEET
+  is not interrupted and never sees the questions. The fork may read files
+  and run a fixed list of look-ups (`git log`, `gh pr view`, `cu fetch`, …)
+  and nothing else. Draft for FLEET asks the fork to write the decision the
+  chat reached; Andy edits it and sends it as an Other answer through the
+  usual path, so nothing reaches FLEET without his send. One chat per card,
+  kept on the server across devices, until the card is answered or gone.
+  Claude FLEET only: a grok fork cannot be held to look-ups.
+
 - The TUI text can be selected and copied. `v` on the session list or in the
   inspector is select mode: mouse capture goes off, so a drag selects text and
   Cmd+C copies it; an amber hint shows, and `v` or Esc turns the mouse back
@@ -449,6 +460,9 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A TUI row that fills the whole width no longer loses its last character.
+  The screen renderer wrote erase-line after it, and with autowrap off the
+  cursor sat on that last cell.
 - The `/fleet` page no longer shows a success toast after a card answer is
   sent. The card moving to the Sent strip is the signal. Errors, an
   unconfirmed delivery and the busy-FLEET notice still show a toast.

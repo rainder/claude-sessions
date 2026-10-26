@@ -263,9 +263,14 @@ func (s *server) fleetPushKey(w http.ResponseWriter, r *http.Request) {
 
 // decodeStrictJSON decodes exactly one JSON value into dst (a pointer to a
 // pointer, so a top-level null stays nil): unknown fields and trailing
-// content are errors.
+// content are errors. The body is capped at 4 KiB.
 func decodeStrictJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	return decodeStrictJSONLimit(w, r, dst, 4<<10)
+}
+
+// decodeStrictJSONLimit is decodeStrictJSON with a body cap of limit bytes.
+func decodeStrictJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return err

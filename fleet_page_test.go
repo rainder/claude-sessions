@@ -18,7 +18,9 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// send time, an answer from another device that landed while the
 		// sheet was open would turn this send into a correction and slip
 		// past the server's already_answered guard.
-		"correction = answerOf(", "correction: answerOf("} {
+		"correction = answerOf(", "correction: answerOf(",
+		// prefillChat keeps what is in the box, so Use as answer must not use it.
+		`prefillChat("Andy decides on " + id + ": " + `} {
 		if strings.Contains(page, bad) {
 			t.Errorf("fleet.html must not contain %q", bad)
 		}
@@ -79,7 +81,22 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		`accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>`,
 		`addEventListener("paste"`, `addEventListener("drop"`, "URL.createObjectURL(f)", "URL.revokeObjectURL(",
 		`fetch("/fleet/upload"`, "function uploadImages(", "withImages(typed, up.paths)", "withImages(text, up.paths)",
-		"const ATT_MAX = 5", "sayAtt.drop(imgs)", "svAtt.drop(imgs)"} {
+		"const ATT_MAX = 5", "sayAtt.drop(imgs)", "svAtt.drop(imgs)",
+		// Clarify: a side chat about one card with a read-only fork of FLEET,
+		// in its own sheet. Use as answer only prefills the chat; a grok
+		// FLEET has no Clarify.
+		"/fleet/clarify", "/fleet/clarify/ask", "/fleet/clarify/draft",
+		`id="clarify-sheet"`, "function openClarify(", "CLARIFY_POLL",
+		"fork of FLEET · read-only · FLEET does not see this",
+		`"Andy decides on " + id + ": " + `, `state.fleet.tool === "grok"`,
+		// Use as answer sets the chat box, never adds to what is there:
+		// leftover text would ride along inside the decision.
+		`"Andy decides on " + id + ": " + draft.text`, `"Replaced the text in the chat box."`,
+		// A draft longer than a send can carry is cut, on a code point, to
+		// the server's byte cap, as the TUI cuts it; else Send would fail.
+		"const SAY_MAX_BYTES = 4096;", "function cutUTF8(s, max)",
+		`ta.value = cutUTF8("Andy decides on " + id + ": " + draft.text`,
+		`bad_text: "Question has control characters"`} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}

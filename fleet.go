@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/subtle"
 	_ "embed"
@@ -134,6 +135,13 @@ type fleetDeps struct {
 	// Card answers (fleet_answered.go). Lock order: sayMu, then the store's
 	// own mutex; /fleet/state and dismiss take the store's only.
 	answered fleetAnsweredStore // cmdServer sets answered.path
+
+	// Clarify side chats (fleet_clarify.go, fleet_clarify_http.go).
+	clarify           fleetClarifyStore                                                              // cmdServer sets clarify.path
+	clarifyRun        func(ctx context.Context, cwd string, argv []string) (clarifyRunResult, error) // nil → runClarifyFork with claude on PATH
+	clarifyRetryDelay time.Duration                                                                  // 0 → 5 s
+	clarifyGo         func(func())                                                                   // nil → go f()
+	clarifyCuPath     func() string                                                                  // nil → clarifyCuPath()
 }
 
 func (s *server) fleetDir() string {
@@ -304,6 +312,9 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("GET /fleet/push/key", s.fleetPushKey)
 	mux.HandleFunc("POST /fleet/push/subscribe", s.fleetPushSubscribe)
 	mux.HandleFunc("POST /fleet/push/unsubscribe", s.fleetPushUnsubscribe)
+	mux.HandleFunc("GET /fleet/clarify", s.fleetClarifyGet)
+	mux.HandleFunc("POST /fleet/clarify/ask", s.fleetClarifyAsk)
+	mux.HandleFunc("POST /fleet/clarify/draft", s.fleetClarifyDraft)
 	registerFleetPWARoutes(mux)
 }
 
@@ -454,7 +465,12 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	if stateErr != "" {
 		cards = nil
 	}
-	out["answered"] = s.fleet.answered.view(cards, now)
+	answered := s.fleet.answered.view(cards, now)
+	out["answered"] = answered
+	// Clarify chats go with their card: gone, no longer a decision, or
+	// answered with sent. A running fork for one is killed.
+	s.fleet.clarify.prune(cards, answered, now)
+	out["clarify"] = s.fleet.clarify.summary()
 	// Plain page messages the server holds for FLEET, without their text.
 	out["outbox"] = s.fleet.outbox.view(now)
 	if stateErr != "" {

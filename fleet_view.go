@@ -159,7 +159,8 @@ func fleetEditText(text, key string, fits func(string) bool) (string, bool) {
 	switch {
 	case key == "\x7f" || key == "\x08":
 		if text != "" {
-			text = text[:len(text)-1]
+			_, n := utf8.DecodeLastRuneInString(text)
+			text = text[:len(text)-n]
 		}
 		return text, true
 	case len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e:

@@ -873,7 +873,8 @@ writes — `~/.claude/fleet/state.json` (cards, rewritten atomically by
 start FLEET when it is down. Routes: `GET /fleet`,
 `/fleet/state`, `/fleet/chat`, `/fleet/log`, `/fleet/usage`, `POST /fleet/say`,
 `POST /fleet/card/dismiss`, `POST /fleet/start`, `/fleet/session`, `POST /fleet/session/say`,
-`POST /fleet/upload`,
+`POST /fleet/upload`, `/fleet/clarify`, `POST /fleet/clarify/ask`,
+`POST /fleet/clarify/draft`,
 `POST /fleet/login`, `POST /fleet/login/arm`,
 `POST /fleet/login/revoke`, `/fleet/accounts`, `POST /fleet/account/switch`,
 `/fleet/push/key`, `POST /fleet/push/subscribe`, `POST /fleet/push/unsubscribe`,
@@ -1216,6 +1217,88 @@ answers only. A send is logged to the say log as `sent target=<tmux>
 len=<n>`, never the text, and never to log.jsonl, which is FLEET's own record.
 A refusal there is the header line only (`refused code=… target=<tmux>
 len=<n>`): the pane lines FLEET's own refusals keep can hold the typed text.
+
+**Clarify** (`fleet_clarify*.go`). A side chat about one open decision card
+(id `^[A-Za-z0-9._-]{1,100}$`), answered by a fork of FLEET's conversation,
+so Andy can ask what a card means without interrupting FLEET, which never
+sees it. One chat per card, on the server, shared by the TUI and the page.
+Ask and draft answer 202 and the fork runs in the background;
+`/fleet/state`'s `clarify` gives per-card counts, never text. **Claude FLEET
+only** (checked live on claude 2.1.310 and grok 1.0.70, 2026-10-26): a grok
+fork ignores `dontAsk` because `~/.claude/settings.json` sets `defaultMode:
+auto`, takes allow rules from `~/.grok/config.toml` and `settings.local.json`
+with no flag to drop them, approved `touch`, `tee`, `git push` and file
+writes in auto mode, and cannot use `--sandbox read-only` (it cannot fork a
+session made without it, and it blocks `gh`'s network). So a grok FLEET's
+first ask is 409 `unsupported_tool`, and both clients hide Clarify.
+
+The fork (`fleet_clarify_run.go`) is exec'd, never through a shell, stdin
+`/dev/null`, its process group killed on cancel or after 5 min: `claude -p
+--output-format json --resume <id> [--fork-session] --model <m>
+--setting-sources "" --strict-mcp-config --disable-slash-commands
+--permission-mode dontAsk --tools Bash,Read,Grep,Glob --settings <deny>
+--allowedTools Read Grep Glob Bash(<look-up>:*)… --append-system-prompt
+<preamble> -- <question>`. `--setting-sources ""` drops Andy's settings,
+which allow `gh pr merge` and `claude-sessions:*` (`--allowedTools` adds to
+them, never replaces), plus hooks and CLAUDE.md; OAuth still works, `--bare`
+does not. So `--model` must be given: FLEET's, `opus` when empty or not a
+plain model name (`^[a-z0-9][a-z0-9.\[\]_-]{0,99}$`; Claude Code writes
+`<synthetic>` on an API-error line), checked at the first ask and again when
+the argv is built from a stored chat. The `--`
+keeps the variadic `--allowedTools` from eating the question. Look-ups
+(`clarifyAllowedBash`) are read-only `git`, `gh pr`/`gh run view`,
+`claude-sessions list-sessions`, plain readers and `<cu> fetch` with
+clickup-events' `cu` (a bare one has no token under the service).
+`claude-sessions usage` is left off: `usage --local` runs the known-accounts
+pass, which can rotate a parked credential snapshot. The deny list
+(`clarifyDenyJSON`) is `Bash(*--output*)` (`git diff/log/show --output`
+writes a file); `Bash(gh *://*)`, `Bash(gh *-R*)` and `Bash(gh *--repo*)`
+(a URL or `-R`/`--repo` sends gh to any host; a false positive only refuses
+a look-up, and a plain `gh pr view 123` works from the repo cwd); plus the
+editing, web and agent tools. The look-ups can still read secrets on this
+host; the deny rules keep gh to the repo's own host, and `cu fetch` and
+`list-sessions` only talk to their configured hosts. Accepted residual:
+FLEET itself has wider tools on the same inputs. `rg` is left off
+rather than denied by flag: `--pre` and `--hostname-bin` run a program, and
+Grep already searches. The
+matcher already refuses redirects, `;`, `&&`, `$()`, `git -c` and `gh pr
+merge`. The preamble forbids finishing FLEET's unfinished step: a mid-turn
+fork offered to re-run it. The cwd is the one in FLEET's transcript head
+(`readResumableHeadFn`), else the session's: claude finds a transcript only
+from the folder it started in.
+
+Only the first ask needs a live FLEET (409 `not_live`, `ambiguous`); later
+ones resume the chat's fork, even across a FLEET restart. Limits: 1..4000
+runes (400 `empty`, `too_long`), no control character but a newline or a
+tab and valid UTF-8 (400 `bad_text`: a NUL fails the exec), one fork per
+card and 2 in all (409 `busy`), answers cut to 32 KiB, and a chat's turn
+text kept to 1 MiB (`clarifyTurnsMaxBytes`; the oldest turns go, the newest
+always stays, and the fork keeps its own context): every change rewrites the
+whole store file, and the TUI reads with a 2 MiB cap. A first ask that fails with an exit or bad
+output retries once after 5 s, then answers "FLEET is mid-step; ask again in
+a moment". A fork id is stored only if it is a UUID and not FLEET's own id,
+so a later ask can never `--resume` FLEET itself. **Draft** asks the fork
+for the decision as one paragraph to FLEET and stores it as `draft`. The
+client hands it to its Other flow (`Andy decides on <id>: …`), which owns
+the outbox and every say guard, so the server does not track the send.
+
+Store: `$XDG_STATE_HOME/claude-sessions/fleet-clarify.json` (0600, atomic,
+on change; `cmdServer` sets the path). It prunes on `/fleet/state`: a chat
+goes, and its fork is cancelled, when the card is no longer a decision or
+its answer was `sent`; a bad state.json prunes nothing. A finish from a
+stale run (the entry pruned or begun again) is a no-op. A `pending` found
+at load becomes "interrupted by a restart". **No fork-id list:** the fork's
+transcript copies FLEET's `custom-title`, but its session file and every
+transcript line say `entrypoint: sdk-cli`, so `Session.Headless()` and the
+resume picker already hide it (`fleet_clarify_invisible_test.go`).
+
+The page polls the chat every 2 s while the sheet is open and a reply is
+pending, and a failed first read retries on that timer. Use as answer sets
+the FLEET chat box to exactly `Andy decides on <id>: <draft>`, cut on a
+code point to 4096 UTF-8 bytes (the send cap, as the TUI cuts it); it never
+appends or sends. A bare `Andy decides on <id>:` from Other is dropped
+silently; other text is replaced with the toast "Replaced the text in the
+chat box.", since it would go out as part of the decision.
 
 **Say guards, in order, and why each exists.** Cookie auth needs `Origin` (or
 `Referer`) host == `r.Host`. Newlines flatten to spaces and other control bytes
@@ -1816,6 +1899,24 @@ loop and `mu` can be held by a state job for 10 s. `tui.go` injects the
 handoff (`runFleetAttach` over `makeCtx()`), with a pause/resume that leaves
 the FLEET badge paused, since the view is still open when the attach returns.
 
+**Clarify** (`fleet_tui_clarify.go`; the server side is under "FLEET web
+page"). `k` on an open decision card of a live claude FLEET opens its chat
+as a full screen: the card's title and options pinned on top, the turns
+below (every string through `fleetDisplayText`), `fleet thinking… Ns` while
+a fork runs, a draft in a box, and the input line. A card row with a chat
+ends in a dim `✎`. Enter asks, with the Other panel's paste rules (armed
+after 400 ms; an Enter inside a key batch types a space). Ctrl-D asks for a
+draft. With a draft and an empty box, `s` opens the card's Other panel with
+the draft as its answer, so Andy reads it once more and sends it through the
+usual send job and host pin; `x` discards it. Esc goes back to the list with
+the card still selected. PgUp/PgDn and the wheel scroll the chat; Backspace
+removes a whole rune. The chat is read every 2 s (`fleetClarifyPoll`) while
+a fork runs, or after a taken POST whose read failed; closing the screen
+leaves the fork running. The chat is pinned to the host it opened on: when
+FLEET moves it closes with the "FLEET moved" toast, as a send would refuse.
+`shipOn` is false while it is open, so a card answered elsewhere (now SENT)
+does not swap the chat for the ship.
+
 **Empty view** (`fleet_ship.go`). A live FLEET with no card that needs Andy
 (`shipOn`: no open card and no `unconfirmed` answer; SENT cards do not
 count, and an open panel keeps its list) draws an animated ship instead of
@@ -1843,7 +1944,10 @@ the next frame; otherwise `nextFrame` is zero and the wait is exactly what
 it was, so cards, panels, list mode, error views and a closed view cost no
 wakeups. No goroutine ticks. A frame redraw goes through `screenRenderer`,
 which rewrites only the rows that changed inside a synchronized update and
-never clears the screen, so the animation does not flicker over ssh. Wide
+never clears the screen, so the animation does not flicker over ssh. It
+writes erase-line only after a row narrower than the screen: autowrap is
+off, so a full row leaves the cursor on its last cell, and EL there wiped
+that cell. Wide
 runes (⛵, CJK) count as two columns everywhere: `runeCells`
 (`cellwidth.go`) drives `visualLen` and `clipLine`, so the renderer's clip
 never lets a wide line wrap.

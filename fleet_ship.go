@@ -374,9 +374,10 @@ func fleetOnlySent(items []fleetItem) bool {
 // shipOn reports whether the view shows the ship screen: a live FLEET with
 // no card that needs Andy, and the SENT list not opened from it. Not
 // running, ambiguous, host-down and error views keep their own bodies, and
-// an open panel keeps the list it was opened from.
+// an open panel keeps the list it was opened from, and the Clarify chat
+// stays over whatever is behind it.
 func (st *fleetViewState) shipOn() bool {
-	if st.err != "" || !st.loaded || len(st.view.Ambiguous) > 0 || !st.view.Fleet.Alive || st.panel != nil {
+	if st.err != "" || !st.loaded || len(st.view.Ambiguous) > 0 || !st.view.Fleet.Alive || st.panel != nil || st.clarify != nil {
 		return false
 	}
 	return len(st.items) == 0 || (!st.listMode && fleetOnlySent(st.items))

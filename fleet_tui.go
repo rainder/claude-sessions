@@ -118,6 +118,32 @@ type fleetDismissResult struct {
 	Err error
 }
 
+// fleetClarifyJobResult is what a clarify job hands back. Every job ends with
+// a ClarifyGet, so View is the chat as it is after the ask, draft or discard.
+// Code is the server's refusal of that POST; Err is a POST that got no usable
+// answer (then no read was made) or a failed read. Posted: the server
+// answered the POST (taken, or refused with Code), so an Err is the read's.
+// Moved: FLEET is on another host than the chat was opened on, and nothing
+// was sent.
+type fleetClarifyJobResult struct {
+	Kind   fleetCmd
+	View   fleetClarifyView
+	Code   string
+	Err    error
+	Posted bool
+	Moved  bool
+}
+
+// fleetClarifyDone is a finished clarify job with the request it ran, so the
+// result can be matched to the chat that is open now.
+type fleetClarifyDone struct {
+	req fleetClarifyRequest
+	res fleetClarifyJobResult
+}
+
+// fleetClarifyPoll is how often the open chat is read while a fork runs.
+const fleetClarifyPoll = 2 * time.Second
+
 // fleetLoop is the modal loop's job bookkeeping, apart from the terminal so
 // the order of results can be tested.
 //
@@ -133,9 +159,14 @@ type fleetLoop struct {
 	dismiss func(cardID, source string) (fleetSayResult, error)
 	// attach hands the terminal to the attach and returns once Andy
 	// detaches. nil: the a key does nothing.
-	attach   func(fleetAttachRequest) error
+	attach func(fleetAttachRequest) error
+	// clarify runs one Clarify request of the given kind (fleetClarifyVia).
+	clarify  func(fleetClarifyRequest, fleetCmd) fleetClarifyJobResult
 	interval time.Duration
 	nextPoll time.Time
+	// nextClarify is when the open chat's next read is due; zero unless a
+	// fork runs for it.
+	nextClarify time.Time
 	// nextFrame is when the ship screen's next animation frame is due; zero
 	// while the ship screen is not showing, so no frame timer runs then.
 	nextFrame time.Time
@@ -153,6 +184,9 @@ type fleetLoop struct {
 	states    []*fleetJob[fleetStateFetch]
 	sends     []*fleetJob[fleetSendResult]
 	dismisses []*fleetJob[fleetDismissResult]
+	// clarifies holds at most one job: a chat request is never sent beside
+	// another, so a read cannot land after a newer ask's answer.
+	clarifies []*fleetJob[fleetClarifyDone]
 }
 
 // startState starts one state fetch.
@@ -204,10 +238,126 @@ func (l *fleetLoop) reap(now time.Time) {
 		l.applied = f.seq
 		l.st.applyState(f.view, f.err, now)
 	}
+	var chats []fleetClarifyDone
+	l.clarifies, chats = reapFleetJobs(l.clarifies)
+	for _, d := range chats {
+		l.applyClarifyJob(d, now)
+	}
+	// A chat opened while another card's job ran had its first read
+	// skipped; it gets it once that job is gone.
+	if c := l.st.clarify; c != nil && !c.loaded && c.err == "" && len(l.clarifies) == 0 {
+		l.startClarify(fleetCmdClarifyGet)
+	}
+}
+
+// applyClarifyJob takes one clarify job's result. A result for a chat that
+// has since closed or moved to another card is dropped whole, its toast too.
+func (l *fleetLoop) applyClarifyJob(d fleetClarifyDone, now time.Time) {
+	st, r := l.st, d.res
+	c := st.clarify
+	if c == nil || c.item.Card.ID != d.req.CardID {
+		return
+	}
+	// A question that was not taken goes back in the box, unless Andy has
+	// started another.
+	keep := func() {
+		if r.Kind == fleetCmdClarifyAsk && c.input == "" {
+			c.input = d.req.Text
+		}
+	}
+	switch {
+	case r.Moved:
+		// Nothing was sent. The state names the new host, and applyState
+		// would close the chat on it anyway.
+		st.clarify = nil
+		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
+		l.startState()
+		return
+	case r.Err != nil && r.Kind != fleetCmdClarifyGet && !r.Posted:
+		// The POST got no usable answer, so no read was made: the chat stays
+		// as it was.
+		keep()
+		msg := "clarify failed"
+		if errors.Is(r.Err, errFleetUnauthorized) {
+			msg = fleetToastTokenBad
+		}
+		st.setToast(msg, fleetToastErr, now)
+		return
+	case r.Code != "":
+		keep()
+		st.applyClarifyRefusal(r.Code, now)
+	}
+	st.applyClarify(d.req.CardID, r.View, r.Err, now)
+	if r.Posted && r.Err != nil {
+		// The server took the request but the chat could not be read after
+		// it: poll until a read lands, so the answer shows without a key.
+		c.reread = true
+	}
+}
+
+// startClarify starts the clarify job for a command: an ask takes
+// st.clarifyReq, the others act on the open chat's card. While a job runs a
+// new one is not started; an ask's text goes back in the box, so nothing
+// typed is lost.
+func (l *fleetLoop) startClarify(kind fleetCmd) {
+	req := l.st.clarifyReq
+	l.st.clarifyReq = nil
+	c := l.st.clarify
+	if c == nil || l.clarify == nil {
+		return
+	}
+	if len(l.clarifies) > 0 {
+		if req != nil && c.input == "" {
+			c.input = req.Text
+		}
+		return
+	}
+	r := fleetClarifyRequest{Source: c.source, CardID: c.item.Card.ID}
+	if kind == fleetCmdClarifyAsk {
+		if req == nil {
+			return
+		}
+		r = *req
+	}
+	run := l.clarify
+	l.clarifies = append(l.clarifies, startFleetJob(func() fleetClarifyDone {
+		return fleetClarifyDone{req: r, res: run(r, kind)}
+	}))
+}
+
+// clarifyPollAt is when the open chat's next read is due: zero unless a fork
+// runs for it or a read after a POST failed.
+func (l *fleetLoop) clarifyPollAt(now time.Time) time.Time {
+	if c := l.st.clarify; c == nil || !c.polling() {
+		return time.Time{}
+	}
+	if l.nextClarify.IsZero() {
+		return now.Add(fleetClarifyPoll)
+	}
+	return l.nextClarify
+}
+
+// tickClarify reads the open chat every fleetClarifyPoll while a fork runs
+// for it or a read after a POST failed, and never otherwise.
+func (l *fleetLoop) tickClarify(now time.Time) {
+	if c := l.st.clarify; c == nil || !c.polling() {
+		l.nextClarify = time.Time{}
+		return
+	}
+	if l.nextClarify.IsZero() {
+		l.nextClarify = now.Add(fleetClarifyPoll)
+		return
+	}
+	if now.Before(l.nextClarify) || len(l.clarifies) > 0 {
+		return
+	}
+	l.startClarify(fleetCmdClarifyGet)
+	l.nextClarify = now.Add(fleetClarifyPoll)
 }
 
 // tick starts the periodic poll once nextPoll has passed and no fetch runs.
 func (l *fleetLoop) tick(now time.Time) {
+	l.tickClarify(now)
 	if now.Before(l.nextPoll) || len(l.states) > 0 {
 		return
 	}
@@ -254,6 +404,12 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 		err := l.attach(*req)
 		l.st.applyAttach(err, time.Now())
 		l.startState()
+	case fleetCmdClarifyGet, fleetCmdClarifyAsk, fleetCmdClarifyDraft, fleetCmdClarifyDiscard:
+		if (cmd == fleetCmdClarifyDraft || cmd == fleetCmdClarifyDiscard) && len(l.clarifies) > 0 {
+			l.st.setToast("wait for the last request", fleetToastWarn, now)
+			return false
+		}
+		l.startClarify(cmd)
 	}
 	return false
 }
@@ -270,6 +426,9 @@ func (l *fleetLoop) wakes(base []wakeFD) []wakeFD {
 	for _, j := range l.dismisses {
 		out = append(out, j.wake())
 	}
+	for _, j := range l.clarifies {
+		out = append(out, j.wake())
+	}
 	return out
 }
 
@@ -281,6 +440,9 @@ func (l *fleetLoop) closeAll() {
 		j.close()
 	}
 	for _, j := range l.dismisses {
+		j.close()
+	}
+	for _, j := range l.clarifies {
 		j.close()
 	}
 }
@@ -318,6 +480,39 @@ func fleetDismissVia(src *fleetLocal) func(cardID, source string) (fleetSayResul
 	}
 }
 
+// fleetClarifyVia is the clarify job body, pinned to the chat's source like a
+// send: a client for another host gives Moved and sends nothing. After an
+// accepted or refused ask, draft or discard it reads the chat, so the result
+// always carries the chat as it is now.
+func fleetClarifyVia(src *fleetLocal) func(fleetClarifyRequest, fleetCmd) fleetClarifyJobResult {
+	return func(req fleetClarifyRequest, kind fleetCmd) fleetClarifyJobResult {
+		r := fleetClarifyJobResult{Kind: kind}
+		c, err := src.Client()
+		if err != nil {
+			r.Err = err
+			return r
+		}
+		if c.base != req.Source {
+			r.Moved = true
+			return r
+		}
+		switch kind {
+		case fleetCmdClarifyAsk:
+			r.Code, r.Err = c.ClarifyAsk(req.CardID, req.Text)
+		case fleetCmdClarifyDraft:
+			r.Code, r.Err = c.ClarifyDraft(req.CardID, false)
+		case fleetCmdClarifyDiscard:
+			r.Code, r.Err = c.ClarifyDraft(req.CardID, true)
+		}
+		if r.Err != nil {
+			return r
+		}
+		r.Posted = kind != fleetCmdClarifyGet
+		r.View, r.Err = c.ClarifyGet(req.CardID)
+		return r
+	}
+}
+
 // fleetDismissToast maps a dismiss result to its toast.
 func fleetDismissToast(r fleetDismissResult) (string, fleetToastKind) {
 	switch {
@@ -349,11 +544,17 @@ const fleetNoPipePoll = 250 * time.Millisecond
 // is held: tick does not start a second one, so an overdue nextPoll would
 // otherwise turn every select into 1 ms until the fetch lands. A held job's
 // pipe wakes the loop; a job without a pipe gets fleetNoPipePoll. While the
-// ship screen shows, the next animation frame (nextFrame) caps it too.
+// ship screen shows, the next animation frame (nextFrame) caps it too, and
+// while a fork runs for the open chat, its next read (clarifyPollAt).
 func (l *fleetLoop) timeout(now time.Time) time.Duration {
 	var pollAt time.Time
 	if len(l.states) == 0 {
 		pollAt = l.nextPoll
+	}
+	// The chat's read counts the same way: while one is held its pipe wakes
+	// the loop.
+	if c := l.clarifyPollAt(now); !c.IsZero() && len(l.clarifies) == 0 && (pollAt.IsZero() || c.Before(pollAt)) {
+		pollAt = c
 	}
 	if l.pipeless() {
 		if c := now.Add(fleetNoPipePoll); pollAt.IsZero() || c.Before(pollAt) {
@@ -442,6 +643,7 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 		state:    src.State,
 		send:     fleetSendVia(src),
 		dismiss:  fleetDismissVia(src),
+		clarify:  fleetClarifyVia(src),
 		interval: fleetBadgeInterval,
 	}
 	if attach != nil {
@@ -506,6 +708,12 @@ const (
 	// fleetHelpRowAttach is the key help when the selected card resolves to
 	// exactly one live session.
 	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
+	// fleetHelpClarifyHint goes after "o other" when k opens Clarify.
+	fleetHelpClarifyHint = "k clarify"
+
+	// The Clarify screen's help rows, without and with a draft.
+	fleetHelpClarify      = "Enter ask · Ctrl-D draft for FLEET · Esc back"
+	fleetHelpClarifyDraft = "Enter ask · s use draft as answer · x discard draft · Esc back"
 )
 
 // fleetAge is the age of an RFC 3339 stamp, "" when it does not parse.
@@ -543,6 +751,15 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	width := cols
 	if width <= 0 {
 		width = 80
+	}
+	if st.clarify != nil {
+		// The chat replaces the whole view; the mouse has no rows to hit.
+		st.hit = fleetHitMap{}
+		lines := fleetClarifyLines(st, width, rows, now)
+		for i, l := range lines {
+			lines[i] = clipLine(l, width)
+		}
+		return strings.Join(lines, "\n")
 	}
 	sep := dim(strings.Repeat("─", width))
 
@@ -781,14 +998,8 @@ func fleetHeaderLine(st *fleetViewState, cols int, now time.Time) string {
 // fleetBottomRow is the active toast, "sending…" while a send runs, nothing
 // while the panel (which has its own key line) is open, else the key help.
 func fleetBottomRow(st *fleetViewState, now time.Time) string {
-	if st.toast != "" && now.Before(st.toastUntil) {
-		switch st.toastKind {
-		case fleetToastWarn:
-			return colorize(fleetSGRAmber, st.toast)
-		case fleetToastErr:
-			return colorize(fleetSGRRed, st.toast)
-		}
-		return colorize(fleetSGRAlive, st.toast)
+	if t := fleetToastLine(st, now); t != "" {
+		return t
 	}
 	if st.sending {
 		return "sending…"
@@ -804,10 +1015,28 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 		}
 		return dim(fleetHelpShip)
 	}
+	row := fleetHelpRow
 	if st.attachable() {
-		return dim(fleetHelpRowAttach)
+		row = fleetHelpRowAttach
 	}
-	return dim(fleetHelpRow)
+	if st.canClarify() {
+		row = strings.Replace(row, " · o other · ", " · o other · "+fleetHelpClarifyHint+" · ", 1)
+	}
+	return dim(row)
+}
+
+// fleetToastLine is the active toast in its kind's colour, "" when none.
+func fleetToastLine(st *fleetViewState, now time.Time) string {
+	if st.toast == "" || !now.Before(st.toastUntil) {
+		return ""
+	}
+	switch st.toastKind {
+	case fleetToastWarn:
+		return colorize(fleetSGRAmber, st.toast)
+	case fleetToastErr:
+		return colorize(fleetSGRRed, st.toast)
+	}
+	return colorize(fleetSGRAlive, st.toast)
 }
 
 var fleetSectionTitles = map[fleetSection]string{
@@ -833,14 +1062,20 @@ func fleetListLines(st *fleetViewState, cols int, now time.Time) (lines []string
 		if i == st.sel {
 			selRow = len(lines)
 		}
-		lines = append(lines, fleetCollapsedRow(it, i == st.sel, cols, now))
+		chat := it.Card.ID != "" && st.view.Clarify[it.Card.ID].Turns > 0
+		lines = append(lines, fleetCollapsedRow(it, i == st.sel, chat, cols, now))
 		lineItems = append(lineItems, i)
 	}
 	return lines, selRow, lineItems
 }
 
-// fleetCollapsedRow is one card's list row.
-func fleetCollapsedRow(it fleetItem, selected bool, cols int, now time.Time) string {
+// fleetClarifyMark follows an open card's title on its row when the card has
+// a Clarify chat.
+const fleetClarifyMark = " ✎"
+
+// fleetCollapsedRow is one card's list row. chat marks an open card that has
+// a Clarify chat.
+func fleetCollapsedRow(it fleetItem, selected, chat bool, cols int, now time.Time) string {
 	prefix := "  "
 	if selected {
 		prefix = "▸ "
@@ -863,6 +1098,9 @@ func fleetCollapsedRow(it fleetItem, selected bool, cols int, now time.Time) str
 		if age := fleetCardAge(it.Card, now); age != "" {
 			right += " · " + age
 		}
+		if chat {
+			return fleetMarkedRow(head+it.Card.Title, right, cols, selected)
+		}
 		row = fleetRowRight(head+it.Card.Title, right, cols)
 	}
 	if selected {
@@ -872,6 +1110,24 @@ func fleetCollapsedRow(it fleetItem, selected bool, cols int, now time.Time) str
 		return dim(row)
 	}
 	return row
+}
+
+// fleetMarkedRow is fleetRowRight with a dim fleetClarifyMark right after
+// left; the title is cut first, so the mark stays on a narrow row.
+func fleetMarkedRow(left, right string, cols int, selected bool) string {
+	style := func(s string) string { return s }
+	if selected {
+		style = bold
+	}
+	mw, rw := len([]rune(fleetClarifyMark)), len([]rune(right))
+	if len([]rune(left))+mw+1+rw > cols {
+		left = truncateRunes(left, cols-mw-1-rw)
+	}
+	pad := cols - len([]rune(left)) - mw - rw
+	if pad < 1 {
+		return style(truncateRunes(left, cols-mw)) + dim(fleetClarifyMark)
+	}
+	return style(left) + dim(fleetClarifyMark) + style(strings.Repeat(" ", pad)+right)
 }
 
 func fleetAttemptLabel(a fleetAttempt) string {
@@ -1151,4 +1407,246 @@ func fleetPanelLines(st *fleetViewState, cols, bodyRows int, now time.Time) []st
 		out = out[len(out)-bodyRows:]
 	}
 	return out
+}
+
+const (
+	fleetSGRYou        = "36"
+	fleetSGRFork       = "35"
+	fleetClarifyLabelW = 6 // the turn labels' column
+)
+
+// fleetClarifyLines is the Clarify screen (layout B) in exactly rows lines
+// (rows <= 0: all of it): the card's head and options pinned on top, the chat
+// bottom-anchored under it, a draft box, the input line and the help row. On
+// a short screen the options line goes first, then the rules, then the head;
+// the input line and the help row stay. It clamps c.scroll to what the chat
+// can scroll and keeps st.panelRows at the chat's height for PgUp/PgDn.
+// Every string drawn is fixed or from the already sanitized view.
+func fleetClarifyLines(st *fleetViewState, cols, rows int, now time.Time) []string {
+	c := st.clarify
+	card := c.item.Card
+	sep := dim(strings.Repeat("─", cols))
+	top := []string{fleetClarifyHead(card, cols), dim(truncateCells("  "+fleetClarifyOptions(card), cols)), sep}
+	help := fleetToastLine(st, now)
+	switch {
+	case help != "":
+	case c.view.Draft != nil:
+		help = dim(fleetHelpClarifyDraft)
+	default:
+		help = dim(fleetHelpClarify)
+	}
+	bottom := []string{sep, fleetClarifyInput(c.input, cols), help}
+
+	h := -1
+	if rows > 0 {
+		shrink := []func(){
+			func() { top = []string{top[0], top[2]} },
+			func() { top = top[:1] },
+			func() { bottom = bottom[1:] },
+			func() { top = nil },
+			func() { bottom = bottom[len(bottom)-1:] },
+		}
+		for i := 0; len(top)+len(bottom) > rows && i < len(shrink); i++ {
+			shrink[i]()
+		}
+		h = max(rows-len(top)-len(bottom), 0)
+	}
+
+	box := fleetClarifyDraftBox(c.view.Draft, cols)
+	turns := fleetClarifyTurnLines(c, cols, now)
+	var body []string
+	if h < 0 {
+		body = append(turns, box...)
+		c.scroll = 0
+	} else {
+		// The draft keeps its box, but leaves the chat 3 rows where it can.
+		boxH := min(len(box), max(h-3, min(h, 3)))
+		box = fleetClarifyCutBox(box, boxH)
+		chatH := h - len(box)
+		st.panelRows = chatH
+		var win []string
+		win, c.scroll = fleetClarifyWindow(turns, chatH, c.scroll)
+		body = append(win, box...)
+	}
+	out := append(append(append([]string(nil), top...), body...), bottom...)
+	if rows > 0 && len(out) > rows {
+		out = out[len(out)-rows:]
+	}
+	return out
+}
+
+// fleetClarifyHead is "Clarify  <ticket>  <title>" with a dim
+// "fork · read-only" at the right edge, the title cut to make room.
+func fleetClarifyHead(card fleetCardView, cols int) string {
+	const right = "fork · read-only"
+	left := "Clarify  "
+	if card.Ticket != "" {
+		left += card.Ticket + "  "
+	}
+	left += strings.Join(strings.Fields(card.Title), " ")
+	rw := cellWidth(right)
+	if cellWidth(left)+2+rw > cols {
+		left = truncateCells(left, cols-2-rw)
+	}
+	styled := left
+	if rest, ok := strings.CutPrefix(left, "Clarify"); ok {
+		styled = bold("Clarify") + rest
+	}
+	if pad := cols - cellWidth(left) - rw; left != "" && pad >= 2 {
+		return styled + strings.Repeat(" ", pad) + dim(right)
+	}
+	return bold(truncateCells("Clarify", cols))
+}
+
+// fleetClarifyOptions is the card's options as "<key> <label>" joined with
+// " · ", FLEET's lean marked.
+func fleetClarifyOptions(card fleetCardView) string {
+	var parts []string
+	for _, o := range card.Options {
+		p := o.Key + " " + o.Label
+		if card.Lean != "" && o.Key == card.Lean {
+			p += " (FLEET's pick)"
+		}
+		parts = append(parts, p)
+	}
+	return strings.Join(strings.Fields(strings.Join(parts, " · ")), " ")
+}
+
+// fleetClarifyInput is the input line; a text too long for it shows its end.
+func fleetClarifyInput(input string, cols int) string {
+	room := cols - 3 // "› " and the cursor
+	if r := []rune(input); room >= 2 && len(r) > room {
+		input = "…" + string(r[len(r)-room+1:])
+	}
+	return "› " + input + "▌"
+}
+
+// fleetClarifyTurnLines is the chat, oldest first: each turn wrapped to
+// cols-6 under its 6-column label (you cyan, fleet magenta, an error turn
+// yellow under "!", a note dim with no label), a blank line between turns,
+// then "fleet thinking… Ns" while a fork runs, and a read error last.
+func fleetClarifyTurnLines(c *fleetClarifyMode, cols int, now time.Time) []string {
+	if !c.loaded && c.err == "" {
+		return []string{dim("loading…")}
+	}
+	w := cols - fleetClarifyLabelW
+	pad := strings.Repeat(" ", fleetClarifyLabelW)
+	label := func(sgr, word string) string {
+		return colorize(sgr, word) + strings.Repeat(" ", fleetClarifyLabelW-len(word))
+	}
+	var out []string
+	if c.loaded && len(c.view.Turns) == 0 && c.view.Pending == nil {
+		for _, l := range wrapRunes("Ask about this card. A read-only fork of FLEET answers; FLEET does not see this chat.", cols) {
+			out = append(out, dim(l))
+		}
+	}
+	for i, t := range c.view.Turns {
+		if i > 0 {
+			out = append(out, "")
+		}
+		head := pad
+		var body []string
+		switch t.Role {
+		case clarifyRoleYou:
+			head = label(fleetSGRYou, "you")
+			body = fleetSummaryStyledLines(t.Text, w)
+		case clarifyRoleFleet:
+			head = label(fleetSGRFork, "fleet")
+			body = fleetSummaryStyledLines(t.Text, w)
+		case clarifyRoleError:
+			head = label(fleetSGRAmber, "!")
+			for _, l := range wrapRunes(t.Text, w) {
+				body = append(body, colorize(fleetSGRAmber, l))
+			}
+		case clarifyRoleNote:
+			for _, l := range wrapRunes(t.Text, w) {
+				body = append(body, dim(l))
+			}
+		default:
+			body = fleetSummaryStyledLines(t.Text, w)
+		}
+		for j, l := range body {
+			if j > 0 {
+				head = pad
+			}
+			out = append(out, head+l)
+		}
+	}
+	if p := c.view.Pending; p != nil {
+		if len(c.view.Turns) > 0 {
+			out = append(out, "")
+		}
+		line := label(fleetSGRFork, "fleet") + dim("thinking…")
+		if t, err := time.Parse(time.RFC3339, p.StartedAt); err == nil {
+			line += dim(fmt.Sprintf(" %ds", max(int(now.Sub(t)/time.Second), 0)))
+		}
+		out = append(out, line)
+	}
+	if c.err != "" {
+		out = append(out, colorize(fleetSGRRed, c.err))
+	}
+	return out
+}
+
+// fleetClarifyWindow cuts the chat to h rows, anchored at the bottom: scroll
+// counts lines up from the newest. A chat that fits sits at the bottom with
+// blank rows above it. Otherwise it is fleetPanelWindow's window, with its
+// "↑ more" / "↓ more" rows. It returns the rows and the clamped scroll.
+func fleetClarifyWindow(lines []string, h, scroll int) ([]string, int) {
+	if h <= 0 {
+		return nil, max(scroll, 0)
+	}
+	if len(lines) <= h {
+		return append(make([]string, h-len(lines)), lines...), 0
+	}
+	// fleetPanelWindow's largest top: the last line just shows.
+	last := len(lines) - h
+	if h >= 3 {
+		last = len(lines) - (h - 1)
+	}
+	win, top := fleetPanelWindow(lines, h, last-max(scroll, 0))
+	return win, last - top
+}
+
+// fleetClarifyDraftBox is the draft as a yellow box titled "draft for FLEET",
+// cols wide, its text wrapped inside. Draft whitespace collapses as it does
+// when s puts the draft in the Other box. nil without a draft.
+func fleetClarifyDraftBox(d *clarifyDraft, cols int) []string {
+	if d == nil {
+		return nil
+	}
+	const title = " draft for FLEET "
+	inner := cols - 4
+	if inner < 1 || cols < cellWidth(title)+3 {
+		return []string{colorize(fleetSGRAmber, truncateCells("draft for FLEET", cols))}
+	}
+	out := []string{colorize(fleetSGRAmber, "┌─"+title+strings.Repeat("─", cols-3-cellWidth(title))+"┐")}
+	for _, l := range wrapRunes(d.Text, inner) {
+		if cellWidth(l) > inner {
+			l = truncateCells(l, inner) // wide runes: wrapRunes counts runes
+		}
+		out = append(out, colorize(fleetSGRAmber, "│")+" "+l+strings.Repeat(" ", inner-cellWidth(l))+" "+colorize(fleetSGRAmber, "│"))
+	}
+	return append(out, colorize(fleetSGRAmber, "└"+strings.Repeat("─", cols-2)+"┘"))
+}
+
+// fleetClarifyCutBox cuts the draft box to h rows: its text ends in "…" and
+// keeps both borders while 3 rows fit, else the title row (and the bottom
+// border) is all that shows.
+func fleetClarifyCutBox(box []string, h int) []string {
+	switch {
+	case len(box) <= h:
+		return box
+	case h <= 0:
+		return nil
+	case h == 1 || len(box) < 3:
+		return box[:1]
+	case h == 2:
+		return []string{box[0], box[len(box)-1]}
+	}
+	text := append([]string(nil), box[1:h-1]...)
+	// The last text row that shows becomes "…" inside the borders.
+	cols := visualLen(box[0])
+	text[len(text)-1] = colorize(fleetSGRAmber, "│") + " …" + strings.Repeat(" ", max(cols-5, 0)) + " " + colorize(fleetSGRAmber, "│")
+	return append(append([]string{box[0]}, text...), box[len(box)-1])
 }
