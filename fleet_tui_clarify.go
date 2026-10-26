@@ -20,7 +20,7 @@ type fleetClarifyMode struct {
 	loaded   bool // the first GET landed
 	input    string
 	openedAt time.Time
-	scroll   int
+	scroll   int    // lines scrolled up from the newest; fleetClarifyLines clamps it
 	err      string // a fixed line when the chat could not be read
 }
 
@@ -102,10 +102,10 @@ func (st *fleetViewState) handleClarifyKey(k string, inBatch bool, now time.Time
 		st.clarify = nil
 		return fleetCmdRender
 	case KeyPageUp:
-		c.scroll = max(c.scroll-st.pageStep(), 0)
+		c.scroll += st.pageStep()
 		return fleetCmdRender
 	case KeyPageDown:
-		c.scroll += st.pageStep()
+		c.scroll = max(c.scroll-st.pageStep(), 0)
 		return fleetCmdRender
 	case KeyEnter:
 		if inBatch {

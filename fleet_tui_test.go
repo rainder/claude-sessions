@@ -374,6 +374,11 @@ func waitFleetJobs(t *testing.T, l *fleetLoop) {
 				running = true
 			}
 		}
+		for _, j := range l.clarifies {
+			if _, ok := j.snapshot(); !ok {
+				running = true
+			}
+		}
 		if !running {
 			return
 		}
@@ -720,16 +725,16 @@ func TestRenderFleetViewOther(t *testing.T) {
 func TestFleetCollapsedRowShowsPriority(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	open := fleetItem{Card: fleetCardView{Ticket: "DR-1", Title: "t", Priority: 1}, Section: fleetSecDecide}
-	if row := stripANSI(fleetCollapsedRow(open, false, 60, now)); !strings.HasSuffix(row, "P1") {
+	if row := stripANSI(fleetCollapsedRow(open, false, false, 60, now)); !strings.HasSuffix(row, "P1") {
 		t.Errorf("open row lacks P1 at the right: %q", row)
 	}
 	def := fleetItem{Card: fleetCardView{Title: "t"}, Section: fleetSecApprove}
-	if row := stripANSI(fleetCollapsedRow(def, false, 60, now)); !strings.HasSuffix(row, "P3") {
+	if row := stripANSI(fleetCollapsedRow(def, false, false, 60, now)); !strings.HasSuffix(row, "P3") {
 		t.Errorf("a card with no priority must show P3: %q", row)
 	}
 	a := fleetAnswer{Attempts: []fleetAttempt{{OptionKey: "a", Status: fleetAttemptSent}}}
 	sent := fleetItem{Card: fleetCardView{Title: "t", Priority: 1}, Section: fleetSecSent, Answer: &a}
-	if row := stripANSI(fleetCollapsedRow(sent, false, 60, now)); strings.Contains(row, "P1") {
+	if row := stripANSI(fleetCollapsedRow(sent, false, false, 60, now)); strings.Contains(row, "P1") {
 		t.Errorf("a sent row shows no priority: %q", row)
 	}
 }

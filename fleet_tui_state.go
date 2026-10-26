@@ -667,8 +667,22 @@ func (st *fleetViewState) handleEvent(ev inputEvent, inBatch bool, now time.Time
 // Releases, other buttons, and every row outside the list and the panel do
 // nothing, and so does every body but the card list (st.hit.on).
 func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
+	if c := st.clarify; c != nil {
+		// The chat is the whole body: the wheel scrolls it anywhere, as
+		// PgUp/PgDn do, and nothing else does anything.
+		switch {
+		case m.release:
+		case m.button == mouseWheelUp:
+			c.scroll += fleetMouseStep
+			return fleetCmdRender
+		case m.button == mouseWheelDown:
+			c.scroll = max(c.scroll-fleetMouseStep, 0)
+			return fleetCmdRender
+		}
+		return fleetCmdNone
+	}
 	h := st.hit
-	if m.release || !h.on || st.panel != nil || st.clarify != nil || st.shipOn() || st.selected() == nil {
+	if m.release || !h.on || st.panel != nil || st.shipOn() || st.selected() == nil {
 		return fleetCmdNone
 	}
 	switch m.button {
