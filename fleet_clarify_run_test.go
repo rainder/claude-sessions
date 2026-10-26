@@ -19,12 +19,12 @@ func TestClarifyArgv(t *testing.T) {
 		"-p", "--output-format", "json", "--resume", "abc", "--fork-session", "--model", "claude-opus-5-5",
 		"--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
 		"--permission-mode", "dontAsk", "--tools", "Bash,Read,Grep,Glob",
-		"--settings", `{"permissions":{"deny":["Bash(*--output*)","Bash(rg *--pre*)","Edit","Write","NotebookEdit","WebFetch","WebSearch","Agent","Task","Workflow","ScheduleWakeup","Skill","ListAgents","ReportFindings"]}}`,
+		"--settings", `{"permissions":{"deny":["Bash(*--output*)","Edit","Write","NotebookEdit","WebFetch","WebSearch","Agent","Task","Workflow","ScheduleWakeup","Skill","ListAgents","ReportFindings"]}}`,
 		"--allowedTools", "Read", "Grep", "Glob",
 		"Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git blame:*)",
 		"Bash(gh pr view:*)", "Bash(gh pr diff:*)", "Bash(gh pr checks:*)", "Bash(gh pr list:*)", "Bash(gh run view:*)",
 		"Bash(/x/cu-with-token fetch:*)", "Bash(claude-sessions list-sessions:*)", "Bash(claude-sessions usage:*)",
-		"Bash(rg:*)", "Bash(grep:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(jq:*)",
+		"Bash(grep:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(jq:*)",
 		"--append-system-prompt", "P", "--", "-rf what?",
 	}
 	got := clarifyArgv(p)

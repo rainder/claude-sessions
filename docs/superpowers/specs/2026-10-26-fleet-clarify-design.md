@@ -48,8 +48,9 @@ Raw notes: the scratchpad `clarify-live/claude-findings.md` and
     `permission_denials`.
 - **Deny list:**
   - `Bash(*--output*)`: `git diff/log/show --output` writes a file.
-  - `Bash(rg *--pre*)`: `rg --pre` runs any program. Not `*--pre*`, which
-    would also block `git log --pretty`.
+  - No `rg` in the Bash allowlist at all: `rg --pre` and `rg --hostname-bin`
+    run a program, and the Grep tool already searches (security review,
+    2026-10-26).
   - Tools: `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`,
     `Agent`, `Task`, `Workflow`, `ScheduleWakeup`, `Skill`, `ListAgents`,
     `ReportFindings`.
@@ -173,7 +174,7 @@ Allowed:
 - Shell commands that are only these look-ups: `git log`, `git show`,
   `git diff`, `git status`, `git blame`; `gh pr view`, `gh pr diff`,
   `gh pr checks`, `gh pr list`, `gh run view`; `cu fetch`;
-  `claude-sessions list-sessions`, `claude-sessions usage`; `rg`, `grep`,
+  `claude-sessions list-sessions`, `claude-sessions usage`; `grep`,
   `ls`, `cat`, `head`, `tail`, `wc`, `jq`.
 
 Refused: every other command, every file edit or write, web fetches, MCP

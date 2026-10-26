@@ -32,10 +32,10 @@ var (
 )
 
 // clarifyDenyJSON is the --settings value. Bash(*--output*): git diff, log
-// and show --output write a file. Bash(rg *--pre*): rg --pre runs any program
-// (not *--pre*, which would also block git log --pretty). The rest are the
-// tools that change the fleet or start more work.
-const clarifyDenyJSON = `{"permissions":{"deny":["Bash(*--output*)","Bash(rg *--pre*)","Edit","Write","NotebookEdit","WebFetch","WebSearch","Agent","Task","Workflow","ScheduleWakeup","Skill","ListAgents","ReportFindings"]}}`
+// and show --output write a file. The rest are the tools that change the
+// fleet or start more work. rg is not a Bash look-up at all: --pre and
+// --hostname-bin run a program, and the Grep tool already searches.
+const clarifyDenyJSON = `{"permissions":{"deny":["Bash(*--output*)","Edit","Write","NotebookEdit","WebFetch","WebSearch","Agent","Task","Workflow","ScheduleWakeup","Skill","ListAgents","ReportFindings"]}}`
 
 // clarifyAllowedBash are the Bash look-ups the fork may run, each as a
 // `Bash(<cmd>:*)` prefix rule. The cu rule is added by clarifyArgv, since it
@@ -47,7 +47,7 @@ var clarifyAllowedBash = []string{
 
 var clarifyAllowedBashTail = []string{
 	"claude-sessions list-sessions", "claude-sessions usage",
-	"rg", "grep", "ls", "cat", "head", "tail", "wc", "jq",
+	"grep", "ls", "cat", "head", "tail", "wc", "jq",
 }
 
 type clarifyRunParams struct {
