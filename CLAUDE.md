@@ -120,6 +120,18 @@ column 0, which visually destroys every multi-line render. The fix is
 entry, after each prompt, after every `runInteractive`. Both `enterRaw`
 (helpers.go) and `runInteractive` already do this; new call sites must too.
 
+**Mouse reporting has one owner, `mouseMode` (mouse_mode.go).** The TUI turns
+on xterm mouse reporting (`?1000h` + SGR `?1006h`) for clicks and the wheel,
+and that is what stops a drag from selecting text: the terminal sends the drag
+to the TUI. `v` on the session list and in the inspector is select mode
+(mouse off, an amber hint in the bottom row or the inspector footer; `v` or
+Esc turns it back on, and that Esc is used up before the screen's own Esc).
+The Fleet view reads no mouse events, so `runFleetView` suspends reporting
+for its whole life. Every re-entry after a prompt or subprocess
+(`actCtx.enterRaw`, `runInteractive`) writes `mouseMode.wanted()`, never a
+bare enable — or an attach from select mode or the Fleet view would quietly
+turn capture back on. iTerm2's Option+drag selects even while it is on.
+
 **Tmux pane detection must check the pid itself first.** `walkTmuxPane` (tmux.go)
 walks pid → ppid up to 32 hops. It checks `panes[cur]` **before** moving to
 `ppid[cur]`, because `tmux new-session "claude --resume ..."` spawns claude as
@@ -1703,6 +1715,33 @@ leave the list as it was. On a tiny screen the list gives way first: the
 details keep the selected row and one panel row, the confirm panel its
 comment and key lines (so only there does opening it shrink the list). A
 frame is exactly `rows` lines whatever the size.
+
+**Selecting and copying card text.** The view turns mouse reporting off
+(mouse_mode.go), so a drag selects. The details panel indents each summary
+line and hard-wraps it, so a wrapped command would copy with a newline and
+spaces in it. `t` opens the raw text screen (fleet_raw.go): the card's title,
+summary and options exactly as FLEET wrote them (markdown not rendered), from
+column 0, with the terminal's own autowrap on and no clipping, so a long line
+soft-wraps and copies back as one line. ↑↓, PgUp/PgDn, Home/End scroll it by
+whole lines (`fleetRawRows` counts the rows a line takes); any other key goes
+back. Nothing is written to the clipboard.
+
+**Links** (links.go, `fleetLineStyles`). In a summary, `[label](url)` shows
+only the label and `https://…` shows itself; both draw as OSC 8 hyperlinks
+(`ESC]8;;URL ESC\`), so iTerm2 opens them on Cmd+click. The match rule is
+the page's (`fleet.html` `RICH_RE`), and the target must pass `safeLinkURL`:
+http or https, a host, printable ASCII, no space. Any other target shows the
+label with no link, as the page's `safeLink` does. Short entity ids cannot
+be linked by the TUI (no full id, no env), so FLEET writes them as
+`[4388c878](https://brain.dev.trecs.dev/document-pages/<full id>)`. The link
+is a field of `fleetStyle`, so `fleetStyledText` closes it at the end of each
+wrapped line and opens it again on the next. `visualLen` and `clipLine`
+(render.go, via `escapeLen`) count an OSC as zero columns and never cut one;
+`clipLine` still writes the sequences past its cut, and closes a link the
+input left open. `cellWidth` and the other cellwidth.go helpers stay
+plain-text only. tmux passes OSC 8 through only from 3.4 with `hyperlinks`
+in `terminal-features` (`set -as terminal-features 'xterm*:hyperlinks'`);
+without it tmux drops the link and the label still shows.
 
 **Keys.** An option is picked by digit `1`..`9` only; the comment box takes
 printable ASCII, and its whitespace collapses to one space in the send text.

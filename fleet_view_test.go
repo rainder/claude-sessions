@@ -268,6 +268,7 @@ func fleetOpenStyle(line string) bool {
 // fleetRunStyle is the SGR in force at the first byte of needle in line.
 func fleetRunStyle(t *testing.T, line, needle string) string {
 	t.Helper()
+	line = stripOSC(line) // a link's URI is not visible text
 	i := strings.Index(line, needle)
 	if i < 0 {
 		t.Fatalf("%q not in %q", needle, line)
@@ -357,7 +358,7 @@ func TestFleetSummaryStyles(t *testing.T) {
 		}
 	}
 	// The underline stops at the URL's end, not on the space after it.
-	if got := one("https://x.y z"); got != "\033[4;34mhttps://x.y"+ansiReset+" z" {
+	if got := one("https://x.y z"); got != osc8Open("https://x.y")+"\033[4;34mhttps://x.y"+ansiReset+osc8Close+" z" {
 		t.Errorf("URL space: %q", got)
 	}
 }

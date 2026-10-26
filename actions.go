@@ -83,13 +83,14 @@ func (c *actCtx) runInteractive(prog string, args ...string) error {
 	return runInteractive(c.fd, c.oldState, prog, args...)
 }
 
-// enterRaw returns to the main raw-mode TUI and re-enables mouse reporting.
+// enterRaw returns to the main raw-mode TUI and re-enables mouse reporting
+// when the TUI wants it (mouse_mode.go: not in select mode or the Fleet view).
 // Bare enterRaw(fd) is deliberately mouse-neutral (see helpers.go), so every
 // action handler that finishes a cooked prompt or subprocess must re-enable
 // it; centralizing that here keeps the calls paired.
 func (c *actCtx) enterRaw() {
 	enterRaw(c.fd)
-	writeMouseMode(terminalOutput, true)
+	writeMouseMode(terminalOutput, mouseMode.wanted())
 }
 
 // prepareLineOutput parks the cursor in a cleared bottom row before restoring

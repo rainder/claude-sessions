@@ -89,7 +89,34 @@ func testLocalHost(rows ...Session) LocalHost {
 	return LocalHost{Name: "local", Sessions: rows}
 }
 
+// stripOSC removes every OSC sequence (ESC ] … BEL or ESC \\), such as an
+// OSC 8 hyperlink's open and close, leaving SGR in place.
+func stripOSC(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\033' && i+1 < len(s) && s[i+1] == ']' {
+			j := i + 2
+			for j < len(s) && s[j] != '\a' && !(s[j] == '\033' && j+1 < len(s) && s[j+1] == '\\') {
+				j++
+			}
+			switch {
+			case j >= len(s):
+				i = len(s)
+			case s[j] == '\a':
+				i = j + 1
+			default:
+				i = j + 2
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 func stripANSI(s string) string {
+	s = stripOSC(s)
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {

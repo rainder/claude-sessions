@@ -104,8 +104,9 @@ func RunTUI(interval time.Duration) error {
 	enableOutputProcessing(fd)
 
 	// Enable mouse reporting, then alt-screen, hide cursor, disable line-wrap.
-	// All restored on return (reverse of the setup order).
-	writeMouseMode(os.Stdout, true)
+	// All restored on return (reverse of the setup order). Mouse reporting is
+	// what stops a drag from selecting text; v turns it off (select mode).
+	writeMouseMode(os.Stdout, mouseMode.wanted())
 	fmt.Print("\033[?1049h\033[?25l\033[?7l")
 	defer func() {
 		writeMouseMode(os.Stdout, false)
@@ -528,7 +529,7 @@ func RunTUI(interval time.Duration) error {
 		if rows > 0 {
 			// While '/'-input mode is active, the edit prompt replaces the footer
 			// hint (and any toast) so the user sees the query they're typing.
-			bottom := sessionBottomRow(toast, toastActive)
+			bottom := sessionBottomRow(toast, toastActive, mouseMode.selectHint())
 			if textFilter.editing {
 				bottom = textFilterPrompt(textFilter.buffer, cols)
 			}
@@ -931,6 +932,13 @@ func RunTUI(interval time.Duration) error {
 				render()
 				continue
 			}
+			// Select mode (mouse_mode.go): v toggles mouse reporting so a drag
+			// selects text; Esc ends it. Like '/', it cancels a pending 'h' arm.
+			if mouseMode.selectKey(os.Stdout, k) {
+				pendingHide = false
+				render()
+				continue
+			}
 			if sessionKeyCommand(k) == commandOpenInspector {
 				pendingHide = false
 				openInspector()
@@ -1212,6 +1220,13 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 			render()
 			return false, false
 		}
+	}
+
+	// Select mode (mouse_mode.go) takes v, and Esc while it is on, before
+	// Esc's back binding: the first Esc turns the mouse back on.
+	if mouseMode.selectKey(os.Stdout, ev.key) {
+		render()
+		return false, false
 	}
 
 	if ev.key == KeyEnter {
@@ -1506,9 +1521,14 @@ func sessionFooter() string {
 	return dim("-/+ disable/enable  ·  d hide disabled  ·  1-9 only  ·  h1-9 hide  ·  ⇧0-9 group  ·  / search  ·  ? help")
 }
 
-func sessionBottomRow(toast string, toastActive bool) string {
+// sessionBottomRow is the toast, else the select-mode hint (selectHint, ""
+// when select mode is off), else the key help.
+func sessionBottomRow(toast string, toastActive bool, selectHint string) string {
 	if toastActive {
 		return bold(toast)
+	}
+	if selectHint != "" {
+		return colorize(fleetSGRAmber, selectHint)
 	}
 	return sessionFooter()
 }
@@ -1524,6 +1544,8 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    Tab          jump to topmost idle (or shell) session")
 	fmt.Fprintln(&b, "    mouse click  select row · double-click opens")
 	fmt.Fprintln(&b, "    mouse wheel  scroll list or inspector")
+	fmt.Fprintln(&b, "    v            select mode: mouse off, so a drag selects text (v or Esc: mouse on)")
+	fmt.Fprintln(&b, "    Option+drag  select text while the mouse is on (iTerm2)")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("ACTIONS")+"  (on selected row)")
 	fmt.Fprintln(&b, "    n            new tmux session (↑/↓ cwd · ←/→ command · p prompt in background)")
@@ -1535,13 +1557,15 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
 	fmt.Fprintln(&b, "    i            show session info (ticket + conversation summary)")
 	fmt.Fprintln(&b, "    Ctrl-W       switch that host's Claude account (⏎ applies · esc cancels)")
-	fmt.Fprintln(&b, "    F            FLEET decision cards (1-9 pick · o other · Enter send · Esc back)")
+	fmt.Fprintln(&b, "    F            FLEET decision cards (1-9 pick · o other · Enter send · t raw text · Esc back)")
+	fmt.Fprintln(&b, "                 the mouse is off there, so a drag selects card text; links are Cmd+click")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("INSPECTOR"))
 	fmt.Fprintln(&b, "    Home / End   oldest output / resume live follow")
 	fmt.Fprintln(&b, "    PgUp / PgDn  scroll inspector by page")
 	fmt.Fprintln(&b, "    r            refresh now")
 	fmt.Fprintln(&b, "    Ctrl-X       kill the session (tmux-aware)")
+	fmt.Fprintln(&b, "    v            select mode (mouse off; v or Esc: mouse on)")
 	fmt.Fprintln(&b, "    Esc / q / p  return from inspector")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("VIEW"))

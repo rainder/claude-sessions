@@ -439,6 +439,11 @@ func inspectorComposeBar(w io.Writer, view inspectorViewState, cols int) []hitRe
 // Once composeStatusUntil passes, this falls back to the ordinary freshness
 // status.
 func inspectorFooterRight(view inspectorViewState) string {
+	// Select mode (mouse_mode.go) outranks the rest: while it is on, the
+	// footer's controls do not take clicks, and the user must know why.
+	if mouseMode.selectOn {
+		return "SELECT · mouse off · v/Esc: mouse on"
+	}
 	if view.composeStatus != "" && time.Now().Before(view.composeStatusUntil) {
 		return view.composeStatus
 	}

@@ -206,6 +206,7 @@ var (
 type fleetStyle struct {
 	bold, dim, under bool
 	fg               string
+	link             string // OSC 8 target, a safeLinkURL; "" is no link
 }
 
 func (s fleetStyle) sgr() string {
@@ -304,16 +305,38 @@ func fleetSummaryRender(s string, width int, styled bool) []string {
 
 // fleetLineStyles removes ** and backticks from one summary line and styles
 // each remaining rune. A ** or backtick opens bold or code only when a closing
-// one follows on the line; an unpaired one is just removed. On top of that: a
-// line of only bold text is a heading; URLs, DR-1234 and #1234 (outside a
-// URL) and "(FLEET lean)" are coloured; on the summary's first line (first)
-// a leading HOLD, READY, UPDATE or RESULT is its status; a list marker is
-// dim. Inside code only the code colour shows.
+// one follows on the line; an unpaired one is just removed. A markdown link
+// [label](url) outside code shows only its label, taken literally, and links
+// it to url when safeLinkURL allows (the page's safeLink rule: http and https
+// only); a bare URL links to itself. On top of that: a line of only bold text
+// is a heading; URLs, link labels, DR-1234 and #1234 (outside a URL or link)
+// and "(FLEET lean)" are coloured; on the summary's first line (first) a
+// leading HOLD, READY, UPDATE or RESULT is its status; a list marker is dim.
+// Inside code only the code colour shows.
 func fleetLineStyles(line string, first bool) ([]rune, []fleetStyle) {
 	var vis []rune
 	var bold, code []bool
+	var links []string
+	var labels [][2]int // byte ranges of link labels in the visible text
+	visBytes := 0
 	b, c := false, false
 	for i := 0; i < len(line); {
+		if line[i] == '[' && !c {
+			if label, href, n, ok := fleetMDLink(line[i:]); ok {
+				if !safeLinkURL(href) {
+					href = ""
+				}
+				start := visBytes
+				for _, r := range label {
+					vis = append(vis, r)
+					bold, code, links = append(bold, b), append(code, c), append(links, href)
+				}
+				visBytes += len(label)
+				labels = append(labels, [2]int{start, visBytes})
+				i += n
+				continue
+			}
+		}
 		switch {
 		case strings.HasPrefix(line[i:], "**"):
 			b = !b && strings.Contains(line[i+2:], "**")
@@ -324,13 +347,14 @@ func fleetLineStyles(line string, first bool) ([]rune, []fleetStyle) {
 		default:
 			r, sz := utf8.DecodeRuneInString(line[i:])
 			vis = append(vis, r)
-			bold, code = append(bold, b), append(code, c)
+			bold, code, links = append(bold, b), append(code, c), append(links, "")
+			visBytes += utf8.RuneLen(r)
 			i += sz
 		}
 	}
 	sty := make([]fleetStyle, len(vis))
 	for i := range sty {
-		sty[i].bold = bold[i]
+		sty[i].bold, sty[i].link = bold[i], links[i]
 	}
 	text := string(vis)
 	// runeAt maps a byte offset in text, as regexp returns, to a rune index.
@@ -363,8 +387,16 @@ func fleetLineStyles(line string, first bool) ([]rune, []fleetStyle) {
 			paint(m[2], m[3], func(s *fleetStyle) { s.fg, s.bold = fg, s.bold || strong })
 		}
 	}
-	urls := fleetURLRe.FindAllStringIndex(text, -1)
-	for _, u := range urls {
+	inLabel := func(from, to int) bool {
+		for _, l := range labels {
+			if from < l[1] && to > l[0] {
+				return true
+			}
+		}
+		return false
+	}
+	var urls [][]int
+	for _, u := range fleetURLRe.FindAllStringIndex(text, -1) {
 		// Sentence punctuation after a URL, and a ")" that closes a bracket
 		// the URL did not open, are not part of it.
 		for u[1] > u[0] {
@@ -375,6 +407,10 @@ func fleetLineStyles(line string, first bool) ([]rune, []fleetStyle) {
 			}
 			u[1]--
 		}
+		// A URL shown as a link's label is that link, not a bare one.
+		if !inLabel(u[0], u[1]) {
+			urls = append(urls, u)
+		}
 	}
 	inURL := func(from, to int) bool {
 		for _, u := range urls {
@@ -382,7 +418,7 @@ func fleetLineStyles(line string, first bool) ([]rune, []fleetStyle) {
 				return true
 			}
 		}
-		return false
+		return inLabel(from, to)
 	}
 	var refs [][]int
 	for _, m := range fleetTicketRe.FindAllStringIndex(text, -1) {
@@ -397,7 +433,18 @@ func fleetLineStyles(line string, first bool) ([]rune, []fleetStyle) {
 		}
 	}
 	for _, u := range urls {
-		paint(u[0], u[1], func(s *fleetStyle) { s.fg, s.under = fleetSGRURL, true })
+		href := text[u[0]:u[1]]
+		if !safeLinkURL(href) {
+			href = ""
+		}
+		paint(u[0], u[1], func(s *fleetStyle) { s.fg, s.under, s.link = fleetSGRURL, true, href })
+	}
+	for _, l := range labels {
+		paint(l[0], l[1], func(s *fleetStyle) {
+			if s.link != "" {
+				s.fg, s.under = fleetSGRURL, true
+			}
+		})
 	}
 	for off := 0; ; {
 		i := strings.Index(text[off:], "(FLEET lean)")
@@ -460,7 +507,10 @@ func fleetWrapStyled(vis []rune, sty []fleetStyle, width int) []string {
 	return out
 }
 
-// fleetStyledText writes rs with one colorize call per run of equal styles.
+// fleetStyledText writes rs with one colorize call per run of equal styles. A
+// run with a link is wrapped in its OSC 8 open and close, so a link never
+// stays open past the line: fleetWrapStyled calls this per output line, which
+// closes a wrapped link at each line end and opens it again on the next.
 func fleetStyledText(rs []rune, sty []fleetStyle) string {
 	var b strings.Builder
 	for i := 0; i < len(rs); {
@@ -468,7 +518,11 @@ func fleetStyledText(rs []rune, sty []fleetStyle) string {
 		for j < len(rs) && sty[j] == sty[i] {
 			j++
 		}
-		b.WriteString(colorize(sty[i].sgr(), string(rs[i:j])))
+		run := colorize(sty[i].sgr(), string(rs[i:j]))
+		if sty[i].link != "" {
+			run = osc8Open(sty[i].link) + run + osc8Close
+		}
+		b.WriteString(run)
 		i = j
 	}
 	return b.String()

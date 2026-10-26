@@ -28,6 +28,7 @@ const (
 	fleetCmdSend             // start fleetSendJob with st.send
 	fleetCmdDismiss          // dismiss st.dismissID
 	fleetCmdAttach           // attach to st.attach, then refetch
+	fleetCmdRawText          // show the selected card's raw text (fleetRawLines)
 )
 
 type fleetToastKind int
@@ -439,6 +440,12 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return fleetCmdDismiss
 	case "o":
 		return st.openOther(now)
+	case "t":
+		// The ship screen shows no card, so there is no card text to show.
+		if inBatch || st.shipOn() || st.selected() == nil {
+			return fleetCmdNone
+		}
+		return fleetCmdRawText
 	}
 	it := st.selected()
 	if it == nil {

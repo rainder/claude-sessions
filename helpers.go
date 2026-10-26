@@ -111,10 +111,12 @@ func runInteractive(fd int, oldState *term.State, prog string, args ...string) e
 	cmd.Stderr = os.Stderr
 	err := cmd.Run()
 	// Re-enter our UI mode (raw with OPOST preserved), then re-enable mouse
-	// reporting last so it takes effect only once we're back in the TUI.
+	// reporting last so it takes effect only once we're back in the TUI —
+	// unless select mode or a mouse-free screen (mouse_mode.go) has it off.
 	_, _ = term.MakeRaw(fd)
 	enableOutputProcessing(fd)
-	fmt.Print("\033[?1049h\033[?25l\033[?7l" + mouseEnableSequence)
+	fmt.Print("\033[?1049h\033[?25l\033[?7l")
+	writeMouseMode(os.Stdout, mouseMode.wanted())
 	return err
 }
 

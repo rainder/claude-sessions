@@ -187,10 +187,10 @@ func TestSessionDisableFooterAndHelp(t *testing.T) {
 			t.Fatalf("footer %q missing %q", footer, want)
 		}
 	}
-	if bottom := sessionBottomRow("sort: status", false); bottom != footer {
+	if bottom := sessionBottomRow("sort: status", false, ""); bottom != footer {
 		t.Fatalf("normal bottom row = %q, want footer %q", bottom, footer)
 	}
-	toast := sessionBottomRow("sort: status", true)
+	toast := sessionBottomRow("sort: status", true, "")
 	if !strings.Contains(toast, "sort: status") ||
 		strings.Contains(toast, "-/+ disable/enable") {
 		t.Fatalf("toast bottom row = %q", toast)

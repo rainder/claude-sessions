@@ -13,6 +13,7 @@ import (
 // differs from visualLen (which returns byte length), so it stays accurate for
 // the inspector's multibyte glyphs like "·" and "↓".
 func visibleWidth(s string) int {
+	s = stripOSC(s)
 	cols := 0
 	for i := 0; i < len(s); {
 		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {

@@ -2659,41 +2659,71 @@ func renderAllMinimal(w *frameWriter, sections []section, sel string, accounts [
 	return overflowing
 }
 
-// visualLen returns the display width of a string with ANSI escapes stripped.
-// A wide rune (runeCells) counts as two columns.
+// visualLen returns the display width of a string with ANSI escapes stripped:
+// SGR (ESC[…m) and OSC (ESC]…, which carries OSC 8 hyperlinks) are zero
+// width. A wide rune (runeCells) counts as two columns.
 func visualLen(s string) int {
-	out := s
-	for {
-		i := strings.Index(out, "\033[")
-		if i < 0 {
-			return cellWidth(out)
+	n := 0
+	for i := 0; i < len(s); {
+		if l := escapeLen(s, i); l > 0 {
+			i += l
+			continue
 		}
-		j := strings.IndexByte(out[i:], 'm')
-		if j < 0 {
-			return cellWidth(out)
-		}
-		out = out[:i] + out[i+j+1:]
+		r, sz := utf8.DecodeRuneInString(s[i:])
+		n += runeCells(r)
+		i += sz
 	}
+	return n
+}
+
+// escapeLen is the byte length of the zero-width escape sequence at s[i], or
+// 0 when none starts there: an SGR ESC[…m, or an OSC ESC]… ended by BEL or
+// ST (ESC\). An unterminated one runs to the end of s.
+func escapeLen(s string, i int) int {
+	if s[i] != '\033' || i+1 >= len(s) {
+		return 0
+	}
+	switch s[i+1] {
+	case '[':
+		j := strings.IndexByte(s[i:], 'm')
+		if j < 0 {
+			return len(s) - i
+		}
+		return j + 1
+	case ']':
+		for j := i + 2; j < len(s); j++ {
+			if s[j] == '\a' {
+				return j + 1 - i
+			}
+			if s[j] == '\033' && j+1 < len(s) && s[j+1] == '\\' {
+				return j + 2 - i
+			}
+		}
+		return len(s) - i
+	}
+	return 0
 }
 
 // clipLine truncates s to at most width visible columns. ANSI escape
-// sequences never count toward the width, and sequences past the cut point
-// are still emitted so color state (e.g. the trailing reset on a dimmed or
-// colorized row) survives truncation. A wide rune (runeCells) counts as two
-// columns; one that would straddle the edge is dropped, and so is everything
-// visible after it.
+// sequences (escapeLen) never count toward the width and are never cut, and
+// sequences past the cut point are still emitted so color state (e.g. the
+// trailing reset on a dimmed or colorized row) survives truncation, and an
+// OSC 8 hyperlink cut by the edge still gets its close. A link left open at
+// the end (its close was never in s) is closed. A wide rune (runeCells)
+// counts as two columns; one that would straddle the edge is dropped, and so
+// is everything visible after it.
 func clipLine(s string, width int) string {
 	var b strings.Builder
 	vis := 0
+	linkOpen := false
 	for i := 0; i < len(s); {
-		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {
-			j := strings.IndexByte(s[i:], 'm')
-			if j < 0 {
-				b.WriteString(s[i:])
-				break
+		if l := escapeLen(s, i); l > 0 {
+			seq := s[i : i+l]
+			if open, ok := osc8Opens(seq); ok {
+				linkOpen = open
 			}
-			b.WriteString(s[i : i+j+1])
-			i += j + 1
+			b.WriteString(seq)
+			i += l
 			continue
 		}
 		r, sz := utf8.DecodeRuneInString(s[i:])
@@ -2704,6 +2734,9 @@ func clipLine(s string, width int) string {
 			vis = width
 		}
 		i += sz
+	}
+	if linkOpen {
+		b.WriteString(osc8Close)
 	}
 	return b.String()
 }

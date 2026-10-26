@@ -448,6 +448,10 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 		l.attach = fleetAttachVia(src, attach)
 	}
 	defer l.closeAll()
+	// The view reads no mouse events, so mouse reporting would only stop a
+	// drag from selecting card text (mouse_mode.go). An attach from here
+	// keeps it off; leaving the view turns it back on if the list wants it.
+	defer mouseMode.suspend(terminalOutput)()
 	l.startState()
 	l.nextPoll = time.Now().Add(l.interval)
 	for {
@@ -473,6 +477,15 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 		for _, k := range keys {
 			now := time.Now()
 			cmd := l.st.handleKey(k, len(keys) > 1, now)
+			if cmd == fleetCmdRawText {
+				if it := l.st.selected(); it != nil {
+					runFleetRawView(fd, fleetRawLines(*it), wakes)
+				}
+				// The raw view drew over the screen, and keys read before it
+				// belong to a view Andy has not seen since.
+				screen.Invalidate()
+				break
+			}
 			if l.run(cmd, now) {
 				return
 			}
@@ -493,10 +506,10 @@ const (
 	fleetSGRAmber   = "33"
 	fleetSGRRed     = "31"
 	fleetIndent     = "   "
-	fleetHelpRow    = "↑↓ card · 1-9 pick option · o other · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
+	fleetHelpRow    = "↑↓ card · 1-9 pick option · o other · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
 	// fleetHelpRowAttach is the key help when the selected card resolves to
 	// exactly one live session.
-	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
+	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
 )
 
 // fleetAge is the age of an RFC 3339 stamp, "" when it does not parse.

@@ -9,6 +9,22 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The TUI text can be selected and copied. `v` on the session list or in the
+  inspector is select mode: mouse capture goes off, so a drag selects text and
+  Cmd+C copies it; an amber hint shows, and `v` or Esc turns the mouse back
+  on. An attach or prompt no longer turns capture back on behind select mode.
+  The FLEET view has no mouse capture at all. Its new `t` key shows the
+  selected card's raw text: no indent, no hard wrap, the terminal soft-wraps,
+  so a long command copies as one line. iTerm2's Option+drag also selects
+  while capture is on.
+
+- FLEET card summaries in the TUI have clickable links (OSC 8): a markdown
+  link `[4388c878](https://…)` shows only `4388c878`, and a bare http(s) URL
+  links to itself; Cmd+click opens it in iTerm2. Other URL schemes show the
+  label without a link. Escapes count as zero width, and a link cut by the
+  edge or a wrap is closed (and opened again on the next line). Under tmux
+  this needs tmux 3.4+ with `set -as terminal-features 'xterm*:hyperlinks'`.
+
 - The FLEET page can send images to a session. In the FLEET chat and in
   the session view, paste a screenshot, drop images on the chat, or tap the
   attach button (on a phone it offers the photo library and screenshots).
