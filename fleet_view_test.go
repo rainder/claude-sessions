@@ -444,3 +444,13 @@ func TestFleetItemsSortByPriorityThenAge(t *testing.T) {
 		t.Fatalf("got %v\nwant %v", got, want)
 	}
 }
+
+func TestFleetEditTextBackspaceIsRuneSafe(t *testing.T) {
+	got, edit := fleetEditText("Pick é", "\x7f", func(string) bool { return true })
+	if !edit || got != "Pick " || !utf8.ValidString(got) {
+		t.Errorf("backspace = %q, %v", got, edit)
+	}
+	if got, _ := fleetEditText("ab", "\x08", func(string) bool { return true }); got != "a" {
+		t.Errorf("ascii backspace = %q", got)
+	}
+}

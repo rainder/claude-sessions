@@ -114,7 +114,7 @@ func clarifyOpen(now time.Time, v fleetClarifyView) *fleetViewState {
 	st := clarifyTestState(now)
 	st.handleKey("k", false, now)
 	v.Card = "c1"
-	st.applyClarify(v, nil, now)
+	st.applyClarify("c1", v, nil, now)
 	return st
 }
 
@@ -174,7 +174,7 @@ func TestClarifyKeyAskArmAndBatch(t *testing.T) {
 	if cmd := st.handleKey(KeyEnter, false, late); cmd != fleetCmdNone {
 		t.Errorf("blank Enter = %v", cmd)
 	}
-	st.applyClarify(fleetClarifyView{Card: "c1", Pending: &clarifyPending{Kind: "ask"}}, nil, late)
+	st.applyClarify("c1", fleetClarifyView{Card: "c1", Pending: &clarifyPending{Kind: "ask"}}, nil, late)
 	st.handleKey("x", false, late)
 	st.clarifyReq = nil
 	if cmd := st.handleKey(KeyEnter, false, late); cmd != fleetCmdNone || st.clarifyReq != nil {
@@ -192,7 +192,7 @@ func TestClarifyKeyDraftAndScroll(t *testing.T) {
 	if cmd := st.handleKey("\x04", false, now); cmd != fleetCmdClarifyDraft {
 		t.Errorf("ctrl-d = %v", cmd)
 	}
-	st.applyClarify(fleetClarifyView{Card: "c1", Turns: []clarifyTurn{{}}, Pending: &clarifyPending{Kind: "draft"}}, nil, now)
+	st.applyClarify("c1", fleetClarifyView{Card: "c1", Turns: []clarifyTurn{{}}, Pending: &clarifyPending{Kind: "draft"}}, nil, now)
 	if cmd := st.handleKey("\x04", false, now); cmd != fleetCmdNone {
 		t.Errorf("ctrl-d while pending = %v", cmd)
 	}
@@ -273,11 +273,15 @@ func TestClarifyEscReturnsToList(t *testing.T) {
 func TestClarifyClosesWhenCardGone(t *testing.T) {
 	now := time.Now()
 	st := clarifyOpen(now, fleetClarifyView{})
-	st.applyState(fleetTestView(fleetTestCard("c1", "needs-you")), nil, now)
+	same := fleetTestView(fleetTestCard("c1", "needs-you"))
+	same.Source = "http://src"
+	st.applyState(same, nil, now)
 	if st.clarify == nil {
 		t.Fatal("closed while the card is still there")
 	}
-	st.applyState(fleetTestView(fleetTestCard("c2", "needs-you")), nil, now)
+	gone := fleetTestView(fleetTestCard("c2", "needs-you"))
+	gone.Source = "http://src"
+	st.applyState(gone, nil, now)
 	if st.clarify != nil || st.toast != "card is gone" {
 		t.Errorf("clarify %v toast %q", st.clarify, st.toast)
 	}
@@ -289,20 +293,24 @@ func TestClarifyApplyAndRefusals(t *testing.T) {
 	if !st.clarify.loaded || len(st.clarify.view.Turns) != 1 {
 		t.Fatalf("view not applied: %+v", st.clarify)
 	}
-	st.applyClarify(fleetClarifyView{Card: "other"}, nil, now) // another card's answer
+	st.applyClarify("other", fleetClarifyView{Card: "other"}, nil, now) // another card's answer
+	st.applyClarify("other", fleetClarifyView{}, &fleetStatusError{Status: 502}, now)
+	if st.clarify.err != "" {
+		t.Error("another card's error landed")
+	}
 	if len(st.clarify.view.Turns) != 1 {
 		t.Error("a stale answer replaced the view")
 	}
-	st.applyClarify(fleetClarifyView{}, &fleetStatusError{Status: 502}, now)
+	st.applyClarify("c1", fleetClarifyView{}, &fleetStatusError{Status: 502}, now)
 	if st.clarify.err == "" {
 		t.Error("no error line")
 	}
-	st.applyClarify(fleetClarifyView{Card: "c1"}, nil, now)
+	st.applyClarify("c1", fleetClarifyView{Card: "c1"}, nil, now)
 	if st.clarify.err != "" {
 		t.Error("error line kept after a good read")
 	}
 	st.clarify = nil
-	st.applyClarify(fleetClarifyView{Card: "c1"}, nil, now) // no panic with the chat closed
+	st.applyClarify("c1", fleetClarifyView{Card: "c1"}, nil, now) // no panic with the chat closed
 
 	for code, want := range map[string]string{
 		"busy": "a question is already running", "card_gone": "card is gone", "not_live": "FLEET is not running",
@@ -313,5 +321,62 @@ func TestClarifyApplyAndRefusals(t *testing.T) {
 		if st.toast != want {
 			t.Errorf("%s toast = %q, want %q", code, st.toast, want)
 		}
+	}
+}
+
+func TestClarifyDraftSourcePin(t *testing.T) {
+	now := time.Now()
+	draft := fleetClarifyView{Draft: &clarifyDraft{Text: "Pick B"}}
+	st := clarifyOpen(now, draft)
+	st.view.Source = "http://elsewhere"
+	if cmd := st.handleKey("s", false, now); cmd != fleetCmdRender || st.clarify != nil || st.panel != nil || st.toast != "FLEET moved" {
+		t.Errorf("s after a move: %v clarify %v panel %v toast %q", cmd, st.clarify, st.panel, st.toast)
+	}
+
+	st = clarifyOpen(now, draft)
+	v := fleetTestView(fleetTestCard("c1", "needs-you"))
+	v.Source = "http://elsewhere"
+	st.applyState(v, nil, now)
+	if st.clarify != nil || st.toast != "FLEET moved" {
+		t.Errorf("applyState on another host: clarify %v toast %q", st.clarify, st.toast)
+	}
+}
+
+func TestClarifyDraftToastCases(t *testing.T) {
+	now := time.Now()
+	draft := fleetClarifyView{Draft: &clarifyDraft{Text: "Pick B"}}
+
+	card := fleetTestCard("c1", "needs-you")
+	card.Options = nil
+	v := fleetTestView(card)
+	st := fleetTestState(v, now)
+	st.handleKey("k", false, now)
+	st.applyClarify("c1", fleetClarifyView{Card: "c1", Draft: draft.Draft}, nil, now)
+	if cmd := st.handleKey("s", false, now); cmd != fleetCmdRender || st.clarify == nil || st.panel != nil || st.toast != "this card has no Other answer" {
+		t.Errorf("no options: %v toast %q", cmd, st.toast)
+	}
+
+	// Options but no card hash: openOther refuses.
+	st = clarifyOpen(now, draft)
+	delete(st.view.CardHashes, "c1")
+	if cmd := st.handleKey("s", false, now); cmd != fleetCmdRender || st.clarify == nil || st.panel != nil || st.toast != "cannot answer this card now" {
+		t.Errorf("refused: %v toast %q", cmd, st.toast)
+	}
+}
+
+func TestClarifyHidesShip(t *testing.T) {
+	now := time.Now()
+	st := clarifyOpen(now, fleetClarifyView{})
+	st.applyState(fleetTestView(), nil, now) // no card left
+	if st.clarify != nil {
+		t.Fatal("chat stayed with the card gone")
+	}
+	st.clarify = &fleetClarifyMode{}
+	if st.shipOn() {
+		t.Error("ship over the chat")
+	}
+	st.clarify = nil
+	if !st.shipOn() {
+		t.Error("ship should show with no cards")
 	}
 }

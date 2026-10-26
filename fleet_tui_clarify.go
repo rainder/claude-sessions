@@ -62,11 +62,12 @@ func (st *fleetViewState) openClarify(now time.Time) fleetCmd {
 // busy is true while a fork runs for the card.
 func (c *fleetClarifyMode) busy() bool { return c.view.Pending != nil }
 
-// applyClarify takes a chat read. A late answer for a chat that has since
-// closed, or been reopened on another card, is dropped.
-func (st *fleetViewState) applyClarify(v fleetClarifyView, err error, now time.Time) {
+// applyClarify takes a chat read for card, the raw id the request used. A
+// late result, an error too, for a chat that has since closed or been
+// reopened on another card is dropped.
+func (st *fleetViewState) applyClarify(card string, v fleetClarifyView, err error, now time.Time) {
 	c := st.clarify
-	if c == nil {
+	if c == nil || card != c.item.Card.ID {
 		return
 	}
 	if err != nil {
@@ -75,9 +76,6 @@ func (st *fleetViewState) applyClarify(v fleetClarifyView, err error, now time.T
 		} else {
 			c.err = "could not read the chat"
 		}
-		return
-	}
-	if v.Card != "" && v.Card != c.item.Card.ID {
 		return
 	}
 	c.view, c.loaded, c.err = v, true, ""
@@ -151,12 +149,22 @@ func (st *fleetViewState) draftToOther(now time.Time) fleetCmd {
 	if it := st.selected(); it == nil || it.Card.ID != c.item.Card.ID {
 		return fleetCmdNone
 	}
+	if st.view.Source != c.source {
+		// FLEET is on another host than the chat was opened on.
+		st.clarify = nil
+		st.setToast("FLEET moved", fleetToastWarn, now)
+		return fleetCmdRender
+	}
+	if len(c.item.Card.Options) == 0 {
+		// No options, no Other panel; stay in the chat.
+		st.setToast("this card has no Other answer", fleetToastWarn, now)
+		return fleetCmdRender
+	}
 	st.clarify = nil
 	cmd := st.openOther(now)
 	if st.panel == nil {
-		// Without options there is no Other panel; stay in the chat.
 		st.clarify = c
-		st.setToast("this card has no Other answer", fleetToastWarn, now)
+		st.setToast("cannot answer this card now", fleetToastWarn, now)
 		return fleetCmdRender
 	}
 	id := c.item.Card.ID

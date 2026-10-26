@@ -328,6 +328,9 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		if i := fleetItemIndex(st.items, c.item.Card.ID); i < 0 {
 			st.clarify = nil
 			st.setToast("card is gone", fleetToastWarn, now)
+		} else if v.Source != c.source {
+			st.clarify = nil
+			st.setToast("FLEET moved", fleetToastWarn, now)
 		} else {
 			c.item = st.items[i]
 		}
@@ -718,7 +721,7 @@ func (st *fleetViewState) applyAttach(err error, now time.Time) {
 	switch {
 	case err == nil:
 	case errors.Is(err, errFleetMoved):
-		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
+		st.setToast("FLEET moved", fleetToastWarn, now)
 	default:
 		st.setToast("attach failed: "+fleetDisplayText(err.Error()), fleetToastErr, now)
 	}
@@ -737,7 +740,7 @@ func (st *fleetViewState) applySend(r fleetSendResult, now time.Time) (refetch b
 		return true
 	}
 	if r.Moved {
-		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
+		st.setToast("FLEET moved", fleetToastWarn, now)
 		return true
 	}
 	msg, kind, refetch := fleetSendToast(r.Out)
