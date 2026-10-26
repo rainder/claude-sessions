@@ -192,9 +192,11 @@ func (st *fleetClarifyStore) get(cardID string) (clarifyEntry, bool) {
 // turn. It returns a copy of the entry, a token for finish (a fork that was
 // pruned away and replaced must not finish into its successor) and a refusal
 // code: "busy" (the card
-// already has a fork, or clarifyMaxRunning are in flight) or "empty" (a draft
-// of a chat with no turns). cancel is called if the entry is pruned while the
-// fork runs; it may be nil.
+// already has a fork, or clarifyMaxRunning are in flight), "empty" (a draft of
+// a chat with no turns or no fork yet: a draft must come from a fork that
+// remembers the chat) or "card_gone" (an ask with no entry and no init: the
+// chat was pruned since the caller looked). cancel is called if the entry is
+// pruned while the fork runs; it may be nil.
 func (st *fleetClarifyStore) begin(cardID, kind string, init *clarifyEntry, question string, cancel context.CancelFunc, now time.Time) (clarifyEntry, uint64, string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -203,17 +205,17 @@ func (st *fleetClarifyStore) begin(cardID, kind string, init *clarifyEntry, ques
 	if ok && e.Pending != nil {
 		return clarifyEntry{}, 0, "busy"
 	}
-	if kind == clarifyKindDraft && (!ok || len(e.Turns) == 0) {
+	if kind == clarifyKindDraft && (!ok || len(e.Turns) == 0 || e.ForkID == "") {
 		return clarifyEntry{}, 0, "empty"
+	}
+	if !ok && init == nil {
+		return clarifyEntry{}, 0, "card_gone"
 	}
 	if st.running >= clarifyMaxRunning {
 		return clarifyEntry{}, 0, "busy"
 	}
 	if !ok {
-		var seed clarifyEntry
-		if init != nil {
-			seed = copyClarify(*init)
-		}
+		seed := copyClarify(*init)
 		e = &seed
 		st.entries[cardID] = e
 	}

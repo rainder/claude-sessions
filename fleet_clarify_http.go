@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -21,7 +22,6 @@ const (
 	clarifyQuestionMax       = 4000     // runes
 	clarifyAnswerMax         = 32 << 10 // bytes of a stored answer or draft
 	clarifyBodyMax           = 32 << 10
-	clarifyCardIDMax         = 200
 	clarifyRetryDelayDefault = 5 * time.Second
 
 	clarifyErrIsError = "the fork answered with an error"
@@ -65,8 +65,11 @@ func (s *server) clarifyGuard(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// clarifyCardIDRe is fleet-state.py's own card id rule.
+var clarifyCardIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
 func clarifyCardIDOK(id string) bool {
-	return id != "" && len(id) <= clarifyCardIDMax
+	return clarifyCardIDRe.MatchString(id)
 }
 
 // fleetClarifyGet is GET /fleet/clarify?card=<id>: the card's chat, or an
@@ -176,6 +179,9 @@ func (s *server) clarifyStart(cardID, kind, question string) (clarifyEntry, stri
 			return clarifyEntry{}, "not_live", http.StatusConflict
 		case sess.Tool == toolGrok:
 			return clarifyEntry{}, "unsupported_tool", http.StatusConflict
+		case !validFleetSessionID(sess.SessionID):
+			// It becomes an argv value: never anything a flag could hide in.
+			return clarifyEntry{}, "not_live", http.StatusConflict
 		}
 		init = &clarifyEntry{Tool: "", FleetSessionID: sess.SessionID, Model: sess.Model, CardHash: card.Hash, Cwd: s.clarifyCwd(sess)}
 	}
@@ -235,7 +241,20 @@ func (s *server) clarifyRunFork(ctx context.Context, cwd string, argv []string) 
 // it would not. finish is a no-op when the chat was pruned meanwhile.
 func (s *server) clarifyWork(ctx context.Context, cancel context.CancelFunc, cardID, kind string, token uint64, e clarifyEntry, preamble, question string) {
 	defer cancel()
-	p := clarifyRunParams{Model: e.Model, CuPath: clarifyCuPath(), Preamble: preamble, Question: question}
+	// A panic must not leave the chat pending for good, nor take the
+	// server down.
+	defer func() {
+		if v := recover(); v != nil {
+			fmt.Fprintf(os.Stderr, "clarify: card %s: panic: %v\n", cardID, v)
+			at := s.fleetNow().UTC().Format(time.RFC3339)
+			s.fleet.clarify.finish(cardID, token, "", &clarifyTurn{Role: clarifyRoleError, Text: clarifyErrFailed, At: at}, nil, s.fleetNow())
+		}
+	}()
+	cuPath := clarifyCuPath
+	if s.fleet.clarifyCuPath != nil {
+		cuPath = s.fleet.clarifyCuPath
+	}
+	p := clarifyRunParams{Model: e.Model, CuPath: cuPath(), Preamble: preamble, Question: question}
 	first := e.ForkID == ""
 	if first {
 		p.ResumeID, p.Fork = e.FleetSessionID, true
@@ -245,11 +264,14 @@ func (s *server) clarifyWork(ctx context.Context, cancel context.CancelFunc, car
 	var res clarifyRunResult
 	var err error
 	retried := false
-	if p.ResumeID == "" {
-		// The chat was pruned and begun again from nothing between the
-		// lookup and begin: there is no session to resume.
+	switch {
+	case first && kind == clarifyKindDraft:
+		// begin refuses this; a draft from a fresh fork of FLEET would
+		// know nothing of the chat.
+		err = errors.New("draft with no fork")
+	case p.ResumeID == "":
 		err = errors.New("no session to resume")
-	} else {
+	default:
 		argv := clarifyArgv(p)
 		res, err = s.clarifyRunFork(ctx, e.Cwd, argv)
 		if err != nil && first && (errors.Is(err, errClarifyExit) || errors.Is(err, errClarifyBadOutput)) {
@@ -300,5 +322,12 @@ func (s *server) clarifyWork(ctx context.Context, cancel context.CancelFunc, car
 		fmt.Fprintf(os.Stderr, "clarify: card %s: %v\n", cardID, err)
 		t = turn(clarifyRoleError, clarifyErrFailed)
 	}
-	s.fleet.clarify.finish(cardID, token, res.SessionID, t, d, s.fleetNow())
+	// Only a fresh session id is stored as the fork. FLEET's own id would
+	// make the next question resume FLEET itself, without --fork-session.
+	forkID := res.SessionID
+	if forkID != "" && (!validFleetSessionID(forkID) || forkID == e.FleetSessionID) {
+		fmt.Fprintf(os.Stderr, "clarify: card %s: fork returned an unusable session id\n", cardID)
+		forkID = ""
+	}
+	s.fleet.clarify.finish(cardID, token, forkID, t, d, s.fleetNow())
 }

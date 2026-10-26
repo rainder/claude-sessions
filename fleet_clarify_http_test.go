@@ -14,6 +14,10 @@ import (
 	"unicode/utf8"
 )
 
+// clarifyForkID is the fake fork's session id. Test FLEET ids are
+// fleetUUID(7001...), unique per test: findTranscript caches by id.
+var clarifyForkID = fleetUUID(7000)
+
 type clarifyCall struct {
 	cwd  string
 	argv []string
@@ -46,6 +50,7 @@ func newClarifyRig(t *testing.T) *clarifyRig {
 	rig.s.collect = func() ([]Session, error) { return rig.sessions, nil }
 	rig.s.fleet.now = func() time.Time { return rig.now }
 	rig.s.fleet.clarifyRetryDelay = time.Millisecond
+	rig.s.fleet.clarifyCuPath = func() string { return "/usr/bin/cu-test" }
 	rig.s.fleet.clarifyGo = func(f func()) {
 		if rig.collect {
 			rig.queued = append(rig.queued, f)
@@ -60,7 +65,7 @@ func newClarifyRig(t *testing.T) *clarifyRig {
 			return clarifyRunResult{}, ctx.Err()
 		}
 		if len(rig.results) == 0 {
-			return clarifyRunResult{SessionID: "F", Text: "because"}, nil
+			return clarifyRunResult{SessionID: clarifyForkID, Text: "because"}, nil
 		}
 		r := rig.results[0]
 		if len(rig.results) > 1 {
@@ -197,7 +202,7 @@ func TestClarifyAuth(t *testing.T) {
 func TestClarifyAskFirstForksFleet(t *testing.T) {
 	rig := newClarifyRig(t)
 	rig.cards(t, dr1Card)
-	rig.clarifyFleet(t, "clarify-first-S")
+	rig.clarifyFleet(t, fleetUUID(7001))
 	code, out := rig.do(t, "POST", "/fleet/clarify/ask", `{"cardId":"dr-1","text":"  why now?  "}`)
 	if code != http.StatusAccepted {
 		t.Fatalf("ask: %d %v", code, out)
@@ -214,7 +219,7 @@ func TestClarifyAskFirstForksFleet(t *testing.T) {
 	if c.cwd != "/w" {
 		t.Fatalf("cwd %q, want the transcript head's /w", c.cwd)
 	}
-	if !hasRun(c.argv, "--resume", "clarify-first-S", "--fork-session", "--model", "M") {
+	if !hasRun(c.argv, "--resume", fleetUUID(7001), "--fork-session", "--model", "M") {
 		t.Fatalf("argv %q", c.argv)
 	}
 	if n := len(c.argv); n < 2 || c.argv[n-2] != "--" || c.argv[n-1] != "why now?" {
@@ -237,7 +242,7 @@ func TestClarifyAskFirstForksFleet(t *testing.T) {
 func TestClarifyFallsBackToSessionCwd(t *testing.T) {
 	rig := newClarifyRig(t)
 	rig.cards(t, dr1Card)
-	rig.sessions = []Session{{PID: 7, Name: "FLEET", SessionID: "clarify-no-transcript", CWD: "/fallback", Status: "shell"}}
+	rig.sessions = []Session{{PID: 7, Name: "FLEET", SessionID: fleetUUID(7002), CWD: "/fallback", Status: "shell"}}
 	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
 		t.Fatalf("ask: %d %s", code, c)
 	}
@@ -250,17 +255,17 @@ func TestClarifyFallsBackToSessionCwd(t *testing.T) {
 func TestClarifyLaterAskNeedsNoLiveFleet(t *testing.T) {
 	rig := newClarifyRig(t)
 	rig.cards(t, dr1Card)
-	rig.clarifyFleet(t, "clarify-later-S")
+	rig.clarifyFleet(t, fleetUUID(7003))
 	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
 		t.Fatalf("first ask: %d %s", code, c)
 	}
 	rig.sessions = nil
-	rig.results = []clarifyFake{{res: clarifyRunResult{SessionID: "F", Text: "still because"}}}
+	rig.results = []clarifyFake{{res: clarifyRunResult{SessionID: clarifyForkID, Text: "still because"}}}
 	if code, c := rig.ask(t, "dr-1", "and then?"); code != http.StatusAccepted {
 		t.Fatalf("second ask: %d %s", code, c)
 	}
 	c := lastCall(t, rig)
-	if !hasRun(c.argv, "--resume", "F") || slices.Contains(c.argv, "--fork-session") || c.cwd != "/w" {
+	if !hasRun(c.argv, "--resume", clarifyForkID) || slices.Contains(c.argv, "--fork-session") || c.cwd != "/w" {
 		t.Fatalf("cwd %q argv %q", c.cwd, c.argv)
 	}
 	if !hasRun(c.argv, "--model", "M") {
@@ -292,7 +297,7 @@ func TestClarifyAskRefusals(t *testing.T) {
 	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusConflict || c != "ambiguous" {
 		t.Fatalf("two FLEETs: %d %s", code, c)
 	}
-	rig.clarifyFleet(t, "clarify-refusals-S")
+	rig.clarifyFleet(t, fleetUUID(7004))
 	if code, c := rig.ask(t, "dr-1", strings.Repeat("é", 4001)); code != http.StatusBadRequest || c != "too_long" {
 		t.Fatalf("4001 runes: %d %s", code, c)
 	}
@@ -304,6 +309,16 @@ func TestClarifyAskRefusals(t *testing.T) {
 			t.Fatalf("body %s: %d %v", body, code, out)
 		}
 	}
+	for _, id := range []string{"dr 1", "dr/1", strings.Repeat("a", 101)} {
+		if code, c := rig.ask(t, id, "why?"); code != http.StatusBadRequest || c != "bad_request" {
+			t.Fatalf("card id %q: %d %s", id, code, c)
+		}
+	}
+	rig.sessions = []Session{{PID: 7, Name: "FLEET", SessionID: "--dangerously-skip-permissions"}}
+	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusConflict || c != "not_live" {
+		t.Fatalf("FLEET with a bad session id: %d %s", code, c)
+	}
+	rig.clarifyFleet(t, fleetUUID(7004))
 	if len(rig.calls) != 0 {
 		t.Fatalf("a refused ask ran a fork: %+v", rig.calls)
 	}
@@ -317,13 +332,13 @@ func TestClarifyAskRefusals(t *testing.T) {
 }
 
 func TestClarifyAskErrorTurn(t *testing.T) {
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name  string
 		fakes []clarifyFake
 		calls int
 		want  string
 	}{
-		{"is_error", []clarifyFake{{res: clarifyRunResult{SessionID: "F", Text: "boom /secret/path", IsError: true}}}, 1, "the fork answered with an error"},
+		{"is_error", []clarifyFake{{res: clarifyRunResult{SessionID: clarifyForkID, Text: "boom /secret/path", IsError: true}}}, 1, "the fork answered with an error"},
 		{"timeout", []clarifyFake{{err: errClarifyTimeout}}, 1, "no answer within 5 minutes"},
 		{"mid-step", []clarifyFake{{err: errClarifyExit}, {err: errClarifyExit}}, 2, "FLEET is mid-step; ask again in a moment"},
 		{"bad output then other", []clarifyFake{{err: errClarifyBadOutput}, {err: context.Canceled}}, 2, "the fork failed; see the server log"},
@@ -331,7 +346,7 @@ func TestClarifyAskErrorTurn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newClarifyRig(t)
 			rig.cards(t, dr1Card)
-			rig.clarifyFleet(t, "clarify-err-"+tc.name)
+			rig.clarifyFleet(t, fleetUUID(7010+i))
 			rig.results = tc.fakes
 			if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
 				t.Fatalf("ask: %d %s", code, c)
@@ -350,7 +365,7 @@ func TestClarifyAskErrorTurn(t *testing.T) {
 func TestClarifyNoRetryOnLaterAsk(t *testing.T) {
 	rig := newClarifyRig(t)
 	rig.cards(t, dr1Card)
-	rig.clarifyFleet(t, "clarify-noretry-S")
+	rig.clarifyFleet(t, fleetUUID(7005))
 	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
 		t.Fatalf("ask: %d %s", code, c)
 	}
@@ -367,8 +382,8 @@ func TestClarifyNoRetryOnLaterAsk(t *testing.T) {
 func TestClarifyAnswerCutAt32KiB(t *testing.T) {
 	rig := newClarifyRig(t)
 	rig.cards(t, dr1Card)
-	rig.clarifyFleet(t, "clarify-cut-S")
-	rig.results = []clarifyFake{{res: clarifyRunResult{SessionID: "F", Text: "x" + strings.Repeat("é", 20000)}}}
+	rig.clarifyFleet(t, fleetUUID(7006))
+	rig.results = []clarifyFake{{res: clarifyRunResult{SessionID: clarifyForkID, Text: "x" + strings.Repeat("é", 20000)}}}
 	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
 		t.Fatalf("ask: %d %s", code, c)
 	}
@@ -382,20 +397,20 @@ func TestClarifyAnswerCutAt32KiB(t *testing.T) {
 func TestClarifyDraftAndDiscard(t *testing.T) {
 	rig := newClarifyRig(t)
 	rig.cards(t, dr1Card)
-	rig.clarifyFleet(t, "clarify-draft-S")
+	rig.clarifyFleet(t, fleetUUID(7007))
 	if code, out := rig.do(t, "POST", "/fleet/clarify/draft", `{"cardId":"dr-1"}`); code != http.StatusBadRequest || rawCode(out) != "empty" {
 		t.Fatalf("draft before a turn: %d %v", code, out)
 	}
 	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
 		t.Fatalf("ask: %d %s", code, c)
 	}
-	rig.results = []clarifyFake{{res: clarifyRunResult{SessionID: "F", Text: "  Go with yes.\n"}}}
+	rig.results = []clarifyFake{{res: clarifyRunResult{SessionID: clarifyForkID, Text: "  Go with yes.\n"}}}
 	code, out := rig.do(t, "POST", "/fleet/clarify/draft", `{"cardId":"dr-1"}`)
 	if code != http.StatusAccepted || !strings.Contains(string(out["pending"]), `"draft"`) {
 		t.Fatalf("draft: %d %v", code, out)
 	}
 	c := lastCall(t, rig)
-	if c.argv[len(c.argv)-1] != clarifyDraftPrompt("dr-1") || !hasRun(c.argv, "--resume", "F") {
+	if c.argv[len(c.argv)-1] != clarifyDraftPrompt("dr-1") || !hasRun(c.argv, "--resume", clarifyForkID) {
 		t.Fatalf("argv %q", c.argv)
 	}
 	if clarifyDraftPrompt("dr-1") != "Write the decision I reached in this chat about card dr-1 as one short paragraph addressed to FLEET. No greeting, no preamble: output only the message." {
@@ -432,7 +447,7 @@ func (rig *clarifyRig) stateClarify(t *testing.T) map[string]clarifySummary {
 func TestClarifyStateSummaryAndPrune(t *testing.T) {
 	rig := newClarifyRig(t)
 	rig.cards(t, dr1Card)
-	rig.clarifyFleet(t, "clarify-state-S")
+	rig.clarifyFleet(t, fleetUUID(7008))
 	if got := rig.stateClarify(t); len(got) != 0 {
 		t.Fatalf("before any chat: %+v", got)
 	}
@@ -455,7 +470,7 @@ func TestClarifyStateSummaryAndPrune(t *testing.T) {
 func TestClarifyPruneCancelsRunningFork(t *testing.T) {
 	rig := newClarifyRig(t)
 	rig.cards(t, dr1Card)
-	rig.clarifyFleet(t, "clarify-cancel-S")
+	rig.clarifyFleet(t, fleetUUID(7009))
 	rig.collect = true
 	rig.block = true
 	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted || len(rig.queued) != 1 {
@@ -472,5 +487,63 @@ func TestClarifyPruneCancelsRunningFork(t *testing.T) {
 	}
 	if chat, raw := rig.chat(t, "dr-1"); len(chat.Turns) != 0 || chat.Pending != nil {
 		t.Fatalf("chat after the cancelled fork: %v", raw)
+	}
+}
+
+func TestClarifyDraftNeedsAFork(t *testing.T) {
+	rig := newClarifyRig(t)
+	rig.cards(t, dr1Card)
+	rig.clarifyFleet(t, fleetUUID(7020))
+	rig.results = []clarifyFake{{err: errClarifyExit}, {err: errClarifyExit}}
+	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
+		t.Fatalf("ask: %d %s", code, c)
+	}
+	calls := len(rig.calls)
+	if code, out := rig.do(t, "POST", "/fleet/clarify/draft", `{"cardId":"dr-1"}`); code != http.StatusBadRequest || rawCode(out) != "empty" {
+		t.Fatalf("draft with no fork: %d %v", code, out)
+	}
+	if len(rig.calls) != calls {
+		t.Fatalf("the draft ran a fork: %+v", rig.calls[calls:])
+	}
+}
+
+func TestClarifyForkIDMustBeFresh(t *testing.T) {
+	rig := newClarifyRig(t)
+	rig.cards(t, dr1Card)
+	fleetID := fleetUUID(7021)
+	rig.clarifyFleet(t, fleetID)
+	for _, bad := range []string{fleetID, "--help"} {
+		rig.results = []clarifyFake{{res: clarifyRunResult{SessionID: bad, Text: "because"}}}
+		if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
+			t.Fatalf("ask: %d %s", code, c)
+		}
+		rig.results = []clarifyFake{{res: clarifyRunResult{SessionID: clarifyForkID, Text: "ok"}}}
+		if code, c := rig.ask(t, "dr-1", "and?"); code != http.StatusAccepted {
+			t.Fatalf("next ask: %d %s", code, c)
+		}
+		c := lastCall(t, rig)
+		if !hasRun(c.argv, "--resume", fleetID, "--fork-session") {
+			t.Fatalf("after fork id %q the next ask resumed %q", bad, c.argv)
+		}
+		rig.cards(t, `[]`)
+		rig.stateClarify(t)
+		rig.cards(t, dr1Card)
+	}
+}
+
+func TestClarifyWorkerPanicFinishes(t *testing.T) {
+	rig := newClarifyRig(t)
+	rig.cards(t, dr1Card)
+	rig.clarifyFleet(t, fleetUUID(7022))
+	rig.s.fleet.clarifyRun = func(context.Context, string, []string) (clarifyRunResult, error) { panic("boom") }
+	if code, c := rig.ask(t, "dr-1", "why?"); code != http.StatusAccepted {
+		t.Fatalf("ask: %d %s", code, c)
+	}
+	chat, _ := rig.chat(t, "dr-1")
+	if chat.Pending != nil || len(chat.Turns) != 2 || chat.Turns[1].Role != "error" || chat.Turns[1].Text != "the fork failed; see the server log" {
+		t.Fatalf("chat after a panic: %+v", chat)
+	}
+	if code, c := rig.ask(t, "dr-1", "again?"); code != http.StatusAccepted {
+		t.Fatalf("ask after a panic: %d %s (the running count leaked?)", code, c)
 	}
 }

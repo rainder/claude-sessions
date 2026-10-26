@@ -141,6 +141,7 @@ type fleetDeps struct {
 	clarifyRun        func(ctx context.Context, cwd string, argv []string) (clarifyRunResult, error) // nil → runClarifyFork with claude on PATH
 	clarifyRetryDelay time.Duration                                                                  // 0 → 5 s
 	clarifyGo         func(func())                                                                   // nil → go f()
+	clarifyCuPath     func() string                                                                  // nil → clarifyCuPath()
 }
 
 func (s *server) fleetDir() string {
