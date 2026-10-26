@@ -13,10 +13,18 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inspector is select mode: mouse capture goes off, so a drag selects text and
   Cmd+C copies it; an amber hint shows, and `v` or Esc turns the mouse back
   on. An attach or prompt no longer turns capture back on behind select mode.
-  The FLEET view has no mouse capture at all. Its new `t` key shows the
+  The FLEET view keeps mouse capture on and has no select mode: there, use
+  Option+drag (iTerm2) or the new `t` key. `t` shows the
   selected card's raw text: no indent, no hard wrap, the terminal soft-wraps,
-  so a long command copies as one line. iTerm2's Option+drag also selects
-  while capture is on.
+  so a long command copies as one line, and capture is off on that screen.
+  iTerm2's Option+drag also selects while capture is on.
+
+- The TUI FLEET view (`F`) takes the mouse. The wheel over the details panel
+  scrolls it 3 lines. The wheel over the card list moves the selection one
+  card. A click on a card row selects that card. A click never sends, picks an
+  option or confirms. While a confirm panel is open, and on the empty-view
+  ship screen, the mouse does nothing. A plain drag no longer selects text in
+  this view.
 
 - FLEET card summaries in the TUI have clickable links (OSC 8): a markdown
   link `[4388c878](https://…)` shows only `4388c878`, and a bare http(s) URL

@@ -448,10 +448,11 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 		l.attach = fleetAttachVia(src, attach)
 	}
 	defer l.closeAll()
-	// The view reads no mouse events, so mouse reporting would only stop a
-	// drag from selecting card text (mouse_mode.go). An attach from here
-	// keeps it off; leaving the view turns it back on if the list wants it.
-	defer mouseMode.suspend(terminalOutput)()
+	// The view reads the wheel and clicks and has no select mode, so it
+	// captures the mouse even over the list's select mode (mouse_mode.go). An
+	// attach or the raw text screen comes back with it on; leaving the view
+	// gives the list its own mode back.
+	defer mouseMode.capture(terminalOutput)()
 	l.startState()
 	l.nextPoll = time.Now().Add(l.interval)
 	for {
@@ -468,15 +469,10 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 		now := time.Now()
 		l.reap(now)
 		l.tick(now)
-		var keys []string
+		inBatch := fleetKeyBatch(events)
 		for _, ev := range events {
-			if ev.kind == eventKey {
-				keys = append(keys, ev.key)
-			}
-		}
-		for _, k := range keys {
 			now := time.Now()
-			cmd := l.st.handleKey(k, len(keys) > 1, now)
+			cmd := l.st.handleEvent(ev, inBatch, now)
 			if cmd == fleetCmdRawText {
 				if it := l.st.selected(); it != nil {
 					runFleetRawView(fd, fleetRawLines(*it), wakes)
@@ -550,6 +546,7 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	}
 	sep := dim(strings.Repeat("─", width))
 
+	st.hit = fleetHitMap{}
 	top := []string{fleetHeaderLine(st, width, now)}
 	if st.err == "" && st.loaded && st.view.StateError != "" {
 		top = append(top, colorize(fleetSGRRed, st.view.StateError))
@@ -582,6 +579,14 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 		for len(body) < bodyRows {
 			body = append(body, "")
 		}
+	}
+	if st.hit.listItems != nil {
+		// fleetStackedBody kept body-relative rows; the body starts under
+		// top, and the panel is every body row after the list and its rule.
+		st.hit.on = true
+		st.hit.panelH = max(len(body)-st.hit.panelY, 0)
+		st.hit.listY += len(top)
+		st.hit.panelY += len(top)
 	}
 
 	lines := append(top, body...)
@@ -680,16 +685,21 @@ func fleetPanelWindow(lines []string, h, scroll int) ([]string, int) {
 // fleetStackedBody is the list window, the rule and the panel, in exactly
 // bodyRows rows (bodyRows < 0: everything).
 func fleetStackedBody(st *fleetViewState, cols, bodyRows int, now time.Time) []string {
-	list, selRow := fleetListLines(st, cols, now)
+	list, selRow, lineItems := fleetListLines(st, cols, now)
 	listH, rule, panelH := fleetStackedLayout(bodyRows, len(list), st.panel != nil)
 	headAbove := len(st.items) > 0 && (st.sel == 0 || st.items[st.sel-1].Section != st.items[st.sel].Section)
 	st.listTop = fleetListWindow(st.listTop, selRow, len(list), listH, headAbove)
 	st.panelRows = max(panelH, 0)
 
 	out := append([]string(nil), list[st.listTop:st.listTop+listH]...)
+	st.hit.listY, st.hit.listItems = 0, lineItems[st.listTop:st.listTop+listH]
 	if rule {
 		out = append(out, fleetListRule(cols, st.listTop, len(list)-st.listTop-listH))
 	}
+	// Body-relative; renderFleetView adds the rows above the body and sets
+	// the panel's height from the body it drew (the rest of it).
+	st.hit.panelY = len(out)
+	st.hit.scrolls = st.panel == nil
 	if panelH == 0 {
 		return out
 	}
@@ -806,24 +816,27 @@ var fleetSectionTitles = map[fleetSection]string{
 	fleetSecSent:    dim("SENT — WAITING FOR FLEET"),
 }
 
-// fleetListLines is one line per card under its section headings, and the
-// selected card's line index.
-func fleetListLines(st *fleetViewState, cols int, now time.Time) (lines []string, selRow int) {
+// fleetListLines is one line per card under its section headings, the
+// selected card's line index, and the item index each line shows (-1 for a
+// heading or the empty-list line).
+func fleetListLines(st *fleetViewState, cols int, now time.Time) (lines []string, selRow int, lineItems []int) {
 	if len(st.items) == 0 {
-		return []string{dim("No cards wait for you.")}, 0
+		return []string{dim("No cards wait for you.")}, 0, []int{-1}
 	}
 	sec := fleetSection(-1)
 	for i, it := range st.items {
 		if it.Section != sec {
 			sec = it.Section
 			lines = append(lines, fleetSectionTitles[sec])
+			lineItems = append(lineItems, -1)
 		}
 		if i == st.sel {
 			selRow = len(lines)
 		}
 		lines = append(lines, fleetCollapsedRow(it, i == st.sel, cols, now))
+		lineItems = append(lineItems, i)
 	}
-	return lines, selRow
+	return lines, selRow, lineItems
 }
 
 // fleetCollapsedRow is one card's list row.

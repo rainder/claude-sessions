@@ -140,6 +140,9 @@ func runFleetRawView(fd int, lines []string, wakes []wakeFD) {
 	dec := newInputDecoder()
 	top := 0
 	defer fmt.Fprint(os.Stdout, "\x1b[?7l"+screenHome+"\x1b[2J")
+	// This screen exists so a drag selects the text: mouse reporting goes
+	// off here and comes back on (the Fleet view captures it) on the way out.
+	defer mouseMode.suspend(terminalOutput)()
 	for {
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {

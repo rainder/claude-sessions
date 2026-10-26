@@ -87,6 +87,10 @@ type fleetViewState struct {
 	toastKind     fleetToastKind
 	toastUntil    time.Time
 
+	// hit is where the last render put the list and the panel on screen, for
+	// the mouse. applyState clears it, since a new state can move every row.
+	hit fleetHitMap
+
 	// The ship screen (fleet_ship.go), shown while no card needs Andy.
 	frame    int  // animation frame; the loop advances it every fleetShipFrame while the ship shows
 	listMode bool // Enter on the ship screen: show the SENT cards as the normal list
@@ -238,6 +242,8 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		}
 		return
 	}
+	// The rows on screen show the old list until the next render.
+	st.hit = fleetHitMap{}
 	// A send whose result was unclear may or may not have reached FLEET:
 	// this state decides, whatever it shows.
 	st.unclear = ""
@@ -567,6 +573,111 @@ func (st *fleetViewState) handlePanelKey(k string, inBatch bool, now time.Time) 
 	var edit bool
 	p.comment, edit = fleetEditComment(p.comment, k, opt.Send)
 	if edit {
+		return fleetCmdRender
+	}
+	return fleetCmdNone
+}
+
+// fleetMouseStep is how many panel lines one wheel event scrolls.
+const fleetMouseStep = 3
+
+// fleetHitMap is the card list's and the details panel's screen rows at the
+// last render (screen row 0 is the frame's first line). on is false for every
+// body but the card list (loading, an error, ambiguous, the ship screen).
+type fleetHitMap struct {
+	on        bool
+	listY     int   // screen row of the list window's first line
+	listItems []int // item index each list window line shows; -1 for a heading
+	panelY    int   // screen row of the panel's first line
+	panelH    int   // panel rows
+	scrolls   bool  // the panel is the details panel, which scrolls (the confirm panel does not)
+}
+
+// listItemAt is the item index of the list line at screen row y, -1 for a
+// heading, and ok false when y is not in the list window.
+func (h fleetHitMap) listItemAt(y int) (item int, ok bool) {
+	if !h.on || y < h.listY || y >= h.listY+len(h.listItems) {
+		return -1, false
+	}
+	return h.listItems[y-h.listY], true
+}
+
+func (h fleetHitMap) inPanel(y int) bool {
+	return h.on && y >= h.panelY && y < h.panelY+h.panelH
+}
+
+// fleetKeyBatch reports whether a read holds more than one key, which makes
+// it a paste (handleKey's inBatch). Mouse events do not count: a wheel turn
+// beside an Enter does not make the Enter part of a paste.
+func fleetKeyBatch(events []inputEvent) bool {
+	n := 0
+	for _, ev := range events {
+		if ev.kind == eventKey {
+			n++
+		}
+	}
+	return n > 1
+}
+
+// handleEvent applies one decoded input event: a key to handleKey, a mouse
+// event to handleMouse. inBatch is fleetKeyBatch of the whole read.
+func (st *fleetViewState) handleEvent(ev inputEvent, inBatch bool, now time.Time) fleetCmd {
+	switch ev.kind {
+	case eventKey:
+		return st.handleKey(ev.key, inBatch, now)
+	case eventMouse:
+		return st.handleMouse(ev.mouse)
+	}
+	return fleetCmdNone
+}
+
+// handleMouse applies one mouse event. It only moves the selection or the
+// details panel's scroll: no click sends, picks an option or confirms. The
+// wheel over the details panel scrolls it fleetMouseStep lines; over the card
+// list (rows and headings) it moves the selection one card, as ↑↓ do, since
+// the list window always follows the selection. A left press on a card row
+// selects that card. While a confirm panel is open it owns input: it does not
+// scroll, and the list under it must not change, so every event is ignored.
+// Releases, other buttons, and every row outside the list and the panel do
+// nothing, and so does every body but the card list (st.hit.on).
+func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
+	h := st.hit
+	if m.release || !h.on || st.panel != nil || st.shipOn() || st.selected() == nil {
+		return fleetCmdNone
+	}
+	switch m.button {
+	case mouseWheelUp, mouseWheelDown:
+		down := m.button == mouseWheelDown
+		if h.inPanel(m.y) {
+			if !h.scrolls {
+				return fleetCmdNone
+			}
+			if down {
+				st.scroll += fleetMouseStep
+			} else {
+				st.scroll = max(st.scroll-fleetMouseStep, 0)
+			}
+			return fleetCmdRender
+		}
+		if _, ok := h.listItemAt(m.y); !ok {
+			return fleetCmdNone
+		}
+		// What ↑↓ do: one card, stopping at the ends, panel back to its top.
+		if down && st.sel < len(st.items)-1 {
+			st.sel++
+		} else if !down && st.sel > 0 {
+			st.sel--
+		}
+		st.scroll = 0
+		return fleetCmdRender
+	case mouseLeft:
+		i, ok := h.listItemAt(m.y)
+		if !ok || i < 0 || i >= len(st.items) {
+			return fleetCmdNone
+		}
+		if i != st.sel {
+			st.sel, st.scroll = i, 0
+		}
 		return fleetCmdRender
 	}
 	return fleetCmdNone

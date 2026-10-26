@@ -89,7 +89,49 @@ func TestActCtxEnterRawKeepsSelectMode(t *testing.T) {
 	mouseMode = mouseModeState{suspended: 1}
 	(&actCtx{fd: -1}).enterRaw()
 	if strings.Contains(buf.String(), mouseEnableSequence) {
+		t.Fatalf("enterRaw under a suspension wrote %q", buf.String())
+	}
+
+	// An attach from the Fleet view comes back with capture on, even when
+	// the list it was opened from is in select mode.
+	buf.Reset()
+	mouseMode = mouseModeState{selectOn: true, captured: 1}
+	(&actCtx{fd: -1}).enterRaw()
+	if !strings.Contains(buf.String(), mouseEnableSequence) || strings.Contains(buf.String(), mouseDisableSequence) {
 		t.Fatalf("enterRaw in the Fleet view wrote %q", buf.String())
+	}
+}
+
+// The Fleet view captures the mouse for its whole life, whatever the list's
+// select mode; its raw text screen suspends it inside that; closing the view
+// gives the list back its own mode.
+func TestMouseCapture(t *testing.T) {
+	for _, selectOn := range []bool{false, true} {
+		m := mouseModeState{selectOn: selectOn}
+		var b strings.Builder
+		release := m.capture(&b)
+		if !m.wanted() || b.String() != mouseEnableSequence {
+			t.Fatalf("select=%v capture: wanted=%v wrote %q", selectOn, m.wanted(), b.String())
+		}
+		b.Reset()
+		resume := m.suspend(&b)
+		if m.wanted() || b.String() != mouseDisableSequence {
+			t.Fatalf("select=%v raw view: wanted=%v wrote %q", selectOn, m.wanted(), b.String())
+		}
+		b.Reset()
+		resume()
+		if !m.wanted() || b.String() != mouseEnableSequence {
+			t.Fatalf("select=%v raw view back: wanted=%v wrote %q", selectOn, m.wanted(), b.String())
+		}
+		b.Reset()
+		release()
+		want := mouseEnableSequence
+		if selectOn {
+			want = mouseDisableSequence
+		}
+		if m.wanted() == selectOn || b.String() != want || m.selectOn != selectOn {
+			t.Fatalf("select=%v close: wanted=%v wrote %q", selectOn, m.wanted(), b.String())
+		}
 	}
 }
 

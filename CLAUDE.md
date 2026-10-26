@@ -126,11 +126,16 @@ and that is what stops a drag from selecting text: the terminal sends the drag
 to the TUI. `v` on the session list and in the inspector is select mode
 (mouse off, an amber hint in the bottom row or the inspector footer; `v` or
 Esc turns it back on, and that Esc is used up before the screen's own Esc).
-The Fleet view reads no mouse events, so `runFleetView` suspends reporting
-for its whole life. Every re-entry after a prompt or subprocess
-(`actCtx.enterRaw`, `runInteractive`) writes `mouseMode.wanted()`, never a
-bare enable — or an attach from select mode or the Fleet view would quietly
-turn capture back on. iTerm2's Option+drag selects even while it is on.
+The Fleet view reads the wheel and clicks and has no select mode, so
+`runFleetView` **captures** reporting for its whole life (`mouseMode.capture`),
+even over the list's select mode; its `t` raw text screen **suspends** it
+inside that (`mouseMode.suspend`), because that screen exists for selecting.
+`wanted()` ranks them: a suspension wins, then a capture, then select mode.
+Leaving the view gives the list its own mode back. Every re-entry after a
+prompt or subprocess (`actCtx.enterRaw`, `runInteractive`) writes
+`mouseMode.wanted()`, never a bare enable or disable — so an attach from select
+mode comes back with capture off, and one from the Fleet view with it on.
+iTerm2's Option+drag selects even while it is on.
 
 **Tmux pane detection must check the pid itself first.** `walkTmuxPane` (tmux.go)
 walks pid → ppid up to 32 hops. It checks `panes[cur]` **before** moving to
@@ -1716,8 +1721,9 @@ details keep the selected row and one panel row, the confirm panel its
 comment and key lines (so only there does opening it shrink the list). A
 frame is exactly `rows` lines whatever the size.
 
-**Selecting and copying card text.** The view turns mouse reporting off
-(mouse_mode.go), so a drag selects. The details panel indents each summary
+**Selecting and copying card text.** The view keeps mouse reporting on
+(mouse_mode.go, for the mouse keys below), so a plain drag does **not** select
+here: use Option+drag (iTerm2) or `t`, whose screen turns reporting off. The details panel indents each summary
 line and hard-wraps it, so a wrapped command would copy with a newline and
 spaces in it. `t` opens the raw text screen (fleet_raw.go): the card's title,
 summary and options exactly as FLEET wrote them (markdown not rendered), from
@@ -1760,6 +1766,25 @@ refused with a toast while a send is in flight. `c` unlocks an answered card for
 correction; `x` dismisses an `unconfirmed` one, and not while a send or
 another dismiss runs. `a` attaches to the selected card's session (below),
 and not while a send or dismiss runs.
+
+**Mouse** (`handleMouse`, fleet_tui_state.go). The wheel over the details
+panel scrolls it 3 lines (`fleetMouseStep`), clamped like PgUp/PgDn; over the
+card list, rows and headings, it moves the selection one card, as ↑↓ do — not
+a free scroll, because the list window always follows the selection and
+would snap back. A left press on a card row selects that card. That is all:
+no click sends, picks an option or confirms. Releases, other buttons, the
+header, the rules, the footer, a heading click, the ship screen and the
+error, loading and ambiguous bodies do nothing. While a confirm or Other panel
+is open it owns input: it does not scroll, and the selection under it must
+not move, so every mouse event is ignored. Hit-testing reads `st.hit`
+(`fleetHitMap`), which `renderFleetView` records on every frame — the list
+window's first screen row and the item index of each of its lines (-1 for a
+heading), the panel's rows — with screen row 0 the frame's first line.
+`applyState` clears it: a state that lands between a draw and a click can move
+every row, so mouse events wait for the next draw. Mouse events never count
+toward a read being a paste (`fleetKeyBatch` counts keys only), so a wheel
+turn beside Enter leaves Enter a lone key, and none of them touches the
+panel's arm delay.
 
 **Attach** (`fleet_attach.go`). `a` opens the tmux session a card belongs
 to; the view comes back, redrawn and refetched, when Andy detaches. The
