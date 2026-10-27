@@ -80,6 +80,19 @@ func TestClarifyPreamble(t *testing.T) {
 	}
 }
 
+func TestClarifyToolsNote(t *testing.T) {
+	got := clarifyToolsNote("/x/cu-with-token")
+	for _, w := range []string{"git log", "gh pr view", "/x/cu-with-token fetch <TICKET>", "jq",
+		"`/x/cu-with-token fetch DR-1234`", "no shell variables", "does not mean Bash is off"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("tools note lacks %q:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "claude-sessions usage") || strings.Contains(got, "rg,") {
+		t.Errorf("tools note names a command the fork may not run:\n%s", got)
+	}
+}
+
 func TestClarifyAskPrompt(t *testing.T) {
 	c := fleetCardView{ID: "dr5791-count", Title: "run the count", Summary: "only on your Mac",
 		Options: []fleetOptionView{{Key: "done", Label: "Ran it"}}}

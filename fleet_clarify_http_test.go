@@ -226,7 +226,7 @@ func TestClarifyAskFirstForksFleet(t *testing.T) {
 	if n := len(c.argv); n < 2 || c.argv[n-2] != "--" || c.argv[n-1] != clarifyAskPrompt(card, true, "why now?") {
 		t.Fatalf("argv tail %q", c.argv)
 	}
-	if !hasRun(c.argv, "--append-system-prompt", clarifyPreamble(card)) {
+	if !hasRun(c.argv, "--append-system-prompt", clarifyPreamble(card)+clarifyToolsNote("/usr/bin/cu-test")) {
 		t.Fatalf("preamble missing from %q", c.argv)
 	}
 	chat, raw := rig.chat(t, "dr-1")

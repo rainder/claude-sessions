@@ -280,7 +280,8 @@ func (s *server) clarifyWork(ctx context.Context, cancel context.CancelFunc, car
 	if s.fleet.clarifyCuPath != nil {
 		cuPath = s.fleet.clarifyCuPath
 	}
-	p := clarifyRunParams{Model: e.Model, CuPath: cuPath(), Preamble: preamble, Question: question}
+	cu := cuPath()
+	p := clarifyRunParams{Model: e.Model, CuPath: cu, Preamble: preamble + clarifyToolsNote(cu), Question: question}
 	first := e.ForkID == ""
 	if first {
 		p.ResumeID, p.Fork = e.FleetSessionID, true

@@ -118,6 +118,18 @@ func clarifyPreamble(c fleetCardView) string {
 	return b.String()
 }
 
+// clarifyToolsNote lists what the fork may run. It resumes FLEET's
+// conversation, where the ClickUp and Slack tools and any shell were there:
+// a fork whose `f=…; ls $f` was refused said "Bash is blocked" and never
+// tried `cu fetch` for the ticket (DR-5790, 2026-10-27).
+func clarifyToolsNote(cuPath string) string {
+	cmds := append(append(append([]string{}, clarifyAllowedBash...), cuPath+" fetch <TICKET>"), clarifyAllowedBashTail...)
+	return "\nYour tools here: Read, Grep and Glob for files, and Bash for these read-only commands only: " +
+		strings.Join(cmds, ", ") + ". " +
+		"The ClickUp and Slack tools from the conversation above are not loaded; read a ticket with `" + cuPath + " fetch DR-1234`. " +
+		"Write each command plainly: no shell variables and no $(...); a refused command does not mean Bash is off, so run it again plainly or use Read.\n"
+}
+
 // clarifyCardBlock is the card as the fork reads it: id, ticket, title,
 // summary, options and lean.
 func clarifyCardBlock(c fleetCardView) string {
