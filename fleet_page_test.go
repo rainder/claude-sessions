@@ -158,3 +158,35 @@ func TestFleetPageCSPAllowsThumbnails(t *testing.T) {
 		t.Fatal("blob: is for images only")
 	}
 }
+
+// TestFleetPageCardsFold: decision cards fold behind a real button that says
+// whether it is open, the open set survives a reload through try-wrapped
+// storage, a deep link opens its card, and a shut card draws no options.
+func TestFleetPageCardsFold(t *testing.T) {
+	page := string(fleetPageHTML)
+	for _, need := range []string{
+		`const FOLD_KEY = "fleet.expanded.v1";`,
+		"try {\n    const m = obj(JSON.parse(localStorage.getItem(FOLD_KEY)",
+		"try {\n      if (!unfolded.size) localStorage.removeItem(FOLD_KEY);",
+		`el("button", "card-tog"`, `b.type = "button";`,
+		`b.setAttribute("aria-expanded", open ? "true" : "false");`, `b.setAttribute("aria-controls", bodyId);`,
+		"unfolded.get(str(c.id)) === str(c.kind)",
+		"if (!open) { body.hidden = true; return card; }",
+		"if (openCardID) unfoldCard(",
+		"decisionCard(c, true, true)", "decisionCard(c, false, true)", "decisionCard(c, explicit))",
+		"pruneUnfolded(st);",
+	} {
+		if !strings.Contains(page, need) {
+			t.Errorf("fleet.html must contain %q", need)
+		}
+	}
+	// The header button holds plain text only: no linkText inside foldHead.
+	i := strings.Index(page, "function foldHead(")
+	j := strings.Index(page, "function titleLinks(")
+	if i < 0 || j < i {
+		t.Fatal("foldHead and titleLinks not found in order")
+	}
+	if strings.Contains(page[i:j], "linkText(") || strings.Contains(page[i:j], "safeLink(") {
+		t.Error("foldHead must not put links inside the toggle button")
+	}
+}
