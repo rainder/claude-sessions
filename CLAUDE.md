@@ -1162,6 +1162,22 @@ note to FLEET goes with no `cardId` on purpose: any `cardId` says "this is an
 answer to the card", and the server would record Chat as one and move the card
 to SENT.
 
+**Folded cards.** A decision card in Decide starts collapsed. Its header is
+one `<button aria-expanded aria-controls>` (`foldHead`) that opens and closes
+it; shut, it shows the kind, `P1`..`P4`, the age, the ticket and title (two
+lines at most), the lean ("FLEET recommends: <label>" when it names an option,
+else "Lean: <text>"), and an amber `Unconfirmed` when the last answer is
+`unconfirmed` or its card changed. A button holds plain text only, so the
+title's autolinks move to the open body's links (`titleLinks`). The Chat button
+sits beside it and does not toggle. A shut card's body is empty, so a tap meant
+to open it can never pick an option. The open set is card id → kind in
+localStorage `fleet.expanded.v1` (every access in try/catch): a card is open
+only while its kind matches, so a card that moves between Needs you and
+Explicit yes, or a new one, starts shut, and a good state prunes ids that are
+gone (a bad state.json prunes nothing). A card with no id never folds. A deep
+link (`#card-<id>`, `open-card`) opens its card before scrolling to it. Sent
+rows show their card whole, as before.
+
 **Priority and order.** A card may hold `priority`, an integer 1..4 (1
 Urgent, 2 High, 3 Normal, 4 Low, the spawn-group scale). `fleet-state.py`
 refuses any other value; a missing field is 3. The script also stamps

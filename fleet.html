@@ -211,6 +211,30 @@ section { min-width: 0; }
 .prio.p1 { color: var(--red); background: var(--red-tint); border-color: var(--red-line); }
 .prio.p2 { color: var(--amber); background: var(--amber-tint); border-color: var(--amber-line); }
 .card .summary { margin: 10px 0 0; font-size: 14.5px; }
+/* A folded card: its header is one button that opens and closes it. Shut,
+   the title keeps to two lines and the lean to one. */
+.card.fold { padding: 0; }
+.card.fold > .card-top { align-items: center; padding-right: 8px; }
+.card-tog { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 10px; min-height: 48px; padding: 10px 4px 10px 12px; border: 0; border-radius: var(--r); background: none; text-align: left; cursor: pointer; }
+.card-tog:focus-visible { outline-offset: -2px; }
+.card-tog .chev { margin: 7px 0 0; }
+.card-tog:hover .chev { border-color: var(--text); }
+.card-tog[aria-expanded="true"] .chev { transform: rotate(45deg); }
+.fold-title { flex: 1; min-width: 0; display: block; }
+.fold-title .card-meta { margin: 0 0 3px; align-items: center; }
+.fold-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; font-weight: 620; font-size: 15px; overflow-wrap: anywhere; }
+.card-tog[aria-expanded="true"] .fold-name { display: block; -webkit-line-clamp: none; line-clamp: none; font-size: 15.5px; }
+.fold-name .tk { margin-right: 6px; font-family: var(--mono); font-size: 12px; font-weight: 450; color: var(--muted); }
+.fold-lean { display: block; margin-top: 3px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; color: var(--muted); }
+.fold-lean b { font-weight: 600; color: var(--text); }
+.kind { padding: 0 7px; border: 1px solid; border-radius: 99px; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.kind-yes { color: var(--red); background: var(--red-tint); border-color: var(--red-line); }
+.kind-needs { color: var(--amber); background: var(--amber-tint); border-color: var(--amber-line); }
+.fold-warn { display: inline-flex; align-items: center; gap: 5px; color: var(--amber); font-weight: 600; white-space: nowrap; }
+.fold-warn .dot { background: var(--amber); }
+.card.fold > .card-body { padding: 0 12px 12px 14px; }
+/* A title link can be a long URL: break it rather than widen the card. */
+.card-body .links a { overflow-wrap: anywhere; min-width: 0; }
 /* Chat: opens the card's session, or the FLEET chat when none is live. */
 .btn.chat-btn { flex: none; min-height: 44px; padding: 0 14px; }
 .row > .row-head.has-act { display: flex; align-items: center; gap: 10px; }
@@ -1483,6 +1507,25 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   let stateReqs = 0;
   // correcting: card ids whose "Send a correction" is open.
   const correcting = new Set();
+  // Decision cards fold: each starts collapsed, and its header button opens
+  // it. unfolded: card id → kind of the cards Andy opened, kept in
+  // localStorage (FOLD_KEY) so a reload keeps them open. A card is open
+  // only while its kind is the one it was opened with: a card that moves
+  // between Needs you and Explicit yes asks something else, so it starts
+  // collapsed again. A card with no id cannot be tracked and always shows
+  // open. Storage that throws leaves the map for this page only.
+  const FOLD_KEY = "fleet.expanded.v1";
+  const unfolded = new Map();
+  try {
+    const m = obj(JSON.parse(localStorage.getItem(FOLD_KEY) || "null"));
+    if (m) for (const [id, k] of Object.entries(m)) if (id && (k === "needs-you" || k === "explicit-yes")) unfolded.set(id, k);
+  } catch { /* storage off: every card starts collapsed */ }
+  function saveUnfolded() {
+    try {
+      if (!unfolded.size) localStorage.removeItem(FOLD_KEY);
+      else localStorage.setItem(FOLD_KEY, JSON.stringify(Object.fromEntries(unfolded)));
+    } catch { /* storage off: open cards last for this page only */ }
+  }
   // Before the server store, the page kept its answers in localStorage
   // (PEND_KEY). The server store starts empty after the deploy, so the
   // entries an older page wrote are read once and still honoured by their
@@ -2130,9 +2173,87 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     return {ticket, title, name: ticket || title};
   }
 
-  // Decision cards show everything needed to decide without a tap: the
-  // summary, every option's label and one-line effect, and the links.
-  function decisionCard(c, explicit) {
+  // cardOpen: a decision card shows unfolded (see unfolded).
+  const cardOpen = c => !str(c.id) || unfolded.get(str(c.id)) === str(c.kind);
+  // unfoldCard opens a decision card (a deep link to it); false when there
+  // was nothing to change.
+  function unfoldCard(c) {
+    if (!c || !str(c.id) || !isDecision(c) || cardOpen(c)) return false;
+    unfolded.set(str(c.id), str(c.kind));
+    saveUnfolded();
+    return true;
+  }
+  function toggleCard(c) {
+    const id = str(c.id);
+    if (!id) return;
+    if (cardOpen(c)) unfolded.delete(id); else unfolded.set(id, str(c.kind));
+    saveUnfolded();
+    guard(renderCards);
+  }
+  // pruneUnfolded drops the ids that are no longer an open question of the
+  // same kind. Only a good state prunes: a bad state.json must not read as
+  // "every card is gone".
+  function pruneUnfolded(st) {
+    if (!Array.isArray(st.cards) || str(st.stateError)) return;
+    const kinds = new Map(st.cards.map(obj).filter(c => c && str(c.id) && isDecision(c)).map(c => [str(c.id), str(c.kind)]));
+    let dirty = false;
+    for (const [id, k] of unfolded) if (kinds.get(id) !== k) { unfolded.delete(id); dirty = true; }
+    if (dirty) saveUnfolded();
+  }
+  // Age: since the card first showed (firstSeenAt, the sort key); a card
+  // without a readable one falls back to updatedAt.
+  const cardAge = c => parseTime(c.firstSeenAt) !== null ? str(c.firstSeenAt) : str(c.updatedAt);
+  let foldSeq = 0;
+  // foldHead: a folded card's header, one button that opens and closes it.
+  // A button holds plain text only (a link inside it would be nested
+  // interactive content), so the open body carries the title's links. Shut,
+  // it shows the kind, priority, age, title (two lines at most) and FLEET's
+  // lean, plus a warning when the last answer's delivery is not confirmed,
+  // so that never hides behind the fold.
+  function foldHead(c, explicit, open, bodyId, warn) {
+    const head = cardHead(c), lean = str(c.lean);
+    const meta = el("span", "card-meta",
+      el("span", "kind " + (explicit ? "kind-yes" : "kind-needs"), explicit ? "Explicit yes" : "Needs you"), prioSpan(c));
+    if (warn && !open) {
+      const w = el("span", "fold-warn", el("span", "dot"), "Unconfirmed");
+      w.title = "Delivery of your last answer is not confirmed: open the card";
+      meta.append(w);
+    }
+    if (open && str(c.session)) { const se = el("span", "sess", str(c.session)); se.title = str(c.session); meta.append(se); }
+    if (open && str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
+    if (cardAge(c)) meta.append(relSpan(cardAge(c)));
+    const name = el("span", "fold-name", head.ticket ? el("span", "tk", head.ticket) : null, el("span", "tt", head.title));
+    let leanEl = null;
+    if (!open && lean) {
+      const o = optionList(c).find(o => str(o.key) === lean);
+      leanEl = o ? el("span", "fold-lean", "FLEET recommends: ", el("b", "", str(o.label) || str(o.send) || lean))
+        : el("span", "fold-lean", "Lean: ", el("b", "", lean));
+    }
+    const b = el("button", "card-tog", el("span", "chev"), el("span", "fold-title", meta, name, leanEl));
+    b.type = "button";
+    b.setAttribute("aria-expanded", open ? "true" : "false");
+    b.setAttribute("aria-controls", bodyId);
+    b.addEventListener("click", () => toggleCard(c));
+    return b;
+  }
+  // titleLinks: the links in a card's ticket and title (linkText's
+  // autolinks) that the card's own links do not already hold. A folded
+  // card's header cannot hold them, so its open body does.
+  function titleLinks(c) {
+    const head = cardHead(c), box = el("span");
+    if (head.ticket) linkText(box, head.ticket + " ");
+    linkText(box, head.title);
+    const seen = new Set(arr(c.links).map(obj).filter(Boolean).map(l => {
+      try { return new URL(str(l.url)).href; } catch { return ""; }
+    }));
+    return [...box.querySelectorAll("a")].filter(a => !seen.has(a.href) && (seen.add(a.href), true));
+  }
+
+  // Decision cards show everything needed to decide without a tap once
+  // open: the summary, every option's label and one-line effect, and the
+  // links. fold: the card folds behind its header (the Decide lists; a
+  // sent row shows its card whole). A card with no id never folds.
+  function decisionCard(c, explicit, fold) {
     const id = str(c.id);
     const head = cardHead(c);
     const opts = optionList(c);
@@ -2141,18 +2262,33 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
 
     const card = el("article", "card " + (explicit ? "k-yes" : "k-needs"));
     card.dataset.cardId = id;
-    const title = el("div", "card-title",
-      head.ticket ? linkText(el("span", "tk"), head.ticket) : null,
-      linkText(el("span", "tt"), head.title));
-    const meta = el("div", "card-meta", prioSpan(c));
-    if (str(c.session)) { const se = el("span", "sess", str(c.session)); se.title = str(c.session); meta.append(se); }
-    if (str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
-    // Age: since the card first showed (firstSeenAt, the sort key); a card
-    // without a readable one falls back to updatedAt.
-    const age = parseTime(c.firstSeenAt) !== null ? str(c.firstSeenAt) : str(c.updatedAt);
-    if (age) meta.append(relSpan(age));
-    title.append(meta);
-    card.append(el("div", "card-top", title, chatBtn(c)));
+    const ans = answerOf(id);
+    const last = lastAttempt(ans);
+    // body: where everything under the header goes; the card itself when
+    // it does not fold. A shut card's body is empty, so a tap meant to open
+    // it can never land on an option.
+    let body = card;
+    const folds = !!(fold && id), open = !folds || cardOpen(c);
+    if (folds) {
+      const bodyId = "cbody-" + (++foldSeq);
+      const warn = !!(last && (last.state === "unconfirmed" || ans.cardChanged));
+      card.classList.add("fold");
+      card.append(el("div", "card-top", foldHead(c, explicit, open, bodyId, warn), chatBtn(c)));
+      body = el("div", "card-body");
+      body.id = bodyId;
+      card.append(body);
+      if (!open) { body.hidden = true; return card; }
+    } else {
+      const title = el("div", "card-title",
+        head.ticket ? linkText(el("span", "tk"), head.ticket) : null,
+        linkText(el("span", "tt"), head.title));
+      const meta = el("div", "card-meta", prioSpan(c));
+      if (str(c.session)) { const se = el("span", "sess", str(c.session)); se.title = str(c.session); meta.append(se); }
+      if (str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
+      if (cardAge(c)) meta.append(relSpan(cardAge(c)));
+      title.append(meta);
+      card.append(el("div", "card-top", title, chatBtn(c)));
+    }
 
     // Andy's answers, once sent: shown by the title until FLEET drops or
     // rewrites the card. They come from answerOf, so an answer sent from
@@ -2161,21 +2297,19 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     // the correction (at most the last 3). An unconfirmed last answer stays
     // even when the card is rewritten, until Andy dismisses it or a
     // correction is confirmed.
-    const ans = answerOf(id);
     const shown = ans ? ans.attempts.slice(-3) : [];
-    const last = lastAttempt(ans);
     const changing = !!(last && correcting.has(id));
     const locked = !!(last && !changing);
     if (last) {
-      shown.forEach((a, i) => card.append(chosenLine(i ? "Correction: " : "You chose: ", a.label, a.state)));
+      shown.forEach((a, i) => body.append(chosenLine(i ? "Correction: " : "You chose: ", a.label, a.state)));
       if (ans.cardChanged && last.state === "unconfirmed")
-        card.append(el("div", "chosen-line warn", el("span", "cl-t", el("span", "dot"),
+        body.append(el("div", "chosen-line warn", el("span", "cl-t", el("span", "dot"),
           el("span", "", "Card changed · delivery of your last answer is still unknown — check the chat"))));
       if (changing) {
         const cancel = el("button", "link-btn", "Cancel");
         cancel.type = "button";
         cancel.addEventListener("click", () => { correcting.delete(id); guard(renderCards); });
-        card.append(el("div", "chosen-note", el("span", "", "Pick the correction below."), cancel));
+        body.append(el("div", "chosen-note", el("span", "", "Pick the correction below."), cancel));
       } else if (last.state !== "sending") {
         const acts = el("div", "chosen-acts");
         if (id && canSendNow()) {
@@ -2191,16 +2325,16 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
           dis.addEventListener("click", () => dismissAnswer(id));
           acts.append(dis);
         }
-        if (acts.childNodes.length) card.append(acts);
+        if (acts.childNodes.length) body.append(acts);
       }
     }
 
     const sum = str(c.summary);
-    if (sum) card.append(el("div", "summary rich", renderSummary(sum)));
+    if (sum) body.append(el("div", "summary rich", renderSummary(sum)));
 
     // A lean that names an option shows as that option's tag; a "Lean:" line
     // is only for a lean that matches no option.
-    if (lean && !leanOpt) card.append(el("p", "lean-line", "Lean: ", el("b", "", lean)));
+    if (lean && !leanOpt) body.append(el("p", "lean-line", "Lean: ", el("b", "", lean)));
 
     const canSend = canSendNow() && !!id;
     const box = el("div", "opts");
@@ -2228,13 +2362,14 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     box.append(other);
     const cl = clarifyBtn(c);
     if (cl) box.append(cl);
-    card.append(box);
+    body.append(box);
     // Without an id the page cannot tie an answer to the card, lock it or
     // track its delivery, so the options only show.
-    if (opts.length && !id) card.append(el("p", "noid-note", "This card has no id, so the page cannot track an answer. Answer in the chat."));
+    if (opts.length && !id) body.append(el("p", "noid-note", "This card has no id, so the page cannot track an answer. Answer in the chat."));
 
-    const links = linksNode(c);
-    if (links) card.append(links);
+    const links = linksNode(c), tl = folds ? titleLinks(c) : [];
+    if (links) { links.append(...tl); body.append(links); }
+    else if (tl.length) body.append(el("span", "links", ...tl));
     return card;
   }
 
@@ -3036,7 +3171,12 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     box.title = n.busy + " busy, " + n.idle + " idle" + (n.shell ? ", " + n.shell + " shell" : "") + " (from this server, not FLEET)";
     box.hidden = false;
   }
-  function renderCards() { keepScroll(() => keepFocus(renderCardsNow)); }
+  // showCard runs after keepScroll: its anchor correction would cancel the
+  // smooth scroll to a card that just unfolded above the view.
+  function renderCards() {
+    keepScroll(() => keepFocus(renderCardsNow));
+    if (openCardID !== null && state) showCard();
+  }
   function renderCardsNow() {
     const cards = arr(state && state.cards).map(obj).filter(Boolean);
     // Working and waiting cards are no longer shown: the working list comes
@@ -3052,8 +3192,10 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     g.yes = byPrio(g.yes);
     g.needs = byPrio(g.needs);
     const cid = c => str(c.id) ? "card:" + str(c.id) : "";
-    $("list-yes").replaceChildren(...g.yes.map(c => fkey(decisionCard(c, true), cid(c))));
-    $("list-needs").replaceChildren(...g.needs.map(c => fkey(decisionCard(c, false), cid(c))));
+    // A card a notification asked to show opens before it is drawn.
+    if (openCardID) unfoldCard([...g.yes, ...g.needs].find(c => str(c.id) === openCardID));
+    $("list-yes").replaceChildren(...g.yes.map(c => fkey(decisionCard(c, true, true), cid(c))));
+    $("list-needs").replaceChildren(...g.needs.map(c => fkey(decisionCard(c, false, true), cid(c))));
     $("sec-yes").hidden = !g.yes.length;
     $("sec-needs").hidden = !g.needs.length;
     $("no-decisions").hidden = !!(g.yes.length || g.needs.length) || !state;
@@ -3078,7 +3220,6 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     badge.classList.toggle("red", openYes > 0);
     badge.parentNode.parentNode.setAttribute("aria-label", n ? "Decide, " + n + " need you" : "Decide");
     markCode();
-    if (openCardID !== null && state) showCard();
   }
 
   function renderNow() {
@@ -3105,6 +3246,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const day = vilniusDay(new Date());
     const changed = text !== stateText || day !== stateDay;
     state = st; stateText = text; stateDay = day;
+    pruneUnfolded(st);
     const fl = obj(st.fleet);
     alive = !!(fl && fl.alive === true);
     start.retryUntil = fl && num(fl.retryAfter) && fl.retryAfter > 0 ? Date.now() + fl.retryAfter * 1000 : 0;
@@ -5191,11 +5333,13 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
 
   // A notification tap: the worker posts {type: "open-card"} to an open
   // page, or opens /fleet#card-<id>. Either way: Decide, card in view.
+  // A folded card opens first (renderCardsNow), so the view lands on all of
+  // it.
   function openCard(id) {
     openCardID = id;
     viewChosen = true;
     setView("decide", true);
-    if (state) showCard();
+    if (state) guard(renderCards);
   }
   function showCard() {
     const id = openCardID;
