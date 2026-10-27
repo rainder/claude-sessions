@@ -2270,7 +2270,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     let body = card;
     const folds = !!(fold && id), open = !folds || cardOpen(c);
     if (folds) {
-      const bodyId = "card-body-" + (++foldSeq);
+      const bodyId = "cbody-" + (++foldSeq);
       const warn = !!(last && (last.state === "unconfirmed" || ans.cardChanged));
       card.classList.add("fold");
       card.append(el("div", "card-top", foldHead(c, explicit, open, bodyId, warn), chatBtn(c)));
@@ -3171,7 +3171,12 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     box.title = n.busy + " busy, " + n.idle + " idle" + (n.shell ? ", " + n.shell + " shell" : "") + " (from this server, not FLEET)";
     box.hidden = false;
   }
-  function renderCards() { keepScroll(() => keepFocus(renderCardsNow)); }
+  // showCard runs after keepScroll: its anchor correction would cancel the
+  // smooth scroll to a card that just unfolded above the view.
+  function renderCards() {
+    keepScroll(() => keepFocus(renderCardsNow));
+    if (openCardID !== null && state) showCard();
+  }
   function renderCardsNow() {
     const cards = arr(state && state.cards).map(obj).filter(Boolean);
     // Working and waiting cards are no longer shown: the working list comes
@@ -3215,7 +3220,6 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     badge.classList.toggle("red", openYes > 0);
     badge.parentNode.parentNode.setAttribute("aria-label", n ? "Decide, " + n + " need you" : "Decide");
     markCode();
-    if (openCardID !== null && state) showCard();
   }
 
   function renderNow() {
