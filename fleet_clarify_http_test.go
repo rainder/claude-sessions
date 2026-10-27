@@ -222,10 +222,11 @@ func TestClarifyAskFirstForksFleet(t *testing.T) {
 	if !hasRun(c.argv, "--resume", fleetUUID(7001), "--fork-session", "--model", "claude-m") {
 		t.Fatalf("argv %q", c.argv)
 	}
-	if n := len(c.argv); n < 2 || c.argv[n-2] != "--" || c.argv[n-1] != "why now?" {
+	card := cardFromJSON(t, dr1Card[1:len(dr1Card)-1])
+	if n := len(c.argv); n < 2 || c.argv[n-2] != "--" || c.argv[n-1] != clarifyAskPrompt(card, true, "why now?") {
 		t.Fatalf("argv tail %q", c.argv)
 	}
-	if !hasRun(c.argv, "--append-system-prompt", clarifyPreamble(cardFromJSON(t, dr1Card[1:len(dr1Card)-1]))) {
+	if !hasRun(c.argv, "--append-system-prompt", clarifyPreamble(card)) {
 		t.Fatalf("preamble missing from %q", c.argv)
 	}
 	chat, raw := rig.chat(t, "dr-1")
@@ -267,6 +268,9 @@ func TestClarifyLaterAskNeedsNoLiveFleet(t *testing.T) {
 	c := lastCall(t, rig)
 	if !hasRun(c.argv, "--resume", clarifyForkID) || slices.Contains(c.argv, "--fork-session") || c.cwd != "/w" {
 		t.Fatalf("cwd %q argv %q", c.cwd, c.argv)
+	}
+	if want := clarifyAskPrompt(cardFromJSON(t, dr1Card[1:len(dr1Card)-1]), false, "and then?"); c.argv[len(c.argv)-1] != want {
+		t.Fatalf("second ask sent %q, want %q", c.argv[len(c.argv)-1], want)
 	}
 	if !hasRun(c.argv, "--model", "claude-m") {
 		t.Fatalf("a resumed fork must keep the stored model: %q", c.argv)

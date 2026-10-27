@@ -221,6 +221,8 @@ func (s *server) clarifyStart(cardID, kind, question string) (clarifyEntry, stri
 	}
 	if kind == clarifyKindDraft {
 		question = clarifyDraftPrompt(cardID)
+	} else {
+		question = clarifyAskPrompt(card.Card, e.ForkID == "", question)
 	}
 	preamble := clarifyPreamble(card.Card)
 	run := func() { s.clarifyWork(ctx, cancel, cardID, kind, token, e, preamble, question) }
