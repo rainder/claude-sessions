@@ -1263,7 +1263,7 @@ rather than denied by flag: `--pre` and `--hostname-bin` run a program, and
 Grep already searches. The
 matcher already refuses redirects, `;`, `&&`, `$()`, `git -c` and `gh pr
 merge`. The preamble forbids finishing FLEET's unfinished step: a mid-turn
-fork offered to re-run it. The card is also in the user turn (`clarifyAskPrompt`): in full on the first ask, as id and title on later ones. In the system prompt alone it lost to FLEET's last turn, and "why can't you run it?" was answered about FLEET's own to-do list. The cwd is the one in FLEET's transcript head
+fork offered to re-run it. The card is also in the user turn (`clarifyAskPrompt`): in full on the first ask, as id and title on later ones. In the system prompt alone it lost to FLEET's last turn, and "why can't you run it?" was answered about FLEET's own to-do list. The preamble also lists the allowed look-ups (`clarifyToolsNote`), names `<cu> fetch` for tickets (the ClickUp and Slack MCP tools seen in FLEET's history are not loaded), and says a refused command is not Bash being off: a fork whose `f=…; ls $f` was refused told Andy Bash was blocked and never read the ticket. The cwd is the one in FLEET's transcript head
 (`readResumableHeadFn`), else the session's: claude finds a transcript only
 from the folder it started in.
 
