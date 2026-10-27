@@ -1256,10 +1256,10 @@ func TestWriteUsageHeaderFitTiers(t *testing.T) {
 			},
 		},
 		{
-			name: "tier 3: labels at 3, one-word marker, bars under usageBarMin", accounts: screenshotUsageAccounts(now), cols: 80,
+			name: "tier 3: full labels, one-word marker, bars under usageBarMin", accounts: screenshotUsageAccounts(now), cols: 80,
 			check: func(t *testing.T, lines []string) {
-				for i, want := range []string{"ask", "avi", "vna", "tre"} {
-					if !strings.HasPrefix(lines[i], dim(want)+" ") {
+				for i, want := range []string{"askerla", "avisoma", "vnaus  ", "trecs  "} {
+					if !strings.HasPrefix(stripANSI(lines[i]), want+" ") {
 						t.Errorf("line %d = %q, want it to start with %q", i, stripANSI(lines[i]), want)
 					}
 					if b := usageLineBarW(lines[i], 4); b >= usageBarMin || b < 1 {
@@ -1315,14 +1315,27 @@ func TestWriteUsageHeaderFitTiers(t *testing.T) {
 			},
 		},
 		{
-			name: "no distinct short cut fits: narrow bars before a clash", accounts: similar, cols: 31,
+			name: "tier 3 keeps the widest label that fits over wider bars", accounts: similar, cols: 31,
+			check: func(t *testing.T, lines []string) {
+				for i, want := range []string{"avisoma", "avisual", "trecs"} {
+					if !strings.HasPrefix(stripANSI(lines[i]), want+" ") {
+						t.Errorf("line %d = %q, want label %q", i, stripANSI(lines[i]), want)
+					}
+					if b := usageLineBarW(lines[i], 2); b >= usageBarMin {
+						t.Errorf("line %d bar width = %d, want under usageBarMin", i, b)
+					}
+				}
+			},
+		},
+		{
+			name: "tier 3 cut stops before a clash", accounts: similar, cols: 27,
 			check: func(t *testing.T, lines []string) {
 				for i, want := range []string{"aviso", "avisu", "trecs"} {
 					if !strings.HasPrefix(lines[i], dim(want)+" ") {
 						t.Errorf("line %d = %q, want label %q", i, stripANSI(lines[i]), want)
 					}
-					if b := usageLineBarW(lines[i], 2); b >= usageBarMin {
-						t.Errorf("line %d bar width = %d, want under usageBarMin", i, b)
+					if b := usageLineBarW(lines[i], 2); b != 1 {
+						t.Errorf("line %d bar width = %d, want 1", i, b)
 					}
 				}
 			},
@@ -1398,6 +1411,37 @@ func TestUsageLineMarkerShort(t *testing.T) {
 		if (usageLineMarker(c.a, now) == "") != (c.want == "") {
 			t.Errorf("short and full markers disagree on having one: %+v", c.a)
 		}
+	}
+}
+
+// A cut must never leave a foreign Codex or Grok label as a bare provider
+// tag: "codex bob" cut to "codex" would read as this machine's own account.
+func TestWriteUsageHeaderCutKeepsForeignProviderLabel(t *testing.T) {
+	plain := func(pct float64) *UsageInfo { return &UsageInfo{FiveHour: usageBucket{Pct: pct}} }
+	accounts := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: plain(41)},
+		{label: "trecs", email: "andy@trecs.aero", info: plain(63)},
+	}
+	codex := []codexAccountLine{{label: "bob", info: &CodexUsageInfo{Windows: []codexWindow{{Label: "wk", Pct: 20}}}}}
+	render := func(cols int) string {
+		var b strings.Builder
+		writeUsageHeader(&b, accounts, codex, nil, cols)
+		lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+		if len(lines) != 3 {
+			t.Fatalf("cols=%d: lines = %#v", cols, lines)
+		}
+		return stripANSI(clipLine(lines[2], cols))
+	}
+	// cols 34 would fit tier 1 with labels cut to 6 runes, which is "codex".
+	// That width is not allowed, so the label keeps at least "codex b".
+	for _, cols := range []int{35, 34, 33} {
+		if line := render(cols); !strings.HasPrefix(line, "codex b") {
+			t.Errorf("cols=%d: codex line = %q, want its label to keep at least %q", cols, line, "codex b")
+		}
+	}
+	// Nothing fits: labels drop on every segmented line, as before.
+	if line := render(24); strings.HasPrefix(line, "codex") || !strings.HasPrefix(line, "wk ") {
+		t.Errorf("narrow codex line = %q, want the label dropped", line)
 	}
 }
 

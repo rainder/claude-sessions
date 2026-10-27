@@ -2651,8 +2651,12 @@ printable ASCII only), with `stale <age>` before it when the reading is past
 `auth expired · ` when the line was an expired placeholder (`deadLocal`: the
 remote's bars do not revive the local credential; a reason placeholder gets
 the plain via marker) — the same trailing mechanism and `suffixW` sizing as
-the stale marker, counted in runes. A via line never renders bare, even
-alone: bare means this machine's own reading. `localFreshAccountEmails`
+the stale marker, counted in runes. On a header too narrow for the whole
+marker, `writeUsageHeader`'s fit search (below) shrinks it to one word
+(`expired` / `stale` / `via`); some marker word stays as long as any tier
+fits. A via line keeps its label even alone: bare means this machine's own
+reading. Only the fit search's last tier, when nothing fits, drops the labels
+of every segmented line. `localFreshAccountEmails`
 reads the hubs, not the lines, so a filled line never counts as local fresh
 data. No credential moves.
 
@@ -3111,15 +3115,17 @@ when every segmented line, marker included, fits in the terminal width. The
 tiers are tried in order, and the first that fits wins:
 
 1. The full marker. Labels from full width down to 3 runes
-   (`usageLabelWidths`): each label is cut to its first n runes, and a width
-   is skipped when two different labels would cut to the same text. Bars are
-   at least `usageBarMin`.
+   (`usageLabelWidths`): each label is cut to its first n runes. A width is
+   skipped when two different labels would cut to the same text, or when a
+   label with a space would keep nothing after it: `codex bob` cut to
+   `codex` would read as the bare tag of this machine's own Codex account,
+   so it never goes below `codex b`. Bars are at least `usageBarMin`.
 2. The one-word marker (`usageLineMarkerShort`, beside `usageLineMarker`):
    `expired` for an expired line filled from a remote, else `stale` (no age),
    else `via`. The same label widths, bars at least `usageBarMin`.
-3. The one-word marker, labels at their narrowest width, bars down to one
-   cell (`lineBarWMin`). The percentages carry the numbers; the bars are
-   decoration.
+3. The one-word marker, the same label widths, bars down to one cell
+   (`lineBarWMin`). The percentages carry the numbers; the bars are
+   decoration, so a wider label wins over wider bars.
 4. Nothing fits: the old layout. Labels drop, the full marker stays, and the
    line clips at the right edge.
 
@@ -3130,7 +3136,8 @@ full label when labels drop: two bare `auth expired` lines would name no
 account. On the ~80-column header that motivated this (four lines with 5h,
 wk, Fable and cr, two of them `auth expired · via agent-workstation`), the
 old rule dropped every label because the marker overflowed, and then clipped
-the marker anyway; tier 3 now shows `ask`, `avi`, `vna`, `tre` and `expired`.
+the marker anyway; tier 3 now shows every full label, one-cell bars and
+`expired`.
 The one entry shape
 still dropped is `Info == nil && !Expired && Reason == ""` — every remote
 account now, since `/usage` reports identity only; giving one a header line

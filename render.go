@@ -551,10 +551,11 @@ func lineBarW(label string, segs []usageSeg, suffixW, cols int) int {
 	return lineBarWMin(label, segs, suffixW, cols, usageBarMin)
 }
 
-// lineBarWMin is lineBarW with the floor as a parameter. Only
-// writeUsageHeader's last-resort fit tier passes less than usageBarMin (bars
-// down to one cell, so a label and a marker still fit); everything else goes
-// through lineBarW.
+// lineBarWMin is lineBarW with the floor as a parameter. Only tier 3 of
+// writeUsageHeader's fit search passes less than usageBarMin (bars down to one
+// cell, so the label and the marker still fit); everything else goes through
+// lineBarW. Tier 3 applies to any header, including a bare line with no label
+// and no marker, which then shrinks its bars instead of clipping.
 func lineBarWMin(label string, segs []usageSeg, suffixW, cols, minBar int) int {
 	if cols <= 0 || len(segs) == 0 {
 		return usageBarMax
@@ -1218,8 +1219,9 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 	//     (usageLabelWidths). Bars at least usageBarMin.
 	//  2. The compact marker (usageLineMarkerShort, one word), the same label
 	//     widths, bars at least usageBarMin.
-	//  3. The compact marker, labels at their narrowest width, bars down to one
-	//     cell. The percentages carry the numbers; the bars are decoration.
+	//  3. The compact marker, the same label widths, bars down to one cell.
+	//     The percentages carry the numbers; the bars are decoration, so a
+	//     wider label wins over wider bars.
 	//  4. Nothing fits: labels drop, the full marker stays, and the line clips at
 	//     the right edge, as it did before the tiers existed.
 	//
@@ -1265,7 +1267,7 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		}{
 			{false, usageBarMin, widths},
 			{true, usageBarMin, widths},
-			{true, 1, widths[len(widths)-1:]},
+			{true, 1, widths},
 		}
 		cut := -1
 	search:
@@ -1351,7 +1353,11 @@ func cutUsageLabel(label string, n int) string {
 // usageLabelWidths lists the label widths writeUsageHeader's fit search may
 // cut to, widest first: labelW itself (no cut), then each n from labelW-1 down
 // to usageLabelMin at which cutting every label to n runes keeps different
-// labels different (empty labels are not compared). Never empty.
+// labels different (empty labels are not compared), and keeps at least one
+// rune after the first space of a label that has one. That second rule is the
+// anti-masquerade one: "codex bob" cut to "codex" (or "cod") would read as
+// the bare tag a sole local Codex line gets, so it never goes below "codex b".
+// Never empty.
 func usageLabelWidths(labels []string, labelW int) []int {
 	widths := []int{labelW}
 	for n := labelW - 1; n >= usageLabelMin; n-- {
@@ -1360,6 +1366,10 @@ func usageLabelWidths(labels []string, labelW int) []int {
 		for _, l := range labels {
 			if l == "" {
 				continue
+			}
+			if sp := strings.IndexByte(l, ' '); sp >= 0 && utf8.RuneCountInString(l) > n && n < utf8.RuneCountInString(l[:sp])+2 {
+				distinct = false
+				break
 			}
 			cut := cutUsageLabel(l, n)
 			if prev, ok := from[cut]; ok && prev != l {
