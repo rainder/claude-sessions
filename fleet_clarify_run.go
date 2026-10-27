@@ -114,6 +114,14 @@ func clarifyPreamble(c fleetCardView) string {
 	b.WriteString("You must not act on the fleet: do not change files, start sessions or send messages. ")
 	b.WriteString("Never resume, re-run or finish any step FLEET left unfinished when you were forked; that work is not yours. ")
 	b.WriteString("Nothing you write reaches FLEET.\n\n")
+	b.WriteString(clarifyCardBlock(c))
+	return b.String()
+}
+
+// clarifyCardBlock is the card as the fork reads it: id, ticket, title,
+// summary, options and lean.
+func clarifyCardBlock(c fleetCardView) string {
+	var b strings.Builder
 	b.WriteString("The card:\n")
 	fmt.Fprintf(&b, "id: %s\n", c.ID)
 	if c.Ticket != "" {
@@ -131,6 +139,19 @@ func clarifyPreamble(c fleetCardView) string {
 		fmt.Fprintf(&b, "FLEET leans %s\n", c.Lean)
 	}
 	return b.String()
+}
+
+// clarifyAskPrompt is the fork's user turn for an ask. The card is in the
+// system prompt too, but the fork resumes FLEET's long conversation, and a
+// question such as "why can't you run it?" was read against FLEET's last turn
+// instead of the card (DR-5791, 2026-10-27). So every ask names the card, and
+// the first one carries it in full.
+func clarifyAskPrompt(c fleetCardView, first bool, question string) string {
+	if first {
+		return "I am asking about this one FLEET card, not about anything else in the conversation above.\n\n" +
+			clarifyCardBlock(c) + "\nMy question: " + question
+	}
+	return fmt.Sprintf("Still about card %s (%s): %s", c.ID, c.Title, question)
 }
 
 type clarifyRunResult struct {

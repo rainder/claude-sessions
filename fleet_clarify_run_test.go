@@ -80,6 +80,24 @@ func TestClarifyPreamble(t *testing.T) {
 	}
 }
 
+func TestClarifyAskPrompt(t *testing.T) {
+	c := fleetCardView{ID: "dr5791-count", Title: "run the count", Summary: "only on your Mac",
+		Options: []fleetOptionView{{Key: "done", Label: "Ran it"}}}
+	first := clarifyAskPrompt(c, true, "why can't you run it?")
+	for _, w := range []string{"this one FLEET card", "id: dr5791-count", "title: run the count",
+		"summary: only on your Mac", "- done: Ran it"} {
+		if !strings.Contains(first, w) {
+			t.Errorf("first ask lacks %q:\n%s", w, first)
+		}
+	}
+	if !strings.HasSuffix(first, "\nMy question: why can't you run it?") {
+		t.Errorf("first ask must end with the question:\n%s", first)
+	}
+	if got := clarifyAskPrompt(c, false, "and then?"); got != "Still about card dr5791-count (run the count): and then?" {
+		t.Errorf("later ask = %q", got)
+	}
+}
+
 func writeClarifyScript(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "fake-claude")
