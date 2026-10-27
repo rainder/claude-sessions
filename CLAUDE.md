@@ -2651,8 +2651,12 @@ printable ASCII only), with `stale <age>` before it when the reading is past
 `auth expired · ` when the line was an expired placeholder (`deadLocal`: the
 remote's bars do not revive the local credential; a reason placeholder gets
 the plain via marker) — the same trailing mechanism and `suffixW` sizing as
-the stale marker, counted in runes. A via line never renders bare, even
-alone: bare means this machine's own reading. `localFreshAccountEmails`
+the stale marker, counted in runes. On a header too narrow for the whole
+marker, `writeUsageHeader`'s fit search (below) shrinks it to one word
+(`expired` / `stale` / `via`); some marker word stays as long as any tier
+fits. A via line keeps its label even alone: bare means this machine's own
+reading. Only the fit search's last tier, when nothing fits, drops the labels
+of every segmented line. `localFreshAccountEmails`
 reads the hubs, not the lines, so a filled line never counts as local fresh
 data. No credential moves.
 
@@ -3102,7 +3106,39 @@ apart like that is deliberate, and leaving the marker out of *both* was a real
 bug — with two collision-promoted full-email labels at ~64 columns the bars
 sized to fill the entire budget, `cropTableFrame`'s clip then ate the marker,
 and the stale line rendered byte-identical to a live one, which is the single
-thing the marker exists to prevent. The one entry shape
+thing the marker exists to prevent.
+
+The label matters as much: it says whose numbers a line shows. So on a narrow
+terminal `writeUsageHeader` runs one **fit search**, and neither the label nor
+the marker may be clipped away while some layout still fits. A layout fits
+when every segmented line, marker included, fits in the terminal width. The
+tiers are tried in order, and the first that fits wins:
+
+1. The full marker. Labels from full width down to 3 runes
+   (`usageLabelWidths`): each label is cut to its first n runes. A width is
+   skipped when two different labels would cut to the same text, or when a
+   label with a space would keep nothing after it: `codex bob` cut to
+   `codex` would read as the bare tag of this machine's own Codex account,
+   so it never goes below `codex b`. Bars are at least `usageBarMin`.
+2. The one-word marker (`usageLineMarkerShort`, beside `usageLineMarker`):
+   `expired` for an expired line filled from a remote, else `stale` (no age),
+   else `via`. The same label widths, bars at least `usageBarMin`.
+3. The one-word marker, the same label widths, bars down to one cell
+   (`lineBarWMin`). The percentages carry the numbers; the bars are
+   decoration, so a wider label wins over wider bars.
+4. Nothing fits: the old layout. Labels drop, the full marker stays, and the
+   line clips at the right edge.
+
+A wide terminal fits tier 1 at full label width and renders exactly as
+before. Placeholder lines take the same label cut, so every line reads the
+same abbreviation, but do not count toward the fit (no bars), and keep their
+full label when labels drop: two bare `auth expired` lines would name no
+account. On the ~80-column header that motivated this (four lines with 5h,
+wk, Fable and cr, two of them `auth expired · via agent-workstation`), the
+old rule dropped every label because the marker overflowed, and then clipped
+the marker anyway; tier 3 now shows every full label, one-cell bars and
+`expired`.
+The one entry shape
 still dropped is `Info == nil && !Expired && Reason == ""` — every remote
 account now, since `/usage` reports identity only; giving one a header line
 would show a bar-less row for every account any remote host merely knows
