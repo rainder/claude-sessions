@@ -958,7 +958,7 @@ func TestWriteUsageHeaderExpiredOnlyLineKeepsItsLabel(t *testing.T) {
 }
 
 func TestWriteUsageHeaderNarrowTerminalKeepsExpiredLine(t *testing.T) {
-	// The label-shedding pass sizes bars against segments; a segment-less line
+	// The fit search sizes bars against segments; a segment-less line
 	// must neither crash it nor be dropped — and must keep its label, or two
 	// expired accounts render as two identical, unattributable placeholders.
 	accounts := []accountUsageLine{
@@ -1175,6 +1175,229 @@ func TestWriteUsageHeaderStaleMarkerSurvivesWidthClip(t *testing.T) {
 	}
 	if clippedStale == clippedFresh {
 		t.Fatalf("stale line renders identically to a live one: %q", clippedStale)
+	}
+}
+
+// usageLabelShown reports whether a rendered header line starts with full, or
+// with a cut of it at least usageLabelMin runes long.
+func usageLabelShown(line, full string) bool {
+	f := strings.Fields(stripANSI(line))
+	return len(f) > 0 && utf8.RuneCountInString(f[0]) >= usageLabelMin && strings.HasPrefix(full, f[0])
+}
+
+// usageLineBarW recovers a rendered line's bar width: bar cells over segments.
+func usageLineBarW(line string, segs int) int {
+	return (strings.Count(line, "█") + strings.Count(line, "░")) / segs
+}
+
+// screenshotUsageAccounts is the header from Andy's ~80-column iTerm: four
+// Claude lines with 5h / wk / Fable / cr, two of them expired placeholders
+// filled from a remote, so they carry "auth expired · via agent-workstation".
+func screenshotUsageAccounts(now time.Time) []accountUsageLine {
+	info := func(p float64) *UsageInfo {
+		return &UsageInfo{
+			FiveHour:          usageBucket{Pct: p, ResetsAt: now.Add(2*time.Hour + 10*time.Minute)},
+			SevenDay:          usageBucket{Pct: 13, ResetsAt: now.Add(3*24*time.Hour + time.Hour)},
+			WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: now.Add(5*24*time.Hour + time.Hour)},
+			WeeklyScopedLabel: "Fable",
+			Credits:           creditsInfo{Enabled: true, Limit: 200000, Used: 112300, DecimalPlaces: 2},
+		}
+	}
+	return []accountUsageLine{
+		{label: "askerla", email: "a@askerla.com", info: info(42), mine: true},
+		{label: "avisoma", email: "andy@avisoma.com", info: info(7), via: "agent-workstation", deadLocal: true, fetchedAt: now.Add(-time.Minute)},
+		{label: "vnaus", email: "v@naus.lt", info: info(55)},
+		{label: "trecs", email: "andy@trecs.aero", info: info(3), via: "agent-workstation", deadLocal: true, fetchedAt: now.Add(-time.Minute)},
+	}
+}
+
+// writeUsageHeader's fit search: the label and the marker both stay visible
+// while some layout fits (full marker, then the one-word marker, then bars
+// under usageBarMin), and only when none does do labels drop as they always
+// did. Every check reads the line as the TUI shows it, after clipLine.
+func TestWriteUsageHeaderFitTiers(t *testing.T) {
+	now := time.Now()
+	plain := func(pct float64) *UsageInfo { return &UsageInfo{FiveHour: usageBucket{Pct: pct}} }
+	render := func(accounts []accountUsageLine, cols int) []string {
+		var b strings.Builder
+		writeUsageHeader(&b, accounts, nil, nil, cols)
+		lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+		if len(lines) != len(accounts) {
+			t.Fatalf("cols=%d: lines = %#v, want one per account", cols, lines)
+		}
+		if cols > 0 {
+			for i := range lines {
+				lines[i] = clipLine(lines[i], cols)
+			}
+		}
+		return lines
+	}
+	// Three labels where "avisoma" and "avisual" share four runes: they can be
+	// cut to 5 or 6, never to 3 or 4. Two segments (5h, wk), no trailers.
+	similar := []accountUsageLine{
+		{label: "avisoma", email: "andy@avisoma.com", info: plain(41)},
+		{label: "avisual", email: "andy@avisual.io", info: plain(52)},
+		{label: "trecs", email: "andy@trecs.aero", info: plain(63)},
+	}
+	cases := []struct {
+		name     string
+		accounts []accountUsageLine
+		cols     int
+		check    func(t *testing.T, lines []string)
+	}{
+		{
+			name: "screenshot at 80 cols keeps a label on every line", accounts: screenshotUsageAccounts(now), cols: 80,
+			check: func(t *testing.T, lines []string) {
+				for i, full := range []string{"askerla", "avisoma", "vnaus", "trecs"} {
+					if !usageLabelShown(lines[i], full) {
+						t.Errorf("line %d lost its label %q: %q", i, full, stripANSI(lines[i]))
+					}
+				}
+			},
+		},
+		{
+			name: "tier 3: labels at 3, one-word marker, bars under usageBarMin", accounts: screenshotUsageAccounts(now), cols: 80,
+			check: func(t *testing.T, lines []string) {
+				for i, want := range []string{"ask", "avi", "vna", "tre"} {
+					if !strings.HasPrefix(lines[i], dim(want)+" ") {
+						t.Errorf("line %d = %q, want it to start with %q", i, stripANSI(lines[i]), want)
+					}
+					if b := usageLineBarW(lines[i], 4); b >= usageBarMin || b < 1 {
+						t.Errorf("line %d bar width = %d, want 1..%d", i, b, usageBarMin-1)
+					}
+				}
+				for _, i := range []int{1, 3} {
+					if !strings.HasSuffix(lines[i], " "+dim("expired")) {
+						t.Errorf("dead line %d = %q, want it to end with the compact marker", i, stripANSI(lines[i]))
+					}
+				}
+				for _, i := range []int{0, 2} {
+					if strings.Contains(lines[i], "expired") || strings.Contains(lines[i], "via") {
+						t.Errorf("healthy line %d picked up a marker: %q", i, stripANSI(lines[i]))
+					}
+				}
+			},
+		},
+		{
+			name: "tier 4: nothing fits, labels drop and the full marker stays", accounts: screenshotUsageAccounts(now), cols: 64,
+			check: func(t *testing.T, lines []string) {
+				for i, l := range lines {
+					if !strings.HasPrefix(stripANSI(l), "5h ") {
+						t.Errorf("line %d = %q, want no label", i, stripANSI(l))
+					}
+					if b := usageLineBarW(l, 4); b != usageBarMin {
+						t.Errorf("line %d bar width = %d, want usageBarMin", i, b)
+					}
+					if strings.Contains(l, dim("expired")) {
+						t.Errorf("line %d took the compact marker: %q", i, stripANSI(l))
+					}
+				}
+				// Unclipped, the dead lines still end with the whole marker.
+				var b strings.Builder
+				writeUsageHeader(&b, screenshotUsageAccounts(now), nil, nil, 64)
+				raw := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+				if want := " " + dim(usageExpiredText+" · via agent-workstation"); !strings.HasSuffix(raw[1], want) {
+					t.Errorf("dead line = %q, want the full marker before the clip", stripANSI(raw[1]))
+				}
+			},
+		},
+		{
+			name: "cut keeps similar labels apart", accounts: similar, cols: 33,
+			check: func(t *testing.T, lines []string) {
+				for i, want := range []string{"aviso", "avisu", "trecs"} {
+					if !strings.HasPrefix(lines[i], dim(want)+" ") {
+						t.Errorf("line %d = %q, want label %q", i, stripANSI(lines[i]), want)
+					}
+					if b := usageLineBarW(lines[i], 2); b != usageBarMin {
+						t.Errorf("line %d bar width = %d, want usageBarMin", i, b)
+					}
+				}
+			},
+		},
+		{
+			name: "no distinct short cut fits: narrow bars before a clash", accounts: similar, cols: 31,
+			check: func(t *testing.T, lines []string) {
+				for i, want := range []string{"aviso", "avisu", "trecs"} {
+					if !strings.HasPrefix(lines[i], dim(want)+" ") {
+						t.Errorf("line %d = %q, want label %q", i, stripANSI(lines[i]), want)
+					}
+					if b := usageLineBarW(lines[i], 2); b >= usageBarMin {
+						t.Errorf("line %d bar width = %d, want under usageBarMin", i, b)
+					}
+				}
+			},
+		},
+		{
+			name: "very narrow drops labels as before", accounts: similar, cols: 24,
+			check: func(t *testing.T, lines []string) {
+				for i, l := range lines {
+					if !strings.HasPrefix(stripANSI(l), "5h ") {
+						t.Errorf("line %d = %q, want no label", i, stripANSI(l))
+					}
+				}
+			},
+		},
+		{
+			name: "placeholder takes the same cut",
+			accounts: []accountUsageLine{
+				{label: "avisoma", email: "andy@avisoma.com", info: plain(41)},
+				{label: "trecs-old", email: "andy@trecs.aero", placeholder: usageExpiredText},
+			},
+			cols: 31,
+			check: func(t *testing.T, lines []string) {
+				if !strings.HasPrefix(lines[0], dim("avi")+" ") {
+					t.Errorf("segment line = %q, want label avi", stripANSI(lines[0]))
+				}
+				if want := dim("tre") + " " + dim(usageExpiredText); lines[1] != want {
+					t.Errorf("placeholder = %q, want %q", lines[1], want)
+				}
+			},
+		},
+		{
+			name: "wide terminal is unchanged", accounts: screenshotUsageAccounts(now), cols: 200,
+			check: func(t *testing.T, lines []string) {
+				// cols 0 never enters the fit search; at 200 tier 1 fits at full
+				// width, so the two must match byte for byte.
+				var b strings.Builder
+				writeUsageHeader(&b, screenshotUsageAccounts(now), nil, nil, 0)
+				if want := strings.Split(strings.TrimRight(b.String(), "\n"), "\n"); strings.Join(lines, "\n") != strings.Join(want, "\n") {
+					t.Fatalf("wide header changed:\n%q\nwant\n%q", lines, want)
+				}
+				if !strings.HasPrefix(lines[0], dim("askerla")+" ") || usageLineBarW(lines[0], 4) != usageBarMax {
+					t.Errorf("wide line = %q, want the full label and usageBarMax bars", stripANSI(lines[0]))
+				}
+				if want := " " + dim(usageExpiredText+" · via agent-workstation"); !strings.HasSuffix(lines[1], want) {
+					t.Errorf("wide dead line = %q, want the full marker", stripANSI(lines[1]))
+				}
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.check(t, render(c.accounts, c.cols))
+		})
+	}
+}
+
+func TestUsageLineMarkerShort(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		a    accountUsageLine
+		want string
+	}{
+		{accountUsageLine{}, ""},
+		{accountUsageLine{stale: true, fetchedAt: now.Add(-time.Hour)}, "stale"},
+		{accountUsageLine{via: "ws", fetchedAt: now.Add(-time.Minute)}, "via"},
+		{accountUsageLine{via: "ws", fetchedAt: now.Add(-usageNumbersStaleAfter - time.Minute)}, "stale"},
+		{accountUsageLine{via: "ws", deadLocal: true, fetchedAt: now.Add(-time.Minute)}, "expired"},
+		{accountUsageLine{deadLocal: true}, ""},
+	} {
+		if got := usageLineMarkerShort(c.a, now); got != c.want {
+			t.Errorf("usageLineMarkerShort(%+v) = %q, want %q", c.a, got, c.want)
+		}
+		if (usageLineMarker(c.a, now) == "") != (c.want == "") {
+			t.Errorf("short and full markers disagree on having one: %+v", c.a)
+		}
 	}
 }
 
@@ -3793,8 +4016,8 @@ func TestDedupeAccountsFillsFromRemoteCache(t *testing.T) {
 }
 
 // The via marker hangs off the end like the stale one, adds "stale" once the
-// reading is past the stale bound, and takes part in bar sizing so a narrow
-// clip cannot eat it.
+// reading is past the stale bound, and takes part in the fit search so a
+// narrow clip cannot eat it — nor the label beside it.
 func TestWriteUsageHeaderMarksRemoteFilledLine(t *testing.T) {
 	now := time.Now()
 	accounts := []accountUsageLine{
@@ -3816,7 +4039,9 @@ func TestWriteUsageHeaderMarksRemoteFilledLine(t *testing.T) {
 	}
 
 	// The same shape as TestWriteUsageHeaderStaleMarkerSurvivesWidthClip:
-	// full-email labels that leave the bars all the room there is.
+	// full-email labels that leave the bars all the room there is. The fit
+	// search may cut the labels or shorten the marker to one word, but must
+	// leave both visible after the clip.
 	const cols = 64
 	narrow := []accountUsageLine{
 		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
@@ -3826,8 +4051,12 @@ func TestWriteUsageHeaderMarksRemoteFilledLine(t *testing.T) {
 	writeUsageHeader(&b, narrow, nil, nil, cols)
 	lines = strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 	line := clipLine(lines[1], cols)
-	if !strings.Contains(line, "via agent-workstation") || !strings.Contains(line, "63%") {
+	marker := strings.Contains(line, dim("via agent-workstation")) || strings.HasSuffix(line, " "+dim("via"))
+	if !marker || !strings.Contains(line, "63%") {
 		t.Fatalf("narrow via line = %q, want marker and numbers to survive the clip", line)
+	}
+	if !usageLabelShown(line, "andy@trecs.aero") {
+		t.Fatalf("narrow via line = %q, want its label to survive too", line)
 	}
 }
 
@@ -3875,7 +4104,9 @@ func TestRemoteFilledExpiredLineStillSaysExpired(t *testing.T) {
 		t.Fatalf("reason-filled line = %q, want only the stale via marker", out[2])
 	}
 
-	// The whole marker takes part in sizing, so the clip cannot eat it.
+	// The marker takes part in the fit search, so the clip cannot eat it: the
+	// line keeps the whole marker, or at least the one word "expired", and its
+	// label beside it.
 	const cols = 64
 	narrow := []accountUsageLine{
 		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
@@ -3885,8 +4116,13 @@ func TestRemoteFilledExpiredLineStillSaysExpired(t *testing.T) {
 	b.Reset()
 	writeUsageHeader(&b, narrow, nil, nil, cols)
 	clipped := clipLine(strings.Split(strings.TrimRight(b.String(), "\n"), "\n")[1], cols)
-	if !strings.Contains(clipped, usageExpiredText) || !strings.Contains(clipped, "via ws") || !strings.Contains(clipped, "63%") {
-		t.Fatalf("narrow expired-filled line = %q, want bars and the whole marker", clipped)
+	whole := strings.HasSuffix(clipped, " "+dim(usageExpiredText+" · via ws"))
+	short := strings.HasSuffix(clipped, " "+dim("expired"))
+	if !(whole || short) || !strings.Contains(clipped, "63%") {
+		t.Fatalf("narrow expired-filled line = %q, want bars and the marker", clipped)
+	}
+	if !usageLabelShown(clipped, "andy@trecs.aero") {
+		t.Fatalf("narrow expired-filled line = %q, want its label to survive too", clipped)
 	}
 }
 

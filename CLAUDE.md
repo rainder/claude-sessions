@@ -3102,7 +3102,36 @@ apart like that is deliberate, and leaving the marker out of *both* was a real
 bug — with two collision-promoted full-email labels at ~64 columns the bars
 sized to fill the entire budget, `cropTableFrame`'s clip then ate the marker,
 and the stale line rendered byte-identical to a live one, which is the single
-thing the marker exists to prevent. The one entry shape
+thing the marker exists to prevent.
+
+The label matters as much: it says whose numbers a line shows. So on a narrow
+terminal `writeUsageHeader` runs one **fit search**, and neither the label nor
+the marker may be clipped away while some layout still fits. A layout fits
+when every segmented line, marker included, fits in the terminal width. The
+tiers are tried in order, and the first that fits wins:
+
+1. The full marker. Labels from full width down to 3 runes
+   (`usageLabelWidths`): each label is cut to its first n runes, and a width
+   is skipped when two different labels would cut to the same text. Bars are
+   at least `usageBarMin`.
+2. The one-word marker (`usageLineMarkerShort`, beside `usageLineMarker`):
+   `expired` for an expired line filled from a remote, else `stale` (no age),
+   else `via`. The same label widths, bars at least `usageBarMin`.
+3. The one-word marker, labels at their narrowest width, bars down to one
+   cell (`lineBarWMin`). The percentages carry the numbers; the bars are
+   decoration.
+4. Nothing fits: the old layout. Labels drop, the full marker stays, and the
+   line clips at the right edge.
+
+A wide terminal fits tier 1 at full label width and renders exactly as
+before. Placeholder lines take the same label cut, so every line reads the
+same abbreviation, but do not count toward the fit (no bars), and keep their
+full label when labels drop: two bare `auth expired` lines would name no
+account. On the ~80-column header that motivated this (four lines with 5h,
+wk, Fable and cr, two of them `auth expired · via agent-workstation`), the
+old rule dropped every label because the marker overflowed, and then clipped
+the marker anyway; tier 3 now shows `ask`, `avi`, `vna`, `tre` and `expired`.
+The one entry shape
 still dropped is `Info == nil && !Expired && Reason == ""` — every remote
 account now, since `/usage` reports identity only; giving one a header line
 would show a bar-less row for every account any remote host merely knows

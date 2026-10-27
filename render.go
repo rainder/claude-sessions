@@ -548,6 +548,14 @@ func segTrailerText(s usageSeg, isLast bool) string {
 // cols <= 0 (unknown width, or no segments) yields usageBarMax. label is the
 // already-padded label ("" for a bare line).
 func lineBarW(label string, segs []usageSeg, suffixW, cols int) int {
+	return lineBarWMin(label, segs, suffixW, cols, usageBarMin)
+}
+
+// lineBarWMin is lineBarW with the floor as a parameter. Only
+// writeUsageHeader's last-resort fit tier passes less than usageBarMin (bars
+// down to one cell, so a label and a marker still fit); everything else goes
+// through lineBarW.
+func lineBarWMin(label string, segs []usageSeg, suffixW, cols, minBar int) int {
 	if cols <= 0 || len(segs) == 0 {
 		return usageBarMax
 	}
@@ -556,8 +564,8 @@ func lineBarW(label string, segs []usageSeg, suffixW, cols int) int {
 	if b := (cols - fixed) / len(segs); b < barW {
 		barW = b
 	}
-	if barW < usageBarMin {
-		barW = usageBarMin
+	if barW < minBar {
+		barW = minBar
 	}
 	return barW
 }
@@ -565,9 +573,9 @@ func lineBarW(label string, segs []usageSeg, suffixW, cols int) int {
 // usageLineFixedWidth is everything on a header usage line except the bars
 // themselves: the padded label prefix, each segment's label/percent/trailer,
 // the inter-segment separators, and suffixW — the display width of anything the
-// caller hangs off the end (the stale marker; 0 when there is none). Shared by
-// lineBarW (sizing the bars) and writeUsageHeader's label-hiding check (does the
-// line fit at all, even at usageBarMin, with the label kept).
+// caller hangs off the end (the stale / via marker; 0 when there is none).
+// Shared by lineBarW (sizing the bars) and writeUsageHeader's fit search (does
+// the line fit at all, at a given label width, marker and smallest bar).
 //
 // The suffix takes part in sizing even though it takes part in no alignment:
 // leaving it out let a stale line size its bars to the full width and then lose
@@ -991,12 +999,8 @@ func usageViaHost(name string) string {
 // its reading passes usageNumbersStaleAfter, checked here against now because
 // the reading ages between the hub's passes.
 func usageLineMarker(a accountUsageLine, now time.Time) string {
-	stale := a.stale
-	if a.via != "" {
-		stale = stale || usageNumbersStale(now, a.fetchedAt, false)
-	}
 	var parts []string
-	if stale {
+	if usageLineStale(a, now) {
 		text := usageStaleText
 		if !a.fetchedAt.IsZero() {
 			text += " " + formatAge(now.Sub(a.fetchedAt).Seconds())
@@ -1011,6 +1015,32 @@ func usageLineMarker(a accountUsageLine, now time.Time) string {
 		text = usageExpiredText + " · " + text
 	}
 	return text
+}
+
+// usageLineMarkerShort is the one-word form of usageLineMarker, for a header
+// too narrow for the full text (see writeUsageHeader's fit search). It keeps
+// the most important word: "expired" for an expired line filled from a remote,
+// else "stale" (no age), else "via". "" exactly when usageLineMarker is "".
+func usageLineMarkerShort(a accountUsageLine, now time.Time) string {
+	stale := usageLineStale(a, now)
+	switch {
+	case a.deadLocal && (stale || a.via != ""):
+		return "expired"
+	case stale:
+		return usageStaleText
+	case a.via != "":
+		return "via"
+	}
+	return ""
+}
+
+// usageLineStale reports whether a line's marker says stale: carried numbers,
+// or a via reading past usageNumbersStaleAfter.
+func usageLineStale(a accountUsageLine, now time.Time) bool {
+	if a.via != "" {
+		return a.stale || usageNumbersStale(now, a.fetchedAt, false)
+	}
+	return a.stale
 }
 
 // writeUsageHeader prints the header's account rate-limit line(s) for three
@@ -1056,6 +1086,10 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		// away, and an unmarked stale line reads as a live one.
 		suffix  string
 		suffixW int
+		// short and shortW are the compact marker (usageLineMarkerShort), used
+		// instead of suffix when the fit search needs the room.
+		short  string
+		shortW int
 	}
 	var entries []entry
 	// now is captured once so every stale line in this render agrees on its
@@ -1072,11 +1106,14 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 			return
 		}
 		if segs := claudeSegs(a.info); len(segs) > 0 {
-			suffix, suffixW := "", 0
+			e := entry{label: label, segs: segs}
 			if text := usageLineMarker(a, now); text != "" {
-				suffix, suffixW = " "+dim(text), 1+utf8.RuneCountInString(text)
+				e.suffix, e.suffixW = " "+dim(text), 1+utf8.RuneCountInString(text)
 			}
-			entries = append(entries, entry{label: label, segs: segs, suffix: suffix, suffixW: suffixW})
+			if text := usageLineMarkerShort(a, now); text != "" {
+				e.short, e.shortW = " "+dim(text), 1+utf8.RuneCountInString(text)
+			}
+			entries = append(entries, e)
 		}
 	}
 	addCodex := func(label string, info *CodexUsageInfo) {
@@ -1172,52 +1209,111 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 			}
 		}
 	}
-	// Drop the label column when it's what's forcing bars below usageBarMin: a
-	// line with a label whose fixed width (at the smallest bar) still overflows
-	// cols is unreadable either way, so free the label's width for the
-	// bars/percent/trailer instead of clipping. Checked against the padded labelW
-	// (every entry pays for the widest label) since that's the width
-	// writeUsageHeader actually renders.
+	// Fit search. The label says whose numbers these are and the marker says
+	// they are not live, so neither may be clipped away while some layout still
+	// fits. A layout fits when every segmented line, marker included, fits in
+	// cols. The tiers are tried in order and the first that fits wins:
 	//
-	// Placeholder lines (no segs) keep their label through this: they have no
-	// bars to make room for, and a bare "auth expired" names no account — two
-	// expired accounts would render as two identical, unattributable lines,
-	// which defeats the point of keeping the line at all. So a shed leaves them
-	// wider than the segmented lines by label+separator, deliberately: on a
-	// terminal this narrow, knowing *whose* account expired is worth more than
-	// the columns it costs.
-	if cols > 0 && labelW > 0 {
-		pad := strings.Repeat(" ", labelW)
-		for _, e := range entries {
-			if len(e.segs) == 0 {
-				continue // placeholder line: no bars to make room for
-			}
-			if fixed := usageLineFixedWidth(pad, e.segs, e.suffixW); fixed+len(e.segs)*usageBarMin > cols {
-				labelW = 0
-				for i := range entries {
-					if len(entries[i].segs) > 0 {
-						entries[i].label = ""
-					}
+	//  1. The full marker. Labels from full width down to usageLabelMin runes
+	//     (usageLabelWidths). Bars at least usageBarMin.
+	//  2. The compact marker (usageLineMarkerShort, one word), the same label
+	//     widths, bars at least usageBarMin.
+	//  3. The compact marker, labels at their narrowest width, bars down to one
+	//     cell. The percentages carry the numbers; the bars are decoration.
+	//  4. Nothing fits: labels drop, the full marker stays, and the line clips at
+	//     the right edge, as it did before the tiers existed.
+	//
+	// On a wide terminal tier 1 fits at full label width, which renders byte for
+	// byte what it always did. cols <= 0 (unknown width) clips nothing, so the
+	// search is skipped.
+	//
+	// Placeholder lines (no segs) take the same label cut, so every line reads
+	// the same abbreviation, but never count toward the fit: they have no bars to
+	// make room for. When labels drop they keep their full label: a bare "auth
+	// expired" names no account — two expired accounts would render as two
+	// identical, unattributable lines, which defeats the point of keeping the
+	// line at all. So a drop leaves them wider than the segmented lines by
+	// label+separator, deliberately: on a terminal this narrow, knowing *whose*
+	// account expired is worth more than the columns it costs.
+	compact, minBar := false, usageBarMin
+	if cols > 0 {
+		labels := make([]string, len(entries))
+		for i, e := range entries {
+			labels[i] = e.label
+		}
+		widths := usageLabelWidths(labels, labelW)
+		fits := func(n int, short bool, min int) bool {
+			pad := strings.Repeat(" ", n)
+			for _, e := range entries {
+				if len(e.segs) == 0 {
+					continue // placeholder line: no bars to make room for
 				}
-				break
+				sw := e.suffixW
+				if short {
+					sw = e.shortW
+				}
+				if usageLineFixedWidth(pad, e.segs, sw)+len(e.segs)*min > cols {
+					return false
+				}
+			}
+			return true
+		}
+		tiers := []struct {
+			short  bool
+			min    int
+			widths []int
+		}{
+			{false, usageBarMin, widths},
+			{true, usageBarMin, widths},
+			{true, 1, widths[len(widths)-1:]},
+		}
+		cut := -1
+	search:
+		for _, t := range tiers {
+			for _, n := range t.widths {
+				if fits(n, t.short, t.min) {
+					cut, compact, minBar = n, t.short, t.min
+					break search
+				}
+			}
+		}
+		switch {
+		case cut >= 0 && cut < labelW:
+			labelW = 0
+			for i := range entries {
+				entries[i].label = cutUsageLabel(entries[i].label, cut)
+				if c := utf8.RuneCountInString(entries[i].label); c > labelW {
+					labelW = c
+				}
+			}
+		case cut < 0 && labelW > 0:
+			labelW = 0
+			for i := range entries {
+				if len(entries[i].segs) > 0 {
+					entries[i].label = ""
+				}
 			}
 		}
 	}
 	// Bars must be the same width on every line, so size them to the narrowest
 	// line's affordable width (computed against the padded labels, the trailers
-	// and any end-of-line suffix) and render all lines with it. cols <= 0 leaves
-	// every line at usageBarMax.
+	// and the marker the fit search chose) and render all lines with it. cols <= 0
+	// leaves every line at usageBarMax.
 	padded := make([]string, len(entries))
 	barW := usageBarMax
 	for i, e := range entries {
-		// A placeholder that kept its label through a shed is wider than labelW
-		// (which the shed zeroed), so the pad can go negative — it just gets none.
+		// A placeholder that kept its label through a drop is wider than labelW
+		// (which the drop zeroed), so the pad can go negative — it just gets none.
 		pad := labelW - utf8.RuneCountInString(e.label)
 		if pad < 0 {
 			pad = 0
 		}
 		padded[i] = e.label + strings.Repeat(" ", pad)
-		if b := lineBarW(padded[i], e.segs, e.suffixW, cols); b < barW {
+		sw := e.suffixW
+		if compact {
+			sw = e.shortW
+		}
+		if b := lineBarWMin(padded[i], e.segs, sw, cols, minBar); b < barW {
 			barW = b
 		}
 	}
@@ -1228,10 +1324,55 @@ func writeUsageHeader(w io.Writer, accounts []accountUsageLine, codexAccounts []
 		}
 		// The suffix rides along only when there is a line to hang it off; a
 		// segment-less entry can never emit a bare marker.
+		suffix := e.suffix
+		if compact {
+			suffix = e.short
+		}
 		if line := usageSegsLine(padded[i], e.segs, barW); line != "" {
-			fmt.Fprintln(w, line+e.suffix)
+			fmt.Fprintln(w, line+suffix)
 		}
 	}
+}
+
+// usageLabelMin is the shortest a header label is cut to before the label
+// column is dropped instead: fewer runes rarely tell two accounts apart.
+const usageLabelMin = 3
+
+// cutUsageLabel cuts label to its first n runes, without the trailing space a
+// cut through "codex andy" can leave. A label of n runes or fewer is unchanged.
+func cutUsageLabel(label string, n int) string {
+	r := []rune(label)
+	if len(r) <= n {
+		return label
+	}
+	return strings.TrimRight(string(r[:n]), " ")
+}
+
+// usageLabelWidths lists the label widths writeUsageHeader's fit search may
+// cut to, widest first: labelW itself (no cut), then each n from labelW-1 down
+// to usageLabelMin at which cutting every label to n runes keeps different
+// labels different (empty labels are not compared). Never empty.
+func usageLabelWidths(labels []string, labelW int) []int {
+	widths := []int{labelW}
+	for n := labelW - 1; n >= usageLabelMin; n-- {
+		from := make(map[string]string, len(labels))
+		distinct := true
+		for _, l := range labels {
+			if l == "" {
+				continue
+			}
+			cut := cutUsageLabel(l, n)
+			if prev, ok := from[cut]; ok && prev != l {
+				distinct = false
+				break
+			}
+			from[cut] = l
+		}
+		if distinct {
+			widths = append(widths, n)
+		}
+	}
+	return widths
 }
 
 // writeCodexUsage prints one Codex account usage line: a dim label prefix
