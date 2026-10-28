@@ -677,7 +677,7 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 			cmd := l.st.handleEvent(ev, inBatch, now)
 			if cmd == fleetCmdRawText {
 				if it := l.st.selected(); it != nil {
-					runFleetRawView(fd, fleetRawLines(*it), wakes)
+					runFleetRawView(fd, fleetRawLines(*it, time.Now()), wakes)
 				}
 				// The raw view drew over the screen, and keys read before it
 				// belong to a view Andy has not seen since.
@@ -1175,12 +1175,12 @@ func fleetDetailLines(st *fleetViewState, it fleetItem, cols int, now time.Time)
 		meta = append(meta, age+" old")
 	}
 	out = append(out, strings.Join(meta, dim(" · ")))
-	return append(out, fleetExpandedLines(st, it, cols)...)
+	return append(out, fleetExpandedLines(st, it, cols, now)...)
 }
 
 // fleetExpandedLines is the selected card's body: summary, meta, answers and
-// options.
-func fleetExpandedLines(st *fleetViewState, it fleetItem, cols int) []string {
+// options. now places the waiting line's times.
+func fleetExpandedLines(st *fleetViewState, it fleetItem, cols int, now time.Time) []string {
 	var out []string
 	c := it.Card
 	if strings.TrimSpace(c.Summary) != "" {
@@ -1189,7 +1189,9 @@ func fleetExpandedLines(st *fleetViewState, it fleetItem, cols int) []string {
 		}
 	}
 	var meta []string
-	if c.WaitingOn != "" {
+	if c.Waiting != nil {
+		meta = append(meta, fleetWaitingText(c.Waiting, now))
+	} else if c.WaitingOn != "" {
 		meta = append(meta, "Waiting on: "+c.WaitingOn)
 	}
 	if c.Session != "" {

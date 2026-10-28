@@ -248,6 +248,15 @@ func (v *fleetStateView) sanitize() {
 		c.Status, c.Ticket, c.Title = fleetDisplayText(c.Status), fleetDisplayText(c.Ticket), fleetDisplayText(c.Title)
 		c.Summary, c.Lean = fleetDisplayText(c.Summary), fleetDisplayText(c.Lean)
 		c.WaitingOn, c.Session = fleetDisplayText(c.WaitingOn), fleetDisplayText(c.Session)
+		if w := c.Waiting; w != nil {
+			w2 := *w
+			w2.Who = fleetWaitingClip(fleetDisplayText(w.Who), fleetWaitingWhoMax)
+			w2.Note = fleetWaitingClip(fleetDisplayText(w.Note), fleetWaitingNoteMax)
+			c.Waiting = &w2
+			if w2.Who == "" {
+				c.Waiting = nil
+			}
+		}
 		c.UpdatedAt, c.FirstSeenAt = fleetDisplayText(c.UpdatedAt), fleetDisplayText(c.FirstSeenAt)
 		for j := range c.Options {
 			o := &c.Options[j]

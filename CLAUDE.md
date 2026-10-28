@@ -199,6 +199,14 @@ types into panes. Spec and plan: `docs/superpowers/`.
 - **Answer store** is server-side. Its guard runs in `fleetSay` under `sayMu`
   on a fresh state.json, right before typing. `cardHash` never includes
   `updatedAt` or `priority`. Lock order: `sayMu`, then the store's mutex.
+- **Waiting line.** Optional card object `waiting`: `who` (required, ≤ 40
+  runes), `since` (required, RFC 3339), `answeredAt`, `note` (≤ 120 runes).
+  A bad `who`/`since` drops it; a bad `answeredAt`/`note` drops alone; text
+  folds to one line and is cut rune-safe. Renders `waiting on <who> since
+  <T>` (` · <note>`) or `<who> answered <T>` (` (<note>)`); T is `HH:MM`
+  today, else `MM-DD HH:MM` (Vilnius on the page, `time.Local` in the TUI).
+  A valid one hides `waitingOn`. Not in `cardHash`. Page (`waitingLine`,
+  node-tested against `fleetWaitingText`), TUI details and raw screen.
 - **Start FLEET:** a mutex across the handler, a 60s gap, a fresh collect,
   and a pending start blocks a second spawn (two taps must not make two
   FLEETs).
