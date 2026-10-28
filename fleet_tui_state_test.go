@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -870,25 +871,33 @@ func fleetPanelSend(t *testing.T, st *fleetViewState, digit string, now time.Tim
 	return *st.send
 }
 
+// fleetDrawn is st after the list screen drew it at now, which starts r's
+// fleetLeanPickDelay on the selected card.
+func fleetDrawn(st *fleetViewState, now time.Time) *fleetViewState {
+	renderFleetView(st, 120, 40, now)
+	return st
+}
+
 func TestFleetViewLeanPick(t *testing.T) {
 	now := time.Unix(1000, 0)
-	at := now.Add(fleetLeanPickDelay) // past the delay the first applied state arms
+	at := now.Add(fleetLeanPickDelay) // the selected card has been drawn long enough
 	leanView := func() fleetStateView {
 		v := fleetTestView(fleetLeanCard(), fleetTestCard("b", "needs-you"))
 		v.Source = "http://ws:8765"
 		return v
 	}
+	drawn := func(v fleetStateView) *fleetViewState { return fleetDrawn(fleetTestState(v, now), now) }
 
 	t.Run("sends what the panel would", func(t *testing.T) {
 		want := fleetPanelSend(t, fleetTestState(leanView(), now), "2", now)
-		st := fleetTestState(leanView(), now)
+		st := drawn(leanView())
 		if cmd := st.handleKey("r", false, at); cmd != fleetCmdSend {
 			t.Fatalf("cmd = %v, want send", cmd)
 		}
 		if st.panel != nil || !st.sending || st.send == nil || *st.send != want {
 			t.Fatalf("panel = %v sending = %v send = %+v, want %+v", st.panel, st.sending, st.send, want)
 		}
-		if want.CardHash != "h-a" || want.Source != "http://ws:8765" || want.OptionKey != "not-yet" || want.Text != "Hold" {
+		if want.CardHash != "h-a" || want.Source != "http://ws:8765" || want.OptionKey != "not-yet" || want.Text != "Hold" || want.Correction {
 			t.Fatalf("panel request = %+v", want)
 		}
 		st.send = nil
@@ -898,19 +907,27 @@ func TestFleetViewLeanPick(t *testing.T) {
 		}
 	})
 
+	tenth := func(c *fleetCardView) {
+		for i := len(c.Options); i < 10; i++ {
+			c.Options = append(c.Options, fleetOptionView{Key: fmt.Sprintf("k%d", i), Label: "L", Send: "S"})
+		}
+		c.Lean = "k9"
+	}
 	refused := []struct {
 		name, toast string
 		edit        func(*fleetCardView)
 	}{
 		{"no lean", "no FLEET pick on this card", func(c *fleetCardView) { c.Lean = "" }},
 		{"lean names no option", "no FLEET pick on this card", func(c *fleetCardView) { c.Lean = "maybe" }},
+		{"lean names two options", "no FLEET pick on this card", func(c *fleetCardView) { c.Options[0].Key = "not-yet" }},
 		{"lean option has no send", "FLEET's pick has nothing to send", func(c *fleetCardView) { c.Options[1].Send = "" }},
+		{"lean on option 10", "FLEET's pick is past option 9 — answer on the page", tenth},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fleetLeanCard()
 			tc.edit(&c)
-			st := fleetTestState(fleetTestView(c), now)
+			st := drawn(fleetTestView(c))
 			if cmd := st.handleKey("r", false, at); cmd != fleetCmdRender || st.send != nil || st.sending || st.panel != nil {
 				t.Fatalf("cmd = %v send = %v sending = %v panel = %v", cmd, st.send, st.sending, st.panel)
 			}
@@ -923,34 +940,38 @@ func TestFleetViewLeanPick(t *testing.T) {
 		})
 	}
 
-	t.Run("answered, then c", func(t *testing.T) {
+	t.Run("answered, with and without c", func(t *testing.T) {
 		v := leanView()
 		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
 		st := fleetTestState(v, now)
-		if st.items[st.sel].Card.ID != "a" {
-			st.sel = fleetItemIndex(st.items, "a")
+		st.sel = fleetItemIndex(st.items, "a")
+		fleetDrawn(st, now)
+		const toast = "answered — press c, then a digit, to correct"
+		if cmd := st.handleKey("r", false, at); cmd != fleetCmdRender || st.send != nil || st.sending || st.toast != toast {
+			t.Fatalf("answered: cmd = %v send = %v toast = %q", cmd, st.send, st.toast)
 		}
-		if cmd := st.handleKey("r", false, at); cmd != fleetCmdRender || st.send != nil || st.sending {
-			t.Fatalf("answered: cmd = %v send = %v", cmd, st.send)
+		st.handleKey("c", false, at)
+		if st.unlocked != "a" || st.leanPickable() {
+			t.Fatalf("unlocked = %q leanPickable = %v", st.unlocked, st.leanPickable())
 		}
-		if !strings.Contains(st.toast, "press c") {
-			t.Errorf("toast = %q, want the correction hint", st.toast)
+		st.toast = ""
+		if cmd := st.handleKey("r", false, at); cmd != fleetCmdRender || st.send != nil || st.sending || st.toast != toast {
+			t.Fatalf("after c: cmd = %v send = %v toast = %q", cmd, st.send, st.toast)
 		}
-		st.handleKey("c", false, now)
-		if cmd := st.handleKey("r", false, at); cmd != fleetCmdSend || st.send == nil || !st.send.Correction || st.send.OptionKey != "not-yet" {
-			t.Fatalf("after c: cmd = %v send = %+v", cmd, st.send)
+		if row := stripANSI(fleetBottomRow(st, at)); strings.Contains(row, "r FLEET's pick") {
+			t.Errorf("answered card: help row = %q", row)
 		}
 	})
 
 	t.Run("paste batch", func(t *testing.T) {
-		st := fleetTestState(leanView(), now)
+		st := drawn(leanView())
 		if cmd := st.handleKey("r", true, at); cmd != fleetCmdNone || st.send != nil || st.sending {
 			t.Fatalf("batched r: cmd = %v send = %v", cmd, st.send)
 		}
 	})
 
 	t.Run("send in flight", func(t *testing.T) {
-		st := fleetTestState(leanView(), now)
+		st := drawn(leanView())
 		st.sending = true
 		if cmd := st.handleKey("r", false, at); cmd != fleetCmdNone || st.send != nil {
 			t.Fatalf("r while sending: cmd = %v send = %v", cmd, st.send)
@@ -958,7 +979,7 @@ func TestFleetViewLeanPick(t *testing.T) {
 	})
 
 	t.Run("just sent and unclear", func(t *testing.T) {
-		st := fleetTestState(leanView(), now)
+		st := drawn(leanView())
 		st.justSent = "a"
 		if cmd := st.handleKey("r", false, at); cmd != fleetCmdRender || st.send != nil {
 			t.Fatalf("justSent: cmd = %v send = %v", cmd, st.send)
@@ -972,14 +993,41 @@ func TestFleetViewLeanPick(t *testing.T) {
 	t.Run("no card hash", func(t *testing.T) {
 		v := leanView()
 		delete(v.CardHashes, "a")
-		st := fleetTestState(v, now)
+		st := drawn(v)
 		if cmd := st.handleKey("r", false, at); cmd != fleetCmdNone || st.send != nil {
 			t.Fatalf("cmd = %v send = %v", cmd, st.send)
 		}
 	})
 
+	t.Run("ship screen", func(t *testing.T) {
+		v := fleetTestView(fleetLeanCard())
+		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
+		st := drawn(v)
+		if !st.shipOn() {
+			t.Fatal("want the ship screen")
+		}
+		if cmd := st.handleKey("r", false, at); cmd == fleetCmdSend || st.send != nil || st.sending {
+			t.Fatalf("r on the ship: cmd = %v send = %v", cmd, st.send)
+		}
+	})
+
+	t.Run("clarify", func(t *testing.T) {
+		st := drawn(leanView())
+		st.clarify = &fleetClarifyMode{item: st.items[st.sel], openedAt: now}
+		fleetDrawn(st, now)
+		if cmd := st.handleKey("r", false, at); cmd == fleetCmdSend || st.send != nil || st.sending {
+			t.Fatalf("r in Clarify: cmd = %v send = %v", cmd, st.send)
+		}
+		// Back on the list, the card needs a fresh second on screen.
+		st.clarify = nil
+		fleetDrawn(st, at)
+		if cmd := st.handleKey("r", false, at.Add(fleetLeanPickDelay/2)); cmd != fleetCmdNone || st.send != nil {
+			t.Fatalf("r right after Clarify: cmd = %v send = %v", cmd, st.send)
+		}
+	})
+
 	t.Run("help row", func(t *testing.T) {
-		st := fleetTestState(leanView(), now)
+		st := drawn(leanView())
 		if row := stripANSI(fleetBottomRow(st, now)); !strings.Contains(row, "1-9 pick option · r FLEET's pick · o other") {
 			t.Errorf("lean card: help row = %q", row)
 		}
@@ -1000,31 +1048,56 @@ func TestFleetViewLeanPick(t *testing.T) {
 		if cmd := st.handleKey("r", false, at); cmd == fleetCmdSend || st.panel.comment != "r" {
 			t.Fatalf("r on the panel: cmd = %v comment = %q", cmd, st.panel.comment)
 		}
-		st.panel = nil
-		v := leanView()
-		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
-		st.applyState(v, nil, now)
-		if row := stripANSI(fleetBottomRow(st, now)); strings.Contains(row, "r FLEET's pick") {
-			t.Errorf("answered card: help row = %q", row)
-		}
-		st.unlocked = "a"
-		if !st.leanPickable() {
-			t.Error("an unlocked answered card should offer r")
-		}
 	})
 }
 
-func TestFleetViewLeanPickDelay(t *testing.T) {
+func TestFleetViewLeanPickDrawDelay(t *testing.T) {
 	now := time.Unix(1000, 0)
-	at := now.Add(fleetLeanPickDelay)
 	b := fleetTestCard("b", "needs-you")
 	b.Lean = "yes"
 	views := func() fleetStateView { return fleetTestView(fleetLeanCard(), b) }
 
-	t.Run("state moves the selection to the next card", func(t *testing.T) {
+	t.Run("one second of draw time", func(t *testing.T) {
+		st := fleetDrawn(fleetTestState(views(), now), now)
+		fleetDrawn(st, now.Add(500*time.Millisecond)) // redrawing the same card keeps its time
+		if cmd := st.handleKey("r", false, now.Add(fleetLeanPickDelay-time.Millisecond)); cmd != fleetCmdNone || st.send != nil || st.toast != "" {
+			t.Fatalf("r before 1 s: cmd = %v send = %v toast = %q", cmd, st.send, st.toast)
+		}
+		if cmd := st.handleKey("r", false, now.Add(fleetLeanPickDelay)); cmd != fleetCmdSend || st.send.CardID != "a" {
+			t.Fatalf("r at 1 s: cmd = %v send = %+v", cmd, st.send)
+		}
+	})
+
+	t.Run("not drawn yet", func(t *testing.T) {
 		st := fleetTestState(views(), now)
-		if cmd := st.handleKey("r", false, at); cmd != fleetCmdSend || st.send.CardID != "a" {
-			t.Fatalf("first r: cmd = %v send = %+v", cmd, st.send)
+		if cmd := st.handleKey("r", false, now.Add(time.Hour)); cmd != fleetCmdNone || st.send != nil {
+			t.Fatalf("r before any draw: cmd = %v send = %v", cmd, st.send)
+		}
+	})
+
+	t.Run("hash change needs a fresh second", func(t *testing.T) {
+		st := fleetDrawn(fleetTestState(views(), now), now)
+		at := now.Add(5 * time.Second)
+		v := views()
+		v.CardHashes["a"] = "h-a2"
+		st.applyState(v, nil, at)
+		if cmd := st.handleKey("r", false, at); cmd != fleetCmdNone || st.send != nil {
+			t.Fatalf("r before the changed card is drawn: cmd = %v", cmd)
+		}
+		fleetDrawn(st, at)
+		if cmd := st.handleKey("r", false, at.Add(fleetLeanPickDelay/2)); cmd != fleetCmdNone || st.send != nil {
+			t.Fatalf("r half a second after the redraw: cmd = %v", cmd)
+		}
+		if cmd := st.handleKey("r", false, at.Add(fleetLeanPickDelay)); cmd != fleetCmdSend || st.send.CardHash != "h-a2" {
+			t.Fatalf("r a second after the redraw: cmd = %v send = %+v", cmd, st.send)
+		}
+	})
+
+	t.Run("state moves the selection after a send", func(t *testing.T) {
+		st := fleetDrawn(fleetTestState(views(), now), now)
+		at := now.Add(fleetLeanPickDelay)
+		if cmd := st.handleKey("r", false, at); cmd != fleetCmdSend {
+			t.Fatalf("first r: cmd = %v", cmd)
 		}
 		st.send = nil
 		st.applySend(fleetSendResult{CardID: "a", Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{OK: true}}}, at)
@@ -1032,45 +1105,57 @@ func TestFleetViewLeanPickDelay(t *testing.T) {
 		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
 		moved := at.Add(100 * time.Millisecond)
 		st.applyState(v, nil, moved)
+		fleetDrawn(st, moved)
 		if st.items[st.sel].Card.ID != "b" {
 			t.Fatalf("selected %q, want b", st.items[st.sel].Card.ID)
 		}
-		// The double-tap's second r lands right after the move: ignored, no toast.
-		st.toast = ""
-		if cmd := st.handleKey("r", false, moved.Add(fleetLeanPickDelay-time.Millisecond)); cmd != fleetCmdNone || st.send != nil || st.sending || st.toast != "" {
-			t.Fatalf("r inside the delay: cmd = %v send = %v toast = %q", cmd, st.send, st.toast)
+		if cmd := st.handleKey("r", false, moved.Add(200*time.Millisecond)); cmd != fleetCmdNone || st.send != nil {
+			t.Fatalf("double-tap r: cmd = %v send = %v", cmd, st.send)
 		}
-		if cmd := st.handleKey("r", false, moved.Add(fleetLeanPickDelay)); cmd != fleetCmdSend || st.send.CardID != "b" || st.send.OptionKey != "yes" {
-			t.Fatalf("r after the delay: cmd = %v send = %+v", cmd, st.send)
+		if cmd := st.handleKey("r", false, moved.Add(fleetLeanPickDelay)); cmd != fleetCmdSend || st.send.CardID != "b" {
+			t.Fatalf("r a second later: cmd = %v send = %+v", cmd, st.send)
 		}
 	})
 
-	t.Run("changed hash on the selected card", func(t *testing.T) {
-		st := fleetTestState(views(), now)
-		v := views()
-		v.CardHashes["a"] = "h-a2"
-		st.applyState(v, nil, at)
-		if cmd := st.handleKey("r", false, at.Add(fleetLeanPickDelay/2)); cmd != fleetCmdNone || st.send != nil {
-			t.Fatalf("r after a hash change: cmd = %v send = %v", cmd, st.send)
-		}
-	})
-
-	t.Run("unchanged state does not re-arm", func(t *testing.T) {
-		st := fleetTestState(views(), now)
-		st.applyState(views(), nil, at)
-		if cmd := st.handleKey("r", false, at); cmd != fleetCmdSend {
-			t.Fatalf("r after an identical poll: cmd = %v", cmd)
-		}
-	})
-
-	t.Run("arrow move does not arm", func(t *testing.T) {
-		st := fleetTestState(views(), now)
+	t.Run("arrow move waits too", func(t *testing.T) {
+		st := fleetDrawn(fleetTestState(views(), now), now)
+		at := now.Add(5 * time.Second)
 		st.handleKey(KeyDown, false, at)
-		if st.items[st.sel].Card.ID != "b" || !st.selChangedAt.Equal(now) {
-			t.Fatalf("selected %q selChangedAt %v", st.items[st.sel].Card.ID, st.selChangedAt)
+		if cmd := st.handleKey("r", false, at); cmd != fleetCmdNone || st.send != nil {
+			t.Fatalf("r right after an arrow: cmd = %v", cmd)
 		}
-		if cmd := st.handleKey("r", false, at); cmd != fleetCmdSend || st.send.CardID != "b" {
-			t.Fatalf("r right after an arrow: cmd = %v send = %+v", cmd, st.send)
+		fleetDrawn(st, at)
+		if cmd := st.handleKey("r", false, at.Add(fleetLeanPickDelay)); cmd != fleetCmdSend || st.send.CardID != "b" {
+			t.Fatalf("r a second after the arrow's draw: cmd = %v send = %+v", cmd, st.send)
 		}
 	})
+
+	for _, ev := range []inputEvent{
+		{kind: eventMouse, mouse: mouseEvent{button: mouseWheelDown}},
+		{kind: eventMouse, mouse: mouseEvent{button: mouseLeft}},
+	} {
+		t.Run(fmt.Sprintf("mouse %v plus r in one read", ev.mouse.button), func(t *testing.T) {
+			st := fleetDrawn(fleetTestState(views(), now), now)
+			// Aim at card b's list row from the hit map the draw recorded.
+			for y := 0; y < 40; y++ {
+				if i, ok := st.hit.listItemAt(y); ok && i == fleetItemIndex(st.items, "b") {
+					ev.mouse.y = y
+				}
+			}
+			if ev.mouse.button == mouseWheelDown {
+				ev.mouse.y = st.hit.listY
+			}
+			at := now.Add(5 * time.Second)
+			events := []inputEvent{ev, {kind: eventKey, key: "r"}}
+			batch := fleetKeyBatch(events)
+			for _, e := range events {
+				if cmd := st.handleEvent(e, batch, at); cmd == fleetCmdSend {
+					t.Fatalf("sent after %+v without a draw", e)
+				}
+			}
+			if st.items[st.sel].Card.ID != "b" || st.send != nil || st.sending {
+				t.Fatalf("selected %q send = %v", st.items[st.sel].Card.ID, st.send)
+			}
+		})
+	}
 }

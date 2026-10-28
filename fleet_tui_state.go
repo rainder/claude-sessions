@@ -16,10 +16,18 @@ import (
 // (the page's SHEET_ARM_MS), so one stray key cannot send.
 const fleetArmDelay = 400 * time.Millisecond
 
-// fleetLeanPickDelay is how long r is ignored after an applied state changes
-// the selected card; longer than fleetArmDelay so a double-tap of r, whose
-// first send moves the selection on, cannot answer the next card.
+// fleetLeanPickDelay is how long a card must have been drawn on the list
+// screen before r answers it; longer than fleetArmDelay so a double-tap of r,
+// whose first send moves the selection on, cannot answer the next card.
 const fleetLeanPickDelay = time.Second
+
+// fleetDrawnCard is the card the list screen's details panel shows: its id,
+// its CardHashes entry, and when that exact pair was first drawn. at is zero
+// when the last frame drew no such card.
+type fleetDrawnCard struct {
+	id, hash string
+	at       time.Time
+}
 
 const fleetPageStep = 10 // lines per PgUp/PgDn before the panel height is known
 
@@ -98,7 +106,7 @@ type fleetViewState struct {
 	nextAfter     string               // card id just sent; the next applyState selects the next open card
 	justSent      string               // card id our own answer reached; locked until a state shows it answered or gone
 	unclear       string               // card id whose send result is unknown; locked until the next applied state
-	selChangedAt  time.Time            // when an applied state last changed the selected card's id or hash; r waits fleetLeanPickDelay
+	drawn         fleetDrawnCard       // renderFleetView keeps it; r waits fleetLeanPickDelay on it
 	toast         string
 	toastKind     fleetToastKind
 	toastUntil    time.Time
@@ -265,7 +273,6 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	st.unclear = ""
 	old := st.items
 	oldSel := st.sel
-	oldID, oldHash := st.selectedIdentity()
 	st.err, st.view, st.items = "", v, fleetItems(v)
 	if len(st.items) == 0 || !fleetOnlySent(st.items) {
 		// An open or unconfirmed card shows the list anyway; with no card
@@ -316,12 +323,6 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	if st.sel < 0 {
 		st.sel = 0
 	}
-	// A state that put another card, or a changed card, under the selection
-	// arms r's delay. Andy's own moves (arrows, click, wheel) do not.
-	if id, hash := st.selectedIdentity(); id != oldID || hash != oldHash {
-		st.selChangedAt = now
-	}
-
 	if st.unlocked != "" {
 		if i := fleetItemIndex(st.items, st.unlocked); i < 0 || st.items[i].Answer == nil {
 			st.unlocked = ""
@@ -384,6 +385,29 @@ func (st *fleetViewState) selectedIdentity() (id, hash string) {
 	}
 	id = st.items[st.sel].Card.ID
 	return id, st.view.CardHashes[id]
+}
+
+// noteDrawn records what this frame drew: list true is the card list with
+// the details panel, anything else (Clarify, ship, confirm panel, error,
+// loading, ambiguous) clears the record. A plain field write, called from
+// renderFleetView.
+func (st *fleetViewState) noteDrawn(list bool, now time.Time) {
+	id, hash := st.selectedIdentity()
+	if !list || id == "" {
+		st.drawn = fleetDrawnCard{}
+		return
+	}
+	if st.drawn.at.IsZero() || st.drawn.id != id || st.drawn.hash != hash {
+		st.drawn = fleetDrawnCard{id: id, hash: hash, at: now}
+	}
+}
+
+// drawnLongEnough reports whether the selected card is the one the screen
+// shows, unchanged, for at least fleetLeanPickDelay.
+func (st *fleetViewState) drawnLongEnough(now time.Time) bool {
+	id, hash := st.selectedIdentity()
+	d := st.drawn
+	return !d.at.IsZero() && id != "" && d.id == id && d.hash == hash && !now.Before(d.at.Add(fleetLeanPickDelay))
 }
 
 // selected is the selected item, nil when the list is empty or not shown.
@@ -559,17 +583,19 @@ func (st *fleetViewState) pickRefusal(it *fleetItem) (msg string, kind fleetToas
 }
 
 // fleetLeanOption is the index of the option FLEET recommends (Key ==
-// card.Lean), ok false when the card has no lean or it names no option.
+// card.Lean), ok false when the card has no lean, or it names no option or
+// more than one (no single pick to send).
 func fleetLeanOption(c fleetCardView) (int, bool) {
 	if c.Lean == "" {
 		return 0, false
 	}
+	idx, n := 0, 0
 	for i, o := range c.Options {
 		if o.Key == c.Lean {
-			return i, true
+			idx, n = i, n+1
 		}
 	}
-	return 0, false
+	return idx, n == 1
 }
 
 // fleetLeanRefusal is why r cannot send card c's lean option, on top of
@@ -587,17 +613,22 @@ func fleetLeanRefusal(c fleetCardView) (opt int, msg string) {
 	return opt, ""
 }
 
-// pickLean is r: send the selected card's lean option at once, with no
-// confirm panel, through the same guards and the same request a digit pick
-// confirmed on the panel makes. A key in a paste never sends, and neither
-// does one within fleetLeanPickDelay of a state that changed the selected card.
+// pickLean is r: send the selected unanswered card's lean option at once,
+// with no confirm panel, through the same guards and the same request a digit
+// pick confirmed on the panel makes. It does nothing in a paste, or unless
+// the screen has shown that exact card (id and hash) for fleetLeanPickDelay.
+// A correction goes through c, a digit and the panel, never r.
 func (st *fleetViewState) pickLean(inBatch bool, now time.Time) fleetCmd {
-	if inBatch || now.Before(st.selChangedAt.Add(fleetLeanPickDelay)) {
+	if inBatch || !st.drawnLongEnough(now) {
 		return fleetCmdNone
 	}
 	it := st.selected()
 	if it == nil {
 		return fleetCmdNone
+	}
+	if it.Answer != nil && !st.sending {
+		st.setToast("answered — press c, then a digit, to correct", fleetToastInfo, now)
+		return fleetCmdRender
 	}
 	if msg, kind, blocked := st.pickRefusal(it); blocked {
 		if msg == "" {
@@ -611,14 +642,14 @@ func (st *fleetViewState) pickLean(inBatch bool, now time.Time) fleetCmd {
 		st.setToast(msg, fleetToastWarn, now)
 		return fleetCmdRender
 	}
-	return st.sendOption(*it, opt, st.view.CardHashes[it.Card.ID], st.view.Source, "", it.Answer != nil, now)
+	return st.sendOption(*it, opt, st.view.CardHashes[it.Card.ID], st.view.Source, "", false, now)
 }
 
-// leanPickable reports whether r would send now, which is when the view
-// offers it in the key help.
+// leanPickable reports whether r would send the selected card, leaving out
+// the fleetLeanPickDelay draw wait: the key help offers r during it too.
 func (st *fleetViewState) leanPickable() bool {
 	it := st.selected()
-	if it == nil || st.panel != nil || st.clarify != nil || st.shipOn() {
+	if it == nil || it.Answer != nil || st.panel != nil || st.clarify != nil || st.shipOn() {
 		return false
 	}
 	if _, _, blocked := st.pickRefusal(it); blocked {

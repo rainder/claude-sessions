@@ -758,6 +758,7 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	if st.clarify != nil {
 		// The chat replaces the whole view; the mouse has no rows to hit.
 		st.hit = fleetHitMap{}
+		st.noteDrawn(false, now)
 		lines := fleetClarifyLines(st, width, rows, now)
 		for i, l := range lines {
 			lines[i] = clipLine(l, width)
@@ -792,6 +793,8 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	default:
 		body = fleetStackedBody(st, width, bodyRows, now)
 	}
+	// Only the card list with the details panel counts as showing a card to r.
+	st.noteDrawn(st.err == "" && st.loaded && len(st.view.Ambiguous) == 0 && !st.shipOn() && st.panel == nil, now)
 	if bodyRows >= 0 {
 		if len(body) > bodyRows {
 			body = body[:bodyRows]
