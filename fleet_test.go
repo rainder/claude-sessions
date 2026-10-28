@@ -15,9 +15,15 @@ import (
 
 func fleetTestServer(t *testing.T, sessions []Session) *server {
 	t.Helper()
+	auto := t.TempDir()
 	return &server{
 		token:   "tok",
 		collect: func() ([]Session, error) { return sessions, nil },
+		// Never the real ~/.config or state dir: /fleet/state reads the
+		// auto-switch config and state.
+		auto: autoSwitchDeps{configPath: filepath.Join(auto, "auto-switch.json"),
+			statePath: filepath.Join(auto, "state", "auto-switch-state.json"),
+			logPath:   filepath.Join(auto, "state", "auto-switch.log")},
 		fleet: fleetDeps{dir: t.TempDir(), secret: "sec",
 			sayLogPath: filepath.Join(t.TempDir(), "state", "fleet-say.log"),
 			// Never the real ~/.config or ~/.claude: discovery writes

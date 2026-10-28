@@ -133,6 +133,12 @@ body.kb .chips, body.kb .quota, body.kb .accts { display: none !important; }
 .chip.old { opacity: .6; }
 /* Account chips: one per provider with saved accounts; tap to switch. */
 .accts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; min-width: 0; }
+/* The last Claude auto switch, for 12 h: one muted line under the chips. */
+.autosw { margin: 6px 0 0; min-width: 0; font-size: 12px; line-height: 1.3; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.kb .autosw { display: none !important; }
+@media (max-width: 1099.98px) { body.sv-open .autosw { display: none !important; } }
+@media (max-width: 599.98px) { .autosw { order: 5; flex: 1 1 100%; } }
+@media (min-width: 600px) { .autosw { order: 4; flex: 1 1 100%; } }
 .acct-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; min-height: 36px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 12.5px; line-height: 1.25; cursor: pointer; }
 .acct-chip:hover { border-color: var(--muted); }
 /* The hit area reaches 44px without a taller chip or header. */
@@ -596,7 +602,7 @@ body.sv-open { overflow: hidden; }
 .hent .t { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12.5px; padding-top: 2px; }
 .hent .c { min-width: 0; overflow-wrap: anywhere; }
 .ty { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 5px; font-size: 11.5px; font-weight: 650; background: var(--surface2); color: var(--muted); vertical-align: 1px; }
-.ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say, .ty-web-start, .ty-web-switch { color: var(--accent); } .ty-clickup { color: var(--green); }
+.ty-merge { color: var(--green); } .ty-decision, .ty-ruling { color: var(--amber); } .ty-kill { color: var(--red); } .ty-web-say, .ty-web-start, .ty-web-switch, .ty-auto-switch { color: var(--accent); } .ty-clickup { color: var(--green); }
 .hent .tk { font-family: var(--mono); font-size: 12px; margin-right: 6px; }
 .hent a.open { margin-left: 2px; white-space: nowrap; }
 .more-row { padding: 10px 12px; border-top: 1px solid var(--line); text-align: center; }
@@ -872,6 +878,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       <button class="chips" id="chips" type="button" aria-expanded="false" aria-controls="quota" aria-label="Quota. Show details." hidden></button>
       <div class="accts" id="accts" hidden></div>
     </div>
+    <p class="autosw" id="autosw" role="status" hidden></p>
     <div class="quota" id="quota" hidden></div>
   </div>
 </header>
@@ -1078,7 +1085,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // Every node is built with createElement + textContent. Card, chat and log
   // text is untrusted; links go through safeLink (http and https only).
 
-  const TYPES = ["merge", "kill", "spawn", "ticket", "decision", "ruling", "relay", "web-say", "web-start", "web-switch", "clickup", "note"];
+  const TYPES = ["merge", "kill", "spawn", "ticket", "decision", "ruling", "relay", "web-say", "web-start", "web-switch", "auto-switch", "clickup", "note"];
   const BACKOFF_CAP = 60000;
   const $ = id => document.getElementById(id);
 
@@ -2047,6 +2054,29 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     $("accts").replaceChildren(...chips);
     $("accts").hidden = !chips.length;
     if ($("acct-sheet").open && !acct.pick && !acct.flight) renderAcctList();
+    measure();
+  }
+
+  // The Claude auto switch (state.autoSwitch.last, the last successful
+  // one): a line under the account chips for 12 h after it, and a toast when
+  // a state brings a new one. The first state after a load only records it.
+  const AUTO_SW_SHOW_MS = 12 * 3600e3;
+  const autoSw = {seen: false, at: "", text: ""};
+  function autoSwText(last) {
+    const pct = v => num(v) ? Math.round(v) + "%" : "?";
+    return "Auto-switched " + str(last.from) + " → " + str(last.to) + " · 7-day " + pct(last.fromPct) + " → " + pct(last.toPct) + " · " + clock(last.at);
+  }
+  function renderAutoSwitch() {
+    const a = obj(state && state.autoSwitch), last = a ? obj(a.last) : null;
+    const at = last ? str(last.at) : "", t = parseTime(at);
+    const text = last && t !== null ? autoSwText(last) : "";
+    if (autoSw.seen && text && at !== autoSw.at) toast(text);
+    autoSw.seen = true; autoSw.at = at;
+    const show = text && Date.now() - t < AUTO_SW_SHOW_MS ? text : "";
+    if (show === autoSw.text) return;
+    autoSw.text = show;
+    $("autosw").textContent = show;
+    $("autosw").hidden = !show;
     measure();
   }
 
@@ -3317,6 +3347,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     } else if (dropped) guard(renderCards);
     guard(watchStart);
     guard(updateRel);
+    guard(renderAutoSwitch);
     if (!viewChosen) { viewChosen = true; setView(decideCount() ? "decide" : "chat", false); }
     if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
   }

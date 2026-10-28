@@ -342,10 +342,65 @@ func (s *server) fleetAccountSwitch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "unknown_account", Error: "no saved account by that name"})
 		return
 	}
+	done, err := s.fleetDoSwitch(provider, name, "", func(old string) (string, string, string) {
+		prev := old
+		if prev == "" {
+			prev = "-"
+		}
+		return "web-switch", provider + " account " + prev + " -> " + name, fleetSwitchEventText(provider, old, name)
+	})
+	switch {
+	case errors.Is(err, errFleetSwitchBusy):
+		writeJSON(w, http.StatusConflict, fleetSwitchResult{Code: "busy", Error: "another switch is running"})
+	case errors.Is(err, errUnknownAccount):
+		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "unknown_account", Error: "no saved account by that name"})
+	case err != nil:
+		writeJSON(w, http.StatusInternalServerError, fleetSwitchResult{Code: "switch_failed", Error: "switch failed; see the server log"})
+	case done.Noop:
+		writeJSON(w, http.StatusOK, fleetSwitchResult{OK: true, Noop: true, Provider: provider, Name: name, Previous: done.Old})
+	default:
+		if provider == accountToolClaude {
+			// A deliberate switch starts the auto switch's cooldown, so it
+			// is not undone within autoSwitchCooldown.
+			at := s.auto.clock().UTC().Format(time.RFC3339)
+			s.auto.update(func(st *autoSwitchState) { st.LastManualAt = at })
+		}
+		writeJSON(w, http.StatusOK, fleetSwitchResult{OK: true, Provider: provider, Name: name, Previous: done.Old,
+			Event: done.Event, Warnings: done.Warnings})
+	}
+}
+
+// fleetSwitchMsgs builds a switch's log.jsonl line (type and text) and the
+// event line typed into FLEET, from the account it replaced ("" when the
+// live one was not saved under a name).
+type fleetSwitchMsgs func(old string) (logType, logText, event string)
+
+// fleetSwitchDone is what fleetDoSwitch did: Old is the account that was
+// live, Event idleDeliver's code for the FLEET line.
+type fleetSwitchDone struct {
+	Old      string
+	Noop     bool
+	Warnings int
+	Event    string
+}
+
+var (
+	errFleetSwitchBusy  = errors.New("another switch is running")
+	errFleetSwitchMoved = errors.New("the live account is not the expected one")
+)
+
+// fleetDoSwitch is the switch both the page's account chip and the
+// auto-switch loop run. One at a time: a held lock is errFleetSwitchBusy and
+// nothing happens. Naming the live account is a no-op (nothing logged or
+// sent). from, when not "", must be the live account's name, else
+// errFleetSwitchMoved and nothing happens. A switch error is returned as is;
+// its text can name accounts by email, so it goes to stderr only. Warnings
+// go to stderr too. A switch logs one log.jsonl line, and types one event
+// line into FLEET after the lock is released.
+func (s *server) fleetDoSwitch(provider, name, from string, msgs fleetSwitchMsgs) (fleetSwitchDone, error) {
 	f := &s.fleet
 	if !f.switchMu.TryLock() {
-		writeJSON(w, http.StatusConflict, fleetSwitchResult{Code: "busy", Error: "another switch is running"})
-		return
+		return fleetSwitchDone{}, errFleetSwitchBusy
 	}
 	locked := true
 	defer func() {
@@ -355,30 +410,22 @@ func (s *server) fleetAccountSwitch(w http.ResponseWriter, r *http.Request) {
 	}()
 	old := s.fleetAccountCurrent(provider)
 	if old == name {
-		writeJSON(w, http.StatusOK, fleetSwitchResult{OK: true, Noop: true, Provider: provider, Name: name, Previous: old})
-		return
+		return fleetSwitchDone{Old: old, Noop: true}, nil
+	}
+	if from != "" && old != from {
+		return fleetSwitchDone{Old: old}, errFleetSwitchMoved
 	}
 	_, warnings, err := s.switchAccountTo(provider, name)
 	if err != nil {
-		// The error text can name accounts by email: stderr only.
 		fmt.Fprintf(os.Stderr, "fleet: %s account switch to %s failed: %v\n", provider, name, err)
-		if errors.Is(err, errUnknownAccount) {
-			writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "unknown_account", Error: "no saved account by that name"})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, fleetSwitchResult{Code: "switch_failed", Error: "switch failed; see the server log"})
-		return
+		return fleetSwitchDone{Old: old}, err
 	}
 	for _, wn := range warnings {
 		fmt.Fprintf(os.Stderr, "fleet: %s account switch to %s: %s\n", provider, name, wn)
 	}
-	prev := old
-	if prev == "" {
-		prev = "-"
-	}
-	if err := s.appendFleetLog(fleetLogEntry{At: s.fleetNow().UTC().Format(time.RFC3339), Type: "web-switch",
-		Text: provider + " account " + prev + " -> " + name}); err != nil {
-		fmt.Fprintf(os.Stderr, "fleet: web-switch log append failed: %v\n", err)
+	logType, logText, event := msgs(old)
+	if err := s.appendFleetLog(fleetLogEntry{At: s.fleetNow().UTC().Format(time.RFC3339), Type: logType, Text: logText}); err != nil {
+		fmt.Fprintf(os.Stderr, "fleet: %s log append failed: %v\n", logType, err)
 	}
 	if provider == accountToolGrok {
 		s.fleetInvalidateParkedGrok()
@@ -386,9 +433,7 @@ func (s *server) fleetAccountSwitch(w http.ResponseWriter, r *http.Request) {
 	f.switchMu.Unlock()
 	locked = false
 
-	event := s.fleetSwitchNotify(provider, old, name)
-	writeJSON(w, http.StatusOK, fleetSwitchResult{OK: true, Provider: provider, Name: name, Previous: old,
-		Event: event, Warnings: len(warnings)})
+	return fleetSwitchDone{Old: old, Warnings: len(warnings), Event: s.fleetSwitchNotify(provider, event)}, nil
 }
 
 // fleetSwitchEventText is the line typed into FLEET after a switch. Names
@@ -398,12 +443,12 @@ func fleetSwitchEventText(provider, old, name string) string {
 		" to " + idleSanitize(name) + "; " + fleetSwitchEventNote(provider)
 }
 
-// fleetSwitchNotify types the switch event into FLEET and returns the
-// delivery code: "sent" or idleDeliver's refusal code (target_missing when
-// no FLEET is running and no target is configured).
-func (s *server) fleetSwitchNotify(provider, old, name string) string {
+// fleetSwitchNotify types an account event line (a switch, or the
+// auto-switch loop's "no target") into FLEET and returns the delivery code:
+// "sent" or idleDeliver's refusal code (target_missing when no FLEET is
+// running and no target is configured).
+func (s *server) fleetSwitchNotify(provider, text string) string {
 	target := s.fleetEventTarget()
-	text := fleetSwitchEventText(provider, old, name)
 	var code string
 	if s.fleet.deliverEvent != nil {
 		code = s.fleet.deliverEvent(target, text)
@@ -411,7 +456,7 @@ func (s *server) fleetSwitchNotify(provider, old, name string) string {
 		code, _ = s.idleDeliver(target, text)
 	}
 	if code != "sent" {
-		fmt.Fprintf(os.Stderr, "fleet: %s account switch event not delivered: code=%s target=%s\n", provider, code, fleetEventTargetName(target))
+		fmt.Fprintf(os.Stderr, "fleet: %s account event not delivered: code=%s target=%s\n", provider, code, fleetEventTargetName(target))
 	}
 	return code
 }
