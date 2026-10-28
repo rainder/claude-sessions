@@ -35,13 +35,14 @@ const fleetPageStep = 10 // lines per PgUp/PgDn before the panel height is known
 type fleetCmd int
 
 const (
-	fleetCmdNone    fleetCmd = iota
-	fleetCmdRender           // redraw
-	fleetCmdClose            // back to the session list
-	fleetCmdSend             // start fleetSendJob with st.send
-	fleetCmdDismiss          // dismiss st.dismissID
-	fleetCmdAttach           // attach to st.attach, then refetch
-	fleetCmdRawText          // show the selected card's raw text (fleetRawLines)
+	fleetCmdNone      fleetCmd = iota
+	fleetCmdRender             // redraw
+	fleetCmdClose              // back to the session list
+	fleetCmdSend               // start fleetSendJob with st.send
+	fleetCmdSendBatch          // start fleetBatchJob with st.batchSend
+	fleetCmdDismiss            // dismiss st.dismissID
+	fleetCmdAttach             // attach to st.attach, then refetch
+	fleetCmdRawText            // show the selected card's raw text (fleetRawLines)
 
 	// Clarify (fleet_tui_clarify.go). The loop starts a job for each; ask
 	// takes st.clarifyReq, the rest use st.clarify.
@@ -94,10 +95,12 @@ type fleetViewState struct {
 	panelRows     int    // the details panel's height at the last render; 0 before one
 	unlocked      string // card id a 'c' unlocked for one answer
 	panel         *fleetPanel
-	sending       bool
+	batch         *fleetBatchPanel // the open R panel (fleet_tui_batch.go)
+	sending       bool             // a send or an R batch job runs
 	dismissing    bool
 	send          *fleetSayRequest     // set with fleetCmdSend; the loop takes it
 	sendLabel     string               // the option label of the answer sending, for the result toast; "" for Other
+	batchSend     []fleetBatchItem     // set with fleetCmdSendBatch; the loop takes it
 	dismissID     string               // set with fleetCmdDismiss
 	dismissSource string               // the applied state's Source when x was pressed
 	attach        *fleetAttachRequest  // set with fleetCmdAttach; the loop takes it
@@ -105,6 +108,7 @@ type fleetViewState struct {
 	clarifyReq    *fleetClarifyRequest // set with fleetCmdClarifyAsk; the loop takes it
 	nextAfter     string               // card id just sent; the next applyState selects the next open card
 	justSent      string               // card id our own answer reached; locked until a state shows it answered or gone
+	batchSent     map[string]bool      // card ids an R batch's answers reached; each locked as justSent is
 	unclear       string               // card id whose send result is unknown; locked until the next applied state
 	drawn         fleetDrawnCard       // renderFleetView keeps it; r waits fleetLeanPickDelay on it
 	toast         string
@@ -361,11 +365,22 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 			// is our own, "another device" would be wrong. An Other answer is
 			// a plain line the card does not track, so it may follow one.
 			st.panel = nil
-			if id != ownSent {
+			if id != ownSent && !st.batchSent[id] {
 				st.setToast(fleetToastAnswered, fleetToastErr, now)
 			}
 		}
 	}
+	for id := range st.batchSent {
+		if i := fleetItemIndex(st.items, id); i < 0 || st.items[i].Answer != nil {
+			delete(st.batchSent, id)
+		}
+	}
+}
+
+// sentLocked reports whether our own answer to card id reached FLEET (a single
+// send or an R batch) and no state has shown it recorded yet.
+func (st *fleetViewState) sentLocked(id string) bool {
+	return id != "" && (id == st.justSent || st.batchSent[id])
 }
 
 // pageStep is PgUp/PgDn's scroll in the details panel: its height less the
@@ -426,6 +441,9 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 	}
 	if st.panel != nil {
 		return st.handlePanelKey(k, inBatch, now)
+	}
+	if st.batch != nil {
+		return st.handleBatchKey(k, inBatch, now)
 	}
 	if st.shipOn() {
 		if cmd, ok := st.handleShipKey(k); ok {
@@ -521,6 +539,8 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return st.openClarify(now)
 	case "r":
 		return st.pickLean(inBatch, now)
+	case "R":
+		return st.openBatch(now)
 	case "t":
 		// The ship screen shows no card, so there is no card text to show.
 		if inBatch || st.shipOn() || st.selected() == nil {
@@ -563,7 +583,7 @@ func (st *fleetViewState) pickRefusal(it *fleetItem) (msg string, kind fleetToas
 	if it.Card.ID == "" || !st.view.Fleet.Alive || st.sending {
 		return "", 0, true
 	}
-	if it.Card.ID == st.justSent {
+	if st.sentLocked(it.Card.ID) {
 		// The list may still show our own answer's card as open until the
 		// refetch lands; a panel now would be a second answer.
 		return "sent — waiting for FLEET", fleetToastInfo, true
@@ -649,7 +669,7 @@ func (st *fleetViewState) pickLean(inBatch bool, now time.Time) fleetCmd {
 // the fleetLeanPickDelay draw wait: the key help offers r during it too.
 func (st *fleetViewState) leanPickable() bool {
 	it := st.selected()
-	if it == nil || it.Answer != nil || st.panel != nil || st.clarify != nil || st.shipOn() {
+	if it == nil || it.Answer != nil || st.panel != nil || st.batch != nil || st.clarify != nil || st.shipOn() {
 		return false
 	}
 	if _, _, blocked := st.pickRefusal(it); blocked {
@@ -663,8 +683,20 @@ func (st *fleetViewState) leanPickable() bool {
 // confirmed panel and r both build. hash and source are the ones the answer
 // was prepared against; the send job re-checks the card against them.
 func (st *fleetViewState) sendOption(item fleetItem, opt int, hash, source, comment string, correction bool, now time.Time) fleetCmd {
+	req := fleetOptionRequest(item, opt, hash, source, comment, correction)
+	st.send = &req
+	st.sendLabel = item.Card.Options[opt].Label
+	st.panel = nil
+	st.sending = true
+	st.setToast("sending…", fleetToastInfo, now)
+	return fleetCmdSend
+}
+
+// fleetOptionRequest is the request that answers item with option opt: the
+// one a confirmed panel, r and R all send.
+func fleetOptionRequest(item fleetItem, opt int, hash, source, comment string, correction bool) fleetSayRequest {
 	o := item.Card.Options[opt]
-	st.send = &fleetSayRequest{
+	return fleetSayRequest{
 		Source:     source,
 		Text:       fleetSendText(o.Send, comment),
 		CardID:     item.Card.ID,
@@ -672,11 +704,6 @@ func (st *fleetViewState) sendOption(item fleetItem, opt int, hash, source, comm
 		OptionKey:  o.Key,
 		Correction: correction,
 	}
-	st.sendLabel = o.Label
-	st.panel = nil
-	st.sending = true
-	st.setToast("sending…", fleetToastInfo, now)
-	return fleetCmdSend
 }
 
 // openOther opens the Other panel on the selected card: Andy's own answer,
@@ -834,7 +861,7 @@ func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
 		return fleetCmdNone
 	}
 	h := st.hit
-	if m.release || !h.on || st.panel != nil || st.shipOn() || st.selected() == nil {
+	if m.release || !h.on || st.panel != nil || st.batch != nil || st.shipOn() || st.selected() == nil {
 		return fleetCmdNone
 	}
 	switch m.button {
@@ -879,7 +906,7 @@ func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
 // session, which is when the view offers the attach key.
 func (st *fleetViewState) attachable() bool {
 	it := st.selected()
-	return it != nil && st.panel == nil && fleetAttachTarget(it.Card, st.view.Sessions).Tmux != ""
+	return it != nil && st.panel == nil && st.batch == nil && fleetAttachTarget(it.Card, st.view.Sessions).Tmux != ""
 }
 
 // applyAttach takes the attach's outcome once the terminal is back.

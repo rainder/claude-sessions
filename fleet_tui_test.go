@@ -369,6 +369,11 @@ func waitFleetJobs(t *testing.T, l *fleetLoop) {
 				running = true
 			}
 		}
+		for _, j := range l.batches {
+			if _, ok := j.snapshot(); !ok {
+				running = true
+			}
+		}
 		for _, j := range l.dismisses {
 			if _, ok := j.snapshot(); !ok {
 				running = true

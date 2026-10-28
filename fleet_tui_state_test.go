@@ -1028,7 +1028,7 @@ func TestFleetViewLeanPick(t *testing.T) {
 
 	t.Run("help row", func(t *testing.T) {
 		st := drawn(leanView())
-		if row := stripANSI(fleetBottomRow(st, now)); !strings.Contains(row, "1-9 pick option · r FLEET's pick · o other") {
+		if row := stripANSI(fleetBottomRow(st, now)); !strings.Contains(row, "1-9 pick option · r FLEET's pick · R all picks · o other") {
 			t.Errorf("lean card: help row = %q", row)
 		}
 		st.sel = fleetItemIndex(st.items, "b") // no lean

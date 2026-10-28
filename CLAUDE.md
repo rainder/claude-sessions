@@ -225,7 +225,11 @@ types into panes. Spec and plan: `docs/superpowers/`.
   that exact card (id and hash, `st.drawn`, recorded by `renderFleetView`)
   for `fleetLeanPickDelay` (1s): any other frame or a changed pair restarts
   the wait, so a double-tap, a mouse move or a new state cannot answer an
-  unseen card.
+  unseen card. `R` builds the set of cards `r` would answer (`leanBatch`),
+  lists it with the skipped ones on a confirm panel (option panel's arming),
+  and sends it in one `fleetBatchJob` through the same send path, 1.1s apart;
+  a host move, failed re-check, unclear result, 401 or `not_submitted` stops
+  it. Sent cards lock in `batchSent` as `justSent` does.
 - **Uploads:** type sniffed from the bytes, server-chosen file names, pruned
   after 7 days.
 - **Web Push:** stdlib RFC 8291/8292. The endpoint host allowlist is the SSRF
