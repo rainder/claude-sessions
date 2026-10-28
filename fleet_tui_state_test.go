@@ -317,7 +317,7 @@ func TestFleetViewSelectsNextOpenAfterSend(t *testing.T) {
 		t.Fatalf("cmd = %v", cmd)
 	}
 	refetch := st.applySend(fleetSendResult{CardID: "a", Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{OK: true}}}, now)
-	if !refetch || st.sending || st.nextAfter != "a" || st.toast != "sent" {
+	if !refetch || st.sending || st.nextAfter != "a" || st.toast != "sent: Merge now" {
 		t.Fatalf("refetch = %v sending = %v nextAfter = %q toast = %q", refetch, st.sending, st.nextAfter, st.toast)
 	}
 	v := fleetTestView(cards...)
@@ -847,4 +847,168 @@ func TestFleetSendJobOther(t *testing.T) {
 	if got, _ := body.Load().(string); got != `{"text":"Andy decides on a: hold","cardId":""}` {
 		t.Fatalf("say body = %s", got)
 	}
+}
+
+// fleetLeanCard is fleetTestCard("a") with FLEET's lean on its second option.
+func fleetLeanCard() fleetCardView {
+	c := fleetTestCard("a", "needs-you")
+	c.Lean = "not-yet"
+	return c
+}
+
+// fleetPanelSend is the request a digit pick of option digit, confirmed on the
+// panel with no comment, makes on st.
+func fleetPanelSend(t *testing.T, st *fleetViewState, digit string, now time.Time) fleetSayRequest {
+	t.Helper()
+	st.handleKey(digit, false, now)
+	if st.panel == nil {
+		t.Fatal("panel did not open")
+	}
+	if cmd := st.handleKey(KeyEnter, false, now.Add(time.Second)); cmd != fleetCmdSend || st.send == nil {
+		t.Fatalf("panel Enter: cmd = %v send = %v", cmd, st.send)
+	}
+	return *st.send
+}
+
+func TestFleetViewLeanPick(t *testing.T) {
+	now := time.Unix(1000, 0)
+	leanView := func() fleetStateView {
+		v := fleetTestView(fleetLeanCard(), fleetTestCard("b", "needs-you"))
+		v.Source = "http://ws:8765"
+		return v
+	}
+
+	t.Run("sends what the panel would", func(t *testing.T) {
+		want := fleetPanelSend(t, fleetTestState(leanView(), now), "2", now)
+		st := fleetTestState(leanView(), now)
+		if cmd := st.handleKey("r", false, now); cmd != fleetCmdSend {
+			t.Fatalf("cmd = %v, want send", cmd)
+		}
+		if st.panel != nil || !st.sending || st.send == nil || *st.send != want {
+			t.Fatalf("panel = %v sending = %v send = %+v, want %+v", st.panel, st.sending, st.send, want)
+		}
+		if want.CardHash != "h-a" || want.Source != "http://ws:8765" || want.OptionKey != "not-yet" || want.Text != "Hold" {
+			t.Fatalf("panel request = %+v", want)
+		}
+		st.send = nil
+		st.applySend(fleetSendResult{CardID: "a", Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{OK: true}}}, now)
+		if st.toast != "sent: Hold" || st.justSent != "a" {
+			t.Fatalf("toast = %q justSent = %q", st.toast, st.justSent)
+		}
+	})
+
+	refused := []struct {
+		name, toast string
+		edit        func(*fleetCardView)
+	}{
+		{"no lean", "no FLEET pick on this card", func(c *fleetCardView) { c.Lean = "" }},
+		{"lean names no option", "no FLEET pick on this card", func(c *fleetCardView) { c.Lean = "maybe" }},
+		{"lean option has no send", "FLEET's pick has nothing to send", func(c *fleetCardView) { c.Options[1].Send = "" }},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fleetLeanCard()
+			tc.edit(&c)
+			st := fleetTestState(fleetTestView(c), now)
+			if cmd := st.handleKey("r", false, now); cmd != fleetCmdRender || st.send != nil || st.sending || st.panel != nil {
+				t.Fatalf("cmd = %v send = %v sending = %v panel = %v", cmd, st.send, st.sending, st.panel)
+			}
+			if st.toast != tc.toast || st.toastKind != fleetToastWarn {
+				t.Fatalf("toast = %q kind = %v, want warn %q", st.toast, st.toastKind, tc.toast)
+			}
+			if st.leanPickable() {
+				t.Error("leanPickable on a card r refuses")
+			}
+		})
+	}
+
+	t.Run("answered, then c", func(t *testing.T) {
+		v := leanView()
+		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
+		st := fleetTestState(v, now)
+		if st.items[st.sel].Card.ID != "a" {
+			st.sel = fleetItemIndex(st.items, "a")
+		}
+		if cmd := st.handleKey("r", false, now); cmd != fleetCmdRender || st.send != nil || st.sending {
+			t.Fatalf("answered: cmd = %v send = %v", cmd, st.send)
+		}
+		if !strings.Contains(st.toast, "press c") {
+			t.Errorf("toast = %q, want the correction hint", st.toast)
+		}
+		st.handleKey("c", false, now)
+		if cmd := st.handleKey("r", false, now); cmd != fleetCmdSend || st.send == nil || !st.send.Correction || st.send.OptionKey != "not-yet" {
+			t.Fatalf("after c: cmd = %v send = %+v", cmd, st.send)
+		}
+	})
+
+	t.Run("paste batch", func(t *testing.T) {
+		st := fleetTestState(leanView(), now)
+		if cmd := st.handleKey("r", true, now); cmd != fleetCmdNone || st.send != nil || st.sending {
+			t.Fatalf("batched r: cmd = %v send = %v", cmd, st.send)
+		}
+	})
+
+	t.Run("send in flight", func(t *testing.T) {
+		st := fleetTestState(leanView(), now)
+		st.sending = true
+		if cmd := st.handleKey("r", false, now); cmd != fleetCmdNone || st.send != nil {
+			t.Fatalf("r while sending: cmd = %v send = %v", cmd, st.send)
+		}
+	})
+
+	t.Run("just sent and unclear", func(t *testing.T) {
+		st := fleetTestState(leanView(), now)
+		st.justSent = "a"
+		if cmd := st.handleKey("r", false, now); cmd != fleetCmdRender || st.send != nil {
+			t.Fatalf("justSent: cmd = %v send = %v", cmd, st.send)
+		}
+		st.justSent, st.unclear = "", "a"
+		if cmd := st.handleKey("r", false, now); cmd != fleetCmdRender || st.send != nil {
+			t.Fatalf("unclear: cmd = %v send = %v", cmd, st.send)
+		}
+	})
+
+	t.Run("no card hash", func(t *testing.T) {
+		v := leanView()
+		delete(v.CardHashes, "a")
+		st := fleetTestState(v, now)
+		if cmd := st.handleKey("r", false, now); cmd != fleetCmdNone || st.send != nil {
+			t.Fatalf("cmd = %v send = %v", cmd, st.send)
+		}
+	})
+
+	t.Run("help row", func(t *testing.T) {
+		st := fleetTestState(leanView(), now)
+		if row := stripANSI(fleetBottomRow(st, now)); !strings.Contains(row, "1-9 pick option · r FLEET's pick · o other") {
+			t.Errorf("lean card: help row = %q", row)
+		}
+		st.sel = fleetItemIndex(st.items, "b") // no lean
+		if row := stripANSI(fleetBottomRow(st, now)); strings.Contains(row, "r FLEET's pick") {
+			t.Errorf("card without a lean: help row = %q", row)
+		}
+		st.sel = fleetItemIndex(st.items, "a")
+		st.sending = true
+		if st.leanPickable() {
+			t.Error("leanPickable while sending")
+		}
+		st.sending = false
+		st.handleKey("2", false, now) // panel open: r types into the comment
+		if st.leanPickable() {
+			t.Error("leanPickable with the panel open")
+		}
+		if cmd := st.handleKey("r", false, now); cmd == fleetCmdSend || st.panel.comment != "r" {
+			t.Fatalf("r on the panel: cmd = %v comment = %q", cmd, st.panel.comment)
+		}
+		st.panel = nil
+		v := leanView()
+		v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
+		st.applyState(v, nil, now)
+		if row := stripANSI(fleetBottomRow(st, now)); strings.Contains(row, "r FLEET's pick") {
+			t.Errorf("answered card: help row = %q", row)
+		}
+		st.unlocked = "a"
+		if !st.leanPickable() {
+			t.Error("an unlocked answered card should offer r")
+		}
+	})
 }

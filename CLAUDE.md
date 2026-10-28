@@ -217,6 +217,10 @@ types into panes. Spec and plan: `docs/superpowers/`.
   servers.yaml host. Views carry `Source`; send, dismiss and attach refuse
   when the chosen host moved. Network calls run only in `fleetJob`s or the
   badge hub, never on the render path.
+- **TUI keys:** a digit opens a confirm panel; `r` sends the option whose
+  `Key == card.Lean` with no panel. Both share `pickRefusal` and
+  `sendOption` (same request, hash, `Source` and send job), and `r` in a
+  paste batch is ignored like the panel's Enter.
 - **Uploads:** type sniffed from the bytes, server-chosen file names, pruned
   after 7 days.
 - **Web Push:** stdlib RFC 8291/8292. The endpoint host allowlist is the SSRF

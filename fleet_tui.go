@@ -710,6 +710,9 @@ const (
 	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
 	// fleetHelpClarifyHint goes after "o other" when k opens Clarify.
 	fleetHelpClarifyHint = "k clarify"
+	// fleetHelpLeanHint goes after "1-9 pick option" when r would send the
+	// selected card's lean option.
+	fleetHelpLeanHint = "r FLEET's pick"
 
 	// The Clarify screen's help rows, without and with a draft.
 	fleetHelpClarify      = "Enter ask · Ctrl-D draft for FLEET · Esc back"
@@ -1018,6 +1021,9 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 	row := fleetHelpRow
 	if st.attachable() {
 		row = fleetHelpRowAttach
+	}
+	if st.leanPickable() {
+		row = strings.Replace(row, " · 1-9 pick option · ", " · 1-9 pick option · "+fleetHelpLeanHint+" · ", 1)
 	}
 	if st.canClarify() {
 		row = strings.Replace(row, " · o other · ", " · o other · "+fleetHelpClarifyHint+" · ", 1)
