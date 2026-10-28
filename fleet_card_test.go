@@ -43,6 +43,7 @@ func cardFromJSON(t *testing.T, s string) fleetCardView {
 
 const baseCardJSON = `{"id":"a","kind":"needs-you","status":"open","title":"T","ticket":"DR-1",
 "summary":"S","lean":"L","updatedAt":"2026-10-22T10:00:00Z","session":"s1","links":["x"],"waitingOn":"w",
+"waiting":{"who":"Rinoj","since":"2026-10-28T08:33:00Z"},
 "options":[{"key":"k","label":"Lab","line":"Ln","send":"Snd"}]}`
 
 func TestFleetCardHashIgnoresVolatileFields(t *testing.T) {
@@ -50,7 +51,7 @@ func TestFleetCardHashIgnoresVolatileFields(t *testing.T) {
 	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(base) {
 		t.Fatalf("hash %q", base)
 	}
-	for _, field := range []string{"updatedAt", "id", "session", "links", "waitingOn"} {
+	for _, field := range []string{"updatedAt", "id", "session", "links", "waitingOn", "waiting"} {
 		m := map[string]any{}
 		if err := json.Unmarshal([]byte(baseCardJSON), &m); err != nil {
 			t.Fatal(err)

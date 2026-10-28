@@ -4,13 +4,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFleetRawLines(t *testing.T) {
 	c := fleetTestCard("a", "needs-you")
 	c.Summary = "Run this:\n```\ngit pull --ff-only && make install && claude-sessions service restart\n```\npage [4388c878](https://brain.dev.trecs.dev/document-pages/4388c878-1111)"
 	c.Options[0].Line = "merges #3301"
-	got := fleetRawLines(fleetItem{Card: c, Section: fleetSecApprove})
+	got := fleetRawLines(fleetItem{Card: c, Section: fleetSecApprove}, time.Now())
 	want := []string{
 		"card a",
 		"DR-1 · P" + strconv.Itoa(c.priority()),

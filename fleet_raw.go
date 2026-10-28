@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -20,10 +21,11 @@ import (
 const fleetRawHelp = "raw card text · drag selects, Cmd+C copies · ↑↓ PgUp/PgDn scroll · any other key: back"
 
 // fleetRawLines is the card's text for the raw screen: title, ticket and
-// priority, the summary unchanged, what it waits on, and the options. The
+// priority, the summary unchanged, what it waits on (times in now's
+// location), and the options. The
 // strings are the view's sanitized copies (fleetDisplayText), so no escape
 // reaches the terminal.
-func fleetRawLines(it fleetItem) []string {
+func fleetRawLines(it fleetItem, now time.Time) []string {
 	c := it.Card
 	var out []string
 	if strings.TrimSpace(c.Title) != "" {
@@ -46,7 +48,9 @@ func fleetRawLines(it fleetItem) []string {
 		out = append(out, "")
 		out = append(out, strings.Split(c.Summary, "\n")...)
 	}
-	if c.WaitingOn != "" {
+	if c.Waiting != nil {
+		out = append(out, "", fleetWaitingText(c.Waiting, now))
+	} else if c.WaitingOn != "" {
 		out = append(out, "", "Waiting on: "+c.WaitingOn)
 	}
 	if len(c.Options) > 0 {

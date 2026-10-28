@@ -206,6 +206,7 @@ section { min-width: 0; }
 .card-meta { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
 .card-meta .sess { font-family: var(--mono); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta .wo { color: var(--amber); }
+.card-meta .wo-ok { color: var(--green); }
 /* Priority badge (FLEET's priority, 1 Urgent .. 4 Low; missing is 3). */
 .prio { padding: 0 6px; border: 1px solid var(--line); border-radius: 99px; font-size: 11px; font-weight: 650; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .prio.p1 { color: var(--red); background: var(--red-tint); border-color: var(--red-line); }
@@ -1446,6 +1447,37 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (h < 48) return h + " h ago";
     return Math.floor(h / 24) + " d ago";
   }
+  // waitingLine: a card's `waiting` object as one plain-text line, or null.
+  // Lenient like the TUI (fleetDecodeWaiting): no object, an empty `who` or
+  // a `since` that is not RFC 3339 drops it; a bad `answeredAt` or `note`
+  // is ignored alone. who and note fold to one line and are cut to 40 and
+  // 120 code points. Times show as HH:MM on today's Vilnius date, else
+  // MM-DD HH:MM. answered says which style the line takes.
+  const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  const waitClip = (v, n) => typeof v === "string" ? Array.from(v.trim().replace(/\s+/g, " ")).slice(0, n).join("").trim() : "";
+  function waitStamp(t, now) {
+    const d = new Date(t);
+    const hm = new Intl.DateTimeFormat("en-GB", {timeZone: "Europe/Vilnius", hour: "2-digit", minute: "2-digit", hourCycle: "h23"}).format(d);
+    const day = vilniusDay(d);
+    return day === vilniusDay(now) ? hm : day.slice(5) + " " + hm;
+  }
+  function waitingLine(c, now) {
+    const w = obj(c.waiting);
+    if (!w) return null;
+    const who = waitClip(w.who, 40), note = waitClip(w.note, 120);
+    const rfc = v => typeof v === "string" && RFC3339.test(v) && !isNaN(Date.parse(v)) ? Date.parse(v) : null;
+    const since = rfc(w.since), answered = rfc(w.answeredAt);
+    if (!who || since === null) return null;
+    if (answered !== null) return {answered: true, text: who + " answered " + waitStamp(answered, now) + (note ? " (" + note + ")" : "")};
+    return {answered: false, text: "waiting on " + who + " since " + waitStamp(since, now) + (note ? " \u00b7 " + note : "")};
+  }
+  // waitSpan: the card meta's waiting span. A valid `waiting` supersedes the
+  // older `waitingOn` string. Plain text only: names are not links.
+  function waitSpan(c) {
+    const w = waitingLine(c, new Date());
+    if (w) return el("span", w.answered ? "wo wo-ok" : "wo", w.text);
+    return str(c.waitingOn) ? el("span", "wo", "Waiting on " + str(c.waitingOn)) : null;
+  }
   function ageText(m) { return m < 120 ? m + " min" : Math.floor(m / 60) + " h"; }
   const localDay = d => d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
   function clock(iso) {
@@ -2220,7 +2252,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       meta.append(w);
     }
     if (open && str(c.session)) { const se = el("span", "sess", str(c.session)); se.title = str(c.session); meta.append(se); }
-    if (open && str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
+    const wo = open ? waitSpan(c) : null;
+    if (wo) meta.append(wo);
     if (cardAge(c)) meta.append(relSpan(cardAge(c)));
     const name = el("span", "fold-name", head.ticket ? el("span", "tk", head.ticket) : null, el("span", "tt", head.title));
     let leanEl = null;
@@ -2284,7 +2317,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
         linkText(el("span", "tt"), head.title));
       const meta = el("div", "card-meta", prioSpan(c));
       if (str(c.session)) { const se = el("span", "sess", str(c.session)); se.title = str(c.session); meta.append(se); }
-      if (str(c.waitingOn)) meta.append(el("span", "wo", "Waiting on " + str(c.waitingOn)));
+      const wo = waitSpan(c);
+      if (wo) meta.append(wo);
       if (cardAge(c)) meta.append(relSpan(cardAge(c)));
       title.append(meta);
       card.append(el("div", "card-top", title, chatBtn(c)));
