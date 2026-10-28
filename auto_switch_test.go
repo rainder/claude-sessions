@@ -22,6 +22,7 @@ type autoSwitchHarness struct {
 	events   *[]fleetEventCall
 	current  map[string]string
 	now      *time.Time
+	names    *[]string
 }
 
 // autoSwitchTestServer is fleetAccountServer with the auto-switch loop
@@ -39,12 +40,14 @@ func autoSwitchTestServer(t *testing.T) autoSwitchHarness {
 		if p == accountToolClaude {
 			return names, nil
 		}
-		return nil, nil
+		return []string{"gx", "gy"}, nil
 	}
+	// No cached reading: every tick asks the (test) fresh source.
+	s.auto.cachedUsage = func() []claudeUsageNumbers { return nil }
 	var usage []claudeUsageNumbers
 	s.fleet.claudeUsage = func() []claudeUsageNumbers { return usage }
 	writeAutoSwitchConfig(t, s, `{"enabled": true}`)
-	return autoSwitchHarness{s: s, usage: &usage, switches: switches, events: events, current: current, now: &now}
+	return autoSwitchHarness{s: s, usage: &usage, switches: switches, events: events, current: current, now: &now, names: &names}
 }
 
 func writeAutoSwitchConfig(t *testing.T, s *server, body string) {
@@ -186,7 +189,7 @@ func TestAutoSwitchLowestSevenDayWinsTieByName(t *testing.T) {
 	if len(*h.switches) != 1 || (*h.switches)[0].name != "alpha" {
 		t.Fatalf("switches %v", *h.switches)
 	}
-	got, ok := autoSwitchTarget([]claudeUsageNumbers{acct("home", true, 99), acct("work", false, 20), noFive}, "home", []string{"beta", "home", "work"}, 95)
+	got, ok, _ := autoSwitchTarget([]claudeUsageNumbers{acct("home", true, 99), acct("work", false, 20), noFive}, "home", []string{"beta", "home", "work"}, 95)
 	if !ok || got.Name != "beta" {
 		t.Fatalf("target %+v %v", got, ok)
 	}
@@ -224,7 +227,8 @@ func TestAutoSwitchFailureStartsCooldown(t *testing.T) {
 	h.s.autoSwitchTick()
 	*h.now = h.now.Add(10 * time.Minute)
 	h.s.autoSwitchTick()
-	if calls != 1 || len(*h.events) != 0 {
+	want := "[claude-sessions event] account claude auto-switch from home to work failed (switch_failed); 7-day 96%, threshold 95%; next try in 30 min"
+	if calls != 1 || len(*h.events) != 1 || (*h.events)[0].text != want {
 		t.Fatalf("calls %d events %v", calls, *h.events)
 	}
 	st := h.state(t)
@@ -244,10 +248,23 @@ func TestAutoSwitchMovedAccountIsRefused(t *testing.T) {
 	h.current["claude"] = "work" // the numbers still say home is live
 	*h.usage = []claudeUsageNumbers{acct("home", true, 96), acct("spare", false, 10)}
 	h.s.autoSwitchTick()
-	if len(*h.switches) != 0 || len(*h.events) != 0 {
+	if len(*h.switches) != 0 || len(*h.events) != 1 || !strings.Contains((*h.events)[0].text, "auto-switch from home to spare failed (moved)") {
 		t.Fatalf("%v %v", *h.switches, *h.events)
 	}
 	if st := h.state(t); st.Last == nil || st.Last.Error != "moved" {
+		t.Fatalf("state %+v", st.Last)
+	}
+}
+
+func TestAutoSwitchAlreadyLiveSendsNothing(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	h.current["claude"] = "spare" // the target is live already
+	*h.usage = []claudeUsageNumbers{acct("home", true, 96), acct("spare", false, 10)}
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 0 || len(*h.events) != 0 {
+		t.Fatalf("%v %v", *h.switches, *h.events)
+	}
+	if st := h.state(t); st.Last == nil || st.Last.Error != "already_live" {
 		t.Fatalf("state %+v", st.Last)
 	}
 }
@@ -273,6 +290,7 @@ func TestAutoSwitchBusySkipsWithoutCooldown(t *testing.T) {
 
 func TestAutoSwitchNoTargetOncePerEpisode(t *testing.T) {
 	h := autoSwitchTestServer(t)
+	*h.names = []string{"home", "work"}
 	over := []claudeUsageNumbers{acct("home", true, 96.4), acct("work", false, 97)}
 	*h.usage = over
 	h.s.autoSwitchTick()
@@ -315,6 +333,7 @@ func TestAutoSwitchNoTargetOncePerEpisode(t *testing.T) {
 
 func TestAutoSwitchNoTargetRetriesUndelivered(t *testing.T) {
 	h := autoSwitchTestServer(t)
+	*h.names = []string{"home"}
 	codes := []string{"target_missing", "sent"}
 	var texts []string
 	h.s.fleet.deliverEvent = func(target, text string) string {
@@ -337,6 +356,7 @@ func TestAutoSwitchNoTargetRetriesUndelivered(t *testing.T) {
 
 func TestAutoSwitchSuccessResetsEpisode(t *testing.T) {
 	h := autoSwitchTestServer(t)
+	*h.names = []string{"home", "work"}
 	*h.usage = []claudeUsageNumbers{acct("home", true, 99), acct("work", false, 99)}
 	h.s.autoSwitchTick()
 	*h.usage = []claudeUsageNumbers{acct("home", true, 99), acct("work", false, 10)}
@@ -494,5 +514,230 @@ func TestFleetStateCarriesAutoSwitch(t *testing.T) {
 	h.s.autoSwitchTick()
 	if again := string(get()["autoSwitch"]); again != got {
 		t.Fatalf("autoSwitch %s", again)
+	}
+}
+
+func fetchedAcct(name string, active bool, seven float64, at time.Time) claudeUsageNumbers {
+	e := acct(name, active, seven)
+	e.FetchedAt = &at
+	e.Stale = true // the disk read's stale flag is not an input to the gate
+	return e
+}
+
+func TestAutoSwitchNeedsFresh(t *testing.T) {
+	now := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Minute)
+	reset := fetchedAcct("home", true, 50, now.Add(-time.Minute))
+	reset.SevenDay.ResetsAt = &past
+	noSeven := fetchedAcct("home", true, 50, now)
+	noSeven.SevenDay = nil
+	noAt := acct("home", true, 50)
+	cases := []struct {
+		name   string
+		cached []claudeUsageNumbers
+		want   bool
+	}{
+		{"far below, recent", []claudeUsageNumbers{fetchedAcct("home", true, 84.9, now.Add(-29*time.Minute))}, false},
+		{"far below, 30 min old", []claudeUsageNumbers{fetchedAcct("home", true, 50, now.Add(-30*time.Minute))}, true},
+		{"near", []claudeUsageNumbers{fetchedAcct("home", true, 85, now)}, true},
+		{"no fetch time", []claudeUsageNumbers{noAt}, true},
+		{"no 7-day", []claudeUsageNumbers{noSeven}, true},
+		{"past its reset", []claudeUsageNumbers{reset}, true},
+		{"no active", []claudeUsageNumbers{fetchedAcct("work", false, 10, now)}, true},
+		{"nothing", nil, true},
+		{"unsaved live", []claudeUsageNumbers{fetchedAcct("", true, 99, now.Add(-time.Hour))}, false},
+	}
+	for _, c := range cases {
+		if got := autoSwitchNeedsFresh(c.cached, 95, now); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+}
+
+func TestAutoSwitchFetchesOnlyWhenTheGateSays(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	fresh := 0
+	h.s.fleet.claudeUsage = func() []claudeUsageNumbers { fresh++; return *h.usage }
+	cached := []claudeUsageNumbers{fetchedAcct("home", true, 60, *h.now), fetchedAcct("work", false, 10, *h.now)}
+	h.s.auto.cachedUsage = func() []claudeUsageNumbers { return cached }
+	// The fresh source would trigger; the cached one is far below and recent.
+	*h.usage = []claudeUsageNumbers{acct("home", true, 99), acct("work", false, 10)}
+	h.s.autoSwitchTick()
+	if fresh != 0 || len(*h.switches) != 0 {
+		t.Fatalf("fresh %d switches %v", fresh, *h.switches)
+	}
+	// Near the threshold: the fresh numbers decide.
+	cached[0] = fetchedAcct("home", true, 90, *h.now)
+	h.s.autoSwitchTick()
+	if fresh != 1 || len(*h.switches) != 1 {
+		t.Fatalf("fresh %d switches %v", fresh, *h.switches)
+	}
+	// Near on disk, but the fresh numbers say below: nothing happens.
+	*h.now = h.now.Add(time.Hour)
+	*h.usage = []claudeUsageNumbers{acct("work", true, 80), acct("home", false, 10)}
+	cached = []claudeUsageNumbers{fetchedAcct("work", true, 96, *h.now)}
+	h.s.autoSwitchTick()
+	if fresh != 2 || len(*h.switches) != 1 {
+		t.Fatalf("fresh %d switches %v", fresh, *h.switches)
+	}
+}
+
+func TestAutoSwitchAccountListErrorSaysNothing(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	h.s.fleet.accountNames = func(string) ([]string, error) { return []string{"home"}, errors.New("readdir failed") }
+	*h.usage = []claudeUsageNumbers{acct("home", true, 99)}
+	h.s.autoSwitchTick()
+	if len(*h.events) != 0 || len(*h.switches) != 0 {
+		t.Fatalf("%v %v", *h.events, *h.switches)
+	}
+	if st := h.state(t); st.NoTargetEpisode || st.NoTargetHedged || st.LastNoTarget != "" {
+		t.Fatalf("state %+v", st)
+	}
+}
+
+func TestAutoSwitchNoTargetHedgedWhenReadingsAreMissing(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	*h.names = []string{"home", "spare", "work"}
+	stale := acct("spare", false, 10)
+	stale.Stale = true
+	// work has no entry at all, spare a stale one.
+	*h.usage = []claudeUsageNumbers{acct("home", true, 99), stale}
+	h.s.autoSwitchTick()
+	h.s.autoSwitchTick()
+	want := "[claude-sessions event] account claude at 99% 7-day, threshold 95%; no saved account with a fresh reading below it (2 without a fresh reading)"
+	if len(*h.events) != 1 || (*h.events)[0].text != want {
+		t.Fatalf("events %v", *h.events)
+	}
+	if st := h.state(t); st.NoTargetEpisode || !st.NoTargetHedged {
+		t.Fatalf("state %+v", st)
+	}
+	// Fresh readings, all over: the definitive line still goes.
+	*h.usage = []claudeUsageNumbers{acct("home", true, 99), acct("spare", false, 97), acct("work", false, 98)}
+	h.s.autoSwitchTick()
+	if len(*h.events) != 2 || !strings.HasSuffix((*h.events)[1].text, "no saved account below it to switch to") {
+		t.Fatalf("events %v", *h.events)
+	}
+	// Or a fresh reading below: it switches.
+	*h.usage = []claudeUsageNumbers{acct("home", true, 99), acct("spare", false, 10)}
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 1 || (*h.switches)[0].name != "spare" {
+		t.Fatalf("switches %v", *h.switches)
+	}
+}
+
+func TestAutoSwitchReenableStartsNewEpisode(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	*h.names = []string{"home"}
+	*h.usage = []claudeUsageNumbers{acct("home", true, 99)}
+	h.s.autoSwitchTick()
+	h.s.autoSwitchTick()
+	if len(*h.events) != 1 {
+		t.Fatalf("events %v", *h.events)
+	}
+	writeAutoSwitchConfig(t, h.s, `{"enabled": false}`)
+	h.s.autoSwitchTick()
+	writeAutoSwitchConfig(t, h.s, `{"enabled": true}`)
+	h.s.autoSwitchTick()
+	if len(*h.events) != 2 {
+		t.Fatalf("re-enabling must report the episode again: %v", *h.events)
+	}
+	// A restart while on is not a re-enable.
+	h.s.auto = autoSwitchDeps{configPath: h.s.auto.configPath, statePath: h.s.auto.statePath, logPath: h.s.auto.logPath,
+		now: h.s.auto.now, cachedUsage: h.s.auto.cachedUsage}
+	h.s.autoSwitchTick()
+	if len(*h.events) != 2 {
+		t.Fatalf("a restart must not repeat the line: %v", *h.events)
+	}
+}
+
+func TestAutoSwitchOffDuringTickDoesNotSwitch(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	h.s.fleet.claudeUsage = func() []claudeUsageNumbers {
+		writeAutoSwitchConfig(t, h.s, `{"enabled": false}`)
+		return []claudeUsageNumbers{acct("home", true, 99), acct("work", false, 10)}
+	}
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 0 {
+		t.Fatalf("switched after off: %v", *h.switches)
+	}
+}
+
+func TestAutoSwitchWeeklyResetPassedNeverTriggers(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	home := acct("home", true, 99)
+	at := *h.now
+	home.SevenDay.ResetsAt = &at
+	*h.usage = []claudeUsageNumbers{home, acct("work", false, 10)}
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 0 || len(*h.events) != 0 {
+		t.Fatalf("%v %v", *h.switches, *h.events)
+	}
+	later := at.Add(time.Second)
+	home.SevenDay.ResetsAt = &later
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 1 {
+		t.Fatalf("switches %v", *h.switches)
+	}
+}
+
+func TestAutoSwitchScopedWeeklyOverIsNoTarget(t *testing.T) {
+	scoped := acct("work", false, 10)
+	scoped.WeeklyScoped = &usageWindowNumbers{Label: "Opus", Pct: 95}
+	under := acct("spare", false, 40)
+	under.WeeklyScoped = &usageWindowNumbers{Label: "Opus", Pct: 94}
+	got, ok, unfresh := autoSwitchTarget([]claudeUsageNumbers{acct("home", true, 99), scoped, under}, "home", []string{"home", "spare", "work"}, 95)
+	if !ok || got.Name != "spare" || unfresh != 0 {
+		t.Fatalf("%+v %v %d", got, ok, unfresh)
+	}
+}
+
+func TestAutoSwitchCorruptStateStartsCooldown(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	if err := os.MkdirAll(filepath.Dir(h.s.auto.statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.s.auto.statePath, []byte(`{"last": {"fro`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	*h.usage = []claudeUsageNumbers{acct("home", true, 99), acct("work", false, 10)}
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 0 {
+		t.Fatalf("switched on a torn state file: %v", *h.switches)
+	}
+	*h.now = h.now.Add(31 * time.Minute)
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 1 {
+		t.Fatalf("switches %v", *h.switches)
+	}
+}
+
+func TestAutoSwitchManualPageSwitchStartsCooldown(t *testing.T) {
+	h := autoSwitchTestServer(t)
+	w, out := postFleetSwitch(h.s, `{"provider":"claude","name":"work"}`, nil)
+	if w.Code != http.StatusOK || !out.OK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if st := h.state(t); st.LastManualAt != "2026-10-28T10:00:00Z" {
+		t.Fatalf("state %+v", st)
+	}
+	// Andy switched to work on purpose; it is over the threshold.
+	*h.usage = []claudeUsageNumbers{acct("work", true, 99), acct("home", false, 10)}
+	*h.now = h.now.Add(29 * time.Minute)
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 1 {
+		t.Fatalf("undid a manual switch inside the cooldown: %v", *h.switches)
+	}
+	*h.now = h.now.Add(2 * time.Minute)
+	h.s.autoSwitchTick()
+	if len(*h.switches) != 2 || (*h.switches)[1].name != "home" {
+		t.Fatalf("switches %v", *h.switches)
+	}
+	// A grok switch does not touch the claude cooldown.
+	h2 := autoSwitchTestServer(t)
+	if w, _ := postFleetSwitch(h2.s, `{"provider":"grok","name":"gy"}`, nil); w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if st := h2.state(t); st.LastManualAt != "" {
+		t.Fatalf("state %+v", st)
 	}
 }

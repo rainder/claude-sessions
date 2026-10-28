@@ -359,6 +359,12 @@ func (s *server) fleetAccountSwitch(w http.ResponseWriter, r *http.Request) {
 	case done.Noop:
 		writeJSON(w, http.StatusOK, fleetSwitchResult{OK: true, Noop: true, Provider: provider, Name: name, Previous: done.Old})
 	default:
+		if provider == accountToolClaude {
+			// A deliberate switch starts the auto switch's cooldown, so it
+			// is not undone within autoSwitchCooldown.
+			at := s.auto.clock().UTC().Format(time.RFC3339)
+			s.auto.update(func(st *autoSwitchState) { st.LastManualAt = at })
+		}
 		writeJSON(w, http.StatusOK, fleetSwitchResult{OK: true, Provider: provider, Name: name, Previous: done.Old,
 			Event: done.Event, Warnings: done.Warnings})
 	}

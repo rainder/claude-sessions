@@ -33,6 +33,12 @@ import (
 const (
 	autoSwitchCooldown         = 30 * time.Minute
 	autoSwitchNoTargetLogEvery = 6 * time.Hour
+	// The spend gate (autoSwitchNeedsFresh): far below the threshold, the
+	// possibly-fetching numbers are asked at most once per
+	// autoSwitchRefreshEvery; within autoSwitchNearMargin points of it, every
+	// poll (the numbers source's own per-interval rule still applies).
+	autoSwitchRefreshEvery = 30 * time.Minute
+	autoSwitchNearMargin   = 10.0
 )
 
 type autoSwitchConfig struct {
@@ -79,15 +85,19 @@ type autoSwitchRecord struct {
 	Error     string  `json:"error,omitempty"`
 }
 
-// autoSwitchState survives a restart. Last is the last attempt (it starts
-// the cooldown), LastOK the last successful one (the page shows it).
-// LastNoTarget is the last "no target" log line. NoTargetEpisode: the event
-// line for the current no-target episode went out.
+// autoSwitchState survives a restart. Last is the last attempt and
+// LastManualAt the last manual claude switch from the page; the later one
+// starts the cooldown. LastOK is the last successful attempt (the page shows
+// it). LastNoTarget is the last "no target" log line. NoTargetEpisode: the
+// definitive no-target line for this episode went out; NoTargetHedged: the
+// line that says some accounts have no fresh reading went out.
 type autoSwitchState struct {
 	Last            *autoSwitchRecord `json:"last,omitempty"`
 	LastOK          *autoSwitchRecord `json:"lastOK,omitempty"`
+	LastManualAt    string            `json:"lastManualAt,omitempty"`
 	LastNoTarget    string            `json:"lastNoTarget,omitempty"`
 	NoTargetEpisode bool              `json:"noTargetEpisode,omitempty"`
+	NoTargetHedged  bool              `json:"noTargetHedged,omitempty"`
 }
 
 // autoSwitchDeps is the loop's seams and state. The zero value is the
@@ -98,6 +108,9 @@ type autoSwitchDeps struct {
 	logPath    string              // "" → <state dir>/auto-switch.log
 	now        func() time.Time    // nil → time.Now
 	sleep      func(time.Duration) // nil → time.Sleep
+	// cachedUsage is the disk-only Claude numbers; nil →
+	// newCachedUsageNumbersSource().build().Claude.
+	cachedUsage func() []claudeUsageNumbers
 
 	// mu guards everything below. It is never held across a switch or a
 	// FLEET delivery, so /fleet/state never waits on one.
@@ -109,6 +122,7 @@ type autoSwitchDeps struct {
 	cfgSize    int64
 	loaded     bool
 	state      autoSwitchState
+	seenOff    bool // a tick saw the feature off; the next on tick is a new start
 	// noTargetCode is the last logged refusal for the no-target event, so a
 	// FLEET that stays down logs once, not every poll. Not persisted.
 	noTargetCode string
@@ -216,7 +230,10 @@ func (d *autoSwitchDeps) loadStateLocked() {
 	_, path, _ := d.paths()
 	st, err := loadAutoSwitchState(path)
 	if err != nil {
-		d.logf("state error: starting empty")
+		// A torn file may have held a switch made a minute ago: start a
+		// cooldown (in memory until the next save), never switch at once.
+		d.logf("state error: starting empty with a cooldown")
+		st = autoSwitchState{Last: &autoSwitchRecord{At: d.clock().UTC().Format(time.RFC3339), Error: "state_reset"}}
 	}
 	d.state = st
 }
@@ -228,6 +245,10 @@ func (d *autoSwitchDeps) update(fn func(st *autoSwitchState)) {
 	defer d.mu.Unlock()
 	d.loadStateLocked()
 	fn(&d.state)
+	d.saveLocked()
+}
+
+func (d *autoSwitchDeps) saveLocked() {
 	_, path, _ := d.paths()
 	if path == "" {
 		return
@@ -252,34 +273,74 @@ func autoSwitchUsable(e claudeUsageNumbers) bool {
 	return e.Name != "" && accountNameOK(e.Name) && !e.Stale && !e.Expired && e.SevenDay != nil
 }
 
-// autoSwitchActive is the live account's entry when it is saved and its
-// 7-day reading is fresh; otherwise false, and nothing may trigger.
-func autoSwitchActive(entries []claudeUsageNumbers) (claudeUsageNumbers, bool) {
+// autoSwitchActive is the live account's entry, and whether it may trigger:
+// saved, a fresh 7-day reading, and that window not already past its reset
+// (a reading from before the weekly reset says nothing about the new week).
+func autoSwitchActive(entries []claudeUsageNumbers, now time.Time) (claudeUsageNumbers, bool) {
 	for _, e := range entries {
 		if e.Active {
-			return e, autoSwitchUsable(e)
+			return e, autoSwitchUsable(e) && (e.SevenDay.ResetsAt == nil || e.SevenDay.ResetsAt.After(now))
 		}
 	}
 	return claudeUsageNumbers{}, false
 }
 
-// autoSwitchTarget is the saved account to switch to: another entry in
-// names with fresh numbers, 7-day and 5-hour both below the threshold (no
-// 5-hour reading counts as below), the lowest 7-day; a tie goes to name
-// order.
-func autoSwitchTarget(entries []claudeUsageNumbers, active string, names []string, threshold float64) (claudeUsageNumbers, bool) {
-	var out []claudeUsageNumbers
-	for _, e := range entries {
-		if e.Active || e.Name == active || !autoSwitchUsable(e) || !containsAccountName(names, e.Name) {
+// autoSwitchNeedsFresh is the spend gate, decided on the disk-only numbers:
+// the possibly-fetching source is asked only when the live account's
+// reading is missing, past its weekly reset, autoSwitchRefreshEvery old, or
+// within autoSwitchNearMargin of the threshold. The stale flag is not an
+// input (it is set after a few minutes); the reading's age is. An unsaved
+// live login never triggers, so it is never worth a fetch.
+func autoSwitchNeedsFresh(cached []claudeUsageNumbers, threshold float64, now time.Time) bool {
+	for _, e := range cached {
+		if !e.Active {
 			continue
 		}
-		if e.SevenDay.Pct >= threshold || (e.FiveHour != nil && e.FiveHour.Pct >= threshold) {
+		if !accountNameOK(e.Name) {
+			return false
+		}
+		if e.SevenDay == nil || e.FetchedAt == nil || now.Sub(*e.FetchedAt) >= autoSwitchRefreshEvery {
+			return true
+		}
+		if e.SevenDay.ResetsAt != nil && !e.SevenDay.ResetsAt.After(now) {
+			return true
+		}
+		return e.SevenDay.Pct >= threshold-autoSwitchNearMargin
+	}
+	return true
+}
+
+// autoSwitchTarget is the saved account to switch to: another name in
+// names with a fresh reading whose 7-day, 5-hour and model-scoped weekly
+// windows are all below the threshold (a missing 5-hour or scoped reading
+// counts as below), the lowest 7-day; a tie goes to name order. unfresh
+// counts the other saved accounts left out for a stale, expired or missing
+// reading.
+func autoSwitchTarget(entries []claudeUsageNumbers, active string, names []string, threshold float64) (target claudeUsageNumbers, ok bool, unfresh int) {
+	byName := map[string]claudeUsageNumbers{}
+	for _, e := range entries {
+		if _, dup := byName[e.Name]; e.Name != "" && !e.Active && !dup {
+			byName[e.Name] = e
+		}
+	}
+	var out []claudeUsageNumbers
+	for _, n := range names {
+		if n == active {
+			continue
+		}
+		e, found := byName[n]
+		if !found || !autoSwitchUsable(e) {
+			unfresh++
+			continue
+		}
+		if e.SevenDay.Pct >= threshold || (e.FiveHour != nil && e.FiveHour.Pct >= threshold) ||
+			(e.WeeklyScoped != nil && e.WeeklyScoped.Pct >= threshold) {
 			continue
 		}
 		out = append(out, e)
 	}
 	if len(out) == 0 {
-		return claudeUsageNumbers{}, false
+		return claudeUsageNumbers{}, false, unfresh
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].SevenDay.Pct != out[j].SevenDay.Pct {
@@ -287,7 +348,22 @@ func autoSwitchTarget(entries []claudeUsageNumbers, active string, names []strin
 		}
 		return out[i].Name < out[j].Name
 	})
-	return out[0], true
+	return out[0], true, unfresh
+}
+
+// autoSwitchCoolingDown: within autoSwitchCooldown of the later of the last
+// attempt and the last manual claude switch from the page.
+func autoSwitchCoolingDown(st autoSwitchState, now time.Time) bool {
+	var last time.Time
+	if st.Last != nil {
+		if at, err := time.Parse(time.RFC3339, st.Last.At); err == nil {
+			last = at
+		}
+	}
+	if at, err := time.Parse(time.RFC3339, st.LastManualAt); err == nil && at.After(last) {
+		last = at
+	}
+	return !last.IsZero() && now.Sub(last) < autoSwitchCooldown
 }
 
 // autoSwitchEventText is the line typed into FLEET after an auto switch.
@@ -298,34 +374,69 @@ func autoSwitchEventText(old, name string, fromPct, toPct int, threshold float64
 		fleetSwitchNoteClaude
 }
 
-// autoSwitchNoTargetText is the one line per no-target episode.
-func autoSwitchNoTargetText(pct int, threshold float64) string {
-	return fleetEventTag + fmt.Sprintf(" account claude at %d%% 7-day, threshold %s%%; no saved account below it to switch to",
-		pct, autoSwitchThreshold(threshold))
+// autoSwitchFailedText is the line typed into FLEET after a failed attempt.
+// code is a fixed tag.
+func autoSwitchFailedText(r *autoSwitchRecord) string {
+	return fleetEventTag + " account claude auto-switch from " + idleSanitize(r.From) + " to " + idleSanitize(r.To) +
+		" failed (" + r.Error + ")" + fmt.Sprintf("; 7-day %d%%, threshold %s%%; next try in %d min",
+		r.FromPct, autoSwitchThreshold(r.Threshold), int(autoSwitchCooldown/time.Minute))
+}
+
+// autoSwitchNoTargetText is the no-target line. With saved accounts that
+// have no fresh reading it says so, since one of them may well be below.
+func autoSwitchNoTargetText(pct int, threshold float64, unfresh int) string {
+	s := fleetEventTag + fmt.Sprintf(" account claude at %d%% 7-day, threshold %s%%; ", pct, autoSwitchThreshold(threshold))
+	if unfresh > 0 {
+		return s + fmt.Sprintf("no saved account with a fresh reading below it (%d without a fresh reading)", unfresh)
+	}
+	return s + "no saved account below it to switch to"
+}
+
+// autoSwitchCached is the disk-only Claude numbers: no fetch, ever.
+func (s *server) autoSwitchCached() []claudeUsageNumbers {
+	if s.auto.cachedUsage != nil {
+		return s.auto.cachedUsage()
+	}
+	return newCachedUsageNumbersSource().build().Claude
 }
 
 // autoSwitchTick is one poll. While off it costs one stat of the config.
+// While on and far below the threshold it reads disk only, and asks the
+// possibly-fetching source once per autoSwitchRefreshEvery.
 func (s *server) autoSwitchTick() {
 	d := &s.auto
 	d.mu.Lock()
 	cfg := d.reloadConfigLocked()
 	if !cfg.Enabled {
+		d.seenOff = true
 		d.mu.Unlock()
 		return
 	}
 	d.loadStateLocked()
+	if d.seenOff {
+		// Off, then on: a new start, so the next no-target episode is
+		// reported again.
+		d.seenOff = false
+		if d.state.NoTargetEpisode || d.state.NoTargetHedged {
+			d.state.NoTargetEpisode, d.state.NoTargetHedged = false, false
+			d.saveLocked()
+		}
+	}
 	st := d.state
 	d.mu.Unlock()
 
 	now := d.clock()
+	if !autoSwitchNeedsFresh(s.autoSwitchCached(), cfg.Threshold, now) {
+		return
+	}
 	usage := s.fleetClaudeUsage()
-	active, ok := autoSwitchActive(usage)
+	active, ok := autoSwitchActive(usage, now)
 	if !ok {
 		return // no fresh reading of a saved live account: never trigger
 	}
 	if active.SevenDay.Pct < cfg.Threshold {
-		if st.NoTargetEpisode {
-			d.update(func(st *autoSwitchState) { st.NoTargetEpisode = false })
+		if st.NoTargetEpisode || st.NoTargetHedged {
+			d.update(func(st *autoSwitchState) { st.NoTargetEpisode, st.NoTargetHedged = false, false })
 		}
 		d.mu.Lock()
 		d.noTargetCode = ""
@@ -334,24 +445,34 @@ func (s *server) autoSwitchTick() {
 	}
 	names, err := s.fleetAccountNames(accountToolClaude)
 	if err != nil {
+		// A partial list could hide the target: decide nothing, say nothing.
 		fmt.Fprintf(os.Stderr, "auto switch: claude account list failed: %v\n", err)
-	}
-	target, ok := autoSwitchTarget(usage, active.Name, names, cfg.Threshold)
-	if !ok {
-		s.autoSwitchNoTarget(cfg, active, st, now)
 		return
 	}
-	if st.Last != nil {
-		if at, err := time.Parse(time.RFC3339, st.Last.At); err == nil && now.Sub(at) < autoSwitchCooldown {
-			return
-		}
+	target, ok, unfresh := autoSwitchTarget(usage, active.Name, names, cfg.Threshold)
+	if !ok {
+		s.autoSwitchNoTarget(cfg, active, unfresh, st, now)
+		return
+	}
+	if autoSwitchCoolingDown(st, now) {
+		return
+	}
+	// `auto-switch off` may have landed during the reads above.
+	d.mu.Lock()
+	on := d.reloadConfigLocked().Enabled
+	d.mu.Unlock()
+	if !on {
+		return
 	}
 	s.autoSwitchRun(cfg, active, target, now)
 }
 
-// autoSwitchNoTarget: one log line per autoSwitchNoTargetLogEvery, one
-// FLEET event line per episode (sent or not_submitted ends the retry).
-func (s *server) autoSwitchNoTarget(cfg autoSwitchConfig, active claudeUsageNumbers, st autoSwitchState, now time.Time) {
+// autoSwitchNoTarget: one log line per autoSwitchNoTargetLogEvery, and one
+// FLEET line per episode (sent or not_submitted counts). A hedged line
+// (some saved accounts have no fresh reading) goes once per episode too, but
+// does not end it: a later fresh reading can still switch, or send the
+// definitive line.
+func (s *server) autoSwitchNoTarget(cfg autoSwitchConfig, active claudeUsageNumbers, unfresh int, st autoSwitchState, now time.Time) {
 	d := &s.auto
 	pct := autoSwitchPct(active.SevenDay.Pct)
 	logIt := true
@@ -359,11 +480,12 @@ func (s *server) autoSwitchNoTarget(cfg autoSwitchConfig, active claudeUsageNumb
 		logIt = false
 	}
 	if logIt {
-		d.logf("no target pct=%d", pct)
+		d.logf("no target pct=%d unfresh=%d", pct, unfresh)
 	}
+	hedged := unfresh > 0
 	sent := false
-	if !st.NoTargetEpisode {
-		code := s.fleetSwitchNotify(accountToolClaude, autoSwitchNoTargetText(pct, cfg.Threshold))
+	if !st.NoTargetEpisode && !(hedged && st.NoTargetHedged) {
+		code := s.fleetSwitchNotify(accountToolClaude, autoSwitchNoTargetText(pct, cfg.Threshold, unfresh))
 		sent = code == "sent" || code == "not_submitted"
 		d.mu.Lock()
 		logRefusal := !sent && code != d.noTargetCode
@@ -380,7 +502,9 @@ func (s *server) autoSwitchNoTarget(cfg autoSwitchConfig, active claudeUsageNumb
 			if logIt {
 				st.LastNoTarget = now.UTC().Format(time.RFC3339)
 			}
-			if sent {
+			if sent && hedged {
+				st.NoTargetHedged = true
+			} else if sent {
 				st.NoTargetEpisode = true
 			}
 		})
@@ -388,7 +512,8 @@ func (s *server) autoSwitchNoTarget(cfg autoSwitchConfig, active claudeUsageNumb
 }
 
 // autoSwitchRun makes one attempt. A busy switch lock skips this poll and
-// starts no cooldown; every other outcome is recorded and starts one.
+// starts no cooldown; every other outcome is recorded and starts one. A
+// failure (but not already_live) is typed into FLEET.
 func (s *server) autoSwitchRun(cfg autoSwitchConfig, active, target claudeUsageNumbers, now time.Time) {
 	d := &s.auto
 	fromPct, toPct := autoSwitchPct(active.SevenDay.Pct), autoSwitchPct(target.SevenDay.Pct)
@@ -414,24 +539,26 @@ func (s *server) autoSwitchRun(cfg autoSwitchConfig, active, target claudeUsageN
 	case done.Noop:
 		rec.Error = "already_live"
 	}
-	if rec.OK {
-		d.logf("switched from=%s to=%s pct=%d to_pct=%d threshold=%s event=%s warnings=%d",
-			rec.From, rec.To, fromPct, toPct, t, done.Event, done.Warnings)
-	} else {
-		d.logf("switch failed code=%s from=%s to=%s pct=%d", rec.Error, rec.From, rec.To, fromPct)
-	}
 	d.update(func(st *autoSwitchState) {
 		st.Last = rec
 		if rec.OK {
 			st.LastOK = rec
-			st.NoTargetEpisode = false
+			st.NoTargetEpisode, st.NoTargetHedged = false, false
 		}
 	})
-	d.mu.Lock()
 	if rec.OK {
+		d.mu.Lock()
 		d.noTargetCode = ""
+		d.mu.Unlock()
+		d.logf("switched from=%s to=%s pct=%d to_pct=%d threshold=%s event=%s warnings=%d",
+			rec.From, rec.To, fromPct, toPct, t, done.Event, done.Warnings)
+		return
 	}
-	d.mu.Unlock()
+	event := "-"
+	if rec.Error != "already_live" {
+		event = s.fleetSwitchNotify(accountToolClaude, autoSwitchFailedText(rec))
+	}
+	d.logf("switch failed code=%s from=%s to=%s pct=%d event=%s", rec.Error, rec.From, rec.To, fromPct, event)
 }
 
 // runAutoSwitch polls forever; started by cmdServer. A panic in one tick is
@@ -580,6 +707,9 @@ func autoSwitchRecordLine(r *autoSwitchRecord) string {
 	if r == nil {
 		return "never"
 	}
+	if r.From == "" {
+		return "none recorded; " + r.Error + " at " + r.At
+	}
 	line := fmt.Sprintf("%s -> %s (7-day %d%% -> %d%%, threshold %s%%) at %s", r.From, r.To, r.FromPct, r.ToPct,
 		autoSwitchThreshold(r.Threshold), r.At)
 	if r.OK {
@@ -604,6 +734,9 @@ func printAutoSwitchStatus(w io.Writer, cfgPath, note string, cfg autoSwitchConf
 	fmt.Fprintf(w, "last switch: %s%s\n", autoSwitchRecordLine(st.Last), stateNote)
 	if st.LastOK != nil && (st.Last == nil || !st.Last.OK) {
 		fmt.Fprintf(w, "last ok:     %s\n", autoSwitchRecordLine(st.LastOK))
+	}
+	if st.LastManualAt != "" {
+		fmt.Fprintf(w, "manual:      %s (page switch; starts the cooldown)\n", st.LastManualAt)
 	}
 	fmt.Fprintf(w, "no target:   %s\n", noTarget)
 }

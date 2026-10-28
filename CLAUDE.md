@@ -204,14 +204,21 @@ types into panes. Spec and plan: `docs/superpowers/`.
   FLEETs).
 - **Outbox:** memory only; card answers are never held.
 - **Auto switch** (auto_switch.go): `auto-switch.json` (`enabled` false,
-  `threshold` 95, `pollSeconds` 120; parsed like the event configs). Reads
-  `fleetClaudeUsage` only, never a fetch of its own. Triggers only on a
-  saved live account's fresh 7-day reading at the threshold; stale, expired
-  or unsaved never triggers. Target: lowest fresh 7-day below it, 5-hour
+  `threshold` 95, `pollSeconds` 120; parsed like the event configs). Spend
+  gate: disk-only numbers first; `fleetClaudeUsage` (which may run a pass)
+  only when the live reading is missing, 30 min old, past its reset, or
+  within 10 points of the threshold. Decides on those fresh numbers only.
+  Triggers only on a saved live account's fresh 7-day reading at the
+  threshold whose reset has not passed; stale, expired or unsaved never
+  triggers. Target: lowest fresh 7-day below it, 5-hour and scoped weekly
   below too, in the saved list. Switches through `fleetDoSwitch`, the page
-  chip's path (busy = skip, no cooldown; the live account must still be
-  the one read). 30 min cooldown per attempt; no target = one FLEET line per
-  episode. Kill switch: `claude-sessions auto-switch off`.
+  chip's path (busy = skip, no cooldown; the live account must still be the
+  one read). 30 min cooldown from the later of the last attempt and the
+  last manual claude switch on the page; a torn state file starts one. A
+  failure (not `already_live`) is one FLEET line. No target = one FLEET line
+  per episode; with saved accounts lacking a fresh reading the line says so
+  and does not end the episode; a list error sends nothing. Kill switch:
+  `claude-sessions auto-switch off`, which also pins the live account.
 - **Session view:** `fleetResolveSession` is the allowlist; the pane address
   always comes from the resolved row, never the request.
 - **Clarify:** claude FLEET only. The fork is exec'd (no shell) with
@@ -270,6 +277,9 @@ status` prints them.
   never cached. Numbers cost an Anthropic call that 429s readily (the budget
   is shared per token).
 - Only the client hubs (`UsageHub`, `KnownAccountsHub`) fetch numbers.
+  Exception: the enabled auto-switch loop may ask `s.numbers` (its spend
+  gate allows one pass per 30 min while far below the threshold, the
+  per-interval rule when near it).
   `GET /usage` is identity-only and never calls Anthropic.
   `GET /usage/numbers` may run one pass per interval, only when no hub wrote
   a cache file recently; `?cached=1` is disk only.
