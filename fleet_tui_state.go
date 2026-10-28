@@ -258,6 +258,10 @@ func fleetItemIndex(items []fleetItem, id string) int {
 // applyState takes one /fleet/state result.
 func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time) {
 	st.loaded = true
+	if msg := st.batchCloseReason(v, err); msg != "" {
+		st.batch = nil
+		st.setToast(msg, fleetToastWarn, now)
+	}
 	if err != nil {
 		var down *fleetHostDownError
 		switch {
@@ -669,7 +673,8 @@ func (st *fleetViewState) pickLean(inBatch bool, now time.Time) fleetCmd {
 // the fleetLeanPickDelay draw wait: the key help offers r during it too.
 func (st *fleetViewState) leanPickable() bool {
 	it := st.selected()
-	if it == nil || it.Answer != nil || st.panel != nil || st.batch != nil || st.clarify != nil || st.shipOn() {
+	if it == nil || it.Answer != nil || !st.loaded || len(st.view.Ambiguous) > 0 || !st.view.Fleet.Alive ||
+		st.panel != nil || st.batch != nil || st.clarify != nil || st.shipOn() {
 		return false
 	}
 	if _, _, blocked := st.pickRefusal(it); blocked {

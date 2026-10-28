@@ -35,8 +35,12 @@ type fleetBatchSkip struct {
 type fleetBatchPanel struct {
 	items    []fleetBatchItem
 	skipped  []fleetBatchSkip
+	source   string // the opening state's Source; the items' requests carry it too
 	openedAt time.Time
 	scroll   int
+	// seenAll is set once a frame has drawn the last item's line with the
+	// title: Enter sends nothing Andy has not had on screen.
+	seenAll bool
 }
 
 // fleetBatchResult is what the batch job hands back: the items it was given
@@ -47,12 +51,12 @@ type fleetBatchResult struct {
 	Results []fleetSendResult
 }
 
-// fleetCardName is how the batch panel and toast name a card.
+// fleetCardName is how the batch panel and toast name a card, on one line.
 func fleetCardName(c fleetCardView) string {
-	if c.Ticket != "" {
-		return c.Ticket
+	if t := fleetOneLine(c.Ticket); t != "" {
+		return t
 	}
-	return c.Title
+	return fleetOneLine(c.Title)
 }
 
 // fleetLeanSkipReason is the batch panel's short reason why card c's lean
@@ -108,7 +112,7 @@ func (st *fleetViewState) leanBatch() (items []fleetBatchItem, skipped []fleetBa
 		}
 		items = append(items, fleetBatchItem{
 			Name:   name,
-			Option: it.Card.Options[opt].Label,
+			Option: fleetOneLine(it.Card.Options[opt].Label),
 			Req:    fleetOptionRequest(*it, opt, st.view.CardHashes[it.Card.ID], st.view.Source, "", false),
 		})
 	}
@@ -118,7 +122,8 @@ func (st *fleetViewState) leanBatch() (items []fleetBatchItem, skipped []fleetBa
 // batchPickable reports whether R would open its panel with a card to send,
 // which is when the key help offers it.
 func (st *fleetViewState) batchPickable() bool {
-	if st.panel != nil || st.batch != nil || st.clarify != nil || st.shipOn() || !st.view.Fleet.Alive {
+	if !st.loaded || len(st.view.Ambiguous) > 0 || !st.view.Fleet.Alive ||
+		st.panel != nil || st.batch != nil || st.clarify != nil || st.shipOn() {
 		return false
 	}
 	items, _ := st.leanBatch()
@@ -140,13 +145,14 @@ func (st *fleetViewState) openBatch(now time.Time) fleetCmd {
 		st.setToast(msg, fleetToastInfo, now)
 		return fleetCmdRender
 	}
-	st.batch = &fleetBatchPanel{items: items, skipped: skipped, openedAt: now}
+	st.batch = &fleetBatchPanel{items: items, skipped: skipped, source: st.view.Source, openedAt: now}
 	return fleetCmdRender
 }
 
 // handleBatchKey is handleKey while the R panel is open. Enter has the
 // option panel's arming: nothing for fleetArmDelay after the panel opened,
-// and never in a paste.
+// and never in a paste. It also sends nothing until a frame has drawn every
+// card line (seenAll): a panel too short for them is scrolled first.
 func (st *fleetViewState) handleBatchKey(k string, inBatch bool, now time.Time) fleetCmd {
 	b := st.batch
 	switch k {
@@ -163,6 +169,10 @@ func (st *fleetViewState) handleBatchKey(k string, inBatch bool, now time.Time) 
 		if inBatch || now.Before(b.openedAt.Add(fleetArmDelay)) {
 			return fleetCmdNone
 		}
+		if !b.seenAll {
+			st.setToast(fmt.Sprintf("scroll to see all %d cards (PgDn)", len(b.items)), fleetToastWarn, now)
+			return fleetCmdRender
+		}
 		st.batchSend = b.items
 		st.batch = nil
 		st.sending = true
@@ -176,9 +186,11 @@ func (st *fleetViewState) handleBatchKey(k string, inBatch bool, now time.Time) 
 // re-read and the Stale check per card, pinned to the request's Source),
 // sleeping fleetBatchGap between two sends. It stops after a send that says
 // the rest would fail or must not go: FLEET moved, the card re-check failed,
-// the result is unknown, the token was rejected, or the text was typed but
-// not submitted (FLEET's box now holds it). A card-level refusal (card
-// changed or gone, already answered, ...) is reported and the rest continue.
+// the result is unknown, the token was rejected, the text was typed but not
+// submitted (FLEET's box now holds it), or the server refused for a reason
+// that is about FLEET, not the card (fleetBatchStopCodes). A card-level
+// refusal (card changed or gone, already answered, ...) is reported and the
+// rest continue.
 func fleetBatchJob(items []fleetBatchItem, send func(fleetSayRequest) fleetSendResult, sleep func(time.Duration)) fleetBatchResult {
 	out := fleetBatchResult{Items: items}
 	for i, it := range items {
@@ -196,7 +208,22 @@ func fleetBatchJob(items []fleetBatchItem, send func(fleetSayRequest) fleetSendR
 
 func fleetBatchStops(r fleetSendResult) bool {
 	return r.Moved || r.CheckErr != nil || r.Out.Unclear || r.Out.Status == 401 ||
-		r.Out.Result.Code == "not_submitted"
+		fleetBatchStopCodes[r.Out.Result.Code]
+}
+
+// fleetBatchStopCodes are the /fleet/say refusals that would refuse the next
+// card too: FLEET's pane, FLEET itself, or the send gate.
+var fleetBatchStopCodes = map[string]bool{
+	"not_submitted": true,
+	"dialog":        true,
+	"input_busy":    true,
+	"pane_mode":     true,
+	"no_pane":       true,
+	"busy":          true,
+	"send_failed":   true,
+	"not_live":      true,
+	"ambiguous":     true,
+	"rate_limited":  true,
 }
 
 // fleetBatchReason is a failed batch send's reason in the result toast.
@@ -259,20 +286,53 @@ func (st *fleetViewState) applyBatch(r fleetBatchResult, now time.Time) (refetch
 	if failure != "" {
 		msg += " · " + failure
 	}
+	if left := len(r.Items) - len(r.Results); left > 0 {
+		msg += fmt.Sprintf(" · %d not tried", left)
+	}
 	st.setToast(msg, kind, now)
 	return true
 }
 
+// batchCloseReason is why a new state closes the open R panel, "" when it
+// stays: FLEET gone, ambiguous or on another host, or a card it lists no
+// longer asked with its hash or answered since (the option panel's rule).
+// The panel never closes under a running job, whose own re-checks decide.
+func (st *fleetViewState) batchCloseReason(v fleetStateView, err error) string {
+	b := st.batch
+	if b == nil || st.sending {
+		return ""
+	}
+	switch {
+	case err != nil || len(v.Ambiguous) > 0 || !v.Fleet.Alive:
+		return "FLEET is not answering — FLEET's picks cancelled"
+	case v.Source != b.source:
+		return errFleetMoved.Error()
+	}
+	for _, it := range b.items {
+		id := it.Req.CardID
+		if !fleetCardStillAsked(v, id, it.Req.CardHash) {
+			return "a card changed — press R again"
+		}
+		if _, answered := v.Answered[id]; answered {
+			return "a card was answered — press R again"
+		}
+	}
+	return ""
+}
+
 // fleetBatchPanelLines is the R confirm panel in h rows (h < 0: all of it):
-// the title, one line per card, the skipped cards, then the key line, which
-// stays on the last row while the rest scrolls (PgUp/PgDn, b.scroll).
+// the title pinned on the first row, the key line on the last, and between
+// them one line per card then the skipped cards, which scroll (PgUp/PgDn,
+// b.scroll). It sets b.seenAll once the window has shown the last card line;
+// with no room for the title, a line and the key line it never does.
 func fleetBatchPanelLines(b *fleetBatchPanel, h int, now time.Time) []string {
 	n := len(b.items)
 	noun := "cards"
 	if n == 1 {
 		noun = "card"
 	}
-	lines := []string{bold(fmt.Sprintf("Send FLEET's pick on %d %s?", n, noun))}
+	title := bold(fmt.Sprintf("Send FLEET's pick on %d %s?", n, noun))
+	var lines []string
 	for _, it := range b.items {
 		lines = append(lines, "  "+it.Name+" → "+it.Option)
 	}
@@ -290,13 +350,28 @@ func fleetBatchPanelLines(b *fleetBatchPanel, h int, now time.Time) []string {
 	keyLine := dim(keys + " · Esc cancel")
 	switch {
 	case h < 0:
-		return append(lines, "", keyLine)
+		b.seenAll = true
+		return append(append([]string{title}, lines...), "", keyLine)
 	case h <= 0:
 		return nil
 	case h == 1:
 		return []string{keyLine}
+	case h == 2:
+		return []string{title, keyLine}
 	}
-	body, scroll := fleetPanelWindow(lines, h-2, b.scroll)
+	win := h - 2 // between the title and the key line
+	spacer := win >= 4 && len(lines) < win
+	if spacer {
+		win-- // a blank line above the key line when everything fits anyway
+	}
+	body, scroll, end := fleetPanelWindowSpan(lines, win, b.scroll)
 	b.scroll = scroll
-	return append(body, "", keyLine)
+	if end >= n {
+		b.seenAll = true
+	}
+	out := append([]string{title}, body...)
+	if spacer {
+		out = append(out, "")
+	}
+	return append(out, keyLine)
 }

@@ -139,6 +139,7 @@ func TestFleetBatchPanelKeys(t *testing.T) {
 		if cmd := st.handleKey("R", false, now); cmd != fleetCmdRender || st.batch == nil {
 			t.Fatalf("R: cmd = %v batch = %v", cmd, st.batch)
 		}
+		renderFleetView(st, 120, 40, now) // every card line on screen
 		return st
 	}
 
@@ -196,15 +197,152 @@ func TestFleetBatchPanelKeys(t *testing.T) {
 		}
 	})
 
-	t.Run("a state with every card answered keeps the panel", func(t *testing.T) {
+	closes := []struct {
+		name, toast string
+		v           func() fleetStateView
+		err         error
+	}{
+		{"error", "FLEET is not answering — FLEET's picks cancelled", fleetBatchView, errors.New("down")},
+		{"ambiguous", "FLEET is not answering — FLEET's picks cancelled", func() fleetStateView {
+			v := fleetBatchView()
+			v.Ambiguous = []string{"x", "y"}
+			return v
+		}, nil},
+		{"not alive", "FLEET is not answering — FLEET's picks cancelled", func() fleetStateView {
+			v := fleetBatchView()
+			v.Fleet.Alive = false
+			return v
+		}, nil},
+		{"source moved", errFleetMoved.Error(), func() fleetStateView {
+			v := fleetBatchView()
+			v.Source = "http://other:8765"
+			return v
+		}, nil},
+		{"hash moved", "a card changed — press R again", func() fleetStateView {
+			v := fleetBatchView()
+			v.CardHashes["a"] = "h-a2"
+			return v
+		}, nil},
+		{"card gone", "a card changed — press R again", func() fleetStateView {
+			v := fleetBatchView()
+			v.Cards = v.Cards[1:]
+			return v
+		}, nil},
+		{"answered", "a card was answered — press R again", func() fleetStateView {
+			v := fleetBatchView()
+			v.Answered["b"] = fleetAnswerWith(fleetAttemptSent)
+			return v
+		}, nil},
+	}
+	for _, tc := range closes {
+		t.Run("a new state closes the panel: "+tc.name, func(t *testing.T) {
+			st := open()
+			st.applyState(tc.v(), tc.err, now)
+			if st.batch != nil || st.toast != tc.toast || st.toastKind != fleetToastWarn {
+				t.Fatalf("batch = %v toast = %q kind = %v", st.batch, st.toast, st.toastKind)
+			}
+		})
+	}
+
+	t.Run("an unchanged state keeps the panel", func(t *testing.T) {
 		st := open()
 		v := fleetBatchView()
-		for _, id := range []string{"a", "b", "c", "d"} {
-			v.Answered[id] = fleetAnswerWith(fleetAttemptSent)
-		}
+		v.Answered["c"] = fleetAnswerWith(fleetAttemptSent) // a skipped card
 		st.applyState(v, nil, now)
-		if st.shipOn() || st.batch == nil {
-			t.Fatalf("shipOn = %v batch = %v", st.shipOn(), st.batch)
+		if st.batch == nil || st.toast != "" {
+			t.Fatalf("batch = %v toast = %q", st.batch, st.toast)
+		}
+	})
+
+	t.Run("a running job is never closed under", func(t *testing.T) {
+		st := open()
+		st.sending = true // what the job's own re-checks cover
+		st.applyState(fleetBatchView(), errors.New("down"), now)
+		if st.batch == nil {
+			t.Fatal("closed while sending")
+		}
+	})
+}
+
+func TestFleetBatchEnterNeedsEveryCardSeen(t *testing.T) {
+	now := time.Unix(1000, 0)
+	at := now.Add(time.Second)
+	var cards []fleetCardView
+	for i := range 12 {
+		cards = append(cards, fleetBatchCard(fmt.Sprintf("%02d", i), "needs-you", "yes"))
+	}
+	open := func() *fleetViewState {
+		st := fleetTestState(fleetTestView(cards...), now)
+		st.handleKey("R", false, now)
+		return st
+	}
+
+	t.Run("not drawn", func(t *testing.T) {
+		st := open()
+		if cmd := st.handleKey(KeyEnter, false, at); cmd != fleetCmdRender || st.sending || st.batch == nil {
+			t.Fatalf("cmd = %v sending = %v", cmd, st.sending)
+		}
+		if st.toast != "scroll to see all 12 cards (PgDn)" || st.toastKind != fleetToastWarn {
+			t.Fatalf("toast = %q", st.toast)
+		}
+	})
+
+	t.Run("short panel, then scrolled", func(t *testing.T) {
+		st := open()
+		// 12 cards in a 20-row terminal: the panel cannot show them all.
+		frame := stripANSI(renderFleetView(st, 100, 20, at))
+		if !strings.Contains(frame, "Send FLEET's pick on 12 cards?") {
+			t.Fatalf("title not pinned:\n%s", frame)
+		}
+		if st.batch.seenAll {
+			t.Fatal("seenAll with cards below the window")
+		}
+		if cmd := st.handleKey(KeyEnter, false, at); cmd == fleetCmdSendBatch {
+			t.Fatal("sent cards the panel never showed")
+		}
+		for !st.batch.seenAll {
+			if st.handleKey(KeyPageDown, false, at); st.batch.scroll > 100 {
+				t.Fatal("never reached the last card")
+			}
+			frame = stripANSI(renderFleetView(st, 100, 20, at))
+			if !strings.Contains(frame, "Send FLEET's pick on 12 cards?") {
+				t.Fatalf("title scrolled away:\n%s", frame)
+			}
+		}
+		if !strings.Contains(frame, "DR-11 → Merge now") {
+			t.Fatalf("seenAll without the last card:\n%s", frame)
+		}
+		// Scrolling back up keeps the consent.
+		st.handleKey(KeyPageUp, false, at)
+		renderFleetView(st, 100, 20, at)
+		if cmd := st.handleKey(KeyEnter, false, at); cmd != fleetCmdSendBatch || len(st.batchSend) != 12 {
+			t.Fatalf("cmd = %v batchSend = %d", cmd, len(st.batchSend))
+		}
+	})
+
+	for _, h := range []int{1, 2} {
+		t.Run(fmt.Sprintf("panel of %d rows", h), func(t *testing.T) {
+			st := fleetTestState(fleetTestView(cards[0]), now)
+			st.handleKey("R", false, now)
+			for range 3 {
+				fleetBatchPanelLines(st.batch, h, at)
+				st.handleKey(KeyPageDown, false, at)
+			}
+			if st.batch.seenAll {
+				t.Fatal("seenAll with no room for a card line")
+			}
+			if cmd := st.handleKey(KeyEnter, false, at); cmd == fleetCmdSendBatch {
+				t.Fatal("sent from a panel with no card line")
+			}
+		})
+	}
+
+	t.Run("title and one line", func(t *testing.T) {
+		st := fleetTestState(fleetTestView(cards[0]), now)
+		st.handleKey("R", false, now)
+		lines := fleetBatchPanelLines(st.batch, 3, at)
+		if len(lines) != 3 || !st.batch.seenAll || !strings.Contains(stripANSI(lines[1]), "DR-00 → Merge now") {
+			t.Fatalf("lines = %q seenAll = %v", lines, st.batch.seenAll)
 		}
 	})
 }
@@ -258,7 +396,8 @@ func TestFleetBatchPanelLines(t *testing.T) {
 		at := now.Add(time.Second)
 		const h = 6
 		top := fleetBatchPanelLines(st.batch, h, at)
-		if len(top) != h || stripANSI(top[h-1]) != "Enter send all · Esc cancel" || !strings.Contains(stripANSI(top[h-3]), "↓ more") {
+		if len(top) != h || stripANSI(top[0]) != "Send FLEET's pick on 12 cards?" ||
+			stripANSI(top[h-1]) != "Enter send all · Esc cancel" || !strings.Contains(stripANSI(top[h-2]), "↓ more") {
 			t.Fatalf("top = %q", top)
 		}
 		st.panelRows = h
@@ -267,10 +406,11 @@ func TestFleetBatchPanelLines(t *testing.T) {
 		st.handleKey(KeyPageDown, false, at)
 		st.handleKey(KeyPageDown, false, at)
 		down := fleetBatchPanelLines(st.batch, h, at)
-		if len(down) != h || stripANSI(down[h-1]) != "Enter send all · Esc cancel" || !strings.Contains(stripANSI(down[0]), "↑ more") {
+		if len(down) != h || stripANSI(down[0]) != "Send FLEET's pick on 12 cards?" ||
+			stripANSI(down[h-1]) != "Enter send all · Esc cancel" || !strings.Contains(stripANSI(down[1]), "↑ more") {
 			t.Fatalf("scrolled = %q", down)
 		}
-		if !strings.Contains(stripANSI(down[h-3]), "DR-11") {
+		if !strings.Contains(stripANSI(down[h-2]), "DR-11") {
 			t.Fatalf("the last card is not reachable: %q", down)
 		}
 		st.handleKey(KeyPageUp, false, at)
@@ -353,12 +493,20 @@ func TestFleetBatchJob(t *testing.T) {
 		res   fleetSendResult
 		toast string
 	}{
-		{"host moved", fleetSendResult{CardID: "b", Moved: true}, "sent 1 of 3 · DR-b: " + errFleetMoved.Error()},
-		{"re-check failed", fleetSendResult{CardID: "b", CheckErr: errors.New("down")}, "sent 1 of 3 · DR-b: could not re-check the card"},
-		{"unclear", fleetSendResult{CardID: "b", Out: fleetSayOutcome{Unclear: true}}, "sent 1 of 3 · DR-b: " + fleetToastUnclear},
-		{"token rejected", fleetSendResult{CardID: "b", Out: fleetSayOutcome{Status: 401}}, "sent 1 of 3 · DR-b: " + fleetToastTokenBad},
+		{"host moved", fleetSendResult{CardID: "b", Moved: true}, "sent 1 of 3 · DR-b: " + errFleetMoved.Error() + " · 1 not tried"},
+		{"re-check failed", fleetSendResult{CardID: "b", CheckErr: errors.New("down")}, "sent 1 of 3 · DR-b: could not re-check the card" + " · 1 not tried"},
+		{"unclear", fleetSendResult{CardID: "b", Out: fleetSayOutcome{Unclear: true}}, "sent 1 of 3 · DR-b: " + fleetToastUnclear + " · 1 not tried"},
+		{"token rejected", fleetSendResult{CardID: "b", Out: fleetSayOutcome{Status: 401}}, "sent 1 of 3 · DR-b: " + fleetToastTokenBad + " · 1 not tried"},
 		{"not submitted", fleetSendResult{CardID: "b", Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{Code: "not_submitted"}}},
-			"sent 1 of 3 · DR-b: typed but not submitted — check FLEET's pane"},
+			"sent 1 of 3 · DR-b: typed but not submitted — check FLEET's pane · 1 not tried"},
+	}
+	for _, code := range []string{"dialog", "input_busy", "pane_mode", "no_pane", "busy", "send_failed", "not_live", "ambiguous", "rate_limited"} {
+		stops = append(stops, struct {
+			name  string
+			res   fleetSendResult
+			toast string
+		}{"code " + code, fleetSendResult{CardID: "b", Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{Code: code, Error: "refused"}}},
+			"sent 1 of 3 · DR-b: refused · 1 not tried"})
 	}
 	for _, tc := range stops {
 		t.Run(tc.name+" stops the batch", func(t *testing.T) {
@@ -453,6 +601,7 @@ func TestFleetBatchKeysWhileSending(t *testing.T) {
 	st := fleetTestState(v, now)
 	fleetDrawn(st, now)
 	st.handleKey("R", false, now)
+	renderFleetView(st, 120, 40, now)
 	if cmd := st.handleKey(KeyEnter, false, now.Add(time.Second)); cmd != fleetCmdSendBatch {
 		t.Fatalf("Enter: cmd = %v", cmd)
 	}
@@ -520,6 +669,7 @@ func TestFleetLoopRunsBatch(t *testing.T) {
 	}
 	defer l.closeAll()
 	l.st.handleKey("R", false, now)
+	renderFleetView(l.st, 120, 40, now)
 	if l.run(l.st.handleKey(KeyEnter, false, now.Add(time.Second)), now) {
 		t.Fatal("the batch closed the view")
 	}
@@ -544,5 +694,86 @@ func TestFleetLoopRunsBatch(t *testing.T) {
 	l.reap(now)
 	if len(l.st.batchSent) != 0 {
 		t.Fatalf("batchSent = %v after the refetch", l.st.batchSent)
+	}
+}
+
+func TestFleetBatchCardLevelRefusalsContinue(t *testing.T) {
+	clock := &fleetFakeClock{t: time.Unix(1000, 0)}
+	for _, code := range []string{"already_answered", "card_gone", "card_changed", "double_tap", "bad_text"} {
+		var ids []string
+		res := fleetBatchJob(fleetBatchItems("a", "b", "c"), func(r fleetSayRequest) fleetSendResult {
+			ids = append(ids, r.CardID)
+			if r.CardID == "b" {
+				return fleetSendResult{CardID: "b", Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{Code: code}}}
+			}
+			return fleetOK(r.CardID)
+		}, clock.sleep)
+		if strings.Join(ids, ",") != "a,b,c" || len(res.Results) != 3 {
+			t.Fatalf("%s: sent %v", code, ids)
+		}
+		st := fleetTestState(fleetTestView(), clock.t)
+		st.applyBatch(res, clock.t)
+		if strings.Contains(st.toast, "not tried") || !strings.HasPrefix(st.toast, "sent 2 of 3 · DR-b: ") {
+			t.Fatalf("%s: toast = %q", code, st.toast)
+		}
+	}
+}
+
+func TestFleetBatchFlattensNewlines(t *testing.T) {
+	now := time.Unix(1000, 0)
+	a := fleetBatchCard("a", "needs-you", "yes")
+	a.Ticket = "DR-1\n  Approve this?"
+	a.Options[0].Label = "Merge\nnow"
+	b := fleetBatchCard("b", "needs-you", "")
+	b.Ticket, b.Title = "", "line one\r\nline two"
+	st := fleetTestState(fleetTestView(a, b), now)
+	st.handleKey("R", false, now)
+	lines := fleetBatchPanelLines(st.batch, -1, now)
+	for _, l := range lines {
+		if strings.ContainsAny(l, "\r\n") {
+			t.Fatalf("panel line holds a line break: %q", l)
+		}
+	}
+	joined := stripANSI(strings.Join(lines, "|"))
+	if !strings.Contains(joined, "DR-1 Approve this? → Merge now") || !strings.Contains(joined, "line one line two — no FLEET pick") {
+		t.Fatalf("lines = %q", joined)
+	}
+
+	sent := fleetBatchCard("c", "needs-you", "")
+	sent.Title = "x\ny"
+	v := fleetTestView(a, b, sent)
+	at := fleetAnswerWith(fleetAttemptSent)
+	at.Attempts[0].Label = "Merge\nnow"
+	v.Answered["c"] = at
+	st = fleetTestState(v, now)
+	for i, it := range st.items {
+		row := fleetCollapsedRow(it, i == st.sel, false, 100, now)
+		if strings.ContainsAny(row, "\r\n") {
+			t.Fatalf("list row holds a line break: %q", row)
+		}
+		if cr := fleetCollapsedRow(it, false, true, 100, now); strings.ContainsAny(cr, "\r\n") {
+			t.Fatalf("marked list row holds a line break: %q", cr)
+		}
+	}
+}
+
+func TestFleetPickHintsNeedALiveLoadedFleet(t *testing.T) {
+	now := time.Unix(1000, 0)
+	lean := fleetBatchCard("a", "needs-you", "yes")
+	cases := map[string]func(*fleetViewState){
+		"not loaded": func(st *fleetViewState) { st.loaded = false },
+		"ambiguous":  func(st *fleetViewState) { st.view.Ambiguous = []string{"x", "y"} },
+		"not alive":  func(st *fleetViewState) { st.view.Fleet.Alive = false },
+	}
+	st := fleetTestState(fleetTestView(lean), now)
+	if !st.leanPickable() || !st.batchPickable() {
+		t.Fatal("hints off on a live FLEET")
+	}
+	for name, edit := range cases {
+		st := fleetTestState(fleetTestView(lean), now)
+		edit(st)
+		if st.leanPickable() || st.batchPickable() {
+			t.Errorf("%s: leanPickable = %v batchPickable = %v", name, st.leanPickable(), st.batchPickable())
+		}
 	}
 }

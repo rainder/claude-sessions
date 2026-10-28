@@ -916,21 +916,27 @@ func fleetListWindow(top, sel, need, h int, headAbove bool) int {
 // "↓ more" the last while more lies below (a panel under 3 rows has no room
 // for them). It returns the rows and the clamped scroll. h < 0 shows all.
 func fleetPanelWindow(lines []string, h, scroll int) ([]string, int) {
+	out, s, _ := fleetPanelWindowSpan(lines, h, scroll)
+	return out, s
+}
+
+// fleetPanelWindowSpan is fleetPanelWindow that also returns end: the lines
+// shown are lines[s:end], the "more" markers aside.
+func fleetPanelWindowSpan(lines []string, h, scroll int) (out []string, s, end int) {
 	if h < 0 || len(lines) <= h {
-		return lines, 0
+		return lines, 0, len(lines)
 	}
 	if h < 3 {
 		s := min(max(scroll, 0), len(lines)-h)
-		return lines[s : s+h], s
+		return lines[s : s+h], s, s + h
 	}
-	s := min(max(scroll, 0), len(lines)-(h-1))
-	var out []string
+	s = min(max(scroll, 0), len(lines)-(h-1))
 	avail := h
 	if s > 0 {
 		out = append(out, dim("↑ more"))
 		avail--
 	}
-	end := s + avail
+	end = s + avail
 	below := end < len(lines)
 	if below {
 		end--
@@ -939,8 +945,12 @@ func fleetPanelWindow(lines []string, h, scroll int) ([]string, int) {
 	if below {
 		out = append(out, dim("↓ more"))
 	}
-	return out, s
+	return out, s, end
 }
+
+// fleetOneLine is s with every whitespace run, a newline too, one space: a
+// card field drawn on one row must not start another.
+func fleetOneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // fleetStackedBody is the list window, the rule and the panel, in exactly
 // bodyRows rows (bodyRows < 0: everything).
@@ -1137,13 +1147,14 @@ func fleetCollapsedRow(it fleetItem, selected, chat bool, cols int, now time.Tim
 		prefix = "▸ "
 	}
 	head := prefix
-	if it.Card.Ticket != "" {
-		head += it.Card.Ticket + "  "
+	if t := fleetOneLine(it.Card.Ticket); t != "" {
+		head += t + "  "
 	}
+	title := fleetOneLine(it.Card.Title)
 	var row string
 	if it.Section == fleetSecSent && it.Answer != nil {
 		a := it.Answer.latest()
-		row = head + "You chose: " + fleetAttemptLabel(a)
+		row = head + "You chose: " + fleetOneLine(fleetAttemptLabel(a))
 		if age := fleetAge(a.At, now); age != "" {
 			row += "  (" + age + " ago)"
 		}
@@ -1155,9 +1166,9 @@ func fleetCollapsedRow(it fleetItem, selected, chat bool, cols int, now time.Tim
 			right += " · " + age
 		}
 		if chat {
-			return fleetMarkedRow(head+it.Card.Title, right, cols, selected)
+			return fleetMarkedRow(head+title, right, cols, selected)
 		}
-		row = fleetRowRight(head+it.Card.Title, right, cols)
+		row = fleetRowRight(head+title, right, cols)
 	}
 	if selected {
 		return bold(row)
