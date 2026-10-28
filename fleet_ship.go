@@ -377,7 +377,7 @@ func fleetOnlySent(items []fleetItem) bool {
 // an open panel keeps the list it was opened from, and the Clarify chat
 // stays over whatever is behind it.
 func (st *fleetViewState) shipOn() bool {
-	if st.err != "" || !st.loaded || len(st.view.Ambiguous) > 0 || !st.view.Fleet.Alive || st.panel != nil || st.clarify != nil {
+	if st.err != "" || !st.loaded || len(st.view.Ambiguous) > 0 || !st.view.Fleet.Alive || st.panel != nil || st.batch != nil || st.clarify != nil {
 		return false
 	}
 	return len(st.items) == 0 || (!st.listMode && fleetOnlySent(st.items))

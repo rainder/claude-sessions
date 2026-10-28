@@ -51,7 +51,7 @@ func (st *fleetViewState) canClarify() bool {
 	it := st.selected()
 	return it != nil && it.Card.ID != "" && it.Section != fleetSecSent &&
 		st.view.Fleet.Alive && st.view.FleetTool != "grok" &&
-		st.panel == nil && st.clarify == nil && !st.shipOn()
+		st.panel == nil && st.batch == nil && st.clarify == nil && !st.shipOn()
 }
 
 func (st *fleetViewState) openClarify(now time.Time) fleetCmd {

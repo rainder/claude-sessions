@@ -183,10 +183,14 @@ type fleetLoop struct {
 
 	states    []*fleetJob[fleetStateFetch]
 	sends     []*fleetJob[fleetSendResult]
+	batches   []*fleetJob[fleetBatchResult] // R: at most one, since R needs no send in flight
 	dismisses []*fleetJob[fleetDismissResult]
 	// clarifies holds at most one job: a chat request is never sent beside
 	// another, so a read cannot land after a newer ask's answer.
 	clarifies []*fleetJob[fleetClarifyDone]
+
+	// sleep waits between a batch's sends; nil is time.Sleep.
+	sleep func(time.Duration)
 }
 
 // startState starts one state fetch.
@@ -217,6 +221,14 @@ func (l *fleetLoop) reap(now time.Time) {
 	for _, r := range sent {
 		l.dropOlderStates()
 		if l.st.applySend(r, now) {
+			l.startState()
+		}
+	}
+	var batched []fleetBatchResult
+	l.batches, batched = reapFleetJobs(l.batches)
+	for _, r := range batched {
+		l.dropOlderStates()
+		if l.st.applyBatch(r, now) {
 			l.startState()
 		}
 	}
@@ -381,6 +393,18 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 		}
 		send, r := l.send, *req
 		l.sends = append(l.sends, startFleetJob(func() fleetSendResult { return send(r) }))
+	case fleetCmdSendBatch:
+		items := l.st.batchSend
+		l.st.batchSend = nil
+		if len(items) == 0 {
+			l.st.sending = false
+			return false
+		}
+		send, sleep := l.send, l.sleep
+		if sleep == nil {
+			sleep = time.Sleep
+		}
+		l.batches = append(l.batches, startFleetJob(func() fleetBatchResult { return fleetBatchJob(items, send, sleep) }))
 	case fleetCmdDismiss:
 		id, source := l.st.dismissID, l.st.dismissSource
 		l.st.dismissID, l.st.dismissSource = "", ""
@@ -423,6 +447,9 @@ func (l *fleetLoop) wakes(base []wakeFD) []wakeFD {
 	for _, j := range l.sends {
 		out = append(out, j.wake())
 	}
+	for _, j := range l.batches {
+		out = append(out, j.wake())
+	}
 	for _, j := range l.dismisses {
 		out = append(out, j.wake())
 	}
@@ -437,6 +464,9 @@ func (l *fleetLoop) closeAll() {
 		j.close()
 	}
 	for _, j := range l.sends {
+		j.close()
+	}
+	for _, j := range l.batches {
 		j.close()
 	}
 	for _, j := range l.dismisses {
@@ -620,6 +650,11 @@ func fleetLoopTimeout(st *fleetViewState, pollAt, now time.Time) time.Duration {
 			earlier(arm)
 		}
 	}
+	if b := st.batch; b != nil {
+		if arm := b.openedAt.Add(fleetArmDelay); now.Before(arm) {
+			earlier(arm)
+		}
+	}
 	if st.toast != "" && now.Before(st.toastUntil) {
 		earlier(st.toastUntil)
 	}
@@ -713,6 +748,8 @@ const (
 	// fleetHelpLeanHint goes after "1-9 pick option" when r would send the
 	// selected card's lean option.
 	fleetHelpLeanHint = "r FLEET's pick"
+	// fleetHelpBatchHint goes after those when R would send at least one card.
+	fleetHelpBatchHint = "R all picks"
 
 	// The Clarify screen's help rows, without and with a draft.
 	fleetHelpClarify      = "Enter ask · Ctrl-D draft for FLEET · Esc back"
@@ -794,7 +831,7 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 		body = fleetStackedBody(st, width, bodyRows, now)
 	}
 	// Only the card list with the details panel counts as showing a card to r.
-	st.noteDrawn(st.err == "" && st.loaded && len(st.view.Ambiguous) == 0 && !st.shipOn() && st.panel == nil, now)
+	st.noteDrawn(st.err == "" && st.loaded && len(st.view.Ambiguous) == 0 && !st.shipOn() && st.panel == nil && st.batch == nil, now)
 	if bodyRows >= 0 {
 		if len(body) > bodyRows {
 			body = body[:bodyRows]
@@ -879,21 +916,27 @@ func fleetListWindow(top, sel, need, h int, headAbove bool) int {
 // "↓ more" the last while more lies below (a panel under 3 rows has no room
 // for them). It returns the rows and the clamped scroll. h < 0 shows all.
 func fleetPanelWindow(lines []string, h, scroll int) ([]string, int) {
+	out, s, _ := fleetPanelWindowSpan(lines, h, scroll)
+	return out, s
+}
+
+// fleetPanelWindowSpan is fleetPanelWindow that also returns end: the lines
+// shown are lines[s:end], the "more" markers aside.
+func fleetPanelWindowSpan(lines []string, h, scroll int) (out []string, s, end int) {
 	if h < 0 || len(lines) <= h {
-		return lines, 0
+		return lines, 0, len(lines)
 	}
 	if h < 3 {
 		s := min(max(scroll, 0), len(lines)-h)
-		return lines[s : s+h], s
+		return lines[s : s+h], s, s + h
 	}
-	s := min(max(scroll, 0), len(lines)-(h-1))
-	var out []string
+	s = min(max(scroll, 0), len(lines)-(h-1))
 	avail := h
 	if s > 0 {
 		out = append(out, dim("↑ more"))
 		avail--
 	}
-	end := s + avail
+	end = s + avail
 	below := end < len(lines)
 	if below {
 		end--
@@ -902,14 +945,18 @@ func fleetPanelWindow(lines []string, h, scroll int) ([]string, int) {
 	if below {
 		out = append(out, dim("↓ more"))
 	}
-	return out, s
+	return out, s, end
 }
+
+// fleetOneLine is s with every whitespace run, a newline too, one space: a
+// card field drawn on one row must not start another.
+func fleetOneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // fleetStackedBody is the list window, the rule and the panel, in exactly
 // bodyRows rows (bodyRows < 0: everything).
 func fleetStackedBody(st *fleetViewState, cols, bodyRows int, now time.Time) []string {
 	list, selRow, lineItems := fleetListLines(st, cols, now)
-	listH, rule, panelH := fleetStackedLayout(bodyRows, len(list), st.panel != nil)
+	listH, rule, panelH := fleetStackedLayout(bodyRows, len(list), st.panel != nil || st.batch != nil)
 	headAbove := len(st.items) > 0 && (st.sel == 0 || st.items[st.sel-1].Section != st.items[st.sel].Section)
 	st.listTop = fleetListWindow(st.listTop, selRow, len(list), listH, headAbove)
 	st.panelRows = max(panelH, 0)
@@ -922,9 +969,12 @@ func fleetStackedBody(st *fleetViewState, cols, bodyRows int, now time.Time) []s
 	// Body-relative; renderFleetView adds the rows above the body and sets
 	// the panel's height from the body it drew (the rest of it).
 	st.hit.panelY = len(out)
-	st.hit.scrolls = st.panel == nil
+	st.hit.scrolls = st.panel == nil && st.batch == nil
 	if panelH == 0 {
 		return out
+	}
+	if st.batch != nil {
+		return append(out, fleetBatchPanelLines(st.batch, panelH, now)...)
 	}
 	if st.panel != nil {
 		return append(out, fleetPanelLines(st, cols, panelH, now)...)
@@ -1010,7 +1060,7 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 	if st.sending {
 		return "sending…"
 	}
-	if st.panel != nil {
+	if st.panel != nil || st.batch != nil {
 		return ""
 	}
 	if st.shipOn() {
@@ -1025,8 +1075,15 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 	if st.attachable() {
 		row = fleetHelpRowAttach
 	}
+	picks := ""
 	if st.leanPickable() {
-		row = strings.Replace(row, " · 1-9 pick option · ", " · 1-9 pick option · "+fleetHelpLeanHint+" · ", 1)
+		picks += fleetHelpLeanHint + " · "
+	}
+	if st.batchPickable() {
+		picks += fleetHelpBatchHint + " · "
+	}
+	if picks != "" {
+		row = strings.Replace(row, " · 1-9 pick option · ", " · 1-9 pick option · "+picks, 1)
 	}
 	if st.canClarify() {
 		row = strings.Replace(row, " · o other · ", " · o other · "+fleetHelpClarifyHint+" · ", 1)
@@ -1090,13 +1147,14 @@ func fleetCollapsedRow(it fleetItem, selected, chat bool, cols int, now time.Tim
 		prefix = "▸ "
 	}
 	head := prefix
-	if it.Card.Ticket != "" {
-		head += it.Card.Ticket + "  "
+	if t := fleetOneLine(it.Card.Ticket); t != "" {
+		head += t + "  "
 	}
+	title := fleetOneLine(it.Card.Title)
 	var row string
 	if it.Section == fleetSecSent && it.Answer != nil {
 		a := it.Answer.latest()
-		row = head + "You chose: " + fleetAttemptLabel(a)
+		row = head + "You chose: " + fleetOneLine(fleetAttemptLabel(a))
 		if age := fleetAge(a.At, now); age != "" {
 			row += "  (" + age + " ago)"
 		}
@@ -1108,9 +1166,9 @@ func fleetCollapsedRow(it fleetItem, selected, chat bool, cols int, now time.Tim
 			right += " · " + age
 		}
 		if chat {
-			return fleetMarkedRow(head+it.Card.Title, right, cols, selected)
+			return fleetMarkedRow(head+title, right, cols, selected)
 		}
-		row = fleetRowRight(head+it.Card.Title, right, cols)
+		row = fleetRowRight(head+title, right, cols)
 	}
 	if selected {
 		return bold(row)
@@ -1239,7 +1297,7 @@ func fleetOptionLines(st *fleetViewState, it fleetItem, cols int) []string {
 		if code := st.view.Fleet.Code; code != "" {
 			note = "FLEET is not running (" + code + ") — answers are off"
 		}
-	case c.ID == st.justSent, c.ID == st.unclear, it.Answer != nil && st.unlocked != c.ID:
+	case st.sentLocked(c.ID), c.ID == st.unclear, it.Answer != nil && st.unlocked != c.ID:
 		locked = true
 	}
 	greyAll := note != "" || locked
