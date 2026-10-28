@@ -16,6 +16,19 @@ import (
 // (the page's SHEET_ARM_MS), so one stray key cannot send.
 const fleetArmDelay = 400 * time.Millisecond
 
+// fleetLeanPickDelay is how long a card must have been drawn on the list
+// screen before r answers it; longer than fleetArmDelay so a double-tap of r,
+// whose first send moves the selection on, cannot answer the next card.
+const fleetLeanPickDelay = time.Second
+
+// fleetDrawnCard is the card the list screen's details panel shows: its id,
+// its CardHashes entry, and when that exact pair was first drawn. at is zero
+// when the last frame drew no such card.
+type fleetDrawnCard struct {
+	id, hash string
+	at       time.Time
+}
+
 const fleetPageStep = 10 // lines per PgUp/PgDn before the panel height is known
 
 // fleetCmd is what the modal loop does after a key.
@@ -84,6 +97,7 @@ type fleetViewState struct {
 	sending       bool
 	dismissing    bool
 	send          *fleetSayRequest     // set with fleetCmdSend; the loop takes it
+	sendLabel     string               // the option label of the answer sending, for the result toast; "" for Other
 	dismissID     string               // set with fleetCmdDismiss
 	dismissSource string               // the applied state's Source when x was pressed
 	attach        *fleetAttachRequest  // set with fleetCmdAttach; the loop takes it
@@ -92,6 +106,7 @@ type fleetViewState struct {
 	nextAfter     string               // card id just sent; the next applyState selects the next open card
 	justSent      string               // card id our own answer reached; locked until a state shows it answered or gone
 	unclear       string               // card id whose send result is unknown; locked until the next applied state
+	drawn         fleetDrawnCard       // renderFleetView keeps it; r waits fleetLeanPickDelay on it
 	toast         string
 	toastKind     fleetToastKind
 	toastUntil    time.Time
@@ -308,7 +323,6 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	if st.sel < 0 {
 		st.sel = 0
 	}
-
 	if st.unlocked != "" {
 		if i := fleetItemIndex(st.items, st.unlocked); i < 0 || st.items[i].Answer == nil {
 			st.unlocked = ""
@@ -361,6 +375,39 @@ func (st *fleetViewState) pageStep() int {
 		return fleetPageStep
 	}
 	return max(st.panelRows-2, 1)
+}
+
+// selectedIdentity is the selected card's id and its CardHashes entry in the
+// applied state, both "" when nothing is selected.
+func (st *fleetViewState) selectedIdentity() (id, hash string) {
+	if st.sel < 0 || st.sel >= len(st.items) {
+		return "", ""
+	}
+	id = st.items[st.sel].Card.ID
+	return id, st.view.CardHashes[id]
+}
+
+// noteDrawn records what this frame drew: list true is the card list with
+// the details panel, anything else (Clarify, ship, confirm panel, error,
+// loading, ambiguous) clears the record. A plain field write, called from
+// renderFleetView.
+func (st *fleetViewState) noteDrawn(list bool, now time.Time) {
+	id, hash := st.selectedIdentity()
+	if !list || id == "" {
+		st.drawn = fleetDrawnCard{}
+		return
+	}
+	if st.drawn.at.IsZero() || st.drawn.id != id || st.drawn.hash != hash {
+		st.drawn = fleetDrawnCard{id: id, hash: hash, at: now}
+	}
+}
+
+// drawnLongEnough reports whether the selected card is the one the screen
+// shows, unchanged, for at least fleetLeanPickDelay.
+func (st *fleetViewState) drawnLongEnough(now time.Time) bool {
+	id, hash := st.selectedIdentity()
+	d := st.drawn
+	return !d.at.IsZero() && id != "" && d.id == id && d.hash == hash && !now.Before(d.at.Add(fleetLeanPickDelay))
 }
 
 // selected is the selected item, nil when the list is empty or not shown.
@@ -472,6 +519,8 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return st.openOther(now)
 	case "k":
 		return st.openClarify(now)
+	case "r":
+		return st.pickLean(inBatch, now)
 	case "t":
 		// The ship screen shows no card, so there is no card text to show.
 		if inBatch || st.shipOn() || st.selected() == nil {
@@ -484,26 +533,17 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return fleetCmdNone
 	}
 	opt, ok := fleetOptionIndex(k, len(it.Card.Options))
-	if !ok || it.Card.ID == "" || !st.view.Fleet.Alive || st.sending {
+	if !ok {
 		return fleetCmdNone
 	}
-	if it.Card.ID == st.justSent {
-		// The list may still show our own answer's card as open until the
-		// refetch lands; a panel now would be a second answer.
-		st.setToast("sent — waiting for FLEET", fleetToastInfo, now)
+	if msg, kind, blocked := st.pickRefusal(it); blocked {
+		if msg == "" {
+			return fleetCmdNone
+		}
+		st.setToast(msg, kind, now)
 		return fleetCmdRender
 	}
-	if it.Card.ID == st.unclear {
-		// The last send may have landed; the refetch it asked for decides.
-		st.setToast("delivery not confirmed — checking the card first", fleetToastWarn, now)
-		return fleetCmdRender
-	}
-	if it.Answer != nil && st.unlocked != it.Card.ID {
-		st.setToast("answered — press c to send a correction", fleetToastInfo, now)
-		return fleetCmdRender
-	}
-	// Without the server's hash the send could never pass the re-check.
-	if it.Card.Options[opt].Send == "" || st.view.CardHashes[it.Card.ID] == "" {
+	if it.Card.Options[opt].Send == "" {
 		return fleetCmdNone
 	}
 	st.panel = &fleetPanel{
@@ -515,6 +555,128 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		correction: it.Answer != nil,
 	}
 	return fleetCmdRender
+}
+
+// pickRefusal is why no option of it may be picked now, shared by a digit and
+// r: blocked with an empty msg means the key does nothing, a msg is the toast.
+func (st *fleetViewState) pickRefusal(it *fleetItem) (msg string, kind fleetToastKind, blocked bool) {
+	if it.Card.ID == "" || !st.view.Fleet.Alive || st.sending {
+		return "", 0, true
+	}
+	if it.Card.ID == st.justSent {
+		// The list may still show our own answer's card as open until the
+		// refetch lands; a panel now would be a second answer.
+		return "sent — waiting for FLEET", fleetToastInfo, true
+	}
+	if it.Card.ID == st.unclear {
+		// The last send may have landed; the refetch it asked for decides.
+		return "delivery not confirmed — checking the card first", fleetToastWarn, true
+	}
+	if it.Answer != nil && st.unlocked != it.Card.ID {
+		return "answered — press c to send a correction", fleetToastInfo, true
+	}
+	// Without the server's hash the send could never pass the re-check.
+	if st.view.CardHashes[it.Card.ID] == "" {
+		return "", 0, true
+	}
+	return "", 0, false
+}
+
+// fleetLeanOption is the index of the option FLEET recommends (Key ==
+// card.Lean), ok false when the card has no lean, or it names no option or
+// more than one (no single pick to send).
+func fleetLeanOption(c fleetCardView) (int, bool) {
+	if c.Lean == "" {
+		return 0, false
+	}
+	idx, n := 0, 0
+	for i, o := range c.Options {
+		if o.Key == c.Lean {
+			idx, n = i, n+1
+		}
+	}
+	return idx, n == 1
+}
+
+// fleetLeanRefusal is why r cannot send card c's lean option, on top of
+// pickRefusal. Only a digit 1-9 can pick an option, so neither can r past 9.
+func fleetLeanRefusal(c fleetCardView) (opt int, msg string) {
+	opt, ok := fleetLeanOption(c)
+	switch {
+	case !ok:
+		return 0, "no FLEET pick on this card"
+	case c.Options[opt].Send == "":
+		return 0, "FLEET's pick has nothing to send"
+	case opt >= 9:
+		return 0, "FLEET's pick is past option 9 — answer on the page"
+	}
+	return opt, ""
+}
+
+// pickLean is r: send the selected unanswered card's lean option at once,
+// with no confirm panel, through the same guards and the same request a digit
+// pick confirmed on the panel makes. It does nothing in a paste, or unless
+// the screen has shown that exact card (id and hash) for fleetLeanPickDelay.
+// A correction goes through c, a digit and the panel, never r.
+func (st *fleetViewState) pickLean(inBatch bool, now time.Time) fleetCmd {
+	if inBatch || !st.drawnLongEnough(now) {
+		return fleetCmdNone
+	}
+	it := st.selected()
+	if it == nil {
+		return fleetCmdNone
+	}
+	if it.Answer != nil && !st.sending {
+		st.setToast("answered — press c, then a digit, to correct", fleetToastInfo, now)
+		return fleetCmdRender
+	}
+	if msg, kind, blocked := st.pickRefusal(it); blocked {
+		if msg == "" {
+			return fleetCmdNone
+		}
+		st.setToast(msg, kind, now)
+		return fleetCmdRender
+	}
+	opt, msg := fleetLeanRefusal(it.Card)
+	if msg != "" {
+		st.setToast(msg, fleetToastWarn, now)
+		return fleetCmdRender
+	}
+	return st.sendOption(*it, opt, st.view.CardHashes[it.Card.ID], st.view.Source, "", false, now)
+}
+
+// leanPickable reports whether r would send the selected card, leaving out
+// the fleetLeanPickDelay draw wait: the key help offers r during it too.
+func (st *fleetViewState) leanPickable() bool {
+	it := st.selected()
+	if it == nil || it.Answer != nil || st.panel != nil || st.clarify != nil || st.shipOn() {
+		return false
+	}
+	if _, _, blocked := st.pickRefusal(it); blocked {
+		return false
+	}
+	_, msg := fleetLeanRefusal(it.Card)
+	return msg == ""
+}
+
+// sendOption starts the answer "option opt of item": the one request a
+// confirmed panel and r both build. hash and source are the ones the answer
+// was prepared against; the send job re-checks the card against them.
+func (st *fleetViewState) sendOption(item fleetItem, opt int, hash, source, comment string, correction bool, now time.Time) fleetCmd {
+	o := item.Card.Options[opt]
+	st.send = &fleetSayRequest{
+		Source:     source,
+		Text:       fleetSendText(o.Send, comment),
+		CardID:     item.Card.ID,
+		CardHash:   hash,
+		OptionKey:  o.Key,
+		Correction: correction,
+	}
+	st.sendLabel = o.Label
+	st.panel = nil
+	st.sending = true
+	st.setToast("sending…", fleetToastInfo, now)
+	return fleetCmdSend
 }
 
 // openOther opens the Other panel on the selected card: Andy's own answer,
@@ -555,6 +717,7 @@ func (st *fleetViewState) handleOtherKey(k string, inBatch bool, now time.Time) 
 		// No card id: the server takes it as a plain line, so it neither
 		// records an answer nor locks the card (the page's Other does the same).
 		st.send = &fleetSayRequest{Source: p.source, Text: fleetOtherText(id, p.comment)}
+		st.sendLabel = ""
 		st.panel = nil
 		st.sending = true
 		st.setToast("sending…", fleetToastInfo, now)
@@ -582,18 +745,7 @@ func (st *fleetViewState) handlePanelKey(k string, inBatch bool, now time.Time) 
 		if inBatch || now.Before(p.openedAt.Add(fleetArmDelay)) {
 			return fleetCmdNone
 		}
-		st.send = &fleetSayRequest{
-			Source:     p.source,
-			Text:       fleetSendText(opt.Send, p.comment),
-			CardID:     p.item.Card.ID,
-			CardHash:   p.hash,
-			OptionKey:  opt.Key,
-			Correction: p.correction,
-		}
-		st.panel = nil
-		st.sending = true
-		st.setToast("sending…", fleetToastInfo, now)
-		return fleetCmdSend
+		return st.sendOption(p.item, p.opt, p.hash, p.source, p.comment, p.correction, now)
 	}
 	// The bool says the key is an edit key, not that the comment changed.
 	var edit bool
@@ -745,6 +897,8 @@ func (st *fleetViewState) applyAttach(err error, now time.Time) {
 // again now.
 func (st *fleetViewState) applySend(r fleetSendResult, now time.Time) (refetch bool) {
 	st.sending = false
+	label := st.sendLabel
+	st.sendLabel = ""
 	if r.CheckErr != nil {
 		st.setToast("could not re-check the card: "+fleetDisplayText(r.CheckErr.Error()), fleetToastErr, now)
 		return false
@@ -758,6 +912,9 @@ func (st *fleetViewState) applySend(r fleetSendResult, now time.Time) (refetch b
 		return true
 	}
 	msg, kind, refetch := fleetSendToast(r.Out)
+	if msg == fleetToastSent && label != "" {
+		msg += ": " + label
+	}
 	st.setToast(msg, kind, now)
 	if r.CardID == "" {
 		// An Other answer: no card records it, so nothing locks, moves on

@@ -217,6 +217,15 @@ types into panes. Spec and plan: `docs/superpowers/`.
   servers.yaml host. Views carry `Source`; send, dismiss and attach refuse
   when the chosen host moved. Network calls run only in `fleetJob`s or the
   badge hub, never on the render path.
+- **TUI keys:** a digit opens a confirm panel; `r` sends the option whose
+  `Key == card.Lean` (exactly one match) with no panel, and only on an
+  unanswered card (a correction is `c`, a digit and the panel). Both share
+  `pickRefusal` and `sendOption` (same request, hash, `Source` and send job).
+  `r` does nothing in a paste batch, or unless the list screen has drawn
+  that exact card (id and hash, `st.drawn`, recorded by `renderFleetView`)
+  for `fleetLeanPickDelay` (1s): any other frame or a changed pair restarts
+  the wait, so a double-tap, a mouse move or a new state cannot answer an
+  unseen card.
 - **Uploads:** type sniffed from the bytes, server-chosen file names, pruned
   after 7 days.
 - **Web Push:** stdlib RFC 8291/8292. The endpoint host allowlist is the SSRF
