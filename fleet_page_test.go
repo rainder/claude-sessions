@@ -96,7 +96,12 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// the server's byte cap, as the TUI cuts it; else Send would fail.
 		"const SAY_MAX_BYTES = 4096;", "function cutUTF8(s, max)",
 		`ta.value = cutUTF8("Andy decides on " + id + ": " + draft.text`,
-		`bad_text: "Question has control characters"`} {
+		`bad_text: "Question has control characters"`,
+		// The Claude auto switch: a line under the account chips for 12 h
+		// and a toast for a new one, from state.autoSwitch; its log lines
+		// have their own filter.
+		`id="autosw"`, "function renderAutoSwitch(", "state.autoSwitch", "a.last", "last.fromPct", "last.toPct",
+		`"Auto-switched "`, "AUTO_SW_SHOW_MS = 12 * 3600e3", "toast(text)", `"auto-switch"`, ".ty-auto-switch"} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}

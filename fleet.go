@@ -473,6 +473,9 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	out["clarify"] = s.fleet.clarify.summary()
 	// Plain page messages the server holds for FLEET, without their text.
 	out["outbox"] = s.fleet.outbox.view(now)
+	// The Claude auto switch: on or off, its threshold, and the last
+	// successful switch (names and percents only).
+	out["autoSwitch"] = s.autoSwitchView()
 	if stateErr != "" {
 		out["stateError"] = stateErr
 	} else {

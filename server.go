@@ -780,6 +780,9 @@ type server struct {
 	// question is the decision-question event loop's seams (question_events.go).
 	// Its state is guarded by idle.mu.
 	question questionDeps
+
+	// auto is the Claude auto-switch loop's seams and state (auto_switch.go).
+	auto autoSwitchDeps
 }
 
 func (s *server) authed(r *http.Request) bool {
@@ -2641,6 +2644,10 @@ func cmdServer(args []string) int {
 	// them. A finished turn that asks for a decision is reported after one
 	// minute, including when a background shell would make the idle loop wait.
 	go s.runQuestionEvents()
+	// Claude account auto switch: off until auto-switch.json enables it; same
+	// one-stat cost while off. It reads the numbers /fleet/accounts shows and
+	// switches through the page chip's own path.
+	go s.runAutoSwitch()
 	// Web Push: a card that turns into a decision notifies the subscribed
 	// devices (fleet_push.go).
 	if s.fleet.vapid != nil {

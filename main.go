@@ -76,6 +76,8 @@ func main() {
 		os.Exit(cmdBlockedEvents(args[1:]))
 	case "question-events":
 		os.Exit(cmdQuestionEvents(args[1:]))
+	case "auto-switch":
+		os.Exit(cmdAutoSwitch(args[1:]))
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", args[0])
 		fmt.Fprintln(os.Stderr, usage)
@@ -137,6 +139,11 @@ subcommands:
                                   state
   clickup-events status           show the ClickUp ticket-event config and
                                   state
+  auto-switch status | on | off   show the Claude account auto-switch config
+                                  and last switch, or turn it on or off
+                                  (switches to the saved account with the
+                                  lowest 7-day use when the live one reaches
+                                  the threshold, default 95%)
   summary [claude|codex]          print or set the ticket/conversation
                                   summary backend (default claude)
   notify-test                     send a test push to every registered device
