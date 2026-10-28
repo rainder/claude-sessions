@@ -220,7 +220,10 @@ types into panes. Spec and plan: `docs/superpowers/`.
 - **TUI keys:** a digit opens a confirm panel; `r` sends the option whose
   `Key == card.Lean` with no panel. Both share `pickRefusal` and
   `sendOption` (same request, hash, `Source` and send job), and `r` in a
-  paste batch is ignored like the panel's Enter.
+  paste batch is ignored like the panel's Enter. `r` is also ignored for
+  `fleetLeanPickDelay` (1s) after an applied state changes the selected
+  card's id or hash (`selChangedAt`; Andy's own moves do not arm it), so a
+  double-tap cannot answer the next card.
 - **Uploads:** type sniffed from the bytes, server-chosen file names, pruned
   after 7 days.
 - **Web Push:** stdlib RFC 8291/8292. The endpoint host allowlist is the SSRF

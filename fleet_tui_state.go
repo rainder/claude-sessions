@@ -16,6 +16,11 @@ import (
 // (the page's SHEET_ARM_MS), so one stray key cannot send.
 const fleetArmDelay = 400 * time.Millisecond
 
+// fleetLeanPickDelay is how long r is ignored after an applied state changes
+// the selected card; longer than fleetArmDelay so a double-tap of r, whose
+// first send moves the selection on, cannot answer the next card.
+const fleetLeanPickDelay = time.Second
+
 const fleetPageStep = 10 // lines per PgUp/PgDn before the panel height is known
 
 // fleetCmd is what the modal loop does after a key.
@@ -93,6 +98,7 @@ type fleetViewState struct {
 	nextAfter     string               // card id just sent; the next applyState selects the next open card
 	justSent      string               // card id our own answer reached; locked until a state shows it answered or gone
 	unclear       string               // card id whose send result is unknown; locked until the next applied state
+	selChangedAt  time.Time            // when an applied state last changed the selected card's id or hash; r waits fleetLeanPickDelay
 	toast         string
 	toastKind     fleetToastKind
 	toastUntil    time.Time
@@ -259,6 +265,7 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	st.unclear = ""
 	old := st.items
 	oldSel := st.sel
+	oldID, oldHash := st.selectedIdentity()
 	st.err, st.view, st.items = "", v, fleetItems(v)
 	if len(st.items) == 0 || !fleetOnlySent(st.items) {
 		// An open or unconfirmed card shows the list anyway; with no card
@@ -308,6 +315,11 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	}
 	if st.sel < 0 {
 		st.sel = 0
+	}
+	// A state that put another card, or a changed card, under the selection
+	// arms r's delay. Andy's own moves (arrows, click, wheel) do not.
+	if id, hash := st.selectedIdentity(); id != oldID || hash != oldHash {
+		st.selChangedAt = now
 	}
 
 	if st.unlocked != "" {
@@ -362,6 +374,16 @@ func (st *fleetViewState) pageStep() int {
 		return fleetPageStep
 	}
 	return max(st.panelRows-2, 1)
+}
+
+// selectedIdentity is the selected card's id and its CardHashes entry in the
+// applied state, both "" when nothing is selected.
+func (st *fleetViewState) selectedIdentity() (id, hash string) {
+	if st.sel < 0 || st.sel >= len(st.items) {
+		return "", ""
+	}
+	id = st.items[st.sel].Card.ID
+	return id, st.view.CardHashes[id]
 }
 
 // selected is the selected item, nil when the list is empty or not shown.
@@ -567,9 +589,10 @@ func fleetLeanRefusal(c fleetCardView) (opt int, msg string) {
 
 // pickLean is r: send the selected card's lean option at once, with no
 // confirm panel, through the same guards and the same request a digit pick
-// confirmed on the panel makes. A key in a paste never sends.
+// confirmed on the panel makes. A key in a paste never sends, and neither
+// does one within fleetLeanPickDelay of a state that changed the selected card.
 func (st *fleetViewState) pickLean(inBatch bool, now time.Time) fleetCmd {
-	if inBatch {
+	if inBatch || now.Before(st.selChangedAt.Add(fleetLeanPickDelay)) {
 		return fleetCmdNone
 	}
 	it := st.selected()
