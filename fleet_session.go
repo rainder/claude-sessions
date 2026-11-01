@@ -85,9 +85,11 @@ func (s *server) fleetSessionCards() map[string]fleetCardInfo {
 }
 
 // fleetResolveSession is the allowlist, in order: a well-formed name; a card
-// in the current state.json names it, or it is a live row of the working
-// list (the page may open only what FLEET put on a card or what the server
-// itself lists); not FLEET's own session (FLEET has its own guarded box, and
+// in the current state.json names it, it is a live row of the working list
+// (the page may open only what FLEET put on a card or what the server itself
+// lists), or it holds the one usable CHAT row (Andy's desk session, which
+// the chat panel shows even when it is off the working list); not FLEET's
+// own session (FLEET has its own guarded box, and
 // typing into it from here would skip those guards); exactly one live row
 // (claude or grok) in that tmux session, so the pane address is unambiguous.
 // With no card, the ticket and title come from that row.
@@ -96,7 +98,7 @@ func (s *server) fleetResolveSession(name string, sessions []Session) (Session, 
 		return Session{}, fleetCardInfo{}, &fleetSessionErr{http.StatusBadRequest, "bad_target", "bad session name"}
 	}
 	card, ok := s.fleetSessionCards()[name]
-	if !ok && !s.fleetIsDerived(name, sessions) {
+	if !ok && !s.fleetIsDerived(name, sessions) && !fleetIsDesk(name, sessions) {
 		return Session{}, fleetCardInfo{}, &fleetSessionErr{http.StatusForbidden, "not_allowed", "no FLEET card or live session list row names this session"}
 	}
 	self := &fleetSessionErr{http.StatusForbidden, "fleet_self", "this is FLEET's own session"}
