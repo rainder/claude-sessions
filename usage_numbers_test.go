@@ -71,7 +71,7 @@ func liveReading(email string, info *UsageInfo) func() (*AccountUsage, error) {
 
 func sampleUsageInfo(five float64) *UsageInfo {
 	return &UsageInfo{
-		FiveHour: usageBucket{Pct: five, ResetsAt: time.Now().Add(time.Hour).UTC()},
+		FiveHour: &usageBucket{Pct: five, ResetsAt: time.Now().Add(time.Hour).UTC()},
 		SevenDay: usageBucket{Pct: 40, ResetsAt: time.Now().Add(72 * time.Hour).UTC()},
 	}
 }
@@ -79,7 +79,7 @@ func sampleUsageInfo(five float64) *UsageInfo {
 func TestUsageNumbersWireMapping(t *testing.T) {
 	reset := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 	info := &UsageInfo{
-		FiveHour:          usageBucket{Pct: 12, ResetsAt: reset},
+		FiveHour:          &usageBucket{Pct: 12, ResetsAt: reset},
 		SevenDay:          usageBucket{Pct: 34},
 		WeeklyScoped:      usageBucket{Pct: 56, ResetsAt: reset},
 		WeeklyScopedLabel: "Fable",
@@ -705,7 +705,7 @@ func TestClaudeInfoFromNumbersRoundTrip(t *testing.T) {
 	reset := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 	at := reset.Add(-time.Hour)
 	orig := &UsageInfo{
-		FiveHour:          usageBucket{Pct: 12, ResetsAt: reset},
+		FiveHour:          &usageBucket{Pct: 12, ResetsAt: reset},
 		SevenDay:          usageBucket{Pct: 34},
 		WeeklyScoped:      usageBucket{Pct: 56, ResetsAt: reset},
 		WeeklyScopedLabel: "Fable",
@@ -727,7 +727,7 @@ func TestClaudeInfoFromNumbersRoundTrip(t *testing.T) {
 	if !ok || !gotAt.Equal(at) {
 		t.Fatalf("ok = %v at = %v, want a usable reading at %v", ok, gotAt, at)
 	}
-	if got.FiveHour != orig.FiveHour || got.SevenDay != orig.SevenDay || got.WeeklyScoped != orig.WeeklyScoped || got.WeeklyScopedLabel != "Fable" {
+	if got.FiveHour == nil || *got.FiveHour != *orig.FiveHour || got.SevenDay != orig.SevenDay || got.WeeklyScoped != orig.WeeklyScoped || got.WeeklyScopedLabel != "Fable" {
 		t.Errorf("windows = %+v, want %+v", got, orig)
 	}
 	c := got.Credits
@@ -736,6 +736,22 @@ func TestClaudeInfoFromNumbersRoundTrip(t *testing.T) {
 	}
 	if a, b := claudeSegs(orig), claudeSegs(got); fmt.Sprint(a) != fmt.Sprint(b) {
 		t.Errorf("segments differ:\n orig %+v\n got  %+v", a, b)
+	}
+
+	// No 5-hour window (Anthropic dropped it): still usable, and it stays
+	// absent rather than turning into a 0% bar.
+	noFive := wire
+	noFive.FiveHour = nil
+	if got, _, ok := claudeInfoFromNumbers(noFive); !ok || got.FiveHour != nil || got.SevenDay != orig.SevenDay {
+		t.Errorf("no 5h: ok = %v info = %+v, want a usable reading with nil FiveHour", ok, got)
+	}
+	var back claudeUsageNumbers
+	fillClaudeInfo(&back, &UsageInfo{SevenDay: usageBucket{Pct: 34}})
+	if back.FiveHour != nil {
+		t.Errorf("fillClaudeInfo with nil FiveHour = %+v, want nil", back.FiveHour)
+	}
+	if raw, _ := json.Marshal(back); strings.Contains(string(raw), "fiveHour") {
+		t.Errorf("wire = %s, want fiveHour omitted", raw)
 	}
 
 	// Unusable entries: no fetchedAt, no windows.

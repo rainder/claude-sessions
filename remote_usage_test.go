@@ -79,10 +79,10 @@ func writeServersConfig(t *testing.T, home string, cfgs ...ServerConfig) {
 
 func sampleUsageResponse() usageResponse {
 	return usageResponse{
-		Usage: &AccountUsage{Account: "bot@ci.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 42}}},
+		Usage: &AccountUsage{Account: "bot@ci.com", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 42}}},
 		KnownAccounts: []KnownAccountUsage{
 			{Name: "trecs", Account: "andy@trecs.aero", Expired: true},
-			{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+			{Name: "avisoma", Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
 			// An account the caller asked to skip: present, unfetched.
 			{Name: "side", Account: "andy@side.dev"},
 		},
@@ -405,13 +405,13 @@ func cachedNumbersResponse(at time.Time) usageNumbersResponse {
 	good.Account = "Andy@Trecs.Aero"
 	good.Name = "\x1b[31mevil"
 	good.Reason = "\x1b]0;pwn\x07"
-	fillClaudeInfo(&good, &UsageInfo{FiveHour: usageBucket{Pct: 12}, SevenDay: usageBucket{Pct: 34}})
+	fillClaudeInfo(&good, &UsageInfo{FiveHour: &usageBucket{Pct: 12}, SevenDay: usageBucket{Pct: 34}})
 	good.FetchedAt = &at
 	var undated claudeUsageNumbers
 	undated.Account = "andy@avisoma.com"
-	fillClaudeInfo(&undated, &UsageInfo{FiveHour: usageBucket{Pct: 1}})
+	fillClaudeInfo(&undated, &UsageInfo{FiveHour: &usageBucket{Pct: 1}})
 	var anon claudeUsageNumbers
-	fillClaudeInfo(&anon, &UsageInfo{FiveHour: usageBucket{Pct: 2}})
+	fillClaudeInfo(&anon, &UsageInfo{FiveHour: &usageBucket{Pct: 2}})
 	anon.FetchedAt = &at
 	return usageNumbersResponse{Claude: []claudeUsageNumbers{good, undated, anon}}
 }
@@ -498,7 +498,7 @@ func TestRemoteClaudeReadingsClampsAFutureFetchedAt(t *testing.T) {
 	mk := func(email string, at time.Time) claudeUsageNumbers {
 		var e claudeUsageNumbers
 		e.Account = email
-		fillClaudeInfo(&e, &UsageInfo{FiveHour: usageBucket{Pct: 1}})
+		fillClaudeInfo(&e, &UsageInfo{FiveHour: &usageBucket{Pct: 1}})
 		e.FetchedAt = &at
 		return e
 	}

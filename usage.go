@@ -46,7 +46,11 @@ func (c creditsInfo) Pct() float64 {
 
 // UsageInfo is the parsed account rate-limit snapshot shown in the header.
 type UsageInfo struct {
-	FiveHour usageBucket
+	// FiveHour is nil when the endpoint reports no 5-hour window (Anthropic
+	// dropped it for subscriptions: "five_hour": null). Absent is not 0%: every
+	// consumer skips the bar or check. Older servers and cache files that
+	// still send a FiveHour object decode into it unchanged.
+	FiveHour *usageBucket
 	SevenDay usageBucket
 	// WeeklyScoped is the model-scoped weekly limit (the "limits" array's
 	// weekly_scoped entry). Zero value with an empty WeeklyScopedLabel means
@@ -106,7 +110,9 @@ type AccountUsage struct {
 
 // parseUsage decodes the /api/oauth/usage response body. The overall
 // five_hour and seven_day buckets are kept; per-model buckets are ignored by
-// design. The model-scoped weekly limit is pulled from the "limits" array's
+// design. five_hour is optional (null now that the 5-hour window is gone) and
+// stays nil when absent. seven_day is required, with the "limits" array's
+// weekly_all entry as the fallback when it is null. The model-scoped weekly limit is pulled from the "limits" array's
 // weekly_scoped entry (label carried from its scope.model.display_name); its
 // absence is not an error — the header just hides that bar.
 func parseUsage(body []byte) (*UsageInfo, error) {
@@ -139,12 +145,24 @@ func parseUsage(body []byte) (*UsageInfo, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
-	if raw.FiveHour == nil || raw.SevenDay == nil {
-		return nil, fmt.Errorf("usage response missing five_hour/seven_day")
+	u := &UsageInfo{}
+	if raw.FiveHour != nil {
+		u.FiveHour = &usageBucket{Pct: raw.FiveHour.Utilization, ResetsAt: raw.FiveHour.ResetsAt}
 	}
-	u := &UsageInfo{
-		FiveHour: usageBucket{Pct: raw.FiveHour.Utilization, ResetsAt: raw.FiveHour.ResetsAt},
-		SevenDay: usageBucket{Pct: raw.SevenDay.Utilization, ResetsAt: raw.SevenDay.ResetsAt},
+	if raw.SevenDay != nil {
+		u.SevenDay = usageBucket{Pct: raw.SevenDay.Utilization, ResetsAt: raw.SevenDay.ResetsAt}
+	} else {
+		found := false
+		for _, l := range raw.Limits {
+			if l.Kind == "weekly_all" {
+				u.SevenDay = usageBucket{Pct: l.Percent, ResetsAt: l.ResetsAt}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("usage response missing seven_day")
+		}
 	}
 	// First weekly_scoped entry wins (fallback: any weekly limit with a named
 	// model scope). is_active is intentionally ignored — the live response's

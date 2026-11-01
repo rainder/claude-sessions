@@ -141,7 +141,9 @@ func fillClaudeInfo(e *claudeUsageNumbers, info *UsageInfo) {
 	if info == nil {
 		return
 	}
-	e.FiveHour = usageWindowFrom("", info.FiveHour)
+	if info.FiveHour != nil {
+		e.FiveHour = usageWindowFrom("", *info.FiveHour)
+	}
 	e.SevenDay = usageWindowFrom("", info.SevenDay)
 	if info.WeeklyScopedLabel != "" || info.WeeklyScoped != (usageBucket{}) {
 		e.WeeklyScoped = usageWindowFrom(info.WeeklyScopedLabel, info.WeeklyScoped)
@@ -150,15 +152,15 @@ func fillClaudeInfo(e *claudeUsageNumbers, info *UsageInfo) {
 }
 
 // claudeInfoFromNumbers is fillClaudeInfo's inverse, for a remote host's
-// cached reading (RemoteUsageHub). ok is false unless the entry has both
-// windows and a fetchedAt. Credits come back in major units with
+// cached reading (RemoteUsageHub). ok is false unless the entry has a 7-day
+// window and a fetchedAt; the 5-hour window is optional (nil stays nil). Credits come back in major units with
 // DecimalPlaces 0, which renders and scales exactly as the minor-unit original
 // did (moneyGrouped rounds to whole major units either way). The two strings
 // that reach the terminal are the remote's, so each must pass a narrow
 // pattern or is dropped: a scoped label that fails drops the scoped bar, a
 // currency that fails falls back to "$".
 func claudeInfoFromNumbers(e claudeUsageNumbers) (info *UsageInfo, fetchedAt time.Time, ok bool) {
-	if e.FiveHour == nil || e.SevenDay == nil || e.FetchedAt == nil || e.FetchedAt.IsZero() {
+	if e.SevenDay == nil || e.FetchedAt == nil || e.FetchedAt.IsZero() {
 		return nil, time.Time{}, false
 	}
 	bucket := func(w *usageWindowNumbers) usageBucket {
@@ -168,7 +170,11 @@ func claudeInfoFromNumbers(e claudeUsageNumbers) (info *UsageInfo, fetchedAt tim
 		}
 		return b
 	}
-	info = &UsageInfo{FiveHour: bucket(e.FiveHour), SevenDay: bucket(e.SevenDay)}
+	info = &UsageInfo{SevenDay: bucket(e.SevenDay)}
+	if e.FiveHour != nil {
+		b := bucket(e.FiveHour)
+		info.FiveHour = &b
+	}
 	if w := e.WeeklyScoped; w != nil && remoteScopedLabelRe.MatchString(w.Label) {
 		info.WeeklyScoped, info.WeeklyScopedLabel = bucket(w), w.Label
 	}

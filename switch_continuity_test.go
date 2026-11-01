@@ -36,7 +36,7 @@ func TestAccountSwitchPreservesContinuityBothDirections(t *testing.T) {
 	trecsFetchedAt := time.Now().Add(-10 * time.Minute)
 	saveAccountCache("trecs", accountCacheEntry{
 		Account:            "andy@trecs.aero",
-		Info:               &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+		Info:               &UsageInfo{FiveHour: &usageBucket{Pct: 63}},
 		FetchedAt:          trecsFetchedAt,
 		BackoffStreak:      1,
 		BackoffNextAttempt: time.Now().Add(5 * time.Minute),
@@ -46,7 +46,7 @@ func TestAccountSwitchPreservesContinuityBothDirections(t *testing.T) {
 	avisomaFetchedAt := time.Now().Add(-20 * time.Minute)
 	saveAccountCache("avisoma", accountCacheEntry{
 		Account:            "andy@avisoma.com",
-		Info:               &UsageInfo{FiveHour: usageBucket{Pct: 88}},
+		Info:               &UsageInfo{FiveHour: &usageBucket{Pct: 88}},
 		FetchedAt:          avisomaFetchedAt,
 		BackoffStreak:      2,
 		BackoffNextAttempt: time.Now().Add(3 * time.Minute),
@@ -140,7 +140,7 @@ func TestAccountSwitchRoundTripsThroughRealDisk(t *testing.T) {
 	usageFetcher := newUsageFetcher(func() (*AccountUsage, error) {
 		return &AccountUsage{
 			Account:   "andy@trecs.aero",
-			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 77}, VerifiedAccount: "andy@trecs.aero"},
+			Info:      &UsageInfo{FiveHour: &usageBucket{Pct: 77}, VerifiedAccount: "andy@trecs.aero"},
 			FetchedAt: time.Now(),
 		}, nil
 	}, saveAccountCache)
