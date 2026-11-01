@@ -230,8 +230,8 @@ func TestKnownAccountUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	fetch := stubUsageFetch(map[string]*UsageInfo{
-		"tok-a": {FiveHour: usageBucket{Pct: 41}},
-		"tok-n": {FiveHour: usageBucket{Pct: 7}},
+		"tok-a": {FiveHour: &usageBucket{Pct: 41}},
+		"tok-n": {FiveHour: &usageBucket{Pct: 7}},
 	})
 
 	t.Run("skips the snapshot standing for the live account", func(t *testing.T) {
@@ -297,7 +297,7 @@ func TestKnownAccountUsage(t *testing.T) {
 		prev := &KnownAccountUsage{
 			Name:      "trecs",
 			Account:   "andy@trecs.aero",
-			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+			Info:      &UsageInfo{FiveHour: &usageBucket{Pct: 63}},
 			FetchedAt: fetched,
 		}
 		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 429})
@@ -327,7 +327,7 @@ func TestKnownAccountUsage(t *testing.T) {
 		prev := &KnownAccountUsage{
 			Name:      "trecs",
 			Account:   "someone-else@old-owner.example",
-			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+			Info:      &UsageInfo{FiveHour: &usageBucket{Pct: 63}},
 			FetchedAt: time.Now().Add(-3 * time.Minute),
 		}
 		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 429})
@@ -347,7 +347,7 @@ func TestKnownAccountUsage(t *testing.T) {
 		prev := &KnownAccountUsage{
 			Name:      "trecs",
 			Account:   "andy@trecs.aero",
-			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+			Info:      &UsageInfo{FiveHour: &usageBucket{Pct: 63}},
 			FetchedAt: time.Now().Add(-6 * time.Hour),
 		}
 		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 429})
@@ -366,7 +366,7 @@ func TestKnownAccountUsage(t *testing.T) {
 	t.Run("an untimestamped previous result is never carried forward", func(t *testing.T) {
 		// Numbers of unknown vintage: with no FetchedAt there is nothing to
 		// judge staleness against, so they are treated as having none.
-		prev := &KnownAccountUsage{Name: "trecs", Info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}}
+		prev := &KnownAccountUsage{Name: "trecs", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}}
 		throttled := stubUsageFetchErr(nil, &usageHTTPError{Status: 503})
 		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, throttled)
 		if got.Info != nil || got.Stale {
@@ -382,7 +382,7 @@ func TestKnownAccountUsage(t *testing.T) {
 		// expired" would imply the credential still works.
 		prev := &KnownAccountUsage{
 			Name:      "trecs",
-			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+			Info:      &UsageInfo{FiveHour: &usageBucket{Pct: 63}},
 			FetchedAt: time.Now(),
 		}
 		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, fetch)
@@ -449,7 +449,7 @@ func TestKnownAccountUsageExpiredAccessToken(t *testing.T) {
 	spy := func(tok string) (*UsageInfo, error) {
 		calls++
 		seen = tok
-		return &UsageInfo{FiveHour: usageBucket{Pct: 41}}, nil
+		return &UsageInfo{FiveHour: &usageBucket{Pct: 41}}, nil
 	}
 
 	t.Run("expired + refresh success fetches with the new token", func(t *testing.T) {
@@ -508,7 +508,7 @@ func TestKnownAccountUsageExpiredAccessToken(t *testing.T) {
 		})
 		prev := &KnownAccountUsage{
 			Name: "trecs", Account: "andy@trecs.aero",
-			Info: &UsageInfo{FiveHour: usageBucket{Pct: 7}}, FetchedAt: now.Add(-10 * time.Minute),
+			Info: &UsageInfo{FiveHour: &usageBucket{Pct: 7}}, FetchedAt: now.Add(-10 * time.Minute),
 		}
 		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", prev, spy)
 		if calls != 0 {
@@ -699,8 +699,8 @@ func TestKnownAccountsFetcherNeverFailsOnOneBadAccount(t *testing.T) {
 	writeSnapshotFixture(t, home, "dead", "tok-dead", "andy@dead.dev")
 	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
 	swapFetch(t, stubUsageFetch(map[string]*UsageInfo{
-		"tok-a": {FiveHour: usageBucket{Pct: 41}},
-		"tok-t": {FiveHour: usageBucket{Pct: 22}},
+		"tok-a": {FiveHour: &usageBucket{Pct: 41}},
+		"tok-t": {FiveHour: &usageBucket{Pct: 22}},
 	}))
 
 	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
@@ -740,7 +740,7 @@ func TestKnownAccountsFetcherSkipsLiveAccountAndReportsItActive(t *testing.T) {
 	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
 	writeLiveAccount(t, home, "Andy@Avisoma.com")
 	swapFetch(t, stubUsageFetch(map[string]*UsageInfo{
-		"tok-t": {FiveHour: usageBucket{Pct: 22}},
+		"tok-t": {FiveHour: &usageBucket{Pct: 22}},
 	}))
 
 	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
@@ -764,7 +764,7 @@ func TestKnownAccountsFetcherThreadsEachAccountsOwnEntry(t *testing.T) {
 	writeSnapshotFixture(t, home, "avisoma", "tok-a", "andy@avisoma.com")
 	writeSnapshotFixture(t, home, "trecs", "tok-t", "andy@trecs.aero")
 	saveAccountCache("trecs", accountCacheEntry{
-		Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, FetchedAt: time.Now(),
+		Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, FetchedAt: time.Now(),
 	})
 	swapFetch(t, func(string) (*UsageInfo, error) { return nil, &usageHTTPError{Status: 429} })
 
@@ -803,7 +803,7 @@ func TestKnownAccountsFetcherDropsBackoffWhenCachedAccountDoesNotMatchSnapshot(t
 	writeSnapshotFixture(t, home, "avisoma", "tok-a", "andy@avisoma.com")
 	saveAccountCache("avisoma", accountCacheEntry{
 		Account:            "someone@else.example",
-		Info:               &UsageInfo{FiveHour: usageBucket{Pct: 99}},
+		Info:               &UsageInfo{FiveHour: &usageBucket{Pct: 99}},
 		FetchedAt:          time.Now(),
 		BackoffStreak:      3,
 		BackoffNextAttempt: time.Now().Add(10 * time.Minute),
@@ -811,7 +811,7 @@ func TestKnownAccountsFetcherDropsBackoffWhenCachedAccountDoesNotMatchSnapshot(t
 	calls := 0
 	swapFetch(t, func(string) (*UsageInfo, error) {
 		calls++
-		return &UsageInfo{FiveHour: usageBucket{Pct: 5}}, nil
+		return &UsageInfo{FiveHour: &usageBucket{Pct: 5}}, nil
 	})
 
 	res, err := newKnownAccountsFetcher(noSaveAccountCache)()
@@ -882,7 +882,7 @@ func TestKnownAccountsFetcherRetriesAFailedAccountFirst(t *testing.T) {
 		if token == "tok-bravo" && failBravo {
 			return nil, &usageHTTPError{Status: 429}
 		}
-		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+		return &UsageInfo{FiveHour: &usageBucket{Pct: 1}}, nil
 	})
 
 	fetcher := newKnownAccountsFetcher(noSaveAccountCache)
@@ -917,7 +917,7 @@ func TestKnownAccountsFetcherHonorsSeededBackoffAcrossRestart(t *testing.T) {
 	calls := 0
 	swapFetch(t, func(string) (*UsageInfo, error) {
 		calls++
-		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+		return &UsageInfo{FiveHour: &usageBucket{Pct: 1}}, nil
 	})
 
 	saveAccountCache("avisoma", accountCacheEntry{
@@ -947,7 +947,7 @@ func TestKnownAccountsFetcherFetchesWhenSeededBackoffHasElapsed(t *testing.T) {
 	calls := 0
 	swapFetch(t, func(string) (*UsageInfo, error) {
 		calls++
-		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+		return &UsageInfo{FiveHour: &usageBucket{Pct: 1}}, nil
 	})
 
 	saveAccountCache("avisoma", accountCacheEntry{
@@ -982,7 +982,7 @@ func TestKnownAccountsFetcherPersistsBackoffAfterEachPass(t *testing.T) {
 		if throttled {
 			return nil, &usageHTTPError{Status: 429}
 		}
-		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+		return &UsageInfo{FiveHour: &usageBucket{Pct: 1}}, nil
 	})
 
 	type saveCall struct {
@@ -1033,7 +1033,7 @@ func TestKnownAccountsFetcherPersistsIdentityOnAFailedPass(t *testing.T) {
 	calls := 0
 	swapFetch(t, func(string) (*UsageInfo, error) {
 		calls++
-		return &UsageInfo{FiveHour: usageBucket{Pct: 1}}, nil
+		return &UsageInfo{FiveHour: &usageBucket{Pct: 1}}, nil
 	})
 	var saved []accountCacheEntry
 	save := func(_ string, e accountCacheEntry) { saved = append(saved, e) }
@@ -1112,8 +1112,8 @@ func TestKnownAccountsFetcherCarriesNumbersAcrossPolls(t *testing.T) {
 	writeSnapshotFixture(t, home, "spare", "tok-s", "andy@spare.dev")
 
 	healthy := map[string]*UsageInfo{
-		"tok-t": {FiveHour: usageBucket{Pct: 63}},
-		"tok-s": {FiveHour: usageBucket{Pct: 12}},
+		"tok-t": {FiveHour: &usageBucket{Pct: 63}},
+		"tok-s": {FiveHour: &usageBucket{Pct: 12}},
 	}
 	var mu sync.Mutex
 	throttled := false
@@ -1188,7 +1188,7 @@ func TestKnownAccountsFetcherCoalescesARecentReading(t *testing.T) {
 
 	saveAccountCache("trecs", accountCacheEntry{
 		Account: "andy@trecs.aero",
-		Info:    &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+		Info:    &UsageInfo{FiveHour: &usageBucket{Pct: 63}},
 		// Pinned to the frozen clock, not a fresh time.Now(): the latter runs
 		// microseconds AFTER fakeClock froze now, which the guard's own
 		// !FetchedAt.After(now) check would (correctly) reject as future-dated.
@@ -1242,7 +1242,7 @@ func TestKnownAccountsFetcherSeedsFromCache(t *testing.T) {
 
 	saveAccountCache("trecs", accountCacheEntry{
 		Account: "andy@trecs.aero",
-		Info:    &UsageInfo{FiveHour: usageBucket{Pct: 63}},
+		Info:    &UsageInfo{FiveHour: &usageBucket{Pct: 63}},
 		// Comfortably past usageCoalesceWindow (60s), not right on its
 		// boundary: a seed the fetcher would coalesce is re-served fresh,
 		// which is the opposite of the stale carry this test asserts.
@@ -1302,7 +1302,7 @@ func TestKnownAccountsFetcherBacksOffRepeatedThrottles(t *testing.T) {
 		if throttled {
 			return nil, &usageHTTPError{Status: 429}
 		}
-		return &UsageInfo{FiveHour: usageBucket{Pct: 21}}, nil
+		return &UsageInfo{FiveHour: &usageBucket{Pct: 21}}, nil
 	})
 	count := func() int {
 		mu.Lock()
@@ -1445,7 +1445,7 @@ func TestKnownAccountUsageWrongIdentity(t *testing.T) {
 	writeSnapshotFixture(t, home, "trecs", "tok-trecs", "andy@trecs.aero")
 
 	stranger := &UsageInfo{
-		FiveHour:        usageBucket{Pct: 91},
+		FiveHour:        &usageBucket{Pct: 91},
 		VerifiedAccount: "someone@elsewhere.example",
 	}
 	fetch := func(string) (*UsageInfo, error) { return stranger, nil }
@@ -1473,7 +1473,7 @@ func TestKnownAccountUsageWrongIdentity(t *testing.T) {
 		prev := &KnownAccountUsage{
 			Name:      "trecs",
 			Account:   "andy@trecs.aero",
-			Info:      &UsageInfo{FiveHour: usageBucket{Pct: 40}},
+			Info:      &UsageInfo{FiveHour: &usageBucket{Pct: 40}},
 			Verified:  true,
 			FetchedAt: time.Now().Add(-time.Minute),
 		}
@@ -1502,7 +1502,7 @@ func TestKnownAccountUsageWrongIdentity(t *testing.T) {
 	// dropping the fresh reading exists to prevent.
 	t.Run("an unverified earlier pass never carries a stranger's numbers", func(t *testing.T) {
 		unreachableProbe := func(string) (*UsageInfo, error) {
-			return &UsageInfo{FiveHour: usageBucket{Pct: 91}}, nil
+			return &UsageInfo{FiveHour: &usageBucket{Pct: 91}}, nil
 		}
 		pass1, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, unreachableProbe)
 		if pass1.Info == nil || pass1.Verified {
@@ -1525,7 +1525,7 @@ func TestKnownAccountUsageWrongIdentity(t *testing.T) {
 
 	t.Run("agreement is an ordinary success", func(t *testing.T) {
 		agreeing := func(string) (*UsageInfo, error) {
-			return &UsageInfo{FiveHour: usageBucket{Pct: 40}, VerifiedAccount: "ANDY@trecs.aero"}, nil
+			return &UsageInfo{FiveHour: &usageBucket{Pct: 40}, VerifiedAccount: "ANDY@trecs.aero"}, nil
 		}
 		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, agreeing)
 		if got.Info == nil || got.Reason != "" {
@@ -1535,7 +1535,7 @@ func TestKnownAccountUsageWrongIdentity(t *testing.T) {
 
 	t.Run("an unverified reading changes nothing", func(t *testing.T) {
 		unverified := func(string) (*UsageInfo, error) {
-			return &UsageInfo{FiveHour: usageBucket{Pct: 40}}, nil
+			return &UsageInfo{FiveHour: &usageBucket{Pct: 40}}, nil
 		}
 		got, _ := knownAccountUsage("trecs", "andy@avisoma.com", nil, unverified)
 		if got.Info == nil || got.Reason != "" {
