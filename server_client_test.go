@@ -236,16 +236,15 @@ func TestLocalServerRequestDoesNotRetryAfterResponse(t *testing.T) {
 }
 
 func TestFetchLocalServerSessionsFallsBackToDirectCollectionAfterBothEndpointsFail(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	withListSessionsSeams(t)
+	stubListSessionsLoopback(t)
+	resetLocalSessionsHost(t)
+	listSessionsTailscaleIPv4 = func(context.Context) string { return "100.64.0.5" }
 	attempts := 0
-	stubLocalServerFallback(t,
-		func(context.Context, ServerConfig, string, string, []byte) ([]byte, bool, error) {
-			attempts++
-			return nil, false, errors.New("unreachable")
-		},
-		func(context.Context) string { return "100.64.0.5" },
-	)
+	listSessionsAttempt = func(context.Context, ServerConfig) ([]byte, int, error) {
+		attempts++
+		return nil, 0, errors.New("unreachable")
+	}
 
 	directRows := []Session{{PID: 1, SessionID: "direct"}}
 	got, err := collectClientLocalWith(fetchLocalServerSessions, func() ([]Session, error) {
@@ -256,6 +255,72 @@ func TestFetchLocalServerSessionsFallsBackToDirectCollectionAfterBothEndpointsFa
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want loopback and Tailscale", attempts)
+	}
+}
+
+func resetLocalSessionsHost(t *testing.T) {
+	t.Helper()
+	localSessionsHost.Lock()
+	localSessionsHost.host = ""
+	localSessionsHost.Unlock()
+	t.Cleanup(func() {
+		localSessionsHost.Lock()
+		localSessionsHost.host = ""
+		localSessionsHost.Unlock()
+	})
+}
+
+// A --bind tailscale service answers loopback 404 for /sessions. The TUI must
+// retry on the Tailscale address (not fall back to a cold in-process collect),
+// then remember that address so later refreshes skip the loopback miss and the
+// tailscale exec. A failure forgets it and the next refresh starts at loopback.
+func TestFetchLocalServerSessionsRetriesTailscaleAndRemembersHost(t *testing.T) {
+	withListSessionsSeams(t)
+	stubListSessionsLoopback(t)
+	resetLocalSessionsHost(t)
+	lookups := 0
+	listSessionsTailscaleIPv4 = func(context.Context) string { lookups++; return "100.80.11.125" }
+	var hosts []string
+	down := false
+	listSessionsAttempt = func(_ context.Context, srv ServerConfig) ([]byte, int, error) {
+		hosts = append(hosts, srv.Host)
+		if srv.Host == "127.0.0.1" {
+			return []byte("missing"), http.StatusNotFound, fmt.Errorf("HTTP %d", http.StatusNotFound)
+		}
+		if down {
+			return nil, 0, errors.New("connection refused")
+		}
+		return []byte(`{"sessions":[{"pid":7,"sessionId":"svc"}]}`), http.StatusOK, nil
+	}
+
+	for i := 0; i < 2; i++ {
+		got, err := collectClientLocalWith(fetchLocalServerSessions, func() ([]Session, error) {
+			t.Fatal("direct collect ran although the service answered on Tailscale")
+			return nil, nil
+		})
+		if err != nil || len(got) != 1 || got[0].SessionID != "svc" {
+			t.Fatalf("call %d result = (%#v, %v)", i, got, err)
+		}
+	}
+	if want := []string{"127.0.0.1", "100.80.11.125", "100.80.11.125"}; fmt.Sprint(hosts) != fmt.Sprint(want) {
+		t.Fatalf("hosts = %v, want %v", hosts, want)
+	}
+	if lookups != 1 {
+		t.Fatalf("tailscale lookups = %d, want 1 (second refresh reuses the host)", lookups)
+	}
+
+	down = true
+	hosts = nil
+	if _, err := fetchLocalServerSessions(); err == nil {
+		t.Fatal("fetch succeeded with the service down")
+	}
+	down = false
+	hosts = nil
+	if _, err := fetchLocalServerSessions(); err != nil {
+		t.Fatalf("fetch after recovery: %v", err)
+	}
+	if len(hosts) == 0 || hosts[0] != "127.0.0.1" {
+		t.Fatalf("hosts after a failure = %v, want a fresh start at loopback", hosts)
 	}
 }
 

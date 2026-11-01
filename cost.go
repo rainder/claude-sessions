@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -95,6 +96,15 @@ func usageTokens(u costUsage) int {
 // re-emissions by message.id+requestId. User lines whose content is a plain
 // string fail the unmarshal and are skipped, same as before.
 func lineCost(line []byte, e *costCacheEntry) (cost float64, tokens int, ok bool) {
+	// Cheap pre-filter: a line that counts must hold both "assistant" (its
+	// type) and "usage" (its message.usage key). Most transcript bytes are
+	// tool results and user turns; full-unmarshalling them made a cold start
+	// parse every byte of every live transcript (a 1 GB one took ~18s).
+	// Contains is whitespace-agnostic, so it only skips lines the unmarshal
+	// below would reject anyway.
+	if !bytes.Contains(line, costKeyUsage) || !bytes.Contains(line, costKeyAssistant) {
+		return 0, 0, false
+	}
 	var ev struct {
 		Type      string `json:"type"`
 		RequestID string `json:"requestId"`
@@ -122,6 +132,11 @@ func lineCost(line []byte, e *costCacheEntry) (cost float64, tokens int, ok bool
 	}
 	return usageCost(price, *ev.Message.Usage), tokens, true
 }
+
+var (
+	costKeyUsage     = []byte(`"usage"`)
+	costKeyAssistant = []byte(`"assistant"`)
+)
 
 // costCacheEntry holds the incremental scan state for one transcript file: the
 // byte offset consumed so far, the running dollar cost and token count, and
