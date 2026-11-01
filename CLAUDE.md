@@ -230,6 +230,14 @@ types into panes. Spec and plan: `docs/superpowers/`.
   `claude-sessions auto-switch off`, which also pins the live account.
 - **Session view:** `fleetResolveSession` is the allowlist; the pane address
   always comes from the resolved row, never the request.
+- **Desk (CHAT):** the chat panel's second target is the one session named
+  `CHAT` (`fleetDeskRow`, findFleet's rules). `/fleet/state` serves it as
+  `desk`; the page reads and sends through `/fleet/session*`, whose
+  allowlist also takes CHAT's tmux session (even disabled), never FLEET's.
+  The CHAT view pins every request (`desk=1`, `"desk": true`):
+  `fleetDeskPin` refuses with 409 `not_desk` unless that tmux session still
+  holds CHAT on the list the handler resolved from.
+  Each target keeps its own DOM log and composer: a draft never crosses.
 - **Clarify:** claude FLEET only. The fork is exec'd (no shell) with
   `--setting-sources ""`, a fixed tool list and a deny list, and never
   resumes FLEET's own session id.

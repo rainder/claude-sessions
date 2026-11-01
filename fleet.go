@@ -24,6 +24,9 @@ const (
 	fleetCookieName   = "cs_fleet"
 	fleetCookieMaxAge = 30 * 24 * 60 * 60
 	fleetSessionName  = "FLEET"
+	// fleetDeskSessionName is Andy's desk session, which the page's chat
+	// panel can show in FLEET's place (fleet_desk.go).
+	fleetDeskSessionName = "CHAT"
 	// fleetStaleAfter: FLEET's idle monitor re-arms every 30 minutes, so a
 	// healthy FLEET writes state.json at least that often.
 	fleetStaleAfter = 40 * time.Minute
@@ -228,13 +231,20 @@ var fleetReasonCodes = map[string]string{
 // be a claude or a grok session. One of each is "ambiguous", like two of one:
 // nothing says which the user meant, so both refuse rather than guess.
 func findFleet(sessions []Session) (Session, string) {
+	return findNamedSession(sessions, fleetSessionName)
+}
+
+// findNamedSession picks the one session the user named exactly name, by
+// findFleet's rules: claude or grok, a user-set name only, 0 = "not
+// running", 2+ = "ambiguous".
+func findNamedSession(sessions []Session, name string) (Session, string) {
 	var hit Session
 	n := 0
 	for _, sess := range sessions {
 		// Only a user-set name counts: a title claude or grok derived that
-		// happens to read "FLEET" is not the user's FLEET. A grok name is
+		// happens to read the name is not the user's session. A grok name is
 		// user-set only after /rename (title_is_manual, grokSessionFrom).
-		if sess.Name == fleetSessionName && (sess.Tool == "" || sess.Tool == toolGrok) && sess.NameSource != "derived" {
+		if sess.Name == name && (sess.Tool == "" || sess.Tool == toolGrok) && sess.NameSource != "derived" {
 			hit = sess
 			n++
 		}
@@ -453,6 +463,9 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	fleetApplyNotes(rows, fleetNotes(state))
 	out["sessions"] = rows
 	out["ended"] = s.fleetEndedRows(now)
+	// Andy's desk session (named CHAT), which the chat panel can show
+	// instead of FLEET, from the same session list.
+	out["desk"] = fleetDesk(sessions)
 	// FLEET's waits-for graph, cleaned, with edges to ended sessions dropped.
 	out["deps"] = fleetDependencies(state, rows)
 	// FLEET's busy-session caps per model family, valid entries only.

@@ -535,7 +535,21 @@ body.sv-open { overflow: hidden; }
 .chat-log.ro { background: color-mix(in srgb, var(--line) 30%, transparent); }
 .newmsg { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 2; min-height: 36px; padding: 0 14px; border: 0; border-radius: 99px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 650; box-shadow: var(--shadow); cursor: pointer; white-space: nowrap; }
 .newmsg::before { content: ""; position: absolute; inset: -4px; }
-.chat .sec-h { margin: 0; padding: 10px 12px 0; }
+.chat-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px 0; }
+.chat-head .sec-h { margin: 0; }
+/* FLEET | CHAT: which session the chat panel shows (FLEET, or Andy's desk
+   session named CHAT). Each keeps its own log and composer. */
+.ctgt { display: inline-flex; flex: none; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface2); }
+.ctgt-b { position: relative; min-height: 30px; padding: 0 13px; border: 0; border-radius: 99px; background: none; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .06em; cursor: pointer; }
+.ctgt-b::before { content: ""; position: absolute; inset: -7px 0; }
+.ctgt-b[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+.ctgt-b:disabled { opacity: .45; cursor: not-allowed; }
+.ctgt-dot { position: absolute; top: 3px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.ctgt-why { flex: 1 1 0; min-width: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Why CHAT cannot take a message now; the draft stays in the box. */
+.desk-note { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 13.5px; font-weight: 600; color: var(--red); }
+.desk-note .dot { background: var(--red); }
+.desk-pane-note { margin: 8px 2px 0; font-size: 12.5px; color: var(--muted); }
 .chat-log { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 12px 8px; overscroll-behavior: contain; }
 .turn { margin: 10px 0; max-width: 94%; }
 .turn.user { margin-left: auto; }
@@ -738,7 +752,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   body.v-chat .banners { margin: 0 max(env(safe-area-inset-right), 16px) 10px max(env(safe-area-inset-left), 16px); }
   body.v-chat .layout { flex: 1; min-height: 0; display: flex; }
   body.v-chat .chat { flex: 1; min-height: 0; border: 0; border-radius: 0; background: transparent; }
-  body.v-chat .chat > .sec-h { display: none; }
+  body.v-chat .chat-head { padding: 0 max(env(safe-area-inset-right), 16px) 8px max(env(safe-area-inset-left), 16px); }
+  body.v-chat .chat-head .sec-h { display: none; }
   body.v-chat .chat-log { max-height: none; min-height: 0; padding: 0 max(env(safe-area-inset-right), 16px) 8px max(env(safe-area-inset-left), 16px); }
   body.v-chat .composer { padding: 8px max(env(safe-area-inset-right), 12px) 8px max(env(safe-area-inset-left), 12px); background: var(--surface); }
   body.v-chat .hint { display: none; }
@@ -915,12 +930,19 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     </div>
 
     <section class="chat" id="chat" aria-labelledby="h-chat">
-      <h2 class="sec-h" id="h-chat">Chat</h2>
-      <div class="log-wrap">
+      <div class="chat-head">
+        <h2 class="sec-h" id="h-chat">Chat</h2>
+        <div class="ctgt" role="group" aria-label="Chat with">
+          <button class="ctgt-b" id="ctgt-fleet" type="button" aria-pressed="true">FLEET<span class="ctgt-dot" id="ctgt-unread" hidden></span></button>
+          <button class="ctgt-b" id="ctgt-desk" type="button" aria-pressed="false" disabled>CHAT</button>
+        </div>
+        <span class="ctgt-why" id="ctgt-why" hidden></span>
+      </div>
+      <div class="log-wrap" id="chat-wrap">
         <div class="chat-log" id="chat-log" aria-live="polite"></div>
         <button class="newmsg" id="newmsg" type="button" hidden>New messages ↓</button>
       </div>
-      <div class="composer">
+      <div class="composer" id="chat-comp">
         <div class="ro-strip" id="ro-strip" hidden>
           <span class="ro-t"><span class="dot"></span><span id="ro-text">Read only — FLEET is not running</span></span>
           <button class="btn btn-primary" id="ro-start" type="button">Start FLEET</button>
@@ -933,6 +955,22 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
           <button class="btn btn-primary" id="say-send" type="button">Send</button>
         </div>
         <p class="hint" id="say-hint"><span class="kbd-hint">Ctrl+Enter sends. Paste or drop images to attach them. </span>New lines become spaces.</p>
+      </div>
+      <div class="log-wrap" id="desk-wrap" hidden>
+        <div class="chat-log" id="desk-log" aria-live="polite"></div>
+        <button class="newmsg" id="desk-newmsg" type="button" hidden>New messages ↓</button>
+      </div>
+      <div class="composer" id="desk-comp" hidden>
+        <p class="desk-note" id="desk-note" hidden><span class="dot"></span><span id="desk-note-t"></span></p>
+        <p class="local-warn sv-warn" id="desk-warn" hidden><span class="dot"></span><span>Not confirmed — check the transcript before you send again</span></p>
+        <div class="att-strip" id="desk-att" aria-label="Images to send" hidden></div>
+        <div class="composer-row">
+          <button class="btn att-btn" id="desk-attach" type="button" aria-label="Attach images" title="Attach images"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button>
+          <input type="file" id="desk-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <textarea id="desk-say" rows="1" maxlength="4096" placeholder="Write to CHAT" aria-label="Message to CHAT"></textarea>
+          <button class="btn btn-primary" id="desk-send" type="button">Send</button>
+        </div>
+        <p class="hint"><span class="kbd-hint">Ctrl+Enter sends. Paste or drop images to attach them. </span>New lines become spaces.</p>
       </div>
     </section>
 
@@ -1657,6 +1695,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (expired) return;
     expired = true;
     stopAll();
+    guard(deskApplySend);
     renderBanners();
     applyEnabled();
   }
@@ -3348,6 +3387,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     guard(watchStart);
     guard(updateRel);
     guard(renderAutoSwitch);
+    guard(applyDesk);
     if (!viewChosen) { viewChosen = true; setView(decideCount() ? "decide" : "chat", false); }
     if (prevWritten !== null && prevWritten !== str(st.writtenAt)) loadHistory(false);
   }
@@ -3903,6 +3943,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (!id || !clarify.armed || !ch || !ch.draft) return;
     const draft = {text: str(ch.draft.text)};
     closeClarify();
+    showChatTarget("fleet", false);
     const ta = $("say"), old = ta.value.trim();
     ta.value = cutUTF8("Andy decides on " + id + ": " + draft.text.replace(/\s+/g, " ").trim(), SAY_MAX_BYTES);
     if (old && !CLARIFY_BARE.test(old)) toast("Replaced the text in the chat box.");
@@ -4028,6 +4069,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       guard(renderChat);
       return "again";
     }
+    const loaded = chat.sid !== null, had = new Set(chat.turns.keys());
     chat.sid = sid;
     chat.reason = str(d.reason);
     let changed = false;
@@ -4041,6 +4083,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
         chat.turns.set(turn.uuid, turn);
         changed = true;
       }
+      if (loaded && turn.role === "assistant" && !had.has(turn.uuid)) fleetUnread();
     }
     chat.pos = num(d.pos) ? d.pos : 0;
     // Keep the last CHAT_TURNS_MAX turns in memory and in the DOM. dropRev
@@ -4365,6 +4408,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // prefillChat starts the FLEET chat input with prefix (e.g. "About card
   // <id>: "), keeps any draft after it and focuses the input.
   function prefillChat(prefix) {
+    showChatTarget("fleet", false);
     const ta = $("say");
     if (!ta.value.startsWith(prefix)) ta.value = prefix + ta.value.replace(/^\s+/, "");
     grow();
@@ -4546,7 +4590,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   });
   $("say-send").addEventListener("click", sendChat);
   const sayAtt = attachBox({strip: $("say-att"), button: $("say-attach"), input: $("say-file"), ta: $("say"),
-    zone: $("chat"), comp: $("chat").querySelector(".composer"), enabled: () => alive && !expired && !chatBusy});
+    zone: $("chat"), comp: $("chat-comp"), enabled: () => alive && !expired && !chatBusy && !desk.shown});
 
   // While FLEET is down (not_live) or the chat is the read-only copy, one
   // compact strip with a Start button stands in for the input.
@@ -4677,7 +4721,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const w = t.offsetWidth, h = t.offsetHeight;
     const left = (window.innerWidth - w) / 2, right = left + w;
     let top = Infinity;
-    for (const el of [$("tabbar"), $("composer-row").closest(".composer"), $("sv-comp")]) {
+    for (const el of [$("tabbar"), $("composer-row").closest(".composer"), $("desk-comp"), $("sv-comp")]) {
       if (!el || el.hidden) continue;
       const r = el.getBoundingClientRect();
       if (r.height === 0 || r.right <= left || r.left >= right) continue;
@@ -4728,12 +4772,13 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (!expired && !document.hidden) p.timer = setTimeout(() => run(p), again ? 0 : p.cur);
   }
   function runNow(name) { const p = pollers[name]; return p ? run(p) : Promise.resolve(); }
-  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); clearTimeout(sv.timer); }
+  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); clearTimeout(sv.timer); clearTimeout(desk.timer); }
   function startAll() {
     if (expired) return;
     for (const p of Object.values(pollers)) { clearTimeout(p.timer); p.cur = p.base; run(p); }
     loadHistory(false);
     if (sv.open) svPoll();
+    if (desk.shown) deskPoll();
   }
 
   document.addEventListener("visibilitychange", () => {
@@ -4758,6 +4803,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (v === view) return;
     if (view) viewScroll[view] = window.scrollY;
     if (view === "chat" && $("chat-log").clientHeight) chat.savedTop = $("chat-log").scrollTop;
+    if (view === "chat" && $("desk-log").clientHeight) desk.savedTop = $("desk-log").scrollTop;
     for (const x of VIEWS) document.body.classList.toggle("v-" + x, x === v);
     view = v;
     for (const b of document.querySelectorAll(".tab")) {
@@ -4772,6 +4818,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       if (chat.stale) guard(renderChat);
       if (chat.follow || chat.savedTop === null) log.scrollTop = log.scrollHeight;
       else log.scrollTop = chat.savedTop;
+      if (desk.shown) deskReveal();
     }
     markCode();
   }
@@ -4801,7 +4848,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   });
   // Leaving the phone layout shows every part again; render a chat that was
   // skipped while it was hidden.
-  phoneMQ.addEventListener("change", () => { measure(); if (chat.stale) guard(renderChat); });
+  phoneMQ.addEventListener("change", () => { measure(); if (chat.stale) guard(renderChat); if (desk.shown) deskReveal(); });
 
   // ---- layout measures ---------------------------------------------------
   // --hdr keeps the sticky chat column under the header on wide screens and
@@ -4815,7 +4862,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const vv = window.visualViewport;
     // Keyboard open = the chat input has focus on a touch phone. A pinch
     // zoom also shrinks visualViewport, so that alone does not count.
-    const typing = document.activeElement === $("say") || document.activeElement === $("sv-say");
+    const typing = document.activeElement === $("say") || document.activeElement === $("sv-say") || document.activeElement === $("desk-say");
     const kb = isPhone() && typing && (coarse.matches || (!!vv && window.innerHeight - vv.height > 120));
     const vh = kb && vv ? vv.height : window.innerHeight;
     document.body.classList.toggle("kb", !!kb);
@@ -4953,7 +5000,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   }
   $("sv-back").addEventListener("click", () => leaveSession(""));
 
-  async function svFetch(url) {
+  // errs maps a refusal code to Andy's words (the session view's by default).
+  async function svFetch(url, errs = svOpenErrors) {
     let r;
     try { r = await fetch(url, {credentials: "same-origin", cache: "no-store"}); } catch { return {}; }
     if (r.status === 401) { expire(); return {auth: true}; }
@@ -4962,7 +5010,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (r.ok) return {body};
     if (r.status >= 400 && r.status < 500) {
       const code = body ? str(body.code) : "";
-      return {err: svOpenErrors[code] || sentence((body && str(body.error)) || ("HTTP " + r.status))};
+      return {err: errs[code] || sentence((body && str(body.error)) || ("HTTP " + r.status))};
     }
     return {};
   }
@@ -5003,37 +5051,47 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   }
 
   function applySession(d, older) {
-    const t = obj(d.target);
-    if (t) sv.target = t;
-    const src = str(d.source) === "pane" ? "pane" : "transcript";
-    let prepend = false;
-    if (older) {
-      if (src !== "transcript" || sv.source !== "transcript") return;
-      const merged = new Map();
-      for (const x of arr(d.turns)) { const o = svTurn(x); if (o && !sv.turns.has(o.uuid)) merged.set(o.uuid, o); }
-      for (const [k, v] of sv.turns) merged.set(k, v);
-      sv.turns = merged;
-      sv.older = num(d.older) && d.older > 0 ? d.older : 0;
-      prepend = true;
-    } else if (src === "pane") {
-      sv.pane = str(d.pane); sv.turns.clear(); sv.pos = null; sv.older = 0;
-    } else {
-      const full = sv.pos === null || d.reset === true || sv.source !== "transcript";
-      if (full) sv.turns.clear();
-      for (const x of arr(d.turns)) {
-        const o = svTurn(x);
-        if (!o) continue;
-        const was = sv.turns.get(o.uuid);
-        if (!was || was.text !== o.text) sv.textRev++;
-        sv.turns.set(o.uuid, o);
-      }
-      if (num(d.pos)) sv.pos = d.pos;
-      if (full) sv.older = num(d.older) && d.older > 0 ? d.older : 0;
-    }
-    sv.source = src;
+    const prepend = mergeSession(sv, d, older);
+    if (prepend === null) return;
     guard(renderSvHead);
     svApplySend();
     guard(() => svRender(prepend, prepend));
+  }
+  // mergeSession takes one /fleet/session answer into v (the session view's
+  // sv, or the chat panel's CHAT log): the target, then the turns or the
+  // pane. older: a "Load older" page, put in front. Answers whether the
+  // render keeps Andy's place (prepend), or null when an older page does
+  // not fit what v shows.
+  function mergeSession(v, d, older) {
+    const t = obj(d.target);
+    if (t) v.target = t;
+    const src = str(d.source) === "pane" ? "pane" : "transcript";
+    let prepend = false;
+    if (older) {
+      if (src !== "transcript" || v.source !== "transcript") return null;
+      const merged = new Map();
+      for (const x of arr(d.turns)) { const o = svTurn(x); if (o && !v.turns.has(o.uuid)) merged.set(o.uuid, o); }
+      for (const [k, x] of v.turns) merged.set(k, x);
+      v.turns = merged;
+      v.older = num(d.older) && d.older > 0 ? d.older : 0;
+      prepend = true;
+    } else if (src === "pane") {
+      v.pane = str(d.pane); v.turns.clear(); v.pos = null; v.older = 0;
+    } else {
+      const full = v.pos === null || d.reset === true || v.source !== "transcript";
+      if (full) v.turns.clear();
+      for (const x of arr(d.turns)) {
+        const o = svTurn(x);
+        if (!o) continue;
+        const was = v.turns.get(o.uuid);
+        if (!was || was.text !== o.text) v.textRev++;
+        v.turns.set(o.uuid, o);
+      }
+      if (num(d.pos)) v.pos = d.pos;
+      if (full) v.older = num(d.older) && d.older > 0 ? d.older : 0;
+    }
+    v.source = src;
+    return prepend;
   }
   function svTurn(x) {
     const o = obj(x);
@@ -5078,51 +5136,60 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // svRender rebuilds the log only when its content changed. prepend keeps
   // the view on the turn Andy was reading after "Load older".
   function svRender(force, prepend) {
-    const log = $("sv-log");
-    let rev = 0, tk = "";
-    for (const t of sv.turns.values()) { rev += t.text.length + 1; tk += t.uuid + ":" + t.text.length + ","; }
-    const key = [sv.error, sv.source, sv.older, sv.loadFail, sv.loadingOlder, tk, sv.textRev, sv.source === "pane" ? sv.pane : "", [...sv.foldOpen].join(",")].join("|");
-    if (!force && key === sv.key) return;
-    sv.key = key;
-    const fromBottom = log.scrollHeight - log.scrollTop;
-    const first = !log.querySelector(".turn, .sv-pane");
-    const nodes = [];
-    if (sv.error) {
+    renderSessionLog(sv, $("sv-log"), $("sv-newmsg"), {force, prepend, error: sv.error, errorNode: () => {
       const back = el("button", "btn", "Back to Fleet");
       back.type = "button";
       back.addEventListener("click", () => leaveSession(""));
-      nodes.push(el("div", "sv-error", el("p", "", sv.error), back));
-    } else if (sv.source === "pane") {
-      nodes.push(el("pre", "sv-pane", sv.pane || "The pane is empty."));
-    } else if (!sv.source) {
-      nodes.push(el("p", "chat-empty", sv.loadFail ? "The page cannot load this session. It tries again." : "Loading…"));
+      return el("div", "sv-error", el("p", "", sv.error), back);
+    }, failText: "The page cannot load this session. It tries again.", loadOlder: svLoadOlder,
+    user: "User", bot: str(sv.target && sv.target.tool) === "grok" ? "Grok" : "Claude", rerender: () => guard(() => svRender(true))});
+  }
+  // renderSessionLog draws v's turns (or pane) into log, and only when they
+  // changed. o: {force, prepend, error (shown instead of the turns, with
+  // errorNode()), failText, loadOlder, user and bot (the names on the
+  // turns), paneNote (a line above a pane), rerender (after a fold)}.
+  function renderSessionLog(v, log, newmsg, o) {
+    let rev = 0, tk = "";
+    for (const t of v.turns.values()) { rev += t.text.length + 1; tk += t.uuid + ":" + t.text.length + ","; }
+    const key = [o.error, v.source, v.older, v.loadFail, v.loadingOlder, tk, v.textRev, v.source === "pane" ? v.pane : "", [...v.foldOpen].join(","), o.paneNote || ""].join("|");
+    if (!o.force && key === v.key) return;
+    v.key = key;
+    const fromBottom = log.scrollHeight - log.scrollTop;
+    const first = !log.querySelector(".turn, .sv-pane");
+    const nodes = [];
+    if (o.error) {
+      nodes.push(o.errorNode());
+    } else if (v.source === "pane") {
+      if (o.paneNote) nodes.push(el("p", "desk-pane-note", o.paneNote));
+      nodes.push(el("pre", "sv-pane", v.pane || "The pane is empty."));
+    } else if (!v.source) {
+      nodes.push(el("p", "chat-empty", v.loadFail ? o.failText : "Loading…"));
     } else {
-      if (sv.older > 0) {
-        const b = el("button", "btn", sv.loadingOlder ? "Loading…" : "Load older");
+      if (v.older > 0) {
+        const b = el("button", "btn", v.loadingOlder ? "Loading…" : "Load older");
         b.type = "button";
-        b.disabled = sv.loadingOlder;
-        b.addEventListener("click", svLoadOlder);
+        b.disabled = v.loadingOlder;
+        b.addEventListener("click", o.loadOlder);
         nodes.push(el("div", "more-row sv-more", b));
       }
-      const bot = str(sv.target && sv.target.tool) === "grok" ? "Grok" : "Claude";
-      for (const t of sv.turns.values()) {
+      for (const t of v.turns.values()) {
         const user = t.role === "user";
         const body = el("div", "body rich", renderRich(t.text));
-        if (!sv.foldOpen.has(t.uuid)) body.classList.add("fold");
-        const w = el("div", "turn " + (user ? "user" : "fleet"), el("div", "who", el("b", "", user ? "User" : bot), el("span", "", clockWithDay(t.at))), body);
+        if (!v.foldOpen.has(t.uuid)) body.classList.add("fold");
+        const w = el("div", "turn " + (user ? "user" : "fleet"), el("div", "who", el("b", "", user ? o.user : o.bot), el("span", "", clockWithDay(t.at))), body);
         w.dataset.uuid = t.uuid;
         nodes.push(w);
       }
-      if (!sv.turns.size) nodes.push(el("p", "chat-empty", "No messages yet."));
+      if (!v.turns.size) nodes.push(el("p", "chat-empty", "No messages yet."));
     }
-    replaceKeepingFocus(log, nodes, () => addFolds(log, sv.foldOpen, () => guard(() => svRender(true))));
+    replaceKeepingFocus(log, nodes, () => addFolds(log, v.foldOpen, o.rerender));
     markCode(log);
-    const grew = rev > sv.rev || (sv.source === "pane" && !first);
-    sv.rev = rev;
-    if (prepend) log.scrollTop = log.scrollHeight - fromBottom;
-    else if (first || sv.follow) { log.scrollTop = log.scrollHeight; sv.unseen = false; }
-    else if (grew) sv.unseen = true;
-    $("sv-newmsg").hidden = !sv.unseen;
+    const grew = rev > v.rev || (v.source === "pane" && !first);
+    v.rev = rev;
+    if (o.prepend) log.scrollTop = log.scrollHeight - fromBottom;
+    else if (first || v.follow) { log.scrollTop = log.scrollHeight; v.unseen = false; }
+    else if (grew) v.unseen = true;
+    newmsg.hidden = !v.unseen;
   }
   $("sv-log").addEventListener("scroll", () => {
     const log = $("sv-log");
@@ -5233,6 +5300,301 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   $("sv-say").addEventListener("focus", () => setTimeout(measure, 50));
   $("sv-say").addEventListener("blur", () => setTimeout(measure, 50));
 
+  // ---- chat target: FLEET or CHAT ------------------------------------------
+  // The chat panel shows FLEET, or Andy's desk session (the one session
+  // named CHAT, /fleet/state's desk) through the session view's routes. Each
+  // target has its own log, draft, images and "not confirmed" note in its
+  // own elements, so a draft can never go to the other one. FLEET's chat
+  // keeps polling whichever is shown; CHAT polls only while it is shown.
+  // The choice is kept per browser (TARGET_KEY) and applied once, on the
+  // first state answer, when CHAT is usable. Later CHAT going away never
+  // moves the view: send is disabled and the reason shows under the log.
+  // desk: shown (CHAT is the panel's target), picked (the first state
+  // answer was seen), tmux (the tmux session the log belongs to), sid (its
+  // session id: a new one starts the log over), gen (counts binds; an
+  // answer for an older one is dropped), waiting (a poll skipped while CHAT
+  // was not usable, so the next usable state polls), error (the last
+  // /fleet/session refusal), stale (a render skipped while hidden), the
+  // rest as sv.
+  const TARGET_KEY = "fleet.chatTarget";
+  const DESK_POLL = 3000;
+  const desk = {shown: false, picked: false, tmux: "", sid: "", gen: 0, timer: 0, busyGen: -1, waiting: false, target: null, source: "",
+    turns: new Map(), pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", follow: true, unseen: false, rev: 0,
+    foldOpen: new Set(), loadingOlder: false, sending: false, textRev: 0, stale: false, savedTop: null, fleetUnread: false};
+  const DESK_REASONS = {
+    "not running": "CHAT is not running",
+    "ambiguous": "Two sessions are named CHAT",
+    "remote": "CHAT is on another host",
+    "not in tmux": "CHAT is not in tmux",
+    "bad tmux name": "CHAT's tmux name is not usable",
+    "in FLEET's tmux": "CHAT is in FLEET's tmux session",
+    "shares tmux": "CHAT shares its tmux session",
+    "session list failed": "The session list failed",
+  };
+  const deskOpenErrors = Object.assign({}, svOpenErrors, {
+    not_allowed: "CHAT is not the desk session any more.",
+    fleet_self: "CHAT is in FLEET's tmux session.",
+    gone: "CHAT has ended.",
+    ambiguous: "Two sessions share CHAT's tmux session.",
+    not_desk: "CHAT is not running.",
+  });
+  const deskSendErrors = Object.assign({}, svSendErrors, deskOpenErrors);
+  const deskInfo = () => obj(state && state.desk);
+  const deskUsable = d => !!d && d.alive === true && SV_NAME.test(str(d.tmux));
+  const deskReason = d => !d ? "CHAT is not available" : DESK_REASONS[str(d.reason)] || "CHAT is not available";
+  function deskPref() {
+    try { return localStorage.getItem(TARGET_KEY) === "chat" ? "chat" : "fleet"; } catch { return "fleet"; }
+  }
+
+  function renderTargetBar() {
+    const d = deskInfo(), ok = deskUsable(d);
+    const why = !state || ok ? "" : deskReason(d);
+    $("ctgt-fleet").setAttribute("aria-pressed", desk.shown ? "false" : "true");
+    $("ctgt-unread").hidden = !desk.fleetUnread;
+    if (desk.fleetUnread) $("ctgt-fleet").setAttribute("aria-label", "FLEET, new messages");
+    else $("ctgt-fleet").removeAttribute("aria-label");
+    $("ctgt-desk").setAttribute("aria-pressed", desk.shown ? "true" : "false");
+    $("ctgt-desk").disabled = !ok;
+    $("ctgt-desk").title = why || "Chat with CHAT, your desk session";
+    $("ctgt-why").textContent = why;
+    $("ctgt-why").title = why;
+    $("ctgt-why").hidden = !why;
+  }
+
+  // showChatTarget shows "fleet" or "desk". persist: Andy chose it (the
+  // toggle), so it is the browser's choice from now on. CHAT opens only
+  // while it is usable.
+  function showChatTarget(t, persist) {
+    const toDesk = t === "desk";
+    if (toDesk && !deskUsable(deskInfo())) return;
+    if (persist) { try { localStorage.setItem(TARGET_KEY, toDesk ? "chat" : "fleet"); } catch { /* storage off */ } }
+    if (toDesk === desk.shown) return;
+    if (desk.shown) { const l = $("desk-log"); if (l.clientHeight) desk.savedTop = l.scrollTop; }
+    else { const l = $("chat-log"); if (l.clientHeight) chat.savedTop = l.scrollTop; }
+    desk.shown = toDesk;
+    $("chat-wrap").hidden = toDesk;
+    $("chat-comp").hidden = toDesk;
+    $("desk-wrap").hidden = !toDesk;
+    $("desk-comp").hidden = !toDesk;
+    if (toDesk) {
+      const tm = str(deskInfo().tmux);
+      if (tm !== desk.tmux) deskBind(tm);
+      deskReveal();
+      deskPoll();
+    } else {
+      clearTimeout(desk.timer);
+      desk.fleetUnread = false;
+      const log = $("chat-log");
+      if (chat.stale) guard(renderChat);
+      if (chat.follow || chat.savedTop === null) log.scrollTop = log.scrollHeight;
+      else log.scrollTop = chat.savedTop;
+    }
+    renderTargetBar();
+    deskApplySend();
+    measure();
+  }
+  $("ctgt-fleet").addEventListener("click", () => showChatTarget("fleet", true));
+
+  // fleetUnread marks the FLEET toggle when FLEET answers while CHAT is
+  // shown: its log is hidden then. Showing FLEET clears the mark.
+  function fleetUnread() {
+    if (!desk.shown || desk.fleetUnread) return;
+    desk.fleetUnread = true;
+    renderTargetBar();
+  }
+  $("ctgt-desk").addEventListener("click", () => showChatTarget("desk", true));
+
+  // deskBind points the CHAT log at tmux session tm and starts it over.
+  function deskBind(tm) {
+    Object.assign(desk, {tmux: tm, sid: "", target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
+      key: "", follow: true, unseen: false, rev: 0, loadingOlder: false, savedTop: null});
+    desk.turns = new Map(); desk.foldOpen = new Set();
+    desk.gen++;
+    guard(() => deskRender(true));
+  }
+
+  // applyDesk runs on every state answer.
+  function applyDesk() {
+    const d = deskInfo(), ok = deskUsable(d);
+    if (!desk.picked) {
+      desk.picked = true;
+      if (ok && deskPref() === "chat") showChatTarget("desk", false);
+    }
+    if (desk.shown && ok) {
+      if (str(d.tmux) !== desk.tmux) { deskBind(str(d.tmux)); deskPoll(); }
+      else if (desk.waiting) deskPoll();
+    }
+    renderTargetBar();
+    deskApplySend();
+  }
+
+  // deskPoll asks for what is new every DESK_POLL ms while CHAT is shown,
+  // usable at the bound tmux session, and the page is visible. As svPoll,
+  // one timer or one request at a time. A refusal keeps the log and the
+  // polls; it shows under the log and blocks send.
+  async function deskPoll() {
+    clearTimeout(desk.timer);
+    if (!desk.shown || expired || document.hidden || desk.busyGen === desk.gen) return;
+    const d = deskInfo();
+    if (!deskUsable(d) || str(d.tmux) !== desk.tmux) { desk.waiting = true; return; }
+    desk.waiting = false;
+    const gen = desk.gen;
+    desk.busyGen = gen;
+    let url = "/fleet/session?desk=1&t=" + encodeURIComponent(desk.tmux);
+    if (desk.source === "transcript" && desk.pos !== null) url += "&since=" + desk.pos;
+    const r = await svFetch(url, deskOpenErrors);
+    if (desk.busyGen === gen) desk.busyGen = -1;
+    if (r.auth) return;
+    if (gen !== desk.gen) { if (desk.shown) deskPoll(); return; }
+    let again = false;
+    if (r.err) {
+      desk.error = r.err;
+      // Nothing shown yet: say why in the log too.
+      if (!desk.source && !desk.loadFail) { desk.loadFail = true; guard(() => deskRender(true)); }
+    } else if (r.body) { desk.error = ""; desk.loadFail = false; guard(() => { again = deskApply(r.body, false) === "again"; }); }
+    else if (!desk.source) { desk.loadFail = true; guard(() => deskRender()); }
+    deskApplySend();
+    if (desk.shown && !document.hidden && !expired) desk.timer = setTimeout(deskPoll, again ? 0 : DESK_POLL);
+  }
+
+  async function deskLoadOlder() {
+    if (desk.loadingOlder || !desk.older || desk.source !== "transcript") return;
+    desk.loadingOlder = true;
+    guard(() => deskRender(true));
+    const gen = desk.gen;
+    const r = await svFetch("/fleet/session?desk=1&t=" + encodeURIComponent(desk.tmux) + "&before=" + desk.older + "&n=100", deskOpenErrors);
+    if (gen !== desk.gen) return;
+    desk.loadingOlder = false;
+    if (r.err) { toast(r.err, true); guard(() => deskRender(true)); return; }
+    if (!r.body) { toast("The page cannot load older turns. Try again.", true); guard(() => deskRender(true)); return; }
+    guard(() => deskApply(r.body, true));
+  }
+
+  // deskApply takes one answer for the bound tmux session. Another session
+  // id there (CHAT restarted in the same tmux session) starts the log over:
+  // "again" asks for its transcript at once.
+  function deskApply(d, older) {
+    const t = obj(d.target), sid = t ? str(t.sessionId) : "";
+    if (desk.sid && sid && sid !== desk.sid) {
+      if (older) return;
+      deskBind(desk.tmux);
+      return "again";
+    }
+    if (sid) desk.sid = sid;
+    const prepend = mergeSession(desk, d, older);
+    if (prepend === null) return;
+    guard(() => deskRender(prepend, prepend));
+  }
+
+  // A hidden log measures as zero height, which would unfold every turn:
+  // render when it shows (deskReveal) instead.
+  function deskRender(force, prepend) {
+    const log = $("desk-log");
+    if (!log.getClientRects().length) { desk.stale = true; return; }
+    desk.stale = false;
+    const t = desk.target || {};
+    renderSessionLog(desk, log, $("desk-newmsg"), {force, prepend, error: "", failText: desk.error || "The page cannot load CHAT. It tries again.",
+      loadOlder: deskLoadOlder, user: "Andy", bot: "CHAT", rerender: () => guard(() => deskRender(true)),
+      paneNote: str(t.tool) === "grok" ? "Grok session: the page shows its terminal pane, not a transcript." : "No transcript found: the page shows the terminal pane."});
+  }
+  // deskReveal: the CHAT log just came into view (the toggle, the phone Chat
+  // view): draw what a hidden render skipped, back where Andy left it.
+  function deskReveal() {
+    const log = $("desk-log");
+    if (desk.stale) guard(() => deskRender(true));
+    if (desk.follow || desk.savedTop === null) log.scrollTop = log.scrollHeight;
+    else log.scrollTop = desk.savedTop;
+  }
+  $("desk-log").addEventListener("scroll", () => {
+    const log = $("desk-log");
+    if (!log.clientHeight) return;
+    desk.follow = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    if (desk.follow && desk.unseen) { desk.unseen = false; $("desk-newmsg").hidden = true; }
+  }, {passive: true});
+  if (window.ResizeObserver) new ResizeObserver(() => { const log = $("desk-log"); if (desk.shown && desk.follow) log.scrollTop = log.scrollHeight; }).observe($("desk-log"));
+  $("desk-newmsg").addEventListener("click", () => {
+    const log = $("desk-log");
+    desk.unseen = false; desk.follow = true;
+    $("desk-newmsg").hidden = true;
+    log.scrollTo({top: log.scrollHeight, behavior: "smooth"});
+  });
+
+  // ---- CHAT send -----------------------------------------------------------
+  // One tap, as the FLEET box: the toggle and the box both name CHAT. The
+  // target is the bound tmux session, and only while state still puts CHAT
+  // there. No answer keeps the text with an amber note, as in the session
+  // view: it may have arrived.
+  function deskCanSend() {
+    const d = deskInfo(), t = desk.target;
+    return desk.shown && !expired && deskUsable(d) && str(d.tmux) === desk.tmux && !desk.error && !!t && t.canSend === true;
+  }
+  function deskApplySend() {
+    const d = deskInfo(), can = deskCanSend(), t = desk.target;
+    const ta = $("desk-say"), btn = $("desk-send");
+    ta.disabled = expired;
+    ta.placeholder = expired ? "Session expired." : "Write to CHAT";
+    btn.disabled = !can || desk.sending || (!ta.value.trim() && !deskAtt.items.length);
+    btn.textContent = desk.sending ? "Sending…" : "Send";
+    $("desk-attach").disabled = !can || desk.sending;
+    if (deskAtt.busy !== desk.sending) { deskAtt.busy = desk.sending; deskAtt.render(); }
+    const note = expired || !desk.shown ? ""
+      : !deskUsable(d) ? deskReason(d) + "."
+      : desk.error ? desk.error
+      : t && t.canSend !== true ? (str(t.sendNote) || "Send is not available for this session.") : "";
+    $("desk-note-t").textContent = note;
+    $("desk-note").hidden = !note;
+  }
+  async function deskSend() {
+    const ta = $("desk-say"), text = ta.value.trim(), imgs = deskAtt.items.slice();
+    if (desk.sending || (!text && !imgs.length) || !deskCanSend()) return;
+    const tmux = desk.tmux;
+    desk.sending = true;
+    deskApplySend();
+    const up = imgs.length ? await uploadImages(imgs) : {ok: true, paths: []};
+    const full = up.ok ? withImages(text, up.paths) : "";
+    // The uploads take time: CHAT may have moved or gone meanwhile. desk:
+    // true has the server refuse a tmux session that no longer holds CHAT.
+    const res = !up.ok ? {ok: false, error: up.error} : tooLong(full) ? {ok: false, error: TOO_LONG}
+      : !(deskCanSend() && desk.tmux === tmux) ? {ok: false, error: "CHAT changed while the images uploaded. Nothing was sent."}
+      : await postSay("/fleet/session/say", {target: tmux, text: full, desk: true}, deskSendErrors);
+    desk.sending = false;
+    if (res.ok) {
+      if (ta.value.trim() === text) { ta.value = ""; deskGrow(); }
+      deskAtt.drop(imgs);
+      $("desk-warn").hidden = true;
+      toast("Sent to CHAT." + (res.queued ? " It is busy and reads this next." : ""));
+      const gen = desk.gen;
+      setTimeout(() => { if (gen === desk.gen) deskPoll(); }, 600);
+    } else if (res.unclear) {
+      $("desk-warn").hidden = false;
+      toast("Delivery not confirmed. Check the transcript before you send again.", true);
+    } else {
+      // Another session in CHAT's tmux: block send until a poll finds CHAT.
+      if (res.code === "not_desk") desk.error = res.error;
+      toast(res.error, true);
+    }
+    deskApplySend();
+  }
+  function deskGrow() {
+    const ta = $("desk-say");
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight + 2, 200) + "px";
+  }
+  $("desk-send").addEventListener("click", deskSend);
+  const deskAtt = attachBox({strip: $("desk-att"), button: $("desk-attach"), input: $("desk-file"), ta: $("desk-say"),
+    zone: $("chat"), comp: $("desk-comp"), enabled: () => deskCanSend() && !desk.sending, after: deskApplySend});
+  $("desk-say").addEventListener("input", () => {
+    deskGrow();
+    if (!$("desk-say").value.trim()) $("desk-warn").hidden = true;
+    deskApplySend();
+  });
+  $("desk-say").addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!e.repeat) deskSend(); }
+  });
+  $("desk-say").addEventListener("focus", () => setTimeout(measure, 50));
+  $("desk-say").addEventListener("blur", () => setTimeout(measure, 50));
+  renderTargetBar();
+
   // ---- refresh -----------------------------------------------------------
   $("refresh").addEventListener("click", async () => {
     const btn = $("refresh");
@@ -5241,6 +5603,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (btn.classList.contains("spinning")) return;
     btn.classList.add("spinning");
     const t0 = Date.now();
+    if (desk.shown) deskPoll();
     await Promise.allSettled([...Object.keys(pollers).map(runNow), loadHistory(false)]);
     setTimeout(() => btn.classList.remove("spinning"), Math.max(0, 600 - (Date.now() - t0)));
   });
