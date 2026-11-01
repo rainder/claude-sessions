@@ -16,7 +16,7 @@ func TestAccountCacheRoundTrip(t *testing.T) {
 	want := accountCacheEntry{
 		Account:   "andy@trecs.aero",
 		FetchedAt: fetchedAt,
-		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 42}},
+		Info:      &UsageInfo{FiveHour: &usageBucket{Pct: 42}},
 		Verified:  true,
 	}
 	saveAccountCache("trecs", want)
@@ -42,7 +42,7 @@ func TestAccountCacheHoldsNumbersAndBackoffTogether(t *testing.T) {
 	next := time.Now().Add(6 * time.Minute).UTC().Truncate(time.Second)
 	saveAccountCache("avisoma", accountCacheEntry{
 		Account:            "andy@avisoma.com",
-		Info:               &UsageInfo{FiveHour: usageBucket{Pct: 5}},
+		Info:               &UsageInfo{FiveHour: &usageBucket{Pct: 5}},
 		FetchedAt:          time.Now().Add(-time.Hour),
 		BackoffStreak:      2,
 		BackoffNextAttempt: next,

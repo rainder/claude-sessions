@@ -554,7 +554,7 @@ func TestClipLine(t *testing.T) {
 func TestWriteUsage(t *testing.T) {
 	var b strings.Builder
 	writeUsage(&b, "", &UsageInfo{
-		FiveHour: usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
+		FiveHour: &usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay: usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
 	}, 0)
 	out := b.String()
@@ -584,7 +584,7 @@ func TestWriteUsage(t *testing.T) {
 func TestWriteUsageScopedWeekly(t *testing.T) {
 	var b strings.Builder
 	writeUsage(&b, "", &UsageInfo{
-		FiveHour:          usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
+		FiveHour:          &usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay:          usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
 		WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: time.Now().Add(72 * time.Hour)},
 		WeeklyScopedLabel: "Fable",
@@ -607,7 +607,7 @@ func TestWriteUsageScopedWeekly(t *testing.T) {
 func TestWriteUsageCredits(t *testing.T) {
 	var b strings.Builder
 	writeUsage(&b, "", &UsageInfo{
-		FiveHour: usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
+		FiveHour: &usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay: usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
 		Credits:  creditsInfo{Enabled: true, Used: 2550, Limit: 100000, Currency: "USD", DecimalPlaces: 2},
 	}, 0)
@@ -628,7 +628,7 @@ func TestWriteUsageCredits(t *testing.T) {
 
 func TestWriteUsageAdaptiveWidth(t *testing.T) {
 	u := &UsageInfo{
-		FiveHour: usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
+		FiveHour: &usageBucket{Pct: 9, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay: usageBucket{Pct: 13, ResetsAt: time.Now().Add(48 * time.Hour)},
 	}
 	bars := func(cols int) int {
@@ -926,7 +926,7 @@ func TestDedupeAccountsKnownAccounts(t *testing.T) {
 
 func TestWriteUsageHeaderRendersExpiredPlaceholder(t *testing.T) {
 	accounts := []accountUsageLine{
-		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
 		{label: "trecs", email: "andy@trecs.aero", placeholder: usageExpiredText},
 	}
 	var b strings.Builder
@@ -946,6 +946,34 @@ func TestWriteUsageHeaderRendersExpiredPlaceholder(t *testing.T) {
 	}
 }
 
+// No 5-hour reading (Anthropic dropped the window): the header has no 5h bar
+// at all, not a 0% one, and the weekly bar leads the line — including at a
+// narrow width, where the fit search still keeps every remaining label.
+func TestWriteUsageHeaderOmitsAbsentFiveHour(t *testing.T) {
+	now := time.Now()
+	info := &UsageInfo{
+		SevenDay:          usageBucket{Pct: 67, ResetsAt: now.Add(3*24*time.Hour + time.Hour)},
+		WeeklyScoped:      usageBucket{Pct: 62, ResetsAt: now.Add(3*24*time.Hour + time.Hour)},
+		WeeklyScopedLabel: "Fable",
+	}
+	for _, cols := range []int{0, 80, 40} {
+		var b strings.Builder
+		writeUsageHeader(&b, []accountUsageLine{{label: "andy", email: "andy@example.com", info: info, mine: true}}, nil, nil, cols)
+		got := stripANSI(strings.TrimRight(b.String(), "\n"))
+		if strings.Contains(got, "5h") {
+			t.Errorf("cols=%d: header = %q, want no 5h bar", cols, got)
+		}
+		if !strings.HasPrefix(strings.TrimLeft(got, " "), "wk") || !strings.Contains(got, "67%") || !strings.Contains(got, "Fable") {
+			t.Errorf("cols=%d: header = %q, want the wk bar first and the Fable bar", cols, got)
+		}
+	}
+	for _, seg := range claudeSegs(info) {
+		if seg.label == "5h" {
+			t.Errorf("claudeSegs kept a 5h segment for a nil FiveHour: %+v", seg)
+		}
+	}
+}
+
 func TestWriteUsageHeaderExpiredOnlyLineKeepsItsLabel(t *testing.T) {
 	// A sole expired line is never bare: dedupeAccounts leaves mine false on
 	// snapshot-derived lines, so "auth expired" always says whose.
@@ -962,7 +990,7 @@ func TestWriteUsageHeaderNarrowTerminalKeepsExpiredLine(t *testing.T) {
 	// must neither crash it nor be dropped — and must keep its label, or two
 	// expired accounts render as two identical, unattributable placeholders.
 	accounts := []accountUsageLine{
-		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
 		{label: "trecs", email: "andy@trecs.aero", placeholder: usageExpiredText},
 	}
 	var b strings.Builder
@@ -986,7 +1014,7 @@ func TestWriteUsageHeaderRendersReasonPlaceholder(t *testing.T) {
 	// claiming the credential died — and is no more droppable than an expired
 	// one, since the account's existence is the point either way.
 	accounts := []accountUsageLine{
-		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
 		{label: "trecs", email: "andy@trecs.aero", placeholder: "rate limited"},
 	}
 	var b strings.Builder
@@ -1005,8 +1033,8 @@ func TestWriteUsageHeaderRendersReasonPlaceholder(t *testing.T) {
 
 func TestWriteUsageHeaderMarksStaleNumbers(t *testing.T) {
 	accounts := []accountUsageLine{
-		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
-		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, stale: true},
 	}
 	var b strings.Builder
 	writeUsageHeader(&b, accounts, nil, nil, 0)
@@ -1030,10 +1058,10 @@ func TestWriteUsageHeaderMarksStaleNumbers(t *testing.T) {
 func TestWriteUsageHeaderShowsStaleAge(t *testing.T) {
 	now := time.Now()
 	accounts := []accountUsageLine{
-		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
 		{
 			label: "trecs", email: "andy@trecs.aero",
-			info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true,
+			info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, stale: true,
 			fetchedAt: now.Add(-12 * time.Minute),
 		},
 	}
@@ -1061,7 +1089,7 @@ func TestWriteUsageHeaderStaleAgeSurvivesNarrowWidth(t *testing.T) {
 	accounts := []accountUsageLine{
 		{
 			label: "trecs", email: "andy@trecs.aero", mine: true,
-			info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true,
+			info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, stale: true,
 			fetchedAt: now.Add(-3 * time.Hour),
 		},
 	}
@@ -1076,7 +1104,7 @@ func TestWriteUsageHeaderStaleAgeSurvivesNarrowWidth(t *testing.T) {
 
 func TestWriteUsageHeaderStaleWithoutAgeStaysBare(t *testing.T) {
 	accounts := []accountUsageLine{
-		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, stale: true},
 	}
 	var b strings.Builder
 	writeUsageHeader(&b, accounts, nil, nil, 0)
@@ -1094,11 +1122,11 @@ func TestWriteUsageHeaderStaleWithoutAgeStaysBare(t *testing.T) {
 func TestWriteUsageHeaderMarksASoleBareLocalLine(t *testing.T) {
 	stale := []accountUsageLine{{
 		label: "avisoma", email: "andy@avisoma.com",
-		info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, mine: true, stale: true,
+		info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, mine: true, stale: true,
 	}}
 	fresh := []accountUsageLine{{
 		label: "avisoma", email: "andy@avisoma.com",
-		info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, mine: true,
+		info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, mine: true,
 	}}
 	var a, b strings.Builder
 	writeUsageHeader(&a, fresh, nil, nil, 100)
@@ -1124,12 +1152,12 @@ func TestWriteUsageHeaderMarksASoleBareLocalLine(t *testing.T) {
 // aligns — so a stale line must leave every other line byte-identical.
 func TestWriteUsageHeaderStaleMarkerShiftsNoOtherColumn(t *testing.T) {
 	fresh := []accountUsageLine{
-		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
-		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}},
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}},
 	}
 	stale := []accountUsageLine{
 		fresh[0],
-		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, stale: true},
 	}
 	var a, b strings.Builder
 	writeUsageHeader(&a, fresh, nil, nil, 100)
@@ -1156,8 +1184,8 @@ func TestWriteUsageHeaderStaleMarkerShiftsNoOtherColumn(t *testing.T) {
 func TestWriteUsageHeaderStaleMarkerSurvivesWidthClip(t *testing.T) {
 	const cols = 64
 	accounts := []accountUsageLine{
-		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
-		{label: "andy@trecs.aero", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, stale: true},
+		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
+		{label: "andy@trecs.aero", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, stale: true},
 	}
 	var b strings.Builder
 	writeUsageHeader(&b, accounts, nil, nil, cols)
@@ -1196,7 +1224,7 @@ func usageLineBarW(line string, segs int) int {
 func screenshotUsageAccounts(now time.Time) []accountUsageLine {
 	info := func(p float64) *UsageInfo {
 		return &UsageInfo{
-			FiveHour:          usageBucket{Pct: p, ResetsAt: now.Add(2*time.Hour + 10*time.Minute)},
+			FiveHour:          &usageBucket{Pct: p, ResetsAt: now.Add(2*time.Hour + 10*time.Minute)},
 			SevenDay:          usageBucket{Pct: 13, ResetsAt: now.Add(3*24*time.Hour + time.Hour)},
 			WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: now.Add(5*24*time.Hour + time.Hour)},
 			WeeklyScopedLabel: "Fable",
@@ -1217,7 +1245,7 @@ func screenshotUsageAccounts(now time.Time) []accountUsageLine {
 // did. Every check reads the line as the TUI shows it, after clipLine.
 func TestWriteUsageHeaderFitTiers(t *testing.T) {
 	now := time.Now()
-	plain := func(pct float64) *UsageInfo { return &UsageInfo{FiveHour: usageBucket{Pct: pct}} }
+	plain := func(pct float64) *UsageInfo { return &UsageInfo{FiveHour: &usageBucket{Pct: pct}} }
 	render := func(accounts []accountUsageLine, cols int) []string {
 		var b strings.Builder
 		writeUsageHeader(&b, accounts, nil, nil, cols)
@@ -1417,7 +1445,7 @@ func TestUsageLineMarkerShort(t *testing.T) {
 // A cut must never leave a foreign Codex or Grok label as a bare provider
 // tag: "codex bob" cut to "codex" would read as this machine's own account.
 func TestWriteUsageHeaderCutKeepsForeignProviderLabel(t *testing.T) {
-	plain := func(pct float64) *UsageInfo { return &UsageInfo{FiveHour: usageBucket{Pct: pct}} }
+	plain := func(pct float64) *UsageInfo { return &UsageInfo{FiveHour: &usageBucket{Pct: pct}} }
 	accounts := []accountUsageLine{
 		{label: "avisoma", email: "andy@avisoma.com", info: plain(41)},
 		{label: "trecs", email: "andy@trecs.aero", info: plain(63)},
@@ -1450,15 +1478,15 @@ func TestRenderHeaderShowsKnownAccountsFromLocalAndRemote(t *testing.T) {
 	remotes := []RemoteResult{{
 		Name:          "beluga",
 		Sessions:      []Session{{PID: 2, Host: "beluga", CWD: "/remote-dir"}},
-		Usage:         &AccountUsage{Account: "bot@ci.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 12}}},
+		Usage:         &AccountUsage{Account: "bot@ci.com", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 12}}},
 		KnownAccounts: []KnownAccountUsage{{Name: "trecs", Account: "andy@trecs.aero", Expired: true}},
 	}}
 	localUsage := &LocalUsage{
-		Claude: &AccountUsage{Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		Claude: &AccountUsage{Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
 		KnownAccounts: []KnownAccountUsage{
 			// Already live on beluga: the live line wins, no second line here.
-			{Name: "ci", Account: "bot@ci.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 99}}},
-			{Name: "spare", Account: "andy@spare.dev", Info: &UsageInfo{FiveHour: usageBucket{Pct: 5}}},
+			{Name: "ci", Account: "bot@ci.com", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 99}}},
+			{Name: "spare", Account: "andy@spare.dev", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 5}}},
 		},
 	}
 	var b strings.Builder
@@ -1500,7 +1528,7 @@ func headerUsageLines(out string) []string {
 func TestRenderHeaderSingleAccountRendersBareLine(t *testing.T) {
 	// Zero ResetsAt keeps formatUntil deterministic (""), so the byte
 	// comparison against the bare writeUsage output can't flake on a clock tick.
-	info := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	info := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	var out bytes.Buffer
 	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
 		nil, "", &LocalUsage{Claude: &AccountUsage{Account: "andy@work.com", Info: info}}, 0, 0, "dir")
@@ -1520,7 +1548,7 @@ func TestRenderHeaderSingleAccountRendersBareLine(t *testing.T) {
 func TestRenderHeaderSoleForeignRemoteKeepsLabel(t *testing.T) {
 	// Local usage never fetched, one remote on a different account: the lone
 	// line must keep its label or the remote's limits masquerade as local's.
-	info := &UsageInfo{FiveHour: usageBucket{Pct: 50}, SevenDay: usageBucket{Pct: 20}}
+	info := &UsageInfo{FiveHour: &usageBucket{Pct: 50}, SevenDay: usageBucket{Pct: 20}}
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
 	remotes := []RemoteResult{
 		{Name: "pi", Usage: &AccountUsage{Account: "bot@ci.com", Info: info}},
@@ -1540,7 +1568,7 @@ func TestRenderHeaderSoleForeignRemoteKeepsLabel(t *testing.T) {
 func TestRenderHeaderSoleLocalUnknownEmailRendersBare(t *testing.T) {
 	// Identity read failure ("" account) on the only line — still this
 	// machine's own limits, so the pre-propagation bare layout applies.
-	info := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	info := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	var out bytes.Buffer
 	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
 		nil, "", &LocalUsage{Claude: &AccountUsage{Account: "", Info: info}}, 0, 0, "dir")
@@ -1558,7 +1586,7 @@ func TestRenderHeaderSoleLocalUnknownEmailRendersBare(t *testing.T) {
 
 func TestRenderHeaderMultiAccountLabelsEachLine(t *testing.T) {
 	mk := func(five float64) *UsageInfo {
-		return &UsageInfo{FiveHour: usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
+		return &UsageInfo{FiveHour: &usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
 	}
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
 	remotes := []RemoteResult{
@@ -1583,7 +1611,7 @@ func TestRenderHeaderMultiAccountColumnsAlign(t *testing.T) {
 	// 0% vs 93%: a single- vs double-digit percentage on the first segment
 	// used to shift every segment after it out of column on the wider row.
 	mk := func(five float64) *UsageInfo {
-		return &UsageInfo{FiveHour: usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
+		return &UsageInfo{FiveHour: &usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
 	}
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
 	remotes := []RemoteResult{
@@ -1761,7 +1789,7 @@ func TestRenderHeaderCodexSingleAccountLabeled(t *testing.T) {
 	// Sole (mine) Claude account plus one Codex account: the Claude line takes the
 	// dim "claude" tag (symmetric with "codex") since a Codex block shares the
 	// header, and the Codex line is tagged "codex".
-	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	claude := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	codex := &CodexAccountUsage{Account: "dev@example.com", Info: &CodexUsageInfo{
 		Windows: []codexWindow{{Label: "wk", Pct: 96}},
 	}}
@@ -1788,7 +1816,7 @@ func TestRenderHeaderNarrowColsHidesLabels(t *testing.T) {
 	// Two Claude accounts (so a label column is in play) squeezed into a
 	// terminal too narrow to show both a label and a usageBarMin-wide bar per
 	// line: the label is dropped entirely rather than clipping the line.
-	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	claude := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	var out bytes.Buffer
 	RenderAll(&out, "1", LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}},
 		[]RemoteResult{{Name: "pi", Usage: &AccountUsage{Account: "dev@example.com", Info: claude}}},
@@ -1812,7 +1840,7 @@ func TestRenderHeaderNarrowColsHidesLabels(t *testing.T) {
 func TestRenderHeaderMixedBlocksLabelsPadEqual(t *testing.T) {
 	// Sole (mine) Claude + sole (mine) Codex: "claude" and "codex" pad to one
 	// shared width, so the first segment starts in the same column on both lines.
-	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	claude := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	codex := &CodexAccountUsage{Account: "me@work.com", Info: &CodexUsageInfo{
 		Windows: []codexWindow{{Label: "wk", Pct: 40}},
 	}}
@@ -1844,7 +1872,7 @@ func TestRenderHeaderMultiClaudePlusCodexAlign(t *testing.T) {
 	// Two Claude accounts + one Codex account: the shared label width spans all
 	// three lines, so every first-segment column lines up.
 	mk := func(five float64) *UsageInfo {
-		return &UsageInfo{FiveHour: usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
+		return &UsageInfo{FiveHour: &usageBucket{Pct: five}, SevenDay: usageBucket{Pct: 20}}
 	}
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
 	remotes := []RemoteResult{
@@ -1883,7 +1911,7 @@ func TestRenderHeaderMixedBlocksShareBarWidth(t *testing.T) {
 	// shrink to the SAME width rather than staying at usageBarMax (the bug). On a
 	// wide terminal both sit at usageBarMax.
 	claude := &UsageInfo{
-		FiveHour:          usageBucket{Pct: 42, ResetsAt: time.Now().Add(2 * time.Hour)},
+		FiveHour:          &usageBucket{Pct: 42, ResetsAt: time.Now().Add(2 * time.Hour)},
 		SevenDay:          usageBucket{Pct: 88, ResetsAt: time.Now().Add(48 * time.Hour)},
 		WeeklyScoped:      usageBucket{Pct: 10, ResetsAt: time.Now().Add(72 * time.Hour)},
 		WeeklyScopedLabel: "Fable",
@@ -1928,11 +1956,11 @@ func TestRenderHeaderTrailerColumnsAlign(t *testing.T) {
 	// whitespace since the last segment is never padded.
 	now := time.Now()
 	lineA := &UsageInfo{
-		FiveHour: usageBucket{Pct: 10, ResetsAt: now.Add(2*time.Hour + 30*time.Minute)},  // "2h"
+		FiveHour: &usageBucket{Pct: 10, ResetsAt: now.Add(2*time.Hour + 30*time.Minute)}, // "2h"
 		SevenDay: usageBucket{Pct: 20, ResetsAt: now.Add(2*24*time.Hour + 12*time.Hour)}, // "2d"
 	}
 	lineB := &UsageInfo{
-		FiveHour: usageBucket{Pct: 30, ResetsAt: now.Add(30 * time.Second)},               // "<1m"
+		FiveHour: &usageBucket{Pct: 30, ResetsAt: now.Add(30 * time.Second)},              // "<1m"
 		SevenDay: usageBucket{Pct: 40, ResetsAt: now.Add(12*24*time.Hour + 12*time.Hour)}, // "12d"
 	}
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
@@ -2035,11 +2063,11 @@ func TestRenderHeaderCodexAbsentEverywhereNoLine(t *testing.T) {
 	// Claude line stays bare — byte-identical to the pre-Codex layout (no "claude"
 	// tag when there's nothing to align against). local and the remote share the
 	// account, so they collapse to a single mine line.
-	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	claude := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	local := LocalHost{Name: "local", Sessions: []Session{{PID: 1, CWD: "/w"}}}
 	remotes := []RemoteResult{
 		{Name: "pi", Usage: &AccountUsage{Account: "andy@work.com",
-			Info: &UsageInfo{FiveHour: usageBucket{Pct: 1}, SevenDay: usageBucket{Pct: 2}}}},
+			Info: &UsageInfo{FiveHour: &usageBucket{Pct: 1}, SevenDay: usageBucket{Pct: 2}}}},
 	}
 	var out bytes.Buffer
 	RenderAll(&out, "1", local, remotes, "",
@@ -2281,7 +2309,7 @@ func TestDedupeGrokAccounts(t *testing.T) {
 
 func TestRenderHeaderGrokAfterCodex(t *testing.T) {
 	// Claude + Codex + Grok: three lines in that order; Grok sits after Codex.
-	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	claude := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	codex := &CodexAccountUsage{Account: "dev@example.com", Info: &CodexUsageInfo{
 		Windows: []codexWindow{{Label: "wk", Pct: 96}},
 	}}
@@ -2317,7 +2345,7 @@ func TestRenderHeaderGrokAfterCodex(t *testing.T) {
 func TestRenderHeaderClaudeLabeledWhenOnlyGrokPresent(t *testing.T) {
 	// No Codex, local Grok: Claude still takes the dim "claude" tag (otherPresent),
 	// Grok is tagged "grok".
-	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	claude := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	grok := &GrokAccountUsage{Account: "dev@x.ai", Info: &GrokUsageInfo{
 		Windows: []grokWindow{{Label: "wk", Pct: 6}},
 	}}
@@ -2342,7 +2370,7 @@ func TestRenderHeaderClaudeLabeledWhenOnlyGrokPresent(t *testing.T) {
 
 func TestRenderHeaderThreeProvidersAlign(t *testing.T) {
 	// Claude + Codex + Grok: first-segment columns match across all three lines.
-	claude := &UsageInfo{FiveHour: usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
+	claude := &UsageInfo{FiveHour: &usageBucket{Pct: 9}, SevenDay: usageBucket{Pct: 13}}
 	codex := &CodexAccountUsage{Account: "me@work.com", Info: &CodexUsageInfo{
 		Windows: []codexWindow{{Label: "wk", Pct: 40}},
 	}}
@@ -2758,7 +2786,7 @@ func TestFormatUntil(t *testing.T) {
 // reset" beside the dim "stale" marker when the numbers are simply old.
 func TestClaudeSegsBlankTrailerForAnElapsedReset(t *testing.T) {
 	u := &UsageInfo{
-		FiveHour:          usageBucket{Pct: 0, ResetsAt: time.Time{}},
+		FiveHour:          &usageBucket{Pct: 0, ResetsAt: time.Time{}},
 		SevenDay:          usageBucket{Pct: 97, ResetsAt: time.Now().Add(-4 * time.Hour)},
 		WeeklyScoped:      usageBucket{Pct: 88, ResetsAt: time.Now().Add(-4 * time.Hour)},
 		WeeklyScopedLabel: "Fable",
@@ -3981,12 +4009,12 @@ func TestRenderHeaderShowsFleetBadge(t *testing.T) {
 }
 
 func cachedReading(email string, pct float64, at time.Time) remoteClaudeReading {
-	return remoteClaudeReading{Account: email, Info: &UsageInfo{FiveHour: usageBucket{Pct: pct}}, FetchedAt: at}
+	return remoteClaudeReading{Account: email, Info: &UsageInfo{FiveHour: &usageBucket{Pct: pct}}, FetchedAt: at}
 }
 
 func TestDedupeAccountsFillsFromRemoteCache(t *testing.T) {
 	now := time.Now()
-	fresh := &UsageInfo{FiveHour: usageBucket{Pct: 41}}
+	fresh := &UsageInfo{FiveHour: &usageBucket{Pct: 41}}
 	remote := func(name string, rs ...remoteClaudeReading) RemoteResult {
 		return RemoteResult{Name: name, CachedClaude: rs}
 	}
@@ -4065,9 +4093,9 @@ func TestDedupeAccountsFillsFromRemoteCache(t *testing.T) {
 func TestWriteUsageHeaderMarksRemoteFilledLine(t *testing.T) {
 	now := time.Now()
 	accounts := []accountUsageLine{
-		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
-		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, fetchedAt: now.Add(-time.Minute), via: "agent-workstation"},
-		{label: "spare", email: "andy@spare.dev", info: &UsageInfo{FiveHour: usageBucket{Pct: 5}}, fetchedAt: now.Add(-usageNumbersStaleAfter - 3*time.Minute), via: "ws"},
+		{label: "avisoma", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
+		{label: "trecs", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, fetchedAt: now.Add(-time.Minute), via: "agent-workstation"},
+		{label: "spare", email: "andy@spare.dev", info: &UsageInfo{FiveHour: &usageBucket{Pct: 5}}, fetchedAt: now.Add(-usageNumbersStaleAfter - 3*time.Minute), via: "ws"},
 	}
 	var b strings.Builder
 	writeUsageHeader(&b, accounts, nil, nil, 0)
@@ -4088,8 +4116,8 @@ func TestWriteUsageHeaderMarksRemoteFilledLine(t *testing.T) {
 	// leave both visible after the clip.
 	const cols = 64
 	narrow := []accountUsageLine{
-		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
-		{label: "andy@trecs.aero", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: usageBucket{Pct: 63}}, fetchedAt: now.Add(-time.Minute), via: "agent-workstation"},
+		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
+		{label: "andy@trecs.aero", email: "andy@trecs.aero", info: &UsageInfo{FiveHour: &usageBucket{Pct: 63}}, fetchedAt: now.Add(-time.Minute), via: "agent-workstation"},
 	}
 	b.Reset()
 	writeUsageHeader(&b, narrow, nil, nil, cols)
@@ -4122,7 +4150,7 @@ func TestUsageViaHostSanitizes(t *testing.T) {
 func TestRemoteFilledExpiredLineStillSaysExpired(t *testing.T) {
 	now := time.Now()
 	lines := dedupeAccounts(
-		AccountUsage{Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}, FetchedAt: now},
+		AccountUsage{Account: "andy@avisoma.com", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}, FetchedAt: now},
 		[]KnownAccountUsage{
 			{Name: "trecs", Account: "andy@trecs.aero", Expired: true},
 			{Name: "spare", Account: "andy@spare.dev", Reason: "rate limited"},
@@ -4153,7 +4181,7 @@ func TestRemoteFilledExpiredLineStillSaysExpired(t *testing.T) {
 	// label beside it.
 	const cols = 64
 	narrow := []accountUsageLine{
-		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: usageBucket{Pct: 41}}},
+		{label: "andy@avisoma.com", email: "andy@avisoma.com", info: &UsageInfo{FiveHour: &usageBucket{Pct: 41}}},
 		lines[1],
 	}
 	narrow[1].label = "andy@trecs.aero"

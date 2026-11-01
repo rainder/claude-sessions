@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -95,22 +96,64 @@ func fetchSessionsFromServer(
 	return parseServerSessions(data)
 }
 
+// fetchLocalServerSessions is the TUI's GET /sessions to this host's
+// service. It uses the list-sessions rule (localServiceGetSessions): a 404 on
+// loopback is the paste-only listener a --bind tailscale service leaves
+// there, so it retries on the Tailscale address. Before this, the TUI took
+// that 404 as "no service" and fell back to an in-process CollectLocal,
+// whose cold cost scan of every live transcript held the first frame for
+// seconds. The host that answered is remembered so later refreshes skip the
+// loopback miss and the `tailscale ip` exec; any failure forgets it.
 func fetchLocalServerSessions() ([]Session, error) {
-	srv, err := sessionServerConfig("")
+	localSessionsHost.Lock()
+	start := localSessionsHost.host
+	localSessionsHost.Unlock()
+	data, host, err := localServiceGetSessions(localServerTimeout, start)
+	localSessionsHost.Lock()
 	if err != nil {
-		return nil, err
+		localSessionsHost.host = ""
+	} else {
+		localSessionsHost.host = host
 	}
-	data, err := localServerRequestWithTimeout(
-		srv,
-		"/sessions",
-		http.MethodGet,
-		nil,
-		localServerTimeout,
-	)
+	localSessionsHost.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	return parseServerSessions(data)
+}
+
+// localSessionsHost is the service address that last answered the TUI's
+// GET /sessions ("" = start at loopback).
+var localSessionsHost struct {
+	sync.Mutex
+	host string
+}
+
+// localServiceGetSessions is one GET /sessions against this host's service
+// under tryLocalService's retry rule. start, when set, replaces loopback as
+// the first host tried. It returns the body and the host that answered.
+func localServiceGetSessions(timeout time.Duration, start string) ([]byte, string, error) {
+	srv, err := listSessionsServiceConfig()
+	if err != nil {
+		return nil, "", err
+	}
+	if start != "" {
+		srv.Host = start
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var data []byte
+	used, _, err := tryLocalService(ctx, srv, listSessionsTailscaleIPv4,
+		func(ctx context.Context, srv ServerConfig) (int, error) {
+			var status int
+			var err error
+			data, status, err = listSessionsAttempt(ctx, srv)
+			return status, err
+		})
+	if err != nil {
+		return nil, "", err
+	}
+	return data, used.Host, nil
 }
 
 func collectClientLocalWith(
@@ -207,20 +250,7 @@ func doListSessionsAttempt(ctx context.Context, srv ServerConfig) ([]byte, int, 
 // 401, 404 on both, timeout, 5xx, or a body that is not JSON). The caller
 // then lists this host without reading cost logs.
 func fetchListSessionsFromService() (sessions []Session, usage HostUsage, ok bool) {
-	srv, err := listSessionsServiceConfig()
-	if err != nil {
-		return nil, HostUsage{}, false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), listSessionsServerTimeout)
-	defer cancel()
-	var data []byte
-	_, _, err = tryLocalService(ctx, srv, listSessionsTailscaleIPv4,
-		func(ctx context.Context, srv ServerConfig) (int, error) {
-			var status int
-			var err error
-			data, status, err = listSessionsAttempt(ctx, srv)
-			return status, err
-		})
+	data, _, err := localServiceGetSessions(listSessionsServerTimeout, "")
 	if err != nil {
 		return nil, HostUsage{}, false
 	}

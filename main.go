@@ -158,7 +158,9 @@ live-view keys:
   q    quit`
 
 func cmdList() error {
-	local, err := CollectLocal()
+	// The service holds a warm transcript-cost cache; a direct collect
+	// rescans every live transcript from byte 0.
+	local, err := collectClientLocal()
 	if err != nil {
 		return err
 	}

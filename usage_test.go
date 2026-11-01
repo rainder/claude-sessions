@@ -139,8 +139,78 @@ func TestParseUsageNoExtraUsage(t *testing.T) {
 }
 
 func TestParseUsageMissingBuckets(t *testing.T) {
-	if _, err := parseUsage([]byte(`{}`)); err == nil {
-		t.Error("want error for body without five_hour/seven_day, got nil")
+	for name, body := range map[string]string{
+		"empty":                     `{}`,
+		"null seven_day, no limits": `{"five_hour": null, "seven_day": null}`,
+		"limits without weekly_all": `{"five_hour": null, "seven_day": null, "limits": [{"kind": "weekly_scoped", "percent": 62, "scope": {"model": {"display_name": "Fable"}}}]}`,
+		"five_hour alone":           `{"five_hour": {"utilization": 9.0, "resets_at": "2026-06-10T15:19:59+00:00"}}`,
+	} {
+		if _, err := parseUsage([]byte(body)); err == nil {
+			t.Errorf("%s: want error for a body without a weekly reading, got nil", name)
+		}
+	}
+}
+
+// The live response since Anthropic dropped the 5-hour window: five_hour is
+// null, extra_usage numbers are null, and there are new keys we ignore. The
+// 5-hour reading must come back absent (nil), never 0% with a zero reset.
+func TestParseUsageNullFiveHour(t *testing.T) {
+	body := []byte(`{
+		"five_hour": null,
+		"seven_day": {"utilization": 67.0, "resets_at": "2026-11-04T18:00:00+00:00",
+			"limit_dollars": null, "used_dollars": null, "remaining_dollars": null, "locked_reason": null},
+		"seven_day_opus": null, "seven_day_sonnet": null,
+		"limits": [
+			{"kind": "weekly_all", "group": "weekly", "percent": 67, "severity": "normal", "is_active": true, "scope": null},
+			{"kind": "weekly_scoped", "percent": 62, "scope": {"model": {"display_name": "Fable"}}, "is_active": false}
+		],
+		"extra_usage": {"is_enabled": false, "monthly_limit": null, "used_credits": null, "currency": null, "utilization": null},
+		"spend": {}, "pace": null, "weekly_scoped_shares": [], "seven_day_breakdown": null
+	}`)
+	u, err := parseUsage(body)
+	if err != nil {
+		t.Fatalf("parseUsage: %v", err)
+	}
+	if u.FiveHour != nil {
+		t.Errorf("FiveHour = %+v, want nil (absent)", *u.FiveHour)
+	}
+	wantReset := time.Date(2026, 11, 4, 18, 0, 0, 0, time.UTC)
+	if u.SevenDay.Pct != 67 || !u.SevenDay.ResetsAt.Equal(wantReset) {
+		t.Errorf("SevenDay = %+v, want 67%% resetting %v", u.SevenDay, wantReset)
+	}
+	if u.WeeklyScopedLabel != "Fable" || u.WeeklyScoped.Pct != 62 {
+		t.Errorf("scoped = %q %+v, want Fable 62%%", u.WeeklyScopedLabel, u.WeeklyScoped)
+	}
+	if u.Credits != (creditsInfo{}) {
+		t.Errorf("Credits = %+v, want zero value for all-null extra_usage", u.Credits)
+	}
+	// An absent five_hour key reads the same as null.
+	u, err = parseUsage([]byte(`{"seven_day": {"utilization": 5, "resets_at": "2026-11-04T18:00:00+00:00"}}`))
+	if err != nil || u.FiveHour != nil {
+		t.Errorf("missing five_hour key: u = %+v err = %v, want nil FiveHour", u, err)
+	}
+}
+
+// seven_day null falls back to the limits array's weekly_all entry.
+func TestParseUsageWeeklyAllFallback(t *testing.T) {
+	body := []byte(`{
+		"five_hour": null,
+		"seven_day": null,
+		"limits": [
+			{"kind": "weekly_scoped", "percent": 62, "resets_at": "2026-11-05T18:00:00+00:00", "scope": {"model": {"display_name": "Fable"}}},
+			{"kind": "weekly_all", "group": "weekly", "percent": 71, "resets_at": "2026-11-04T18:00:00+00:00", "scope": null}
+		]
+	}`)
+	u, err := parseUsage(body)
+	if err != nil {
+		t.Fatalf("parseUsage: %v", err)
+	}
+	wantReset := time.Date(2026, 11, 4, 18, 0, 0, 0, time.UTC)
+	if u.FiveHour != nil || u.SevenDay.Pct != 71 || !u.SevenDay.ResetsAt.Equal(wantReset) {
+		t.Errorf("FiveHour = %v SevenDay = %+v, want nil and 71%% resetting %v", u.FiveHour, u.SevenDay, wantReset)
+	}
+	if u.WeeklyScopedLabel != "Fable" || u.WeeklyScoped.Pct != 62 {
+		t.Errorf("scoped = %q %+v, want Fable 62%%", u.WeeklyScopedLabel, u.WeeklyScoped)
 	}
 }
 
@@ -298,7 +368,7 @@ func liveUsageFixture(pct float64) *AccountUsage {
 func liveUsageFixtureAged(pct float64, age time.Duration) *AccountUsage {
 	return &AccountUsage{
 		Account:   "andy@trecs.aero",
-		Info:      &UsageInfo{FiveHour: usageBucket{Pct: pct}},
+		Info:      &UsageInfo{FiveHour: &usageBucket{Pct: pct}},
 		FetchedAt: time.Now().Add(-age),
 	}
 }
@@ -793,7 +863,7 @@ func TestUsageFetcherDoesNotCoalesceAMismatchedEntry(t *testing.T) {
 	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
 	saveAccountCache("trecs", accountCacheEntry{
 		Account:   "someone@else.example",
-		Info:      &UsageInfo{FiveHour: usageBucket{Pct: 99}},
+		Info:      &UsageInfo{FiveHour: &usageBucket{Pct: 99}},
 		FetchedAt: time.Now(),
 	})
 	fresh := liveUsageFixture(21)
@@ -885,7 +955,7 @@ func TestUsageFetcherDropsCarryWhenCachedAccountDoesNotMatchLive(t *testing.T) {
 	loginAsWithSnapshot(t, "trecs", "andy@trecs.aero")
 	saveAccountCache("trecs", accountCacheEntry{
 		Account:            "someone@else.example",
-		Info:               &UsageInfo{FiveHour: usageBucket{Pct: 99}},
+		Info:               &UsageInfo{FiveHour: &usageBucket{Pct: 99}},
 		FetchedAt:          time.Now(),
 		BackoffStreak:      3,
 		BackoffNextAttempt: time.Now().Add(10 * time.Minute),
@@ -1063,7 +1133,7 @@ func TestUsageFetcherFallbackSurvivesAnUnrelatedDiskPass(t *testing.T) {
 		if calls <= 2 {
 			return nil, &usageHTTPError{Status: 429}
 		}
-		return &AccountUsage{Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: usageBucket{Pct: 55}}, FetchedAt: time.Now()}, nil
+		return &AccountUsage{Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 55}}, FetchedAt: time.Now()}, nil
 	}, noSaveAccountCache)
 
 	// Arm avisoma's fallback streak to 2 (first throttle imposes no wait, the
@@ -1125,7 +1195,7 @@ func TestUsageFetcherUnconfirmedIdentityWaitSurvivesALaterResolvedAccount(t *tes
 		if calls <= 2 {
 			return nil, &usageHTTPError{Status: 429}
 		}
-		return &AccountUsage{Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: usageBucket{Pct: 55}}, FetchedAt: time.Now()}, nil
+		return &AccountUsage{Account: "andy@trecs.aero", Info: &UsageInfo{FiveHour: &usageBucket{Pct: 55}}, FetchedAt: time.Now()}, nil
 	}, noSaveAccountCache)
 
 	// Arm the ownerless wait to streak 2.
@@ -1225,7 +1295,7 @@ func TestVerifiedUsageInfoBindsIdentityToTheToken(t *testing.T) {
 	t.Run("verified email lands on the reading", func(t *testing.T) {
 		var probed string
 		info, err := verifiedUsageInfo("tok-live",
-			func(string) (*UsageInfo, error) { return &UsageInfo{FiveHour: usageBucket{Pct: 12}}, nil },
+			func(string) (*UsageInfo, error) { return &UsageInfo{FiveHour: &usageBucket{Pct: 12}}, nil },
 			func(tok string) (string, error) { probed = tok; return "andy@trecs.aero", nil })
 		if err != nil {
 			t.Fatalf("err = %v", err)
@@ -1240,7 +1310,7 @@ func TestVerifiedUsageInfoBindsIdentityToTheToken(t *testing.T) {
 
 	t.Run("a failed probe is not a failed fetch", func(t *testing.T) {
 		info, err := verifiedUsageInfo("tok-live",
-			func(string) (*UsageInfo, error) { return &UsageInfo{FiveHour: usageBucket{Pct: 12}}, nil },
+			func(string) (*UsageInfo, error) { return &UsageInfo{FiveHour: &usageBucket{Pct: 12}}, nil },
 			func(string) (string, error) { return "", &usageHTTPError{Status: 429} })
 		if err != nil {
 			t.Fatalf("err = %v, want a probe failure to be non-fatal", err)

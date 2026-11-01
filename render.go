@@ -469,13 +469,15 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 }
 
 // claudeSegs builds the Anthropic header segments for a non-nil snapshot: the 5h
-// and weekly buckets, the model-scoped weekly segment when the account has one,
-// and the credits segment when extra usage is enabled.
+// bucket when the endpoint reported one (nil = no bar, never 0%), the weekly
+// bucket, the model-scoped weekly segment when the account has one, and the
+// credits segment when extra usage is enabled.
 func claudeSegs(u *UsageInfo) []usageSeg {
-	segs := []usageSeg{
-		{label: "5h", trailer: formatUntil(u.FiveHour.ResetsAt), pct: u.FiveHour.Pct},
-		{label: "wk", trailer: formatUntil(u.SevenDay.ResetsAt), pct: u.SevenDay.Pct},
+	var segs []usageSeg
+	if u.FiveHour != nil {
+		segs = append(segs, usageSeg{label: "5h", trailer: formatUntil(u.FiveHour.ResetsAt), pct: u.FiveHour.Pct})
 	}
+	segs = append(segs, usageSeg{label: "wk", trailer: formatUntil(u.SevenDay.ResetsAt), pct: u.SevenDay.Pct})
 	if u.WeeklyScopedLabel != "" {
 		segs = append(segs, usageSeg{
 			label:   u.WeeklyScopedLabel,

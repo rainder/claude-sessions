@@ -218,11 +218,12 @@ types into panes. Spec and plan: `docs/superpowers/`.
   within 10 points of the threshold. Decides on those fresh numbers only.
   Triggers only on a saved live account's fresh 7-day reading at the
   threshold whose reset has not passed; stale, expired or unsaved never
-  triggers. Target: lowest fresh 7-day below it, 5-hour and scoped weekly
-  below too, in the saved list. Switches through `fleetDoSwitch`, the page
-  chip's path (busy = skip, no cooldown; the live account must still be the
-  one read). 30 min cooldown from the later of the last attempt and the
-  last manual claude switch on the page; a torn state file starts one. A
+  triggers. Target: lowest fresh 7-day below it, 5-hour (when reported)
+  and scoped weekly below too, in the saved list. Switches through
+  `fleetDoSwitch`, the page chip's path (busy = skip, no cooldown; the live
+  account must still be the one read). 30 min cooldown from the later of
+  the last attempt and the last manual claude switch on the page; a torn
+  state file starts one. A
   failure (not `already_live`) is one FLEET line. No target = one FLEET line
   per episode; with saved accounts lacking a fresh reading the line says so
   and does not end the episode; a list error sends nothing. Kill switch:
@@ -307,6 +308,9 @@ status` prints them.
   backoff; written with `writeFileAtomic`. Both fetchers reload it every
   pass. `entryIdentityMatches` gates numbers **and** backoff. The `fb*`
   in-memory fallback is used only when the name does not resolve.
+- The 5-hour window is optional (`UsageInfo.FiveHour` nil): absent is no
+  bar and no check, never 0%. A null `seven_day` falls back to the `limits`
+  entry `weekly_all`; neither is a parse error.
 - Only 401/403 is `Expired`. Other reasons: `rate limited`, `server error`,
   `timed out`, `unreachable`, `bad snapshot`, `wrong identity`,
   `needs refresh`. An expired access token answers **429**, not 401.
