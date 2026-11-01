@@ -544,6 +544,7 @@ body.sv-open { overflow: hidden; }
 .ctgt-b::before { content: ""; position: absolute; inset: -7px 0; }
 .ctgt-b[aria-pressed="true"] { background: var(--text); color: var(--bg); }
 .ctgt-b:disabled { opacity: .45; cursor: not-allowed; }
+.ctgt-dot { position: absolute; top: 3px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .ctgt-why { flex: 1 1 0; min-width: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Why CHAT cannot take a message now; the draft stays in the box. */
 .desk-note { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 13.5px; font-weight: 600; color: var(--red); }
@@ -932,7 +933,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       <div class="chat-head">
         <h2 class="sec-h" id="h-chat">Chat</h2>
         <div class="ctgt" role="group" aria-label="Chat with">
-          <button class="ctgt-b" id="ctgt-fleet" type="button" aria-pressed="true">FLEET</button>
+          <button class="ctgt-b" id="ctgt-fleet" type="button" aria-pressed="true">FLEET<span class="ctgt-dot" id="ctgt-unread" hidden></span></button>
           <button class="ctgt-b" id="ctgt-desk" type="button" aria-pressed="false" disabled>CHAT</button>
         </div>
         <span class="ctgt-why" id="ctgt-why" hidden></span>
@@ -4068,6 +4069,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       guard(renderChat);
       return "again";
     }
+    const loaded = chat.sid !== null, had = new Set(chat.turns.keys());
     chat.sid = sid;
     chat.reason = str(d.reason);
     let changed = false;
@@ -4081,6 +4083,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
         chat.turns.set(turn.uuid, turn);
         changed = true;
       }
+      if (loaded && turn.role === "assistant" && !had.has(turn.uuid)) fleetUnread();
     }
     chat.pos = num(d.pos) ? d.pos : 0;
     // Keep the last CHAT_TURNS_MAX turns in memory and in the DOM. dropRev
@@ -5317,7 +5320,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   const DESK_POLL = 3000;
   const desk = {shown: false, picked: false, tmux: "", sid: "", gen: 0, timer: 0, busyGen: -1, waiting: false, target: null, source: "",
     turns: new Map(), pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", follow: true, unseen: false, rev: 0,
-    foldOpen: new Set(), loadingOlder: false, sending: false, textRev: 0, stale: false, savedTop: null};
+    foldOpen: new Set(), loadingOlder: false, sending: false, textRev: 0, stale: false, savedTop: null, fleetUnread: false};
   const DESK_REASONS = {
     "not running": "CHAT is not running",
     "ambiguous": "Two sessions are named CHAT",
@@ -5333,6 +5336,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     fleet_self: "CHAT is in FLEET's tmux session.",
     gone: "CHAT has ended.",
     ambiguous: "Two sessions share CHAT's tmux session.",
+    not_desk: "CHAT is not running.",
   });
   const deskSendErrors = Object.assign({}, svSendErrors, deskOpenErrors);
   const deskInfo = () => obj(state && state.desk);
@@ -5346,6 +5350,9 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const d = deskInfo(), ok = deskUsable(d);
     const why = !state || ok ? "" : deskReason(d);
     $("ctgt-fleet").setAttribute("aria-pressed", desk.shown ? "false" : "true");
+    $("ctgt-unread").hidden = !desk.fleetUnread;
+    if (desk.fleetUnread) $("ctgt-fleet").setAttribute("aria-label", "FLEET, new messages");
+    else $("ctgt-fleet").removeAttribute("aria-label");
     $("ctgt-desk").setAttribute("aria-pressed", desk.shown ? "true" : "false");
     $("ctgt-desk").disabled = !ok;
     $("ctgt-desk").title = why || "Chat with CHAT, your desk session";
@@ -5376,6 +5383,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       deskPoll();
     } else {
       clearTimeout(desk.timer);
+      desk.fleetUnread = false;
       const log = $("chat-log");
       if (chat.stale) guard(renderChat);
       if (chat.follow || chat.savedTop === null) log.scrollTop = log.scrollHeight;
@@ -5386,6 +5394,14 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     measure();
   }
   $("ctgt-fleet").addEventListener("click", () => showChatTarget("fleet", true));
+
+  // fleetUnread marks the FLEET toggle when FLEET answers while CHAT is
+  // shown: its log is hidden then. Showing FLEET clears the mark.
+  function fleetUnread() {
+    if (!desk.shown || desk.fleetUnread) return;
+    desk.fleetUnread = true;
+    renderTargetBar();
+  }
   $("ctgt-desk").addEventListener("click", () => showChatTarget("desk", true));
 
   // deskBind points the CHAT log at tmux session tm and starts it over.
@@ -5424,7 +5440,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     desk.waiting = false;
     const gen = desk.gen;
     desk.busyGen = gen;
-    let url = "/fleet/session?t=" + encodeURIComponent(desk.tmux);
+    let url = "/fleet/session?desk=1&t=" + encodeURIComponent(desk.tmux);
     if (desk.source === "transcript" && desk.pos !== null) url += "&since=" + desk.pos;
     const r = await svFetch(url, deskOpenErrors);
     if (desk.busyGen === gen) desk.busyGen = -1;
@@ -5446,7 +5462,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     desk.loadingOlder = true;
     guard(() => deskRender(true));
     const gen = desk.gen;
-    const r = await svFetch("/fleet/session?t=" + encodeURIComponent(desk.tmux) + "&before=" + desk.older + "&n=100", deskOpenErrors);
+    const r = await svFetch("/fleet/session?desk=1&t=" + encodeURIComponent(desk.tmux) + "&before=" + desk.older + "&n=100", deskOpenErrors);
     if (gen !== desk.gen) return;
     desk.loadingOlder = false;
     if (r.err) { toast(r.err, true); guard(() => deskRender(true)); return; }
@@ -5536,8 +5552,11 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     deskApplySend();
     const up = imgs.length ? await uploadImages(imgs) : {ok: true, paths: []};
     const full = up.ok ? withImages(text, up.paths) : "";
+    // The uploads take time: CHAT may have moved or gone meanwhile. desk:
+    // true has the server refuse a tmux session that no longer holds CHAT.
     const res = !up.ok ? {ok: false, error: up.error} : tooLong(full) ? {ok: false, error: TOO_LONG}
-      : await postSay("/fleet/session/say", {target: tmux, text: full}, deskSendErrors);
+      : !(deskCanSend() && desk.tmux === tmux) ? {ok: false, error: "CHAT changed while the images uploaded. Nothing was sent."}
+      : await postSay("/fleet/session/say", {target: tmux, text: full, desk: true}, deskSendErrors);
     desk.sending = false;
     if (res.ok) {
       if (ta.value.trim() === text) { ta.value = ""; deskGrow(); }
@@ -5550,6 +5569,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       $("desk-warn").hidden = false;
       toast("Delivery not confirmed. Check the transcript before you send again.", true);
     } else {
+      // Another session in CHAT's tmux: block send until a poll finds CHAT.
+      if (res.code === "not_desk") desk.error = res.error;
       toast(res.error, true);
     }
     deskApplySend();

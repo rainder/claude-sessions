@@ -234,6 +234,9 @@ types into panes. Spec and plan: `docs/superpowers/`.
   `CHAT` (`fleetDeskRow`, findFleet's rules). `/fleet/state` serves it as
   `desk`; the page reads and sends through `/fleet/session*`, whose
   allowlist also takes CHAT's tmux session (even disabled), never FLEET's.
+  The CHAT view pins every request (`desk=1`, `"desk": true`):
+  `fleetDeskPin` refuses with 409 `not_desk` unless that tmux session still
+  holds CHAT on the list the handler resolved from.
   Each target keeps its own DOM log and composer: a draft never crosses.
 - **Clarify:** claude FLEET only. The fork is exec'd (no shell) with
   `--setting-sources ""`, a fixed tool list and a deny list, and never

@@ -1,5 +1,7 @@
 package main
 
+import "net/http"
+
 // The chat panel's second target: Andy's desk session, the one session the
 // user named exactly CHAT. The page reads it from /fleet/state's "desk" and
 // talks to it through the session view's routes (/fleet/session,
@@ -77,4 +79,16 @@ func fleetDesk(sessions []Session) fleetDeskView {
 func fleetIsDesk(name string, sessions []Session) bool {
 	row, reason := fleetDeskRow(sessions)
 	return reason == "" && tmuxSessionPart(row.Tmux) == name
+}
+
+// fleetDeskPin refuses a CHAT-view request (desk=1, "desk": true) whose
+// tmux session no longer holds the usable CHAT row on sessions, the list the
+// handler resolved from. The page binds CHAT by tmux name between state
+// polls; without this, a new session started in that tmux after CHAT exited
+// would be shown and typed into as CHAT.
+func fleetDeskPin(name string, sessions []Session) *fleetSessionErr {
+	if fleetIsDesk(name, sessions) {
+		return nil
+	}
+	return &fleetSessionErr{http.StatusConflict, "not_desk", "CHAT is no longer in this tmux session"}
 }

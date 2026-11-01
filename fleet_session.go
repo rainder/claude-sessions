@@ -296,6 +296,13 @@ func (s *server) fleetSessionGet(w http.ResponseWriter, r *http.Request) {
 		p, err := strconv.ParseInt(v, 10, 64)
 		return p, err == nil && p >= lo && p <= hi
 	}
+	// desk=1 is the chat panel's CHAT view: the session must still be CHAT,
+	// not merely something in the tmux session CHAT used to hold.
+	pin := q.Get("desk")
+	if pin != "" && pin != "1" {
+		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: "bad_request", Error: "bad desk"})
+		return
+	}
 	since, ok1 := num("since", 0, 1<<62, 0)
 	before, ok2 := num("before", 1, 1<<62, -1)
 	n, ok3 := num("n", 1, 200, fleetSessionTurnsDefault)
@@ -309,6 +316,9 @@ func (s *server) fleetSessionGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, card, rerr := s.fleetResolveSession(name, sessions)
+	if rerr == nil && pin == "1" {
+		rerr = fleetDeskPin(name, sessions)
+	}
 	if rerr != nil {
 		writeFleetSessionErr(w, rerr, "")
 		return
@@ -356,25 +366,30 @@ type fleetSessionSayResult struct {
 	Target string `json:"target"`
 }
 
-func decodeFleetSessionSayBody(w http.ResponseWriter, r *http.Request) (target, text string, err error) {
+// fleetSessionSayBody is the say request. Desk marks a send from the chat
+// panel's CHAT view: it is refused unless the target still holds CHAT.
+type fleetSessionSayBody struct {
+	Target string `json:"target"`
+	Text   string `json:"text"`
+	Desk   bool   `json:"desk"`
+}
+
+func decodeFleetSessionSayBody(w http.ResponseWriter, r *http.Request) (fleetSessionSayBody, error) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
 	dec.DisallowUnknownFields()
-	var body *struct {
-		Target string `json:"target"`
-		Text   string `json:"text"`
-	}
+	var body *fleetSessionSayBody
 	if err := dec.Decode(&body); err != nil || body == nil {
-		return "", "", errors.New("bad json")
+		return fleetSessionSayBody{}, errors.New("bad json")
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return "", "", errors.New("bad json")
+		return fleetSessionSayBody{}, errors.New("bad json")
 	}
-	return body.Target, body.Text, nil
+	return *body, nil
 }
 
 var fleetSayOther = fleetSayWho{subject: "The session", pane: "the session pane"}
 
-// fleetSessionSay is POST /fleet/session/say {target, text}: the /fleet/say
+// fleetSessionSay is POST /fleet/session/say {target, text, desk?}: the /fleet/say
 // pipeline (fleetSayGateLocked, fleetTypeInto) aimed at an allowlisted
 // session, resolved from a fresh collect and a fresh state.json read. Sends
 // are logged to the say log as target and length only, never the text, and
@@ -390,7 +405,8 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, fleetSessionErrBody{Code: "origin", Error: "origin mismatch"})
 		return
 	}
-	name, raw, err := decodeFleetSessionSayBody(w, r)
+	body, err := decodeFleetSessionSayBody(w, r)
+	name, raw := body.Target, body.Text
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: "bad_json", Error: "bad json"})
 		return
@@ -420,6 +436,9 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, _, rerr := s.fleetResolveSession(name, sessions)
+	if rerr == nil && body.Desk {
+		rerr = fleetDeskPin(name, sessions)
+	}
 	if rerr != nil {
 		writeFleetSessionErr(w, rerr, name)
 		return

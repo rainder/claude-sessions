@@ -165,3 +165,60 @@ func TestFleetSessionSayToTheDesk(t *testing.T) {
 		t.Fatalf("copy-mode: %d %v typed %q", code, out, rig.typed)
 	}
 }
+
+// replacedDeskRows: CHAT has exited and an unnamed session on the working
+// list now runs in tmux session "desk", the one the page bound CHAT to.
+func replacedDeskRows() []Session {
+	return append(fleetSessionRows(fleetUUID(130)),
+		Session{PID: 31, SessionID: fleetUUID(131), Status: "idle", Tmux: "desk:0.0"})
+}
+
+func TestFleetSessionDeskPin(t *testing.T) {
+	// The real CHAT passes the pin.
+	s := fleetTestServer(t, deskRows())
+	s.fleet.disabled = deskDisabled
+	writeFleetFile(t, s, "state.json", fleetSessionState)
+	if code, out := getFleetSession(t, s, "t=desk&desk=1"); code != 200 {
+		t.Fatalf("pinned CHAT: %d %v", code, out)
+	}
+	if code, out := getFleetSession(t, s, "t=desk&desk=yes"); code != 400 || out["code"] != "bad_request" {
+		t.Fatalf("bad desk value: %d %v", code, out)
+	}
+	// Another session in CHAT's old tmux: the session view still opens it,
+	// the CHAT view does not.
+	s2 := fleetTestServer(t, replacedDeskRows())
+	writeFleetFile(t, s2, "state.json", fleetSessionState)
+	if code, out := getFleetSession(t, s2, "t=desk"); code != 200 {
+		t.Fatalf("unpinned: %d %v", code, out)
+	}
+	if code, out := getFleetSession(t, s2, "t=desk&desk=1"); code != 409 || out["code"] != "not_desk" {
+		t.Fatalf("pinned, not CHAT: %d %v", code, out)
+	}
+}
+
+func TestFleetSessionSayDeskPin(t *testing.T) {
+	// The real CHAT, flagged: typed.
+	rig := newSayRig(t, deskRows())
+	rig.s.fleet.disabled = deskDisabled
+	writeFleetFile(t, rig.s, "state.json", fleetSessionState)
+	code, out := rig.postSession(t, `{"target":"desk","text":"to chat","desk":true}`, nil)
+	if code != 200 || out["ok"] != true || len(rig.typed) != 1 {
+		t.Fatalf("pinned CHAT: %d %v typed %q", code, out, rig.typed)
+	}
+	// Another session in CHAT's old tmux: the flagged send is refused before
+	// any key; the unflagged one (the session view) still types.
+	rig2 := newSayRig(t, replacedDeskRows())
+	writeFleetFile(t, rig2.s, "state.json", fleetSessionState)
+	code, out = rig2.postSession(t, `{"target":"desk","text":"to chat","desk":true}`, nil)
+	if code != 409 || out["code"] != "not_desk" || out["target"] != "desk" || len(rig2.typed) != 0 {
+		t.Fatalf("pinned, not CHAT: %d %v typed %q", code, out, rig2.typed)
+	}
+	code, out = rig2.postSession(t, `{"target":"desk","text":"to the view"}`, nil)
+	if code != 200 || out["ok"] != true || len(rig2.typed) != 1 {
+		t.Fatalf("unpinned: %d %v typed %q", code, out, rig2.typed)
+	}
+	// The flag is a bool, nothing else.
+	if code, out := rig2.postSession(t, `{"target":"desk","text":"x","desk":"1"}`, nil); code != 400 {
+		t.Fatalf("string desk: %d %v", code, out)
+	}
+}

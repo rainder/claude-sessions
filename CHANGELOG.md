@@ -16,7 +16,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never go to the other one. The choice is kept per browser; when CHAT is not
   usable the switch is disabled with the reason beside it, and a CHAT view
   that loses its session stays put with send disabled. `/fleet/state` gains a
-  `desk` object (alive, tmux, status, tool, or a short reason).
+  `desk` object (alive, tmux, status, tool, or a short reason). The CHAT view
+  asks with `desk=1` / `"desk": true`, so a new session in CHAT's old tmux
+  session is refused (409 `not_desk`), never shown or typed into as CHAT. A
+  dot on the FLEET button marks a FLEET reply that arrived while CHAT was
+  shown.
 
 - FLEET Clarify: a side chat about one open decision card, in the TUI's
   FLEET view (`k`) and on the `/fleet` page (the Clarify button). The
