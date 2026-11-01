@@ -221,8 +221,9 @@ types into panes. Spec and plan: `docs/superpowers/`.
   triggers. Target: lowest fresh 7-day below it, 5-hour (when reported)
   and scoped weekly below too, in the saved list. Switches through
   `fleetDoSwitch`, the page chip's path (busy = skip, no cooldown; the live
-  account must still be the one read). 30 min cooldown from the later of the last attempt and the
-  last manual claude switch on the page; a torn state file starts one. A
+  account must still be the one read). 30 min cooldown from the later of
+  the last attempt and the last manual claude switch on the page; a torn
+  state file starts one. A
   failure (not `already_live`) is one FLEET line. No target = one FLEET line
   per episode; with saved accounts lacking a fresh reading the line says so
   and does not end the episode; a list error sends nothing. Kill switch:
