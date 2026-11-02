@@ -167,6 +167,9 @@ rows. Actions route on `s.Host != ""` to `remote_actions.go`.
   copy-mode. Resize revert is `set-window-option -u window-size`, never
   `resize-window -A` (that leaves `window-size manual` for good). `RunTUI`
   defers a revert; the local revert falls back to the snapshot's tmux name.
+- The `send-keys` CLI (cmd_send_keys.go) takes the TUI compose box's path
+  (`sendKeysToInspected`) and checks text with the server's own
+  `validateSendKeysText` before resolving, so local and remote refuse alike.
 - Accepted residual windows: a bare-pid kill with no tmux name, the gap
   between `reattest` and SIGTERM, and the gap before SIGKILL.
 

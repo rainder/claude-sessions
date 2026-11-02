@@ -13,6 +13,31 @@ import (
 // validator (server.go's sendKeysBody) enforce the identical limit.
 const sendKeysMaxLen = 4096
 
+// validateSendKeysText is the text rule for one send-keys message, shared by
+// the server (sendKeysBody) and the send-keys CLI, which checks before it
+// resolves or sends anything so a local and a remote send refuse the same
+// text. Empty and oversized text are refused, and so is every C0 control
+// byte, not just CR/LF/NUL: send-keys is single-line by design, and
+// sendKeys's -l flag only keeps tmux itself from parsing text as key names.
+// It says nothing about the receiving pty — an embedded ESC (0x1b) reaches
+// the pane as a literal byte and can still be interpreted there as the start
+// of a terminal escape sequence. DEL (0x7f) is rejected alongside it for the
+// same reason: neither belongs in message content.
+func validateSendKeysText(text string) error {
+	if text == "" {
+		return fmt.Errorf("text must not be empty")
+	}
+	if len(text) > sendKeysMaxLen {
+		return fmt.Errorf("text exceeds %d bytes", sendKeysMaxLen)
+	}
+	for i := 0; i < len(text); i++ {
+		if b := text[i]; b < 0x20 || b == 0x7f {
+			return fmt.Errorf("text must not contain control characters")
+		}
+	}
+	return nil
+}
+
 // sendKeysPaneInMode and sendKeysTmux are sendKeys' seams, so a test never
 // types into a real pane.
 var (

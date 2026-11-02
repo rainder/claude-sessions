@@ -221,22 +221,8 @@ func sendKeysBody(w http.ResponseWriter, r *http.Request) (sessionID, text strin
 	if body.SessionID == "" {
 		return "", "", fmt.Errorf("session_id is required")
 	}
-	if body.Text == "" {
-		return "", "", fmt.Errorf("text must not be empty")
-	}
-	if len(body.Text) > sendKeysMaxLen {
-		return "", "", fmt.Errorf("text exceeds %d bytes", sendKeysMaxLen)
-	}
-	// Every C0 control byte, not just CR/LF/NUL: send-keys is single-line by
-	// design, and sendKeys's -l flag only keeps tmux itself from parsing text
-	// as key names. It says nothing about the receiving pty — an embedded ESC
-	// (0x1b) reaches the pane as a literal byte and can still be interpreted
-	// there as the start of a terminal escape sequence. DEL (0x7f) is rejected
-	// alongside it for the same reason: neither belongs in message content.
-	for i := 0; i < len(body.Text); i++ {
-		if b := body.Text[i]; b < 0x20 || b == 0x7f {
-			return "", "", fmt.Errorf("text must not contain control characters")
-		}
+	if err := validateSendKeysText(body.Text); err != nil {
+		return "", "", err
 	}
 	return body.SessionID, body.Text, nil
 }

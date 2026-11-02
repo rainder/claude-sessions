@@ -124,6 +124,10 @@ claude-sessions notify-test                # send a test push to every registere
 claude-sessions attach PID                 # tmux attach (or switch-client)
 claude-sessions preview PID                # tmux capture or transcript tail
 claude-sessions tmux-info PID              # tmux session name for a pid
+claude-sessions send-keys [--server S] TARGET TEXT...
+                                            # type TEXT + Enter into a session's tmux pane;
+                                            # TARGET is a PID, HOST:PID, tmux session name,
+                                            # session name or id; TEXT "-" reads stdin
 ```
 
 ### Live-view keys
@@ -491,6 +495,7 @@ account_picker.go    Ctrl+W account picker overlay + switch action
 actions.go           local action handlers (kill/attach/preview/new)
 remote_actions.go    remote action handlers
 commands.go          scriptable subcommands (used by server shell-out)
+cmd_send_keys.go     `send-keys` CLI: target matcher + local/remote dispatch
 service.go           launchd/systemd unit rendering + install/uninstall/status
 paste.go             remote-image-paste server (broker + tmux binding)
 clipboard.go         remote-image-paste client (clipboard read + relay)

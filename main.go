@@ -48,6 +48,8 @@ func main() {
 		os.Exit(cmdPreview(args[1:]))
 	case "tmux-info":
 		os.Exit(cmdTmuxInfo(args[1:]))
+	case "send-keys":
+		os.Exit(cmdSendKeys(args[1:]))
 	case "attach":
 		os.Exit(cmdAttach(args[1:]))
 	case "clip-request":
@@ -108,6 +110,10 @@ subcommands:
   attach PID                      tmux attach (or switch-client) to a session
   preview PID                     print tmux capture or transcript tail
   tmux-info PID                   print tmux session name for a pid
+  send-keys [--server SERVER] TARGET TEXT...
+                                  type TEXT + Enter into a session's tmux pane;
+                                  TARGET is a PID, HOST:PID, tmux session name,
+                                  session name or id; TEXT "-" reads stdin
   pair [--port N]                 print a pairing QR for the iOS app
   service install [--port N] [--bind ADDR] | uninstall | restart | status
                                   run the server as a supervised background
