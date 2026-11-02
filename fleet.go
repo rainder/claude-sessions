@@ -24,9 +24,6 @@ const (
 	fleetCookieName   = "cs_fleet"
 	fleetCookieMaxAge = 30 * 24 * 60 * 60
 	fleetSessionName  = "FLEET"
-	// fleetDeskSessionName is Andy's desk session, which the page's chat
-	// panel can show in FLEET's place (fleet_desk.go).
-	fleetDeskSessionName = "CHAT"
 	// fleetStaleAfter: FLEET's idle monitor re-arms every 30 minutes, so a
 	// healthy FLEET writes state.json at least that often.
 	fleetStaleAfter = 40 * time.Minute
@@ -463,9 +460,13 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	fleetApplyNotes(rows, fleetNotes(state))
 	out["sessions"] = rows
 	out["ended"] = s.fleetEndedRows(now)
-	// Andy's desk session (named CHAT), which the chat panel can show
-	// instead of FLEET, from the same session list.
-	out["desk"] = fleetDesk(sessions)
+	// Andy's desk sessions (CHAT, SLACK), which the chat panel can show
+	// instead of FLEET, from the same session list. "desk" is the first
+	// desk (CHAT) alone, for a page loaded before "desks"; drop it in the
+	// next release.
+	desks := fleetDesks(sessions)
+	out["desks"] = desks
+	out["desk"] = desks[0]
 	// FLEET's waits-for graph, cleaned, with edges to ended sessions dropped.
 	out["deps"] = fleetDependencies(state, rows)
 	// FLEET's busy-session caps per model family, valid entries only.

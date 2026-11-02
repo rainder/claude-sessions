@@ -9,6 +9,17 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- FLEET page: the chat panel switch is now `FLEET | CHAT | SLACK`. SLACK is
+  Andy's Slack-triage session, the one session named `SLACK`, with CHAT's
+  guards, its own log, draft, images and send note, and it polls only while
+  shown. The browser remembers the last target by name (an old `chat`
+  choice still opens CHAT). `/fleet/state` gains `desks`, one entry per
+  desk in switch order; `desk` stays CHAT's for one release. A desk view
+  pins each request to its own desk (`desk=<NAME>`, `"desk": "<NAME>"`), so
+  a draft written for SLACK is refused (409 `not_desk`) if CHAT now holds
+  SLACK's old tmux session, and the other way round. While FLEET shows, the
+  line beside the switch gives every unusable desk's reason.
+
 - FLEET page: a `FLEET | CHAT` switch on the chat panel. CHAT shows and
   types into Andy's desk session, the one session named `CHAT`, through the
   session view's guarded send path, even when that session is disabled for

@@ -230,14 +230,17 @@ types into panes. Spec and plan: `docs/superpowers/`.
   `claude-sessions auto-switch off`, which also pins the live account.
 - **Session view:** `fleetResolveSession` is the allowlist; the pane address
   always comes from the resolved row, never the request.
-- **Desk (CHAT):** the chat panel's second target is the one session named
-  `CHAT` (`fleetDeskRow`, findFleet's rules). `/fleet/state` serves it as
-  `desk`; the page reads and sends through `/fleet/session*`, whose
-  allowlist also takes CHAT's tmux session (even disabled), never FLEET's.
-  The CHAT view pins every request (`desk=1`, `"desk": true`):
-  `fleetDeskPin` refuses with 409 `not_desk` unless that tmux session still
-  holds CHAT on the list the handler resolved from.
-  Each target keeps its own DOM log and composer: a draft never crosses.
+- **Desks (CHAT, SLACK):** the chat panel's other targets are the sessions
+  named in `fleetDeskSessionNames`, in order, one each (`fleetDeskRow`,
+  findFleet's rules). `/fleet/state` serves them as `desks` (and CHAT alone
+  as the old `desk`, for one release); the page reads and sends through
+  `/fleet/session*`, whose allowlist also takes a usable desk's tmux session
+  (even disabled), never FLEET's. A desk view pins every request to its own
+  desk (`desk=<NAME>`, `"desk": "<NAME>"`; the old `desk=1` / `true` mean
+  CHAT for one release): `fleetDeskPin` refuses with 409 `not_desk` unless
+  that tmux session still holds that desk on the list the handler resolved
+  from. Each target keeps its own DOM log and composer (one `#desk-tpl`
+  clone per desk): a draft never crosses.
 - **Clarify:** claude FLEET only. The fork is exec'd (no shell) with
   `--setting-sources ""`, a fixed tool list and a deny list, and never
   resumes FLEET's own session id.

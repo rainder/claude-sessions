@@ -537,8 +537,8 @@ body.sv-open { overflow: hidden; }
 .newmsg::before { content: ""; position: absolute; inset: -4px; }
 .chat-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px 0; }
 .chat-head .sec-h { margin: 0; }
-/* FLEET | CHAT: which session the chat panel shows (FLEET, or Andy's desk
-   session named CHAT). Each keeps its own log and composer. */
+/* FLEET | CHAT | SLACK: which session the chat panel shows (FLEET, or one
+   of Andy's desk sessions). Each keeps its own log and composer. */
 .ctgt { display: inline-flex; flex: none; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface2); }
 .ctgt-b { position: relative; min-height: 30px; padding: 0 13px; border: 0; border-radius: 99px; background: none; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .06em; cursor: pointer; }
 .ctgt-b::before { content: ""; position: absolute; inset: -7px 0; }
@@ -546,7 +546,7 @@ body.sv-open { overflow: hidden; }
 .ctgt-b:disabled { opacity: .45; cursor: not-allowed; }
 .ctgt-dot { position: absolute; top: 3px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .ctgt-why { flex: 1 1 0; min-width: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Why CHAT cannot take a message now; the draft stays in the box. */
+/* Why the desk cannot take a message now; the draft stays in the box. */
 .desk-note { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 13.5px; font-weight: 600; color: var(--red); }
 .desk-note .dot { background: var(--red); }
 .desk-pane-note { margin: 8px 2px 0; font-size: 12.5px; color: var(--muted); }
@@ -932,9 +932,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     <section class="chat" id="chat" aria-labelledby="h-chat">
       <div class="chat-head">
         <h2 class="sec-h" id="h-chat">Chat</h2>
-        <div class="ctgt" role="group" aria-label="Chat with">
+        <div class="ctgt" id="ctgt" role="group" aria-label="Chat with">
           <button class="ctgt-b" id="ctgt-fleet" type="button" aria-pressed="true">FLEET<span class="ctgt-dot" id="ctgt-unread" hidden></span></button>
-          <button class="ctgt-b" id="ctgt-desk" type="button" aria-pressed="false" disabled>CHAT</button>
         </div>
         <span class="ctgt-why" id="ctgt-why" hidden></span>
       </div>
@@ -956,22 +955,25 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
         </div>
         <p class="hint" id="say-hint"><span class="kbd-hint">Ctrl+Enter sends. Paste or drop images to attach them. </span>New lines become spaces.</p>
       </div>
-      <div class="log-wrap" id="desk-wrap" hidden>
-        <div class="chat-log" id="desk-log" aria-live="polite"></div>
-        <button class="newmsg" id="desk-newmsg" type="button" hidden>New messages ↓</button>
+      <!-- One desk's log and composer; deskNodes clones it per desk. -->
+      <template id="desk-tpl">
+      <div class="log-wrap" data-d="wrap" hidden>
+        <div class="chat-log" data-d="log" aria-live="polite"></div>
+        <button class="newmsg" data-d="newmsg" type="button" hidden>New messages ↓</button>
       </div>
-      <div class="composer" id="desk-comp" hidden>
-        <p class="desk-note" id="desk-note" hidden><span class="dot"></span><span id="desk-note-t"></span></p>
-        <p class="local-warn sv-warn" id="desk-warn" hidden><span class="dot"></span><span>Not confirmed — check the transcript before you send again</span></p>
-        <div class="att-strip" id="desk-att" aria-label="Images to send" hidden></div>
+      <div class="composer" data-d="comp" hidden>
+        <p class="desk-note" data-d="note" hidden><span class="dot"></span><span data-d="noteT"></span></p>
+        <p class="local-warn sv-warn" data-d="warn" hidden><span class="dot"></span><span>Not confirmed — check the transcript before you send again</span></p>
+        <div class="att-strip" data-d="att" aria-label="Images to send" hidden></div>
         <div class="composer-row">
-          <button class="btn att-btn" id="desk-attach" type="button" aria-label="Attach images" title="Attach images"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button>
-          <input type="file" id="desk-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-          <textarea id="desk-say" rows="1" maxlength="4096" placeholder="Write to CHAT" aria-label="Message to CHAT"></textarea>
-          <button class="btn btn-primary" id="desk-send" type="button">Send</button>
+          <button class="btn att-btn" data-d="attach" type="button" aria-label="Attach images" title="Attach images"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button>
+          <input type="file" data-d="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <textarea data-d="say" rows="1" maxlength="4096"></textarea>
+          <button class="btn btn-primary" data-d="send" type="button">Send</button>
         </div>
         <p class="hint"><span class="kbd-hint">Ctrl+Enter sends. Paste or drop images to attach them. </span>New lines become spaces.</p>
       </div>
+      </template>
     </section>
 
     <div class="col col-lists">
@@ -1695,7 +1697,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (expired) return;
     expired = true;
     stopAll();
-    guard(deskApplySend);
+    guard(deskApplySends);
     renderBanners();
     applyEnabled();
   }
@@ -3943,7 +3945,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (!id || !clarify.armed || !ch || !ch.draft) return;
     const draft = {text: str(ch.draft.text)};
     closeClarify();
-    showChatTarget("fleet", false);
+    showChatTarget(null, false);
     const ta = $("say"), old = ta.value.trim();
     ta.value = cutUTF8("Andy decides on " + id + ": " + draft.text.replace(/\s+/g, " ").trim(), SAY_MAX_BYTES);
     if (old && !CLARIFY_BARE.test(old)) toast("Replaced the text in the chat box.");
@@ -4408,7 +4410,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // prefillChat starts the FLEET chat input with prefix (e.g. "About card
   // <id>: "), keeps any draft after it and focuses the input.
   function prefillChat(prefix) {
-    showChatTarget("fleet", false);
+    showChatTarget(null, false);
     const ta = $("say");
     if (!ta.value.startsWith(prefix)) ta.value = prefix + ta.value.replace(/^\s+/, "");
     grow();
@@ -4590,7 +4592,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   });
   $("say-send").addEventListener("click", sendChat);
   const sayAtt = attachBox({strip: $("say-att"), button: $("say-attach"), input: $("say-file"), ta: $("say"),
-    zone: $("chat"), comp: $("chat-comp"), enabled: () => alive && !expired && !chatBusy && !desk.shown});
+    zone: $("chat"), comp: $("chat-comp"), enabled: () => alive && !expired && !chatBusy && !deskShown});
 
   // While FLEET is down (not_live) or the chat is the read-only copy, one
   // compact strip with a Start button stands in for the input.
@@ -4721,7 +4723,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const w = t.offsetWidth, h = t.offsetHeight;
     const left = (window.innerWidth - w) / 2, right = left + w;
     let top = Infinity;
-    for (const el of [$("tabbar"), $("composer-row").closest(".composer"), $("desk-comp"), $("sv-comp")]) {
+    for (const el of [$("tabbar"), $("composer-row").closest(".composer"), ...desks.map(D => D.els.comp), $("sv-comp")]) {
       if (!el || el.hidden) continue;
       const r = el.getBoundingClientRect();
       if (r.height === 0 || r.right <= left || r.left >= right) continue;
@@ -4772,13 +4774,13 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (!expired && !document.hidden) p.timer = setTimeout(() => run(p), again ? 0 : p.cur);
   }
   function runNow(name) { const p = pollers[name]; return p ? run(p) : Promise.resolve(); }
-  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); clearTimeout(sv.timer); clearTimeout(desk.timer); }
+  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); clearTimeout(sv.timer); for (const D of desks) clearTimeout(D.timer); }
   function startAll() {
     if (expired) return;
     for (const p of Object.values(pollers)) { clearTimeout(p.timer); p.cur = p.base; run(p); }
     loadHistory(false);
     if (sv.open) svPoll();
-    if (desk.shown) deskPoll();
+    if (deskShown) deskPoll(deskShown);
   }
 
   document.addEventListener("visibilitychange", () => {
@@ -4803,7 +4805,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (v === view) return;
     if (view) viewScroll[view] = window.scrollY;
     if (view === "chat" && $("chat-log").clientHeight) chat.savedTop = $("chat-log").scrollTop;
-    if (view === "chat" && $("desk-log").clientHeight) desk.savedTop = $("desk-log").scrollTop;
+    if (view === "chat" && deskShown && deskShown.els.log.clientHeight) deskShown.savedTop = deskShown.els.log.scrollTop;
     for (const x of VIEWS) document.body.classList.toggle("v-" + x, x === v);
     view = v;
     for (const b of document.querySelectorAll(".tab")) {
@@ -4818,7 +4820,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       if (chat.stale) guard(renderChat);
       if (chat.follow || chat.savedTop === null) log.scrollTop = log.scrollHeight;
       else log.scrollTop = chat.savedTop;
-      if (desk.shown) deskReveal();
+      if (deskShown) deskReveal(deskShown);
     }
     markCode();
   }
@@ -4848,7 +4850,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   });
   // Leaving the phone layout shows every part again; render a chat that was
   // skipped while it was hidden.
-  phoneMQ.addEventListener("change", () => { measure(); if (chat.stale) guard(renderChat); if (desk.shown) deskReveal(); });
+  phoneMQ.addEventListener("change", () => { measure(); if (chat.stale) guard(renderChat); if (deskShown) deskReveal(deskShown); });
 
   // ---- layout measures ---------------------------------------------------
   // --hdr keeps the sticky chat column under the header on wide screens and
@@ -4862,7 +4864,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const vv = window.visualViewport;
     // Keyboard open = the chat input has focus on a touch phone. A pinch
     // zoom also shrinks visualViewport, so that alone does not count.
-    const typing = document.activeElement === $("say") || document.activeElement === $("sv-say") || document.activeElement === $("desk-say");
+    const typing = document.activeElement === $("say") || document.activeElement === $("sv-say") || desks.some(D => document.activeElement === D.els.say);
     const kb = isPhone() && typing && (coarse.matches || (!!vv && window.innerHeight - vv.height > 120));
     const vh = kb && vv ? vv.height : window.innerHeight;
     document.body.classList.toggle("kb", !!kb);
@@ -5058,7 +5060,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     guard(() => svRender(prepend, prepend));
   }
   // mergeSession takes one /fleet/session answer into v (the session view's
-  // sv, or the chat panel's CHAT log): the target, then the turns or the
+  // sv, or a desk's log on the chat panel): the target, then the turns or the
   // pane. older: a "Load older" page, put in front. Answers whether the
   // render keeps Andy's place (prepend), or null when an older page does
   // not fit what v shows.
@@ -5300,299 +5302,356 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   $("sv-say").addEventListener("focus", () => setTimeout(measure, 50));
   $("sv-say").addEventListener("blur", () => setTimeout(measure, 50));
 
-  // ---- chat target: FLEET or CHAT ------------------------------------------
-  // The chat panel shows FLEET, or Andy's desk session (the one session
-  // named CHAT, /fleet/state's desk) through the session view's routes. Each
-  // target has its own log, draft, images and "not confirmed" note in its
-  // own elements, so a draft can never go to the other one. FLEET's chat
-  // keeps polling whichever is shown; CHAT polls only while it is shown.
-  // The choice is kept per browser (TARGET_KEY) and applied once, on the
-  // first state answer, when CHAT is usable. Later CHAT going away never
+  // deskNodes builds one desk's log and composer from #desk-tpl, named for
+  // that desk, at the end of the chat panel (hidden until shown).
+  function deskNodes(name) {
+    const frag = $("desk-tpl").content.cloneNode(true), n = {};
+    for (const x of frag.querySelectorAll("[data-d]")) n[x.dataset.d] = x;
+    n.say.placeholder = "Write to " + name;
+    n.say.setAttribute("aria-label", "Message to " + name);
+    $("chat").append(frag);
+    return n;
+  }
+
+  // ---- chat target: FLEET or a desk ----------------------------------------
+  // The chat panel shows FLEET, or one of Andy's desk sessions
+  // (/fleet/state's desks, in its order: CHAT, his desk; SLACK, his Slack
+  // triage) through the session view's routes. Each target has its own log,
+  // draft, images and "not confirmed" note in its own elements, and a desk's
+  // send reads only its own box and names its own desk, so a draft can never
+  // go to another target. FLEET's chat keeps polling whichever is shown; a
+  // desk polls only while it is shown. The choice is kept per browser
+  // (TARGET_KEY: "fleet" or the desk's name) and applied once, on the first
+  // state answer, when that desk is usable. Later a desk going away never
   // moves the view: send is disabled and the reason shows under the log.
-  // desk: shown (CHAT is the panel's target), picked (the first state
-  // answer was seen), tmux (the tmux session the log belongs to), sid (its
-  // session id: a new one starts the log over), gen (counts binds; an
-  // answer for an older one is dropped), waiting (a poll skipped while CHAT
-  // was not usable, so the next usable state polls), error (the last
-  // /fleet/session refusal), stale (a render skipped while hidden), the
-  // rest as sv.
+  // desks: one object per desk the server listed (deskMake), never removed.
+  // deskShown: the desk shown, or null for FLEET. deskPicked: the first
+  // state answer was seen. fleetUnreadMark: FLEET answered while a desk
+  // showed. A desk: name, btn (its switch button), els (its nodes), att (its
+  // images), tmux (the tmux session the log belongs to), sid (its session id:
+  // a new one starts the log over), gen (counts binds; an answer for an older
+  // one is dropped), waiting (a poll skipped while the desk was not usable, so
+  // the next usable state polls), error (the last /fleet/session refusal),
+  // stale (a render skipped while hidden), the rest as sv.
   const TARGET_KEY = "fleet.chatTarget";
   const DESK_POLL = 3000;
-  const desk = {shown: false, picked: false, tmux: "", sid: "", gen: 0, timer: 0, busyGen: -1, waiting: false, target: null, source: "",
-    turns: new Map(), pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", follow: true, unseen: false, rev: 0,
-    foldOpen: new Set(), loadingOlder: false, sending: false, textRev: 0, stale: false, savedTop: null, fleetUnread: false};
+  // A desk name is the server's, but still only ever text; the cap keeps a
+  // broken state from filling the switch.
+  const DESK_NAME = /^[A-Z][A-Z0-9_-]{0,31}$/, DESKS_MAX = 4;
+  const desks = [];
+  let deskShown = null, deskPicked = false, fleetUnreadMark = false;
   const DESK_REASONS = {
-    "not running": "CHAT is not running",
-    "ambiguous": "Two sessions are named CHAT",
-    "remote": "CHAT is on another host",
-    "not in tmux": "CHAT is not in tmux",
-    "bad tmux name": "CHAT's tmux name is not usable",
-    "in FLEET's tmux": "CHAT is in FLEET's tmux session",
-    "shares tmux": "CHAT shares its tmux session",
-    "session list failed": "The session list failed",
+    "not running": n => n + " is not running",
+    "ambiguous": n => "Two sessions are named " + n,
+    "remote": n => n + " is on another host",
+    "not in tmux": n => n + " is not in tmux",
+    "bad tmux name": n => n + "'s tmux name is not usable",
+    "in FLEET's tmux": n => n + " is in FLEET's tmux session",
+    "shares tmux": n => n + " shares its tmux session",
+    "session list failed": () => "The session list failed",
   };
-  const deskOpenErrors = Object.assign({}, svOpenErrors, {
-    not_allowed: "CHAT is not the desk session any more.",
-    fleet_self: "CHAT is in FLEET's tmux session.",
-    gone: "CHAT has ended.",
-    ambiguous: "Two sessions share CHAT's tmux session.",
-    not_desk: "CHAT is not running.",
+  const deskOpenErrors = n => Object.assign({}, svOpenErrors, {
+    not_allowed: n + " is not a desk session any more.",
+    fleet_self: n + " is in FLEET's tmux session.",
+    gone: n + " has ended.",
+    ambiguous: "Two sessions share " + n + "'s tmux session.",
+    not_desk: n + " is not running.",
   });
-  const deskSendErrors = Object.assign({}, svSendErrors, deskOpenErrors);
-  const deskInfo = () => obj(state && state.desk);
+  const deskInfo = D => arr(state && state.desks).map(obj).find(d => d && str(d.name) === D.name) || null;
   const deskUsable = d => !!d && d.alive === true && SV_NAME.test(str(d.tmux));
-  const deskReason = d => !d ? "CHAT is not available" : DESK_REASONS[str(d.reason)] || "CHAT is not available";
+  function deskReason(D, d) {
+    const f = d && DESK_REASONS[str(d.reason)];
+    return f ? f(D.name) : D.name + " is not available";
+  }
+  // deskPref is the remembered target: a desk name, or "fleet". "chat" is
+  // CHAT as a page from before SLACK saved it.
   function deskPref() {
-    try { return localStorage.getItem(TARGET_KEY) === "chat" ? "chat" : "fleet"; } catch { return "fleet"; }
+    let v = "";
+    try { v = localStorage.getItem(TARGET_KEY) || ""; } catch { /* storage off */ }
+    return v === "chat" ? "CHAT" : v;
   }
 
+  // deskMake adds desk name: its switch button after the others, its own
+  // log and composer, and their handlers, all bound to this desk alone.
+  function deskMake(name) {
+    const D = {name, tmux: "", sid: "", gen: 0, timer: 0, busyGen: -1, waiting: false, target: null, source: "",
+      turns: new Map(), pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", follow: true, unseen: false, rev: 0,
+      foldOpen: new Set(), loadingOlder: false, sending: false, textRev: 0, stale: false, savedTop: null,
+      openErrors: deskOpenErrors(name)};
+    D.sendErrors = Object.assign({}, svSendErrors, D.openErrors);
+    const e = D.els = deskNodes(name);
+    D.btn = el("button", "ctgt-b", name);
+    D.btn.type = "button";
+    D.btn.setAttribute("aria-pressed", "false");
+    D.btn.disabled = true;
+    D.btn.addEventListener("click", () => showChatTarget(D, true));
+    $("ctgt").append(D.btn);
+    e.log.addEventListener("scroll", () => {
+      if (!e.log.clientHeight) return;
+      D.follow = e.log.scrollHeight - e.log.scrollTop - e.log.clientHeight < 80;
+      if (D.follow && D.unseen) { D.unseen = false; e.newmsg.hidden = true; }
+    }, {passive: true});
+    if (window.ResizeObserver) new ResizeObserver(() => { if (deskShown === D && D.follow) e.log.scrollTop = e.log.scrollHeight; }).observe(e.log);
+    e.newmsg.addEventListener("click", () => {
+      D.unseen = false; D.follow = true;
+      e.newmsg.hidden = true;
+      e.log.scrollTo({top: e.log.scrollHeight, behavior: "smooth"});
+    });
+    e.send.addEventListener("click", () => deskSend(D));
+    D.att = attachBox({strip: e.att, button: e.attach, input: e.file, ta: e.say,
+      zone: $("chat"), comp: e.comp, enabled: () => deskCanSend(D) && !D.sending, after: () => deskApplySend(D)});
+    e.say.addEventListener("input", () => {
+      deskGrow(D);
+      if (!e.say.value.trim()) e.warn.hidden = true;
+      deskApplySend(D);
+    });
+    e.say.addEventListener("keydown", ev => {
+      if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); if (!ev.repeat) deskSend(D); }
+    });
+    e.say.addEventListener("focus", () => setTimeout(measure, 50));
+    e.say.addEventListener("blur", () => setTimeout(measure, 50));
+    desks.push(D);
+    return D;
+  }
+
+  // renderTargetBar: FLEET's button, then one per desk, disabled with its
+  // reason (title) while not usable. The line beside them gives the reasons
+  // of every unusable desk while FLEET shows, the shown desk's own while one
+  // shows.
   function renderTargetBar() {
-    const d = deskInfo(), ok = deskUsable(d);
-    const why = !state || ok ? "" : deskReason(d);
-    $("ctgt-fleet").setAttribute("aria-pressed", desk.shown ? "false" : "true");
-    $("ctgt-unread").hidden = !desk.fleetUnread;
-    if (desk.fleetUnread) $("ctgt-fleet").setAttribute("aria-label", "FLEET, new messages");
+    $("ctgt-fleet").setAttribute("aria-pressed", deskShown ? "false" : "true");
+    $("ctgt-unread").hidden = !fleetUnreadMark;
+    if (fleetUnreadMark) $("ctgt-fleet").setAttribute("aria-label", "FLEET, new messages");
     else $("ctgt-fleet").removeAttribute("aria-label");
-    $("ctgt-desk").setAttribute("aria-pressed", desk.shown ? "true" : "false");
-    $("ctgt-desk").disabled = !ok;
-    $("ctgt-desk").title = why || "Chat with CHAT, your desk session";
-    $("ctgt-why").textContent = why;
-    $("ctgt-why").title = why;
-    $("ctgt-why").hidden = !why;
+    const why = [];
+    for (const D of desks) {
+      const d = deskInfo(D), ok = deskUsable(d), r = !state || ok ? "" : deskReason(D, d);
+      D.btn.setAttribute("aria-pressed", D === deskShown ? "true" : "false");
+      D.btn.disabled = !ok;
+      D.btn.title = r || "Chat with your " + D.name + " session";
+      if (r && (!deskShown || D === deskShown)) why.push(r);
+    }
+    const w = why.join(" · ");
+    $("ctgt-why").textContent = w;
+    $("ctgt-why").title = w;
+    $("ctgt-why").hidden = !w;
   }
+  function deskApplySends() { for (const D of desks) deskApplySend(D); }
 
-  // showChatTarget shows "fleet" or "desk". persist: Andy chose it (the
-  // toggle), so it is the browser's choice from now on. CHAT opens only
-  // while it is usable.
-  function showChatTarget(t, persist) {
-    const toDesk = t === "desk";
-    if (toDesk && !deskUsable(deskInfo())) return;
-    if (persist) { try { localStorage.setItem(TARGET_KEY, toDesk ? "chat" : "fleet"); } catch { /* storage off */ } }
-    if (toDesk === desk.shown) return;
-    if (desk.shown) { const l = $("desk-log"); if (l.clientHeight) desk.savedTop = l.scrollTop; }
-    else { const l = $("chat-log"); if (l.clientHeight) chat.savedTop = l.scrollTop; }
-    desk.shown = toDesk;
-    $("chat-wrap").hidden = toDesk;
-    $("chat-comp").hidden = toDesk;
-    $("desk-wrap").hidden = !toDesk;
-    $("desk-comp").hidden = !toDesk;
-    if (toDesk) {
-      const tm = str(deskInfo().tmux);
-      if (tm !== desk.tmux) deskBind(tm);
-      deskReveal();
-      deskPoll();
+  // showChatTarget shows desk D, or FLEET for null. persist: Andy chose it
+  // (the switch), so it is the browser's choice from now on. A desk opens
+  // only while it is usable.
+  function showChatTarget(D, persist) {
+    if (D && !deskUsable(deskInfo(D))) return;
+    if (persist) { try { localStorage.setItem(TARGET_KEY, D ? D.name : "fleet"); } catch { /* storage off */ } }
+    if (D === deskShown) return;
+    const was = deskShown;
+    if (was) {
+      if (was.els.log.clientHeight) was.savedTop = was.els.log.scrollTop;
+      clearTimeout(was.timer);
+    } else { const l = $("chat-log"); if (l.clientHeight) chat.savedTop = l.scrollTop; }
+    deskShown = D;
+    $("chat-wrap").hidden = !!D;
+    $("chat-comp").hidden = !!D;
+    for (const x of desks) { x.els.wrap.hidden = x !== D; x.els.comp.hidden = x !== D; }
+    if (D) {
+      const tm = str(deskInfo(D).tmux);
+      if (tm !== D.tmux) deskBind(D, tm);
+      deskReveal(D);
+      deskPoll(D);
     } else {
-      clearTimeout(desk.timer);
-      desk.fleetUnread = false;
+      fleetUnreadMark = false;
       const log = $("chat-log");
       if (chat.stale) guard(renderChat);
       if (chat.follow || chat.savedTop === null) log.scrollTop = log.scrollHeight;
       else log.scrollTop = chat.savedTop;
     }
     renderTargetBar();
-    deskApplySend();
+    deskApplySends();
     measure();
   }
-  $("ctgt-fleet").addEventListener("click", () => showChatTarget("fleet", true));
+  $("ctgt-fleet").addEventListener("click", () => showChatTarget(null, true));
 
-  // fleetUnread marks the FLEET toggle when FLEET answers while CHAT is
+  // fleetUnread marks the FLEET button when FLEET answers while a desk is
   // shown: its log is hidden then. Showing FLEET clears the mark.
   function fleetUnread() {
-    if (!desk.shown || desk.fleetUnread) return;
-    desk.fleetUnread = true;
+    if (!deskShown || fleetUnreadMark) return;
+    fleetUnreadMark = true;
     renderTargetBar();
   }
-  $("ctgt-desk").addEventListener("click", () => showChatTarget("desk", true));
 
-  // deskBind points the CHAT log at tmux session tm and starts it over.
-  function deskBind(tm) {
-    Object.assign(desk, {tmux: tm, sid: "", target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
+  // deskBind points D's log at tmux session tm and starts it over.
+  function deskBind(D, tm) {
+    Object.assign(D, {tmux: tm, sid: "", target: null, source: "", pos: null, older: 0, pane: "", error: "", loadFail: false,
       key: "", follow: true, unseen: false, rev: 0, loadingOlder: false, savedTop: null});
-    desk.turns = new Map(); desk.foldOpen = new Set();
-    desk.gen++;
-    guard(() => deskRender(true));
+    D.turns = new Map(); D.foldOpen = new Set();
+    D.gen++;
+    guard(() => deskRender(D, true));
   }
 
-  // applyDesk runs on every state answer.
+  // applyDesk runs on every state answer: a desk named for the first time
+  // gets its button and log.
   function applyDesk() {
-    const d = deskInfo(), ok = deskUsable(d);
-    if (!desk.picked) {
-      desk.picked = true;
-      if (ok && deskPref() === "chat") showChatTarget("desk", false);
+    for (const d of arr(state && state.desks).map(obj)) {
+      const name = d ? str(d.name) : "";
+      if (DESK_NAME.test(name) && name !== "FLEET" && desks.length < DESKS_MAX && !desks.some(x => x.name === name)) deskMake(name);
     }
-    if (desk.shown && ok) {
-      if (str(d.tmux) !== desk.tmux) { deskBind(str(d.tmux)); deskPoll(); }
-      else if (desk.waiting) deskPoll();
+    if (!deskPicked) {
+      deskPicked = true;
+      const D = desks.find(x => x.name === deskPref());
+      if (D && deskUsable(deskInfo(D))) showChatTarget(D, false);
+    }
+    const D = deskShown, d = D && deskInfo(D);
+    if (D && deskUsable(d)) {
+      if (str(d.tmux) !== D.tmux) { deskBind(D, str(d.tmux)); deskPoll(D); }
+      else if (D.waiting) deskPoll(D);
     }
     renderTargetBar();
-    deskApplySend();
+    deskApplySends();
   }
 
-  // deskPoll asks for what is new every DESK_POLL ms while CHAT is shown,
+  // deskURL is a /fleet/session read for D's bound tmux session, pinned to
+  // D: the server refuses it unless that session still holds D.
+  const deskURL = D => "/fleet/session?desk=" + encodeURIComponent(D.name) + "&t=" + encodeURIComponent(D.tmux);
+
+  // deskPoll asks for what is new every DESK_POLL ms while D is shown,
   // usable at the bound tmux session, and the page is visible. As svPoll,
   // one timer or one request at a time. A refusal keeps the log and the
   // polls; it shows under the log and blocks send.
-  async function deskPoll() {
-    clearTimeout(desk.timer);
-    if (!desk.shown || expired || document.hidden || desk.busyGen === desk.gen) return;
-    const d = deskInfo();
-    if (!deskUsable(d) || str(d.tmux) !== desk.tmux) { desk.waiting = true; return; }
-    desk.waiting = false;
-    const gen = desk.gen;
-    desk.busyGen = gen;
-    let url = "/fleet/session?desk=1&t=" + encodeURIComponent(desk.tmux);
-    if (desk.source === "transcript" && desk.pos !== null) url += "&since=" + desk.pos;
-    const r = await svFetch(url, deskOpenErrors);
-    if (desk.busyGen === gen) desk.busyGen = -1;
+  async function deskPoll(D) {
+    clearTimeout(D.timer);
+    if (deskShown !== D || expired || document.hidden || D.busyGen === D.gen) return;
+    const d = deskInfo(D);
+    if (!deskUsable(d) || str(d.tmux) !== D.tmux) { D.waiting = true; return; }
+    D.waiting = false;
+    const gen = D.gen;
+    D.busyGen = gen;
+    let url = deskURL(D);
+    if (D.source === "transcript" && D.pos !== null) url += "&since=" + D.pos;
+    const r = await svFetch(url, D.openErrors);
+    if (D.busyGen === gen) D.busyGen = -1;
     if (r.auth) return;
-    if (gen !== desk.gen) { if (desk.shown) deskPoll(); return; }
+    if (gen !== D.gen) { if (deskShown === D) deskPoll(D); return; }
     let again = false;
     if (r.err) {
-      desk.error = r.err;
+      D.error = r.err;
       // Nothing shown yet: say why in the log too.
-      if (!desk.source && !desk.loadFail) { desk.loadFail = true; guard(() => deskRender(true)); }
-    } else if (r.body) { desk.error = ""; desk.loadFail = false; guard(() => { again = deskApply(r.body, false) === "again"; }); }
-    else if (!desk.source) { desk.loadFail = true; guard(() => deskRender()); }
-    deskApplySend();
-    if (desk.shown && !document.hidden && !expired) desk.timer = setTimeout(deskPoll, again ? 0 : DESK_POLL);
+      if (!D.source && !D.loadFail) { D.loadFail = true; guard(() => deskRender(D, true)); }
+    } else if (r.body) { D.error = ""; D.loadFail = false; guard(() => { again = deskApply(D, r.body, false) === "again"; }); }
+    else if (!D.source) { D.loadFail = true; guard(() => deskRender(D)); }
+    deskApplySend(D);
+    if (deskShown === D && !document.hidden && !expired) D.timer = setTimeout(() => deskPoll(D), again ? 0 : DESK_POLL);
   }
 
-  async function deskLoadOlder() {
-    if (desk.loadingOlder || !desk.older || desk.source !== "transcript") return;
-    desk.loadingOlder = true;
-    guard(() => deskRender(true));
-    const gen = desk.gen;
-    const r = await svFetch("/fleet/session?desk=1&t=" + encodeURIComponent(desk.tmux) + "&before=" + desk.older + "&n=100", deskOpenErrors);
-    if (gen !== desk.gen) return;
-    desk.loadingOlder = false;
-    if (r.err) { toast(r.err, true); guard(() => deskRender(true)); return; }
-    if (!r.body) { toast("The page cannot load older turns. Try again.", true); guard(() => deskRender(true)); return; }
-    guard(() => deskApply(r.body, true));
+  async function deskLoadOlder(D) {
+    if (D.loadingOlder || !D.older || D.source !== "transcript") return;
+    D.loadingOlder = true;
+    guard(() => deskRender(D, true));
+    const gen = D.gen;
+    const r = await svFetch(deskURL(D) + "&before=" + D.older + "&n=100", D.openErrors);
+    if (gen !== D.gen) return;
+    D.loadingOlder = false;
+    if (r.err) { toast(r.err, true); guard(() => deskRender(D, true)); return; }
+    if (!r.body) { toast("The page cannot load older turns. Try again.", true); guard(() => deskRender(D, true)); return; }
+    guard(() => deskApply(D, r.body, true));
   }
 
-  // deskApply takes one answer for the bound tmux session. Another session
-  // id there (CHAT restarted in the same tmux session) starts the log over:
-  // "again" asks for its transcript at once.
-  function deskApply(d, older) {
+  // deskApply takes one answer for D's bound tmux session. Another session
+  // id there (the desk restarted in the same tmux session) starts the log
+  // over: "again" asks for its transcript at once.
+  function deskApply(D, d, older) {
     const t = obj(d.target), sid = t ? str(t.sessionId) : "";
-    if (desk.sid && sid && sid !== desk.sid) {
+    if (D.sid && sid && sid !== D.sid) {
       if (older) return;
-      deskBind(desk.tmux);
+      deskBind(D, D.tmux);
       return "again";
     }
-    if (sid) desk.sid = sid;
-    const prepend = mergeSession(desk, d, older);
+    if (sid) D.sid = sid;
+    const prepend = mergeSession(D, d, older);
     if (prepend === null) return;
-    guard(() => deskRender(prepend, prepend));
+    guard(() => deskRender(D, prepend, prepend));
   }
 
   // A hidden log measures as zero height, which would unfold every turn:
   // render when it shows (deskReveal) instead.
-  function deskRender(force, prepend) {
-    const log = $("desk-log");
-    if (!log.getClientRects().length) { desk.stale = true; return; }
-    desk.stale = false;
-    const t = desk.target || {};
-    renderSessionLog(desk, log, $("desk-newmsg"), {force, prepend, error: "", failText: desk.error || "The page cannot load CHAT. It tries again.",
-      loadOlder: deskLoadOlder, user: "Andy", bot: "CHAT", rerender: () => guard(() => deskRender(true)),
+  function deskRender(D, force, prepend) {
+    const log = D.els.log;
+    if (!log.getClientRects().length) { D.stale = true; return; }
+    D.stale = false;
+    const t = D.target || {};
+    renderSessionLog(D, log, D.els.newmsg, {force, prepend, error: "", failText: D.error || "The page cannot load " + D.name + ". It tries again.",
+      loadOlder: () => deskLoadOlder(D), user: "Andy", bot: D.name, rerender: () => guard(() => deskRender(D, true)),
       paneNote: str(t.tool) === "grok" ? "Grok session: the page shows its terminal pane, not a transcript." : "No transcript found: the page shows the terminal pane."});
   }
-  // deskReveal: the CHAT log just came into view (the toggle, the phone Chat
+  // deskReveal: D's log just came into view (the switch, the phone Chat
   // view): draw what a hidden render skipped, back where Andy left it.
-  function deskReveal() {
-    const log = $("desk-log");
-    if (desk.stale) guard(() => deskRender(true));
-    if (desk.follow || desk.savedTop === null) log.scrollTop = log.scrollHeight;
-    else log.scrollTop = desk.savedTop;
+  function deskReveal(D) {
+    const log = D.els.log;
+    if (D.stale) guard(() => deskRender(D, true));
+    if (D.follow || D.savedTop === null) log.scrollTop = log.scrollHeight;
+    else log.scrollTop = D.savedTop;
   }
-  $("desk-log").addEventListener("scroll", () => {
-    const log = $("desk-log");
-    if (!log.clientHeight) return;
-    desk.follow = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
-    if (desk.follow && desk.unseen) { desk.unseen = false; $("desk-newmsg").hidden = true; }
-  }, {passive: true});
-  if (window.ResizeObserver) new ResizeObserver(() => { const log = $("desk-log"); if (desk.shown && desk.follow) log.scrollTop = log.scrollHeight; }).observe($("desk-log"));
-  $("desk-newmsg").addEventListener("click", () => {
-    const log = $("desk-log");
-    desk.unseen = false; desk.follow = true;
-    $("desk-newmsg").hidden = true;
-    log.scrollTo({top: log.scrollHeight, behavior: "smooth"});
-  });
 
-  // ---- CHAT send -----------------------------------------------------------
-  // One tap, as the FLEET box: the toggle and the box both name CHAT. The
-  // target is the bound tmux session, and only while state still puts CHAT
+  // ---- desk send -----------------------------------------------------------
+  // One tap, as the FLEET box: the switch and the box both name the desk.
+  // The target is D's bound tmux session, and only while state still puts D
   // there. No answer keeps the text with an amber note, as in the session
   // view: it may have arrived.
-  function deskCanSend() {
-    const d = deskInfo(), t = desk.target;
-    return desk.shown && !expired && deskUsable(d) && str(d.tmux) === desk.tmux && !desk.error && !!t && t.canSend === true;
+  function deskCanSend(D) {
+    const d = deskInfo(D), t = D.target;
+    return deskShown === D && !expired && deskUsable(d) && str(d.tmux) === D.tmux && !D.error && !!t && t.canSend === true;
   }
-  function deskApplySend() {
-    const d = deskInfo(), can = deskCanSend(), t = desk.target;
-    const ta = $("desk-say"), btn = $("desk-send");
-    ta.disabled = expired;
-    ta.placeholder = expired ? "Session expired." : "Write to CHAT";
-    btn.disabled = !can || desk.sending || (!ta.value.trim() && !deskAtt.items.length);
-    btn.textContent = desk.sending ? "Sending…" : "Send";
-    $("desk-attach").disabled = !can || desk.sending;
-    if (deskAtt.busy !== desk.sending) { deskAtt.busy = desk.sending; deskAtt.render(); }
-    const note = expired || !desk.shown ? ""
-      : !deskUsable(d) ? deskReason(d) + "."
-      : desk.error ? desk.error
+  function deskApplySend(D) {
+    const d = deskInfo(D), can = deskCanSend(D), t = D.target, e = D.els;
+    e.say.disabled = expired;
+    e.say.placeholder = expired ? "Session expired." : "Write to " + D.name;
+    e.send.disabled = !can || D.sending || (!e.say.value.trim() && !D.att.items.length);
+    e.send.textContent = D.sending ? "Sending…" : "Send";
+    e.attach.disabled = !can || D.sending;
+    if (D.att.busy !== D.sending) { D.att.busy = D.sending; D.att.render(); }
+    const note = expired || deskShown !== D ? ""
+      : !deskUsable(d) ? deskReason(D, d) + "."
+      : D.error ? D.error
       : t && t.canSend !== true ? (str(t.sendNote) || "Send is not available for this session.") : "";
-    $("desk-note-t").textContent = note;
-    $("desk-note").hidden = !note;
+    e.noteT.textContent = note;
+    e.note.hidden = !note;
   }
-  async function deskSend() {
-    const ta = $("desk-say"), text = ta.value.trim(), imgs = deskAtt.items.slice();
-    if (desk.sending || (!text && !imgs.length) || !deskCanSend()) return;
-    const tmux = desk.tmux;
-    desk.sending = true;
-    deskApplySend();
+  async function deskSend(D) {
+    const e = D.els, text = e.say.value.trim(), imgs = D.att.items.slice();
+    if (D.sending || (!text && !imgs.length) || !deskCanSend(D)) return;
+    const tmux = D.tmux;
+    D.sending = true;
+    deskApplySend(D);
     const up = imgs.length ? await uploadImages(imgs) : {ok: true, paths: []};
     const full = up.ok ? withImages(text, up.paths) : "";
-    // The uploads take time: CHAT may have moved or gone meanwhile. desk:
-    // true has the server refuse a tmux session that no longer holds CHAT.
+    // The uploads take time: D may have moved or gone meanwhile. desk: D's
+    // name has the server refuse a tmux session that no longer holds D.
     const res = !up.ok ? {ok: false, error: up.error} : tooLong(full) ? {ok: false, error: TOO_LONG}
-      : !(deskCanSend() && desk.tmux === tmux) ? {ok: false, error: "CHAT changed while the images uploaded. Nothing was sent."}
-      : await postSay("/fleet/session/say", {target: tmux, text: full, desk: true}, deskSendErrors);
-    desk.sending = false;
+      : !(deskCanSend(D) && D.tmux === tmux) ? {ok: false, error: D.name + " changed while the images uploaded. Nothing was sent."}
+      : await postSay("/fleet/session/say", {target: tmux, text: full, desk: D.name}, D.sendErrors);
+    D.sending = false;
     if (res.ok) {
-      if (ta.value.trim() === text) { ta.value = ""; deskGrow(); }
-      deskAtt.drop(imgs);
-      $("desk-warn").hidden = true;
-      toast("Sent to CHAT." + (res.queued ? " It is busy and reads this next." : ""));
-      const gen = desk.gen;
-      setTimeout(() => { if (gen === desk.gen) deskPoll(); }, 600);
+      if (e.say.value.trim() === text) { e.say.value = ""; deskGrow(D); }
+      D.att.drop(imgs);
+      e.warn.hidden = true;
+      toast("Sent to " + D.name + "." + (res.queued ? " It is busy and reads this next." : ""));
+      const gen = D.gen;
+      setTimeout(() => { if (gen === D.gen) deskPoll(D); }, 600);
     } else if (res.unclear) {
-      $("desk-warn").hidden = false;
+      e.warn.hidden = false;
       toast("Delivery not confirmed. Check the transcript before you send again.", true);
     } else {
-      // Another session in CHAT's tmux: block send until a poll finds CHAT.
-      if (res.code === "not_desk") desk.error = res.error;
+      // Another session in D's tmux: block send until a poll finds D.
+      if (res.code === "not_desk") D.error = res.error;
       toast(res.error, true);
     }
-    deskApplySend();
+    deskApplySend(D);
   }
-  function deskGrow() {
-    const ta = $("desk-say");
+  function deskGrow(D) {
+    const ta = D.els.say;
     ta.style.height = "auto";
     ta.style.height = Math.min(ta.scrollHeight + 2, 200) + "px";
   }
-  $("desk-send").addEventListener("click", deskSend);
-  const deskAtt = attachBox({strip: $("desk-att"), button: $("desk-attach"), input: $("desk-file"), ta: $("desk-say"),
-    zone: $("chat"), comp: $("desk-comp"), enabled: () => deskCanSend() && !desk.sending, after: deskApplySend});
-  $("desk-say").addEventListener("input", () => {
-    deskGrow();
-    if (!$("desk-say").value.trim()) $("desk-warn").hidden = true;
-    deskApplySend();
-  });
-  $("desk-say").addEventListener("keydown", e => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!e.repeat) deskSend(); }
-  });
-  $("desk-say").addEventListener("focus", () => setTimeout(measure, 50));
-  $("desk-say").addEventListener("blur", () => setTimeout(measure, 50));
   renderTargetBar();
 
   // ---- refresh -----------------------------------------------------------
@@ -5603,7 +5662,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (btn.classList.contains("spinning")) return;
     btn.classList.add("spinning");
     const t0 = Date.now();
-    if (desk.shown) deskPoll();
+    if (deskShown) deskPoll(deskShown);
     await Promise.allSettled([...Object.keys(pollers).map(runNow), loadHistory(false)]);
     setTimeout(() => btn.classList.remove("spinning"), Math.max(0, 600 - (Date.now() - t0)));
   });

@@ -87,7 +87,7 @@ func (s *server) fleetSessionCards() map[string]fleetCardInfo {
 // fleetResolveSession is the allowlist, in order: a well-formed name; a card
 // in the current state.json names it, it is a live row of the working list
 // (the page may open only what FLEET put on a card or what the server itself
-// lists), or it holds the one usable CHAT row (Andy's desk session, which
+// lists), or it holds a usable desk row (Andy's CHAT or SLACK session, which
 // the chat panel shows even when it is off the working list); not FLEET's
 // own session (FLEET has its own guarded box, and
 // typing into it from here would skip those guards); exactly one live row
@@ -296,10 +296,11 @@ func (s *server) fleetSessionGet(w http.ResponseWriter, r *http.Request) {
 		p, err := strconv.ParseInt(v, 10, 64)
 		return p, err == nil && p >= lo && p <= hi
 	}
-	// desk=1 is the chat panel's CHAT view: the session must still be CHAT,
-	// not merely something in the tmux session CHAT used to hold.
-	pin := q.Get("desk")
-	if pin != "" && pin != "1" {
+	// desk=<name> is the chat panel's view of that desk: the session must
+	// still be that desk, not merely something in the tmux session it used
+	// to hold.
+	pin, ok := fleetDeskParam(q.Get("desk"))
+	if !ok {
 		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: "bad_request", Error: "bad desk"})
 		return
 	}
@@ -316,8 +317,8 @@ func (s *server) fleetSessionGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, card, rerr := s.fleetResolveSession(name, sessions)
-	if rerr == nil && pin == "1" {
-		rerr = fleetDeskPin(name, sessions)
+	if rerr == nil && pin != "" {
+		rerr = fleetDeskPin(name, pin, sessions)
 	}
 	if rerr != nil {
 		writeFleetSessionErr(w, rerr, "")
@@ -366,12 +367,14 @@ type fleetSessionSayResult struct {
 	Target string `json:"target"`
 }
 
-// fleetSessionSayBody is the say request. Desk marks a send from the chat
-// panel's CHAT view: it is refused unless the target still holds CHAT.
+// fleetSessionSayBody is the say request. Desk names the desk a send from
+// the chat panel's desk view is for (fleetDeskJSON): it is refused unless the
+// target still holds that desk. desk is Desk read.
 type fleetSessionSayBody struct {
-	Target string `json:"target"`
-	Text   string `json:"text"`
-	Desk   bool   `json:"desk"`
+	Target string          `json:"target"`
+	Text   string          `json:"text"`
+	Desk   json.RawMessage `json:"desk"`
+	desk   string
 }
 
 func decodeFleetSessionSayBody(w http.ResponseWriter, r *http.Request) (fleetSessionSayBody, error) {
@@ -384,6 +387,11 @@ func decodeFleetSessionSayBody(w http.ResponseWriter, r *http.Request) (fleetSes
 	if _, err := dec.Token(); err != io.EOF {
 		return fleetSessionSayBody{}, errors.New("bad json")
 	}
+	desk, ok := fleetDeskJSON(body.Desk)
+	if !ok {
+		return fleetSessionSayBody{}, errors.New("bad desk")
+	}
+	body.desk = desk
 	return *body, nil
 }
 
@@ -436,8 +444,8 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, _, rerr := s.fleetResolveSession(name, sessions)
-	if rerr == nil && body.Desk {
-		rerr = fleetDeskPin(name, sessions)
+	if rerr == nil && body.desk != "" {
+		rerr = fleetDeskPin(name, body.desk, sessions)
 	}
 	if rerr != nil {
 		writeFleetSessionErr(w, rerr, name)
