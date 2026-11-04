@@ -304,8 +304,10 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	}
 
 	// After a send, move on to the next open card, in the order the list
-	// had before the answered card moved to SENT.
-	if st.nextAfter != "" {
+	// had before the answered card moved to SENT, but only while the
+	// selection is still on the sent card: a user who moved to another card
+	// since keeps it.
+	if st.nextAfter != "" && st.nextAfter == selID {
 		next := -1
 		for j := fleetItemIndex(old, st.nextAfter) + 1; j > 0 && j < len(old) && next < 0; j++ {
 			if i := fleetItemIndex(st.items, old[j].Card.ID); i >= 0 && fleetItemOpen(st.items[i]) {
@@ -323,8 +325,8 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		if next >= 0 && next != st.sel {
 			st.sel, st.scroll = next, 0
 		}
-		st.nextAfter = ""
 	}
+	st.nextAfter = ""
 	if st.sel >= len(st.items) {
 		st.sel = len(st.items) - 1
 	}

@@ -329,6 +329,26 @@ func TestFleetViewSelectsNextOpenAfterSend(t *testing.T) {
 	}
 }
 
+// A user who moved off the sent card before the state showed it answered
+// keeps the card they moved to: the jump is for the card that leaves.
+func TestFleetViewKeepsMovedSelectionAfterSend(t *testing.T) {
+	now := time.Unix(1000, 0)
+	cards := []fleetCardView{fleetTestCard("a", "needs-you"), fleetTestCard("b", "needs-you"), fleetTestCard("c", "needs-you")}
+	st := fleetTestState(fleetTestView(cards...), now)
+	st.handleKey("1", false, now)
+	if cmd := st.handleKey(KeyEnter, false, now.Add(time.Second)); cmd != fleetCmdSend {
+		t.Fatalf("cmd = %v", cmd)
+	}
+	st.applySend(fleetSendResult{CardID: "a", Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{OK: true}}}, now)
+	st.sel = 2 // the user moved to card c
+	v := fleetTestView(cards...)
+	v.Answered["a"] = fleetAnswerWith(fleetAttemptSent)
+	st.applyState(v, nil, now)
+	if got := st.items[st.sel].Card.ID; got != "c" || st.nextAfter != "" {
+		t.Fatalf("selected %q nextAfter %q, want c kept and nextAfter cleared", got, st.nextAfter)
+	}
+}
+
 func TestFleetViewServiceErrors(t *testing.T) {
 	now := time.Unix(1000, 0)
 	st := &fleetViewState{}
