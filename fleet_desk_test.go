@@ -171,8 +171,8 @@ func TestFleetSessionAllowsTheDesk(t *testing.T) {
 	if code != 200 || tg["title"] != "SLACK" || tg["canSend"] != true {
 		t.Fatalf("slack: %d %v", code, out)
 	}
-	// The desk allowance names the desks' tmux sessions only.
-	for _, name := range []string{"off", "nobody", "fleet"} {
+	// Neither a desk nor a listed row (working or disabled): refused.
+	for _, name := range []string{"nobody", "fleet"} {
 		if code, out := getFleetSession(t, s, "t="+name); code != 403 {
 			t.Fatalf("%s: %d %v", name, code, out)
 		}
@@ -192,12 +192,16 @@ func TestFleetSessionAllowsTheDesk(t *testing.T) {
 	if code, out := getFleetSession(t, s3, "t=desk"); code != 409 || out["code"] != "ambiguous" {
 		t.Fatalf("shared: %d %v", code, out)
 	}
-	// Two CHAT rows: neither is the desk.
+	// Two CHAT rows: neither is the desk. The session view still opens
+	// one (a disabled row), the CHAT view does not.
 	two := append(deskRows(), Session{PID: 30, Name: "CHAT", NameSource: "user", SessionID: deskSID, Tmux: "desk2:0.0"})
 	s4 := fleetTestServer(t, two)
 	s4.fleet.disabled = deskDisabled
-	if code, out := getFleetSession(t, s4, "t=desk"); code != 403 || out["code"] != "not_allowed" {
-		t.Fatalf("two CHAT rows: %d %v", code, out)
+	if code, out := getFleetSession(t, s4, "t=desk"); code != 200 {
+		t.Fatalf("two CHAT rows, session view: %d %v", code, out)
+	}
+	if code, out := getFleetSession(t, s4, "t=desk&desk=CHAT"); code != 409 || out["code"] != "not_desk" {
+		t.Fatalf("two CHAT rows, CHAT view: %d %v", code, out)
 	}
 }
 

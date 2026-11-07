@@ -459,6 +459,10 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	rows := s.fleetObserveWork(sessions, now)
 	fleetApplyNotes(rows, fleetNotes(state))
 	out["sessions"] = rows
+	// The disabled rows apart (null when the list failed): FLEET does not
+	// manage them, but the chat panel's picker offers them beside the
+	// working list.
+	out["disabledSessions"] = s.fleetDisabledRows(sessions, now)
 	out["ended"] = s.fleetEndedRows(now)
 	// Andy's desk sessions (CHAT, SLACK), which the chat panel can show
 	// instead of FLEET, from the same session list. "desk" is the first

@@ -231,8 +231,10 @@ types into panes. Spec and plan: `docs/superpowers/`.
   per episode; with saved accounts lacking a fresh reading the line says so
   and does not end the episode; a list error sends nothing. Kill switch:
   `claude-sessions auto-switch off`, which also pins the live account.
-- **Session view:** `fleetResolveSession` is the allowlist; the pane address
-  always comes from the resolved row, never the request.
+- **Session view:** `fleetResolveSession` is the allowlist (a card's
+  session, a working-list row, a local row disabled for FLEET that passes
+  the list's other rules, or a usable desk; never FLEET's tmux); the pane
+  address always comes from the resolved row, never the request.
 - **Desks (CHAT, SLACK):** the chat panel's other targets are the sessions
   named in `fleetDeskSessionNames`, in order, one each (`fleetDeskRow`,
   findFleet's rules). `/fleet/state` serves them as `desks` (and CHAT alone
@@ -245,7 +247,10 @@ types into panes. Spec and plan: `docs/superpowers/`.
   from. Each target keeps its own DOM log and composer (one `#desk-tpl`
   clone per desk): a draft never crosses.
   After the desks, one picked-session slot (the `⋯` picker over
-  `state.sessions`, which carry `sessionId`; usable desks' tmux left out):
+  `state.sessions` plus `state.disabledSessions`, one list in the working
+  list's order, disabled rows tagged "off FLEET"; rows carry `sessionId`
+  and `pid`; usable desks' tmux left out; `fleetEligibleSessions` is the
+  shared filter, so `sessions` itself never holds a disabled row):
   a desk object with `pick` set, rebound by a new pick, a draft kept per
   picked session. Its requests pin the session id (`sid=<id>`, `"sid"`):
   `fleetSessionPin` refuses 409 `not_session` when the resolved row runs

@@ -162,11 +162,13 @@ func fleetSelfTmux(sessions []Session) map[string]bool {
 	return self
 }
 
-// fleetDerivedSessions filters sessions to the working list's rows: local,
-// in tmux, not FLEET, not disabled. The idle ignore list does not apply:
-// that list is about events, not about what runs. nil in, nil out (the list
-// failed).
-func (s *server) fleetDerivedSessions(sessions []Session) []Session {
+// fleetEligibleSessions filters sessions to the rows FLEET's lists may
+// hold: local, in tmux under a usable name, not in FLEET's tmux. disabled
+// picks the side of the flag store's disabled bit: false is the working
+// list, true the disabled rows the chat panel's picker also offers. The idle
+// ignore list does not apply: that list is about events, not about what
+// runs. nil in, nil out (the list failed).
+func (s *server) fleetEligibleSessions(sessions []Session, disabled bool) []Session {
 	if sessions == nil {
 		return nil
 	}
@@ -174,7 +176,7 @@ func (s *server) fleetDerivedSessions(sessions []Session) []Session {
 	out := []Session{}
 	for _, row := range sessions {
 		part := tmuxSessionPart(row.Tmux)
-		if row.Host != "" || row.Tmux == "" || !fleetSessionNameRe.MatchString(part) || self[part] || s.fleetDisabled(row.SessionID) {
+		if row.Host != "" || row.Tmux == "" || !fleetSessionNameRe.MatchString(part) || self[part] || s.fleetDisabled(row.SessionID) != disabled {
 			continue
 		}
 		out = append(out, row)
@@ -182,15 +184,34 @@ func (s *server) fleetDerivedSessions(sessions []Session) []Session {
 	return out
 }
 
+// fleetDerivedSessions is the working list's rows: eligible and not
+// disabled.
+func (s *server) fleetDerivedSessions(sessions []Session) []Session {
+	return s.fleetEligibleSessions(sessions, false)
+}
+
 // fleetWorkRows builds the "sessions" rows, sorted, with ticket statuses from
 // the cache. nil when the list failed.
 func (s *server) fleetWorkRows(sessions []Session, now time.Time) []fleetWorkRow {
-	derived := s.fleetDerivedSessions(sessions)
-	if derived == nil {
+	return s.fleetRowsOf(s.fleetDerivedSessions(sessions), now)
+}
+
+// fleetDisabledRows builds /fleet/state's "disabledSessions": the eligible
+// rows the flag store disables, which FLEET's working list leaves out and
+// the chat panel's picker still offers. Same shape and order as the
+// working rows. nil when the list failed.
+func (s *server) fleetDisabledRows(sessions []Session, now time.Time) []fleetWorkRow {
+	return s.fleetRowsOf(s.fleetEligibleSessions(sessions, true), now)
+}
+
+// fleetRowsOf builds sorted rows from filtered sessions, with ticket
+// statuses from the cache (no lookup). nil stays nil.
+func (s *server) fleetRowsOf(list []Session, now time.Time) []fleetWorkRow {
+	if list == nil {
 		return nil
 	}
-	rows := make([]fleetWorkRow, 0, len(derived))
-	for _, sess := range derived {
+	rows := make([]fleetWorkRow, 0, len(list))
+	for _, sess := range list {
 		r := fleetWorkRow{
 			Tmux: tmuxSessionPart(sess.Tmux), PID: sess.PID, Name: sess.Name, NameSource: sess.NameSource,
 			Tickets: sessionTickets(sess), Tool: "claude", Model: sess.Model, SessionID: sess.SessionID, Status: sess.StatusDisplay(),

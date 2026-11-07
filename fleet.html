@@ -559,6 +559,8 @@ body.sv-open { overflow: hidden; }
 .pick-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 12px; border: 0; border-top: 1px solid var(--line); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .pick-row:hover { background: var(--surface2); }
 .pick-row[aria-current="true"] { background: var(--accent-tint); }
+/* A session disabled for FLEET: a quiet tag, not a lesser row. */
+.pick-off { padding: 0 6px; border: 1px solid var(--line); border-radius: 99px; font-size: 11px; line-height: 16px; white-space: nowrap; }
 /* Why the desk cannot take a message now; the draft stays in the box. */
 .desk-note { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 13.5px; font-weight: 600; color: var(--red); }
 .desk-note .dot { background: var(--red); }
@@ -5340,7 +5342,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // state answer, when that desk is usable. Later a desk going away never
   // moves the view: send is disabled and the reason shows under the log.
   // After the desks, one more slot: a session Andy picked from the working
-  // list (the "pick a session" control). It is a desk object with pick set
+  // list or the rows disabled for FLEET (the "pick a session" control). It is a desk object with pick set
   // ({tmux, sid, pid}); its reads and sends carry sid, so the server refuses
   // another session that took over the tmux name. The same pid with a new
   // id (/clear or /resume in that claude) is the same session going on: the
@@ -5393,16 +5395,18 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     not_session: n + " has ended.",
   });
   const deskInfo = D => D.pick ? pickInfo(D) : arr(state && state.desks).map(obj).find(d => d && str(d.name) === D.name) || null;
-  // pickInfo is the picked slot's desk-like view from the working list: alive
+  // pickInfo is the picked slot's desk-like view from both lists: alive
   // only while exactly one row runs in its tmux session and that row is the
   // picked session. Another session id there means the picked one ended.
   function pickInfo(D) {
     if (!state) return null;
     if (state.sessions === null) return {alive: false, reason: "session list failed"};
-    const tm = D.pick.tmux, rows = workingRows().filter(r => str(r.tmux) === tm);
+    const tm = D.pick.tmux, rows = pickListRows(state).filter(r => str(r.tmux) === tm);
     if (rows.length > 1) return {alive: false, reason: "shares tmux"};
     if (rows.length === 1) return str(rows[0].sessionId) === D.pick.sid ? {alive: true, tmux: tm} : {alive: false, reason: "ended"};
-    const ended = arr(state.ended).map(obj).some(r => r && str(r.tmux) === tm);
+    // The two lists hold every live local row in tmux: off both, it ended. A
+    // server without disabledSessions: only the ended list says so.
+    const ended = Array.isArray(state.disabledSessions) || arr(state.ended).map(obj).some(r => r && str(r.tmux) === tm);
     return {alive: false, reason: ended ? "ended" : "off list"};
   }
   const deskUsable = d => !!d && d.alive === true && SV_NAME.test(str(d.tmux));
@@ -5552,14 +5556,30 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // pickLabel: the session's name, or its tmux name when it has none.
   const pickLabel = r => str(r.name).trim() || str(r.tmux);
   const pickPid = r => Number.isInteger(r.pid) && r.pid > 0 ? r.pid : 0;
-  // pickableRows: what the picker offers, from a /fleet/state answer: the
-  // working list (never FLEET: the server leaves it out, and a row named
-  // FLEET is dropped here too) without the tmux sessions a usable desk
-  // holds, which have their own buttons.
+  // pickListRows: every live row a /fleet/state answer lists for the
+  // picker: the working list ("sessions") and the rows Andy disabled for
+  // FLEET ("disabledSessions", copied with off: true). He disables sessions
+  // he works in so FLEET leaves them alone: they are as pickable as any.
+  // A row moving between the lists is the same row.
+  function pickListRows(st) {
+    const on = arr(st && st.sessions).map(obj).filter(r => r && str(r.tmux));
+    const off = arr(st && st.disabledSessions).map(obj).filter(r => r && str(r.tmux)).map(r => Object.assign({}, r, {off: true}));
+    return on.concat(off);
+  }
+  // pickRank orders the picker as the server orders the working list
+  // (fleetWorkStatusRank): waiting, idle, shell, no status, busy; then tmux
+  // name, then pid.
+  const PICK_RANK = new Map([["waiting", 0], ["idle", 1], ["shell", 2], ["busy", 4]]);
+  const pickRank = r => { const v = PICK_RANK.get(str(r.status)); return v === undefined ? 3 : v; };
+  // pickableRows: what the picker offers, in one list: pickListRows (never
+  // FLEET: the server leaves it out, and a row named FLEET is dropped here
+  // too) without the tmux sessions a usable desk holds, which have their own
+  // buttons.
   function pickableRows(st) {
     const deskTm = new Set(arr(st && st.desks).map(obj).filter(d => d && d.alive === true).map(d => str(d.tmux)));
-    return arr(st && st.sessions).map(obj).filter(r => r && SV_NAME.test(str(r.tmux)) && PICK_SID.test(str(r.sessionId)) &&
-      str(r.name) !== "FLEET" && !deskTm.has(str(r.tmux)));
+    return pickListRows(st).filter(r => SV_NAME.test(str(r.tmux)) && PICK_SID.test(str(r.sessionId)) &&
+      str(r.name) !== "FLEET" && !deskTm.has(str(r.tmux)))
+      .sort((a, b) => pickRank(a) - pickRank(b) || (str(a.tmux) < str(b.tmux) ? -1 : str(a.tmux) > str(b.tmux) ? 1 : 0) || pickPid(a) - pickPid(b));
   }
 
   // pickBind points the picked slot at session pick ({tmux, sid}) named
@@ -5597,7 +5617,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (!p) return;
     const tm = str(p.tmux), sid = str(p.sid);
     const r = pickableRows(state).find(x => str(x.tmux) === tm);
-    if (r && str(r.sessionId) === sid && workingRows().filter(x => str(x.tmux) === tm).length === 1) pickBind({tmux: tm, sid, pid: pickPid(r)}, pickLabel(r));
+    if (r && str(r.sessionId) === sid && pickListRows(state).filter(x => str(x.tmux) === tm).length === 1) pickBind({tmux: tm, sid, pid: pickPid(r)}, pickLabel(r));
   }
 
   // pickAdopt runs on every state answer: when the one row in the picked
@@ -5609,7 +5629,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   function pickAdopt(D) {
     const p = D.pick;
     if (!p.pid) return;
-    const rows = workingRows().filter(r => str(r.tmux) === p.tmux);
+    const rows = pickListRows(state).filter(r => str(r.tmux) === p.tmux);
     if (rows.length !== 1 || pickPid(rows[0]) !== p.pid) return;
     const sid = str(rows[0].sessionId);
     if (sid === p.sid || !PICK_SID.test(sid)) return;
@@ -5622,7 +5642,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (deskShown === D) deskPoll(D);
   }
 
-  // pickSession shows working-list row r in the picked slot.
+  // pickSession shows listed row r (pickableRows) in the picked slot.
   function pickSession(r) {
     const tm = str(r.tmux), sid = str(r.sessionId), pick = {tmux: tm, sid, pid: pickPid(r)};
     if (!SV_NAME.test(tm) || !PICK_SID.test(sid)) return;
@@ -5640,7 +5660,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     deskApplySends();
   }
 
-  // The picker: the working list's other sessions, under the switch. Esc,
+  // The picker: the other listed sessions, enabled and disabled for FLEET
+  // alike, under the switch. Esc,
   // a tap outside or a pick closes it.
   function renderPicker() {
     const box = $("ctgt-pick");
@@ -5657,6 +5678,11 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       const se = el("span", "sess", tm);
       se.title = tm;
       l2.append(se);
+      if (r.off) {
+        const off = el("span", "pick-off", "off FLEET");
+        off.title = "Disabled for FLEET: FLEET leaves this session alone";
+        l2.append(off);
+      }
       const b = fkey(el("button", "row pick-row", el("div", "row-main", workL1(r, tm), l2)), "pick:" + tm);
       b.type = "button";
       b.title = "Chat with " + name;

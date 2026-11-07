@@ -479,6 +479,44 @@ const deskPageDrive = `
   e.ids["ctgt-more"].fire("click");
   const eb = e.ids["ctgt-pick"].children;
   check(eb.length === 2 && eb[1].textContent === "No other running sessions", "empty picker: " + eb.map(x => x.textContent));
+
+  // Sessions disabled for FLEET: one list with the working rows, in the
+  // server's order, a quiet tag on each; they open, pin and restore as any.
+  const dis = [{tmux: "aaa-off", name: "Own work", sessionId: "s-off", pid: 31, status: "waiting"},
+    {tmux: "zzz-off", name: "", sessionId: "s-off2", pid: 32, status: "busy"},
+    {tmux: "desk", name: "CHAT", sessionId: "sid-CHAT", pid: 33, status: "idle"}];
+  const dst = Object.assign(withRows(workList), {disabledSessions: dis});
+  const d = world("fleet");
+  d.setState(dst);
+  d.applyDesk();
+  check(d.pickableRows(dst).map(r => r.tmux).join() === "aaa-off,other,fix-2,zzz-off", "merged order: " + d.pickableRows(dst).map(r => r.tmux));
+  d.ids["ctgt-more"].fire("click");
+  const dEntries = d.ids["ctgt-pick"].children[1].children;
+  const tagged = b => b.children[0].children[1].children.some(x => x.className === "pick-off");
+  check(dEntries.map(tagged).join() === "true,false,false,true", "off FLEET tags: " + dEntries.map(tagged));
+  dEntries[0].fire("click");
+  await flush();
+  const dp = d.pick;
+  check(!!dp && d.shown === dp && dp.btn.textContent === "Own work", "a disabled row opens");
+  check(d.fetched[d.fetched.length - 1] === "/fleet/session?sid=s-off&t=aaa-off", "disabled pick pinned: " + d.fetched);
+  // Enabled again (moves to the working list): the same session, not ended.
+  const moved = Object.assign(withRows(workList.concat([Object.assign({}, dis[0])])), {disabledSessions: dis.slice(1)});
+  d.setState(moved);
+  d.applyDesk();
+  check(d.shown === dp && !dp.btn.disabled && dp.els.note.hidden && dp.pick.sid === "s-off", "enabled again: still usable: " + dp.els.noteT.textContent);
+  // /clear in it while disabled: adopted.
+  d.setState(Object.assign(withRows(workList), {disabledSessions: [Object.assign({}, dis[0], {sessionId: "s-off3"})]}));
+  d.applyDesk();
+  await flush();
+  check(dp.pick.sid === "s-off3" && !dp.btn.disabled && d.fetched[d.fetched.length - 1] === "/fleet/session?sid=s-off3&t=aaa-off", "disabled /clear adopted: " + d.fetched);
+  // Off both lists: it ended.
+  d.setState(Object.assign(withRows(workList), {disabledSessions: []}));
+  d.applyDesk();
+  check(dp.btn.disabled && dp.els.noteT.textContent === "Own work has ended.", "disabled pick ended: " + dp.els.noteT.textContent);
+  const dr = world("pick", {tmux: "aaa-off", sid: "s-off"});
+  dr.setState(dst);
+  dr.applyDesk();
+  check(!!dr.pick && dr.shown === dr.pick && dr.pick.pick.pid === 31, "disabled pick restored");
   console.log(JSON.stringify(fails));
 })().catch(e => console.log(JSON.stringify(["threw: " + e.stack])));
 `

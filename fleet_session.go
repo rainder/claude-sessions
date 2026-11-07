@@ -18,8 +18,9 @@ import (
 // names or the working list holds, and a box to type into it. It types into
 // sessions other than FLEET, so the target is allowlisted
 // (fleetResolveSession): only a tmux session named by a card in the current
-// state.json or a live working-list row, never FLEET itself, and exactly one
-// live row there. The pane address always comes from that resolved row;
+// state.json, a live working-list row, or a live local row the flag store
+// disables (otherwise eligible for that list), never FLEET itself, and
+// exactly one live row there. The pane address always comes from that resolved row;
 // the request supplies a validated name and nothing else.
 
 const (
@@ -86,8 +87,9 @@ func (s *server) fleetSessionCards() map[string]fleetCardInfo {
 
 // fleetResolveSession is the allowlist, in order: a well-formed name; a card
 // in the current state.json names it, it is a live row of the working list
-// (the page may open only what FLEET put on a card or what the server itself
-// lists), or it holds a usable desk row (Andy's CHAT or SLACK session, which
+// or a disabled row that passes the working list's other rules (the page
+// may open only what FLEET put on a card or what the server itself lists:
+// "sessions" and "disabledSessions"), or it holds a usable desk row (Andy's CHAT or SLACK session, which
 // the chat panel shows even when it is off the working list); not FLEET's
 // own session (FLEET has its own guarded box, and
 // typing into it from here would skip those guards); exactly one live row
@@ -98,7 +100,7 @@ func (s *server) fleetResolveSession(name string, sessions []Session) (Session, 
 		return Session{}, fleetCardInfo{}, &fleetSessionErr{http.StatusBadRequest, "bad_target", "bad session name"}
 	}
 	card, ok := s.fleetSessionCards()[name]
-	if !ok && !s.fleetIsDerived(name, sessions) && !fleetIsDesk(name, sessions) {
+	if !ok && !s.fleetIsListed(name, sessions) && !fleetIsDesk(name, sessions) {
 		return Session{}, fleetCardInfo{}, &fleetSessionErr{http.StatusForbidden, "not_allowed", "no FLEET card or live session list row names this session"}
 	}
 	self := &fleetSessionErr{http.StatusForbidden, "fleet_self", "this is FLEET's own session"}
@@ -144,12 +146,15 @@ func fleetSessionPin(row Session, sid string) *fleetSessionErr {
 // empty or outside resumeSessionIDRe.
 var fleetBadSID = &fleetSessionErr{http.StatusBadRequest, "bad_target", "bad session id"}
 
-// fleetIsDerived reports whether a working-list row runs in tmux session
-// name, on the list the caller resolved from.
-func (s *server) fleetIsDerived(name string, sessions []Session) bool {
-	for _, row := range s.fleetDerivedSessions(sessions) {
-		if tmuxSessionPart(row.Tmux) == name {
-			return true
+// fleetIsListed reports whether a working-list row or a disabled row
+// (fleetEligibleSessions, either side) runs in tmux session name, on the
+// list the caller resolved from.
+func (s *server) fleetIsListed(name string, sessions []Session) bool {
+	for _, disabled := range []bool{false, true} {
+		for _, row := range s.fleetEligibleSessions(sessions, disabled) {
+			if tmuxSessionPart(row.Tmux) == name {
+				return true
+			}
 		}
 	}
 	return false

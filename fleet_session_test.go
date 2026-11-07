@@ -79,7 +79,7 @@ func TestFleetSessionAllowlist(t *testing.T) {
 		{"spawn-dr-1-fix", 200, ""},
 		{"grok-dr-2", 200, ""},
 		{"other", 200, ""},                        // no card, but a working-list row
-		{"off", 403, "not_allowed"},               // live and disabled, no card
+		{"off", 200, ""},                          // live and disabled, no card: a disabled row
 		{"nobody", 403, "not_allowed"},            // neither
 		{"fleet", 403, "fleet_self"},              // FLEET's own tmux session
 		{"named-fleet", 403, "fleet_self"},        // a row there is named FLEET
@@ -106,7 +106,10 @@ func TestFleetSessionAllowlist(t *testing.T) {
 	if code != 200 || tg["ticket"] != "DR-1" || tg["title"] != "DR-1 fix" || tg["kind"] != "" {
 		t.Fatalf("no state, derived row: %d %v", code, out)
 	}
-	for _, name := range []string{"off", "fleet", "named-fleet", "nobody"} {
+	if code, out := getFleetSession(t, s2, "t=off"); code != 200 {
+		t.Fatalf("no state, disabled row: %d %v", code, out)
+	}
+	for _, name := range []string{"fleet", "named-fleet", "nobody"} {
 		if code, out := getFleetSession(t, s2, "t="+name); code != 403 {
 			t.Fatalf("no state, %s: %d %v", name, code, out)
 		}
@@ -323,7 +326,7 @@ func TestFleetSessionSayRefusals(t *testing.T) {
 		{"cookie without origin", `{"target":"spawn-dr-1-fix","text":"hi"}`, func(r *http.Request) { r.Header.Del("Origin") }, 403, "origin"},
 		{"cross origin", `{"target":"spawn-dr-1-fix","text":"hi"}`, func(r *http.Request) { r.Header.Set("Origin", "http://evil.test") }, 403, "origin"},
 		{"no auth", `{"target":"spawn-dr-1-fix","text":"hi"}`, func(r *http.Request) { r.Header.Del("Cookie") }, 401, "unauthorized"},
-		{"not on a card and disabled", `{"target":"off","text":"hi"}`, nil, 403, "not_allowed"},
+		{"not on a card or a list", `{"target":"nobody","text":"hi"}`, nil, 403, "not_allowed"},
 		{"fleet itself", `{"target":"fleet","text":"hi"}`, nil, 403, "fleet_self"},
 		{"gone", `{"target":"ended-dr-3","text":"hi"}`, nil, 404, "gone"},
 		{"ambiguous", `{"target":"dup","text":"hi"}`, nil, 409, "ambiguous"},
@@ -600,5 +603,67 @@ func TestFleetSessionSaySIDPin(t *testing.T) {
 	code, out = drig.postSession(t, `{"target":"desk","text":"x","desk":"CHAT","sid":"`+deskSID+`"}`, nil)
 	if code != 200 || out["ok"] != true || len(drig.typed) != 1 {
 		t.Fatalf("both pins pass: %d %v typed %q", code, out, drig.typed)
+	}
+}
+
+// TestFleetSessionDisabledRows: a live local row the flag store disables
+// stays off /fleet/state's "sessions" (FLEET's working list) but is listed
+// in "disabledSessions", and the session view opens and types into it.
+// FLEET's own session is never listed or allowed, disabled or not.
+func TestFleetSessionDisabledRows(t *testing.T) {
+	s := fleetSessionServer(t, fleetUUID(150))
+	s.fleet.disabled = func(sid string) bool { return sid == fleetDisabledSID || sid == "fleet-sid" || sid == "g2" }
+	st := getFleetJSON(t, s, "/fleet/state")
+	tmuxOf := func(key string) []string {
+		var out []string
+		list, _ := st[key].([]any)
+		for _, x := range list {
+			r, _ := x.(map[string]any)
+			out = append(out, fmt.Sprint(r["tmux"]))
+		}
+		return out
+	}
+	if got := strings.Join(tmuxOf("disabledSessions"), ","); got != "off" {
+		t.Fatalf("disabledSessions = %q, want off", got)
+	}
+	list, _ := st["disabledSessions"].([]any)
+	if r, _ := list[0].(map[string]any); r["sessionId"] != fleetDisabledSID || r["pid"] != float64(18) {
+		t.Fatalf("disabled row = %v", r)
+	}
+	for _, tm := range tmuxOf("sessions") {
+		if tm == "off" || tm == "fleet" || tm == "named-fleet" {
+			t.Fatalf("sessions holds %q: %v", tm, tmuxOf("sessions"))
+		}
+	}
+	for _, c := range []struct {
+		q, code string
+		status  int
+	}{
+		{"t=off", "", 200},
+		{"t=off&sid=" + fleetDisabledSID, "", 200},
+		{"t=off&sid=" + fleetUUID(151), "not_session", 409},
+		{"t=fleet", "fleet_self", 403},       // FLEET, disabled
+		{"t=named-fleet", "fleet_self", 403}, // a row named FLEET, disabled
+	} {
+		code, out := getFleetSession(t, s, c.q)
+		if code != c.status || (c.code != "" && out["code"] != c.code) {
+			t.Errorf("%s: %d %v", c.q, code, out)
+		}
+	}
+
+	// A failed list: null, like "sessions".
+	if rows := s.fleetDisabledRows(nil, time.Now()); rows != nil {
+		t.Fatalf("failed list: %v", rows)
+	}
+
+	rig, targets := sessionSayRig(t)
+	code, out := rig.postSession(t, `{"target":"off","text":"to the disabled one","sid":"`+fleetDisabledSID+`"}`, nil)
+	if code != 200 || out["ok"] != true || len(rig.typed) != 1 || (*targets)[0] != "=off:0.0" {
+		t.Fatalf("say to a disabled row: %d %v keys %v", code, out, *targets)
+	}
+	rig.now = rig.now.Add(time.Minute)
+	code, out = rig.postSession(t, `{"target":"fleet","text":"x"}`, nil)
+	if code != 403 || out["code"] != "fleet_self" || len(rig.typed) != 1 {
+		t.Fatalf("say to FLEET: %d %v", code, out)
 	}
 }
