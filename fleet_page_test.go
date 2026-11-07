@@ -106,9 +106,11 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		`id="autosw"`, "function renderAutoSwitch(", "state.autoSwitch", "a.last", "last.fromPct", "last.toPct",
 		`"Auto-switched "`, "AUTO_SW_SHOW_MS = 12 * 3600e3", "toast(text)", `"auto-switch"`, ".ty-auto-switch",
 		// The chat panel's desks come from state.desks, each built from one
-		// template, and every desk request is pinned to that desk by name
-		// (TestFleetPageDeskTargets drives the module).
-		"state.desks", `<template id="desk-tpl">`, `"/fleet/session?desk=" + encodeURIComponent(D.name)`, "desk: D.name}"} {
+		// template, and every desk request is pinned to that desk by name;
+		// the picked session's, to its session id (TestFleetPageDeskTargets
+		// drives the module).
+		"state.desks", `<template id="desk-tpl">`, `"desk=" + encodeURIComponent(D.name)`, "desk: D.name}",
+		`"sid=" + encodeURIComponent(D.pick.sid)`, "sid: pin}", `id="ctgt-more"`, `id="ctgt-pick"`} {
 		if !strings.Contains(page, need) {
 			t.Errorf("fleet.html must contain %q", need)
 		}
@@ -223,19 +225,33 @@ class E {
   addEventListener(type, f) { (this.on[type] = this.on[type] || []).push(f); }
   fire(type, ev) { for (const f of this.on[type] || []) f(ev || {}); }
   append(...kids) { for (const k of kids) this.children.push(k); }
+  replaceChildren(...kids) { this.children = kids; }
+  insertBefore(k, ref) { const i = this.children.indexOf(ref); if (i < 0) this.children.push(k); else this.children.splice(i, 0, k); }
+  contains(x) { return x === this || this.children.some(c => c instanceof E && c.contains(x)); }
   getClientRects() { return []; }
   scrollTo() {}
+  focus() {}
 }
-function world(pref) {
+function world(pref, pick) {
   let state = null;
   const expired = false;
-  const document = {hidden: false, activeElement: null};
+  const docOn = {};
+  const document = {hidden: false, activeElement: null, addEventListener(type, f) { (docOn[type] = docOn[type] || []).push(f); }};
   const window = {};
   const ids = {};
   const $ = id => ids[id] || (ids[id] = new E(id));
-  function el(tag, cls, ...kids) { const e = new E(tag); e.className = cls || ""; for (const k of kids) if (k) e.textContent += k; return e; }
+  function el(tag, cls, ...kids) {
+    const e = new E(tag);
+    e.className = cls || "";
+    for (const k of kids) if (k) { if (k instanceof E) e.children.push(k); else e.textContent += k; }
+    return e;
+  }
   const store = {};
   if (pref !== null) store["fleet.chatTarget"] = pref;
+  if (pick) store["fleet.chatPick"] = JSON.stringify(pick);
+  const workingRows = () => arr(state && state.sessions).map(obj).filter(r => r && str(r.tmux));
+  const liveBadgeOf = () => null, modelLabel = m => m, fkey = n => n, keepFocus = f => f();
+  const workL1 = (r, tm) => el("div", "row-l1", str(r.name) || tm);
   const localStorage = {getItem: k => k in store ? store[k] : null, setItem: (k, v) => { store[k] = String(v); }};
   const SV_NAME = /^[A-Za-z0-9._-]{1,128}$/;
   const svOpenErrors = {gone: "This session has ended."}, svSendErrors = {busy: "busy"};
@@ -246,14 +262,15 @@ function world(pref) {
   const setTimeout = () => 0, clearTimeout = () => {};
   async function svFetch(url) {
     fetched.push(url);
-    const m = /[?&]desk=([A-Z]+)/.exec(url);
-    return {body: {target: {canSend: true, sessionId: "sid-" + (m ? m[1] : "")}, source: "transcript", turns: [], pos: 1}};
+    const m = /[?&]desk=([A-Z]+)/.exec(url), p = /[?&]sid=([^&]+)/.exec(url);
+    const sid = p ? decodeURIComponent(p[1]) : "sid-" + (m ? m[1] : "");
+    return {body: {target: {canSend: true, sessionId: sid}, source: "transcript", turns: [], pos: 1}};
   }
   async function postSay(url, payload) { said.push(payload); return {ok: true}; }
   async function uploadImages() { return {ok: true, paths: []}; }
   const withImages = t => t, tooLong = () => false, TOO_LONG = "too long";
   const mergeSession = (v, d) => { v.target = d.target; v.source = d.source; return false; }, renderSessionLog = () => {};
-  const attachBox = () => ({items: [], busy: false, render() {}, drop() {}});
+  const attachBox = () => ({items: [], busy: false, render() {}, drop() {}, set(items) { this.items = items; }});
   function deskNodes() {
     const n = {};
     for (const k of ["wrap", "log", "newmsg", "comp", "note", "noteT", "warn", "att", "attach", "file", "say", "send"]) n[k] = new E(k);
@@ -261,13 +278,25 @@ function world(pref) {
     return n;
   }
   /*MODULE*/
-  return {applyDesk, deskPref, desks, ids, store, said, fetched, toasts,
-    get shown() { return deskShown; }, setState(s) { state = s; }};
+  return {applyDesk, deskPref, desks, ids, store, said, fetched, toasts, docOn, pickableRows,
+    get shown() { return deskShown; }, get pick() { return pickD; }, setState(s) { state = s; }};
 }
 const flush = () => new Promise(r => setImmediate(r));
 const fails = [];
 const check = (ok, what) => { if (!ok) fails.push(what); };
 const both = {desks: [{name: "CHAT", alive: true, tmux: "desk"}, {name: "SLACK", alive: true, tmux: "slack-triage-c4a100"}]};
+// withRows is both plus a working list: the two desks' rows, two others,
+// and rows the picker must never offer.
+const workList = [
+  {tmux: "desk", name: "CHAT", sessionId: "sid-CHAT"},
+  {tmux: "slack-triage-c4a100", name: "SLACK", sessionId: "sid-SLACK"},
+  {tmux: "other", name: "Other work", sessionId: "s-other", pid: 21, tickets: ["DR-7"], status: "idle"},
+  {tmux: "fix-2", name: "", sessionId: "s-fix", status: "busy"},
+  {tmux: "fleet2", name: "FLEET", sessionId: "s-fleet"},
+  {tmux: "bad-sid", name: "x", sessionId: "a;b"},
+  {tmux: "no sid", name: "y", sessionId: "s-y"},
+];
+const withRows = rows => Object.assign({}, both, {sessions: rows, ended: []});
 `
 
 // deskPageDrive is the test itself, run after deskPageWorld; it prints the
@@ -347,6 +376,109 @@ const deskPageDrive = `
   w3.setState(both);
   w3.applyDesk();
   check(!!w3.shown && w3.shown.name === "CHAT", "legacy chat pref opens CHAT");
+
+  // ---- the picked session --------------------------------------------
+  const p = world("fleet");
+  p.setState(withRows(workList));
+  p.applyDesk();
+  const more = p.ids["ctgt-more"];
+  check(p.pickableRows(withRows(workList)).map(r => r.tmux).join() === "other,fix-2", "pickable: " + p.pickableRows(withRows(workList)).map(r => r.tmux));
+  more.fire("click");
+  const box = p.ids["ctgt-pick"];
+  check(!box.hidden && more.getAttribute("aria-expanded") === "true", "picker opens");
+  const entries = () => box.children[1] ? box.children[1].children : [];
+  check(entries().map(b => b.title).join() === "Chat with Other work,Chat with fix-2", "entries: " + entries().map(b => b.title));
+  // Esc closes it.
+  for (const f of p.docOn.keydown) f({key: "Escape", preventDefault() {}});
+  check(box.hidden && more.getAttribute("aria-expanded") === "false", "Esc closes the picker");
+
+  // Pick "Other work": a slot after the desks, shown, pinned by session id.
+  more.fire("click");
+  entries()[0].fire("click");
+  await flush();
+  const pk = p.pick;
+  check(!!pk && p.shown === pk && box.hidden, "the pick shows, the picker closed");
+  check(p.ids.ctgt.children.map(b => b.textContent).join() === "CHAT,SLACK,Other work", "buttons: " + p.ids.ctgt.children.map(b => b.textContent));
+  check(p.desks.length === 2, "the pick is not a desk");
+  check(p.fetched[p.fetched.length - 1] === "/fleet/session?sid=s-other&t=other", "pick polls pinned: " + p.fetched);
+  check(p.store["fleet.chatTarget"] === "pick" && p.store["fleet.chatPick"] === JSON.stringify({tmux: "other", sid: "s-other", pid: 21}), "pick remembered: " + JSON.stringify(p.store));
+  pk.els.say.value = "for other";
+  pk.els.send.fire("click");
+  await flush();
+  check(JSON.stringify(p.said) === JSON.stringify([{target: "other", text: "for other", sid: "s-other"}]), "pick send: " + JSON.stringify(p.said));
+
+  // Another pick rebinds the slot; each session keeps its own draft.
+  pk.els.say.value = "draft for other";
+  more.fire("click");
+  entries()[1].fire("click");
+  await flush();
+  check(p.pick === pk && pk.btn.textContent === "fix-2" && pk.els.say.value === "", "rebound to fix-2, empty box: " + pk.els.say.value);
+  check(p.fetched[p.fetched.length - 1] === "/fleet/session?sid=s-fix&t=fix-2", "fix-2 polls pinned: " + p.fetched);
+  check(p.ids.ctgt.children.length === 3, "one slot only");
+  more.fire("click");
+  entries()[0].fire("click");
+  await flush();
+  check(pk.els.say.value === "draft for other" && pk.btn.textContent === "Other work", "draft back with its session: " + pk.els.say.value);
+
+  // A desk shown: the pick's send does nothing.
+  p.desks[0].btn.fire("click");
+  pk.els.send.fire("click");
+  await flush();
+  check(p.said.length === 1, "a hidden pick sent");
+  pk.btn.fire("click");
+
+  // /clear in the picked claude: same pid, new id. The slot follows it, the
+  // draft stays, reads and sends carry the new id.
+  pk.els.say.value = "after clear";
+  p.setState(withRows(workList.map(r => r.tmux === "other" ? Object.assign({}, r, {sessionId: "s-clear"}) : r)));
+  p.applyDesk();
+  await flush();
+  check(p.shown === pk && !pk.btn.disabled && pk.pick.sid === "s-clear" && pk.els.say.value === "after clear", "same pid adopts: " + JSON.stringify(pk.pick));
+  check(p.fetched[p.fetched.length - 1] === "/fleet/session?sid=s-clear&t=other", "adopted id polls: " + p.fetched);
+  check(p.store["fleet.chatPick"] === JSON.stringify({tmux: "other", sid: "s-clear", pid: 21}), "adopted id remembered: " + p.store["fleet.chatPick"]);
+  pk.els.send.fire("click");
+  await flush();
+  check(JSON.stringify(p.said[1]) === JSON.stringify({target: "other", text: "after clear", sid: "s-clear"}), "send after clear: " + JSON.stringify(p.said));
+  const nSaid = p.said.length;
+
+  // Another process took over the tmux: the view stays, send is off, the
+  // reason names the pick.
+  p.setState(withRows(workList.map(r => r.tmux === "other" ? Object.assign({}, r, {sessionId: "s-new", pid: 99}) : r)));
+  p.applyDesk();
+  pk.els.send.fire("click");
+  await flush();
+  check(p.shown === pk && pk.btn.disabled && pk.els.send.disabled && p.said.length === nSaid && pk.pick.sid === "s-clear", "ended pick: view kept, send off, no adopt");
+  check(pk.els.noteT.textContent === "Other work has ended." && !pk.els.note.hidden, "pick note: " + pk.els.noteT.textContent);
+  // Gone from the list (not ended): its own reason.
+  p.setState(withRows(workList.filter(r => r.tmux !== "other")));
+  p.applyDesk();
+  check(pk.els.noteT.textContent === "Other work is not on the session list.", "off list note: " + pk.els.noteT.textContent);
+  // FLEET shows: the line holds only the desks' reasons, never the pick's.
+  p.ids["ctgt-fleet"].fire("click");
+  check(p.ids["ctgt-why"].hidden && p.ids["ctgt-why"].textContent === "", "why on FLEET left out the pick: " + p.ids["ctgt-why"].textContent);
+
+  // On load, the pick comes back only while its tmux runs that session.
+  const r1 = world("pick", {tmux: "other", sid: "s-other"});
+  r1.setState(withRows(workList));
+  r1.applyDesk();
+  await flush();
+  check(!!r1.pick && r1.shown === r1.pick && r1.fetched.join() === "/fleet/session?sid=s-other&t=other", "pick restored: " + r1.fetched);
+  const r2 = world("pick", {tmux: "other", sid: "s-old"});
+  r2.setState(withRows(workList));
+  r2.applyDesk();
+  check(!r2.pick && r2.shown === null && r2.fetched.length === 0, "a stale pick was restored");
+  const r3 = world("CHAT", {tmux: "other", sid: "s-other"});
+  r3.setState(withRows(workList));
+  r3.applyDesk();
+  check(!!r3.pick && r3.shown === r3.desks[0], "the slot comes back, CHAT shows");
+
+  // Nothing else running: the picker says so.
+  const e = world("fleet");
+  e.setState(withRows(workList.slice(0, 2)));
+  e.applyDesk();
+  e.ids["ctgt-more"].fire("click");
+  const eb = e.ids["ctgt-pick"].children;
+  check(eb.length === 2 && eb[1].textContent === "No other running sessions", "empty picker: " + eb.map(x => x.textContent));
   console.log(JSON.stringify(fails));
 })().catch(e => console.log(JSON.stringify(["threw: " + e.stack])));
 `

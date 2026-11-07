@@ -97,8 +97,9 @@ type fleetWorkRow struct {
 	Tickets      []string          `json:"tickets"`
 	Tool         string            `json:"tool"` // claude or grok
 	Model        string            `json:"model"`
-	Status       string            `json:"status"`          // StatusDisplay; may be ""
-	Since        string            `json:"since,omitempty"` // when not busy and known
+	SessionID    string            `json:"sessionId,omitempty"` // the chat panel's picked-session pin
+	Status       string            `json:"status"`              // StatusDisplay; may be ""
+	Since        string            `json:"since,omitempty"`     // when not busy and known
 	StartedAt    string            `json:"startedAt,omitempty"`
 	TicketStatus map[string]string `json:"ticketStatus,omitempty"`
 	Note         string            `json:"note,omitempty"`
@@ -192,7 +193,7 @@ func (s *server) fleetWorkRows(sessions []Session, now time.Time) []fleetWorkRow
 	for _, sess := range derived {
 		r := fleetWorkRow{
 			Tmux: tmuxSessionPart(sess.Tmux), PID: sess.PID, Name: sess.Name, NameSource: sess.NameSource,
-			Tickets: sessionTickets(sess), Tool: "claude", Model: sess.Model, Status: sess.StatusDisplay(),
+			Tickets: sessionTickets(sess), Tool: "claude", Model: sess.Model, SessionID: sess.SessionID, Status: sess.StatusDisplay(),
 			key: idleKey(sess),
 		}
 		if sess.IsGrok() {

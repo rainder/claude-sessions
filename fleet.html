@@ -535,17 +535,30 @@ body.sv-open { overflow: hidden; }
 .chat-log.ro { background: color-mix(in srgb, var(--line) 30%, transparent); }
 .newmsg { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 2; min-height: 36px; padding: 0 14px; border: 0; border-radius: 99px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 650; box-shadow: var(--shadow); cursor: pointer; white-space: nowrap; }
 .newmsg::before { content: ""; position: absolute; inset: -4px; }
-.chat-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px 0; }
+.chat-head { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px 0; }
 .chat-head .sec-h { margin: 0; }
 /* FLEET | CHAT | SLACK: which session the chat panel shows (FLEET, or one
    of Andy's desk sessions). Each keeps its own log and composer. */
-.ctgt { display: inline-flex; flex: none; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface2); }
-.ctgt-b { position: relative; min-height: 30px; padding: 0 13px; border: 0; border-radius: 99px; background: none; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .06em; cursor: pointer; }
+.ctgt { display: inline-flex; flex: 0 1 auto; min-width: 0; max-width: 100%; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface2); }
+.ctgt-b { position: relative; flex: none; min-height: 30px; padding: 0 13px; border: 0; border-radius: 99px; background: none; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .06em; cursor: pointer; }
 .ctgt-b::before { content: ""; position: absolute; inset: -7px 0; }
 .ctgt-b[aria-pressed="true"] { background: var(--text); color: var(--bg); }
 .ctgt-b:disabled { opacity: .45; cursor: not-allowed; }
 .ctgt-dot { position: absolute; top: 3px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .ctgt-why { flex: 1 1 0; min-width: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The picked session's slot and the "pick a session" control after the
+   desks: the slot's label is a session name, cut to fit. */
+.ctgt-b.ctgt-pk { flex: 0 1 auto; min-width: 4.5em; max-width: 9.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: .02em; }
+.ctgt-more { display: inline-flex; align-items: center; justify-content: center; padding: 0 10px; }
+.ctgt-more svg { width: 15px; height: 15px; }
+.ctgt-more[aria-expanded="true"] { background: var(--line); color: var(--text); }
+.ctgt-pick { position: absolute; z-index: 6; top: calc(100% + 4px); left: 8px; right: 8px; max-width: 440px; max-height: min(60vh, 420px); overflow-y: auto; overscroll-behavior: contain;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.ctgt-pick .pick-h { margin: 0; padding: 9px 12px 3px; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.ctgt-pick .empty { margin: 6px 10px 10px; }
+.pick-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 12px; border: 0; border-top: 1px solid var(--line); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.pick-row:hover { background: var(--surface2); }
+.pick-row[aria-current="true"] { background: var(--accent-tint); }
 /* Why the desk cannot take a message now; the draft stays in the box. */
 .desk-note { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 13.5px; font-weight: 600; color: var(--red); }
 .desk-note .dot { background: var(--red); }
@@ -934,8 +947,10 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
         <h2 class="sec-h" id="h-chat">Chat</h2>
         <div class="ctgt" id="ctgt" role="group" aria-label="Chat with">
           <button class="ctgt-b" id="ctgt-fleet" type="button" aria-pressed="true">FLEET<span class="ctgt-dot" id="ctgt-unread" hidden></span></button>
+          <button class="ctgt-b ctgt-more" id="ctgt-more" type="button" aria-label="Pick a session" title="Pick a session" aria-haspopup="dialog" aria-expanded="false" aria-controls="ctgt-pick"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button>
         </div>
         <span class="ctgt-why" id="ctgt-why" hidden></span>
+        <div class="ctgt-pick" id="ctgt-pick" role="dialog" aria-label="Pick a session" hidden></div>
       </div>
       <div class="log-wrap" id="chat-wrap">
         <div class="chat-log" id="chat-log" aria-live="polite"></div>
@@ -4723,7 +4738,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const w = t.offsetWidth, h = t.offsetHeight;
     const left = (window.innerWidth - w) / 2, right = left + w;
     let top = Infinity;
-    for (const el of [$("tabbar"), $("composer-row").closest(".composer"), ...desks.map(D => D.els.comp), $("sv-comp")]) {
+    for (const el of [$("tabbar"), $("composer-row").closest(".composer"), ...targets().map(D => D.els.comp), $("sv-comp")]) {
       if (!el || el.hidden) continue;
       const r = el.getBoundingClientRect();
       if (r.height === 0 || r.right <= left || r.left >= right) continue;
@@ -4774,7 +4789,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (!expired && !document.hidden) p.timer = setTimeout(() => run(p), again ? 0 : p.cur);
   }
   function runNow(name) { const p = pollers[name]; return p ? run(p) : Promise.resolve(); }
-  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); clearTimeout(sv.timer); for (const D of desks) clearTimeout(D.timer); }
+  function stopAll() { for (const p of Object.values(pollers)) clearTimeout(p.timer); clearTimeout(sv.timer); for (const D of targets()) clearTimeout(D.timer); }
   function startAll() {
     if (expired) return;
     for (const p of Object.values(pollers)) { clearTimeout(p.timer); p.cur = p.base; run(p); }
@@ -4864,7 +4879,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const vv = window.visualViewport;
     // Keyboard open = the chat input has focus on a touch phone. A pinch
     // zoom also shrinks visualViewport, so that alone does not count.
-    const typing = document.activeElement === $("say") || document.activeElement === $("sv-say") || desks.some(D => document.activeElement === D.els.say);
+    const typing = document.activeElement === $("say") || document.activeElement === $("sv-say") || targets().some(D => document.activeElement === D.els.say);
     const kb = isPhone() && typing && (coarse.matches || (!!vv && window.innerHeight - vv.height > 120));
     const vh = kb && vv ? vv.height : window.innerHeight;
     document.body.classList.toggle("kb", !!kb);
@@ -5324,10 +5339,20 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // (TARGET_KEY: "fleet" or the desk's name) and applied once, on the first
   // state answer, when that desk is usable. Later a desk going away never
   // moves the view: send is disabled and the reason shows under the log.
+  // After the desks, one more slot: a session Andy picked from the working
+  // list (the "pick a session" control). It is a desk object with pick set
+  // ({tmux, sid, pid}); its reads and sends carry sid, so the server refuses
+  // another session that took over the tmux name. The same pid with a new
+  // id (/clear or /resume in that claude) is the same session going on: the
+  // slot adopts the id (pickAdopt). Picking another session
+  // rebinds the slot; each picked session keeps its own draft and images
+  // (pickDrafts). The pick is kept per browser (TARGET_KEY "pick", PICK_KEY
+  // {tmux, sid}) and restored only while that tmux still runs that session.
   // desks: one object per desk the server listed (deskMake), never removed.
-  // deskShown: the desk shown, or null for FLEET. deskPicked: the first
-  // state answer was seen. fleetUnreadMark: FLEET answered while a desk
-  // showed. A desk: name, btn (its switch button), els (its nodes), att (its
+  // pickD: the picked slot, or null until the first pick.
+  // deskShown: the desk (or the picked slot) shown, or null for FLEET.
+  // deskPicked: the first state answer was seen. fleetUnreadMark: FLEET
+  // answered while a desk showed. A desk: name, btn (its switch button), els (its nodes), att (its
   // images), tmux (the tmux session the log belongs to), sid (its session id:
   // a new one starts the log over), gen (counts binds; an answer for an older
   // one is dropped), waiting (a poll skipped while the desk was not usable, so
@@ -5339,7 +5364,11 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // broken state from filling the switch.
   const DESK_NAME = /^[A-Z][A-Z0-9_-]{0,31}$/, DESKS_MAX = 4;
   const desks = [];
-  let deskShown = null, deskPicked = false, fleetUnreadMark = false;
+  let deskShown = null, deskPicked = false, fleetUnreadMark = false, pickD = null, pickOpen = false;
+  const PICK_KEY = "fleet.chatPick";
+  const pickDrafts = new Map(), pickAttDrafts = new Map(); // tmux + "\n" + sid → draft text, images
+  // targets: every desk, then the picked slot.
+  const targets = () => pickD ? desks.concat(pickD) : desks;
   const DESK_REASONS = {
     "not running": n => n + " is not running",
     "ambiguous": n => "Two sessions are named " + n,
@@ -5349,6 +5378,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     "in FLEET's tmux": n => n + " is in FLEET's tmux session",
     "shares tmux": n => n + " shares its tmux session",
     "session list failed": () => "The session list failed",
+    "ended": n => n + " has ended",
+    "off list": n => n + " is not on the session list",
   };
   const deskOpenErrors = n => Object.assign({}, svOpenErrors, {
     not_allowed: n + " is not a desk session any more.",
@@ -5357,7 +5388,23 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     ambiguous: "Two sessions share " + n + "'s tmux session.",
     not_desk: n + " is not running.",
   });
-  const deskInfo = D => arr(state && state.desks).map(obj).find(d => d && str(d.name) === D.name) || null;
+  const pickOpenErrors = n => Object.assign(deskOpenErrors(n), {
+    not_allowed: n + " is not on the session list any more.",
+    not_session: n + " has ended.",
+  });
+  const deskInfo = D => D.pick ? pickInfo(D) : arr(state && state.desks).map(obj).find(d => d && str(d.name) === D.name) || null;
+  // pickInfo is the picked slot's desk-like view from the working list: alive
+  // only while exactly one row runs in its tmux session and that row is the
+  // picked session. Another session id there means the picked one ended.
+  function pickInfo(D) {
+    if (!state) return null;
+    if (state.sessions === null) return {alive: false, reason: "session list failed"};
+    const tm = D.pick.tmux, rows = workingRows().filter(r => str(r.tmux) === tm);
+    if (rows.length > 1) return {alive: false, reason: "shares tmux"};
+    if (rows.length === 1) return str(rows[0].sessionId) === D.pick.sid ? {alive: true, tmux: tm} : {alive: false, reason: "ended"};
+    const ended = arr(state.ended).map(obj).some(r => r && str(r.tmux) === tm);
+    return {alive: false, reason: ended ? "ended" : "off list"};
+  }
   const deskUsable = d => !!d && d.alive === true && SV_NAME.test(str(d.tmux));
   function deskReason(D, d) {
     const f = d && DESK_REASONS[str(d.reason)];
@@ -5373,19 +5420,21 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
 
   // deskMake adds desk name: its switch button after the others, its own
   // log and composer, and their handlers, all bound to this desk alone.
-  function deskMake(name) {
-    const D = {name, tmux: "", sid: "", gen: 0, timer: 0, busyGen: -1, waiting: false, target: null, source: "",
+  // With pick ({tmux, sid}) it is the picked slot instead: its button goes
+  // after the desks', and it is not one of desks.
+  function deskMake(name, pick) {
+    const D = {name, pick: pick || null, tmux: "", sid: "", gen: 0, timer: 0, busyGen: -1, waiting: false, target: null, source: "",
       turns: new Map(), pos: null, older: 0, pane: "", error: "", loadFail: false, key: "", follow: true, unseen: false, rev: 0,
       foldOpen: new Set(), loadingOlder: false, sending: false, textRev: 0, stale: false, savedTop: null,
-      openErrors: deskOpenErrors(name)};
+      openErrors: pick ? pickOpenErrors(name) : deskOpenErrors(name)};
     D.sendErrors = Object.assign({}, svSendErrors, D.openErrors);
     const e = D.els = deskNodes(name);
-    D.btn = el("button", "ctgt-b", name);
+    D.btn = el("button", pick ? "ctgt-b ctgt-pk" : "ctgt-b", name);
     D.btn.type = "button";
     D.btn.setAttribute("aria-pressed", "false");
     D.btn.disabled = true;
     D.btn.addEventListener("click", () => showChatTarget(D, true));
-    $("ctgt").append(D.btn);
+    $("ctgt").insertBefore(D.btn, !pick && pickD ? pickD.btn : $("ctgt-more"));
     e.log.addEventListener("scroll", () => {
       if (!e.log.clientHeight) return;
       D.follow = e.log.scrollHeight - e.log.scrollTop - e.log.clientHeight < 80;
@@ -5410,7 +5459,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     });
     e.say.addEventListener("focus", () => setTimeout(measure, 50));
     e.say.addEventListener("blur", () => setTimeout(measure, 50));
-    desks.push(D);
+    if (!pick) desks.push(D);
     return D;
   }
 
@@ -5424,26 +5473,33 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     if (fleetUnreadMark) $("ctgt-fleet").setAttribute("aria-label", "FLEET, new messages");
     else $("ctgt-fleet").removeAttribute("aria-label");
     const why = [];
-    for (const D of desks) {
+    for (const D of targets()) {
       const d = deskInfo(D), ok = deskUsable(d), r = !state || ok ? "" : deskReason(D, d);
       D.btn.setAttribute("aria-pressed", D === deskShown ? "true" : "false");
       D.btn.disabled = !ok;
-      D.btn.title = r || "Chat with your " + D.name + " session";
-      if (r && (!deskShown || D === deskShown)) why.push(r);
+      D.btn.title = r || (D.pick ? "Chat with " + D.name : "Chat with your " + D.name + " session");
+      // While FLEET shows, only the desks' reasons; the picked slot's shows
+      // only while it is shown.
+      if (r && (D === deskShown || (!deskShown && !D.pick))) why.push(r);
     }
     const w = why.join(" · ");
     $("ctgt-why").textContent = w;
     $("ctgt-why").title = w;
     $("ctgt-why").hidden = !w;
   }
-  function deskApplySends() { for (const D of desks) deskApplySend(D); }
+  function deskApplySends() { for (const D of targets()) deskApplySend(D); }
 
   // showChatTarget shows desk D, or FLEET for null. persist: Andy chose it
   // (the switch), so it is the browser's choice from now on. A desk opens
   // only while it is usable.
   function showChatTarget(D, persist) {
     if (D && !deskUsable(deskInfo(D))) return;
-    if (persist) { try { localStorage.setItem(TARGET_KEY, D ? D.name : "fleet"); } catch { /* storage off */ } }
+    if (persist) {
+      try {
+        localStorage.setItem(TARGET_KEY, !D ? "fleet" : D.pick ? "pick" : D.name);
+        if (D && D.pick) localStorage.setItem(PICK_KEY, JSON.stringify(D.pick));
+      } catch { /* storage off */ }
+    }
     if (D === deskShown) return;
     const was = deskShown;
     if (was) {
@@ -5453,7 +5509,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     deskShown = D;
     $("chat-wrap").hidden = !!D;
     $("chat-comp").hidden = !!D;
-    for (const x of desks) { x.els.wrap.hidden = x !== D; x.els.comp.hidden = x !== D; }
+    for (const x of targets()) { x.els.wrap.hidden = x !== D; x.els.comp.hidden = x !== D; }
     if (D) {
       const tm = str(deskInfo(D).tmux);
       if (tm !== D.tmux) deskBind(D, tm);
@@ -5489,6 +5545,143 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     guard(() => deskRender(D, true));
   }
 
+  // ---- the picked session ----------------------------------------------
+  // PICK_SID is the server's session-id rule (resumeSessionIDRe): a row
+  // without a usable id cannot be pinned, so it is not offered.
+  const PICK_SID = /^[A-Za-z0-9_-]{1,64}$/;
+  // pickLabel: the session's name, or its tmux name when it has none.
+  const pickLabel = r => str(r.name).trim() || str(r.tmux);
+  const pickPid = r => Number.isInteger(r.pid) && r.pid > 0 ? r.pid : 0;
+  // pickableRows: what the picker offers, from a /fleet/state answer: the
+  // working list (never FLEET: the server leaves it out, and a row named
+  // FLEET is dropped here too) without the tmux sessions a usable desk
+  // holds, which have their own buttons.
+  function pickableRows(st) {
+    const deskTm = new Set(arr(st && st.desks).map(obj).filter(d => d && d.alive === true).map(d => str(d.tmux)));
+    return arr(st && st.sessions).map(obj).filter(r => r && SV_NAME.test(str(r.tmux)) && PICK_SID.test(str(r.sessionId)) &&
+      str(r.name) !== "FLEET" && !deskTm.has(str(r.tmux)));
+  }
+
+  // pickBind points the picked slot at session pick ({tmux, sid}) named
+  // name, making the slot on the first pick; the same session under a new
+  // name only renames it. The draft and images of the session it showed are
+  // kept for that session (pickDrafts), never carried over.
+  function pickBind(pick, name) {
+    if (!pickD) { pickD = deskMake(name, pick); return; }
+    const D = pickD, e = D.els, was = D.pick, key = p => p.tmux + "\n" + p.sid;
+    const moved = was.tmux !== pick.tmux || was.sid !== pick.sid;
+    if (!moved && D.name === name) return;
+    D.name = name;
+    D.openErrors = pickOpenErrors(name);
+    D.sendErrors = Object.assign({}, svSendErrors, D.openErrors);
+    D.btn.textContent = name;
+    e.say.setAttribute("aria-label", "Message to " + name);
+    if (!moved) { guard(() => deskRender(D, true)); return; }
+    const draft = e.say.value;
+    if (draft.trim()) pickDrafts.set(key(was), draft); else pickDrafts.delete(key(was));
+    if (D.att.items.length) pickAttDrafts.set(key(was), D.att.items); else pickAttDrafts.delete(key(was));
+    e.say.value = pickDrafts.get(key(pick)) || "";
+    D.att.set(pickAttDrafts.get(key(pick)) || []);
+    pickAttDrafts.delete(key(pick));
+    e.warn.hidden = true;
+    D.pick = pick;
+    deskBind(D, pick.tmux);
+    deskGrow(D);
+  }
+
+  // pickRestore brings back the browser's last pick on the first state
+  // answer, only while its tmux session still runs that session.
+  function pickRestore() {
+    let p = null;
+    try { p = obj(JSON.parse(localStorage.getItem(PICK_KEY) || "null")); } catch { p = null; }
+    if (!p) return;
+    const tm = str(p.tmux), sid = str(p.sid);
+    const r = pickableRows(state).find(x => str(x.tmux) === tm);
+    if (r && str(r.sessionId) === sid && workingRows().filter(x => str(x.tmux) === tm).length === 1) pickBind({tmux: tm, sid, pid: pickPid(r)}, pickLabel(r));
+  }
+
+  // pickAdopt runs on every state answer: when the one row in the picked
+  // tmux session is the picked process (same pid) under a new session id,
+  // Claude rewrote its session file (/clear, /resume) and the slot follows
+  // the new id. The log starts over (deskBind drops polls in flight); the
+  // draft stays, it was written for this session. Another pid is another
+  // process: the pick stays ended. A send in flight keeps the id it took.
+  function pickAdopt(D) {
+    const p = D.pick;
+    if (!p.pid) return;
+    const rows = workingRows().filter(r => str(r.tmux) === p.tmux);
+    if (rows.length !== 1 || pickPid(rows[0]) !== p.pid) return;
+    const sid = str(rows[0].sessionId);
+    if (sid === p.sid || !PICK_SID.test(sid)) return;
+    D.pick = {tmux: p.tmux, sid, pid: p.pid};
+    try {
+      const saved = obj(JSON.parse(localStorage.getItem(PICK_KEY) || "null"));
+      if (saved && str(saved.tmux) === p.tmux && str(saved.sid) === p.sid) localStorage.setItem(PICK_KEY, JSON.stringify(D.pick));
+    } catch { /* storage off */ }
+    deskBind(D, p.tmux);
+    if (deskShown === D) deskPoll(D);
+  }
+
+  // pickSession shows working-list row r in the picked slot.
+  function pickSession(r) {
+    const tm = str(r.tmux), sid = str(r.sessionId), pick = {tmux: tm, sid, pid: pickPid(r)};
+    if (!SV_NAME.test(tm) || !PICK_SID.test(sid)) return;
+    if (!deskUsable(pickInfo({pick}))) { toast(pickLabel(r) + " is not available now.", true); return; }
+    if (pickD && pickD.sending && (pickD.pick.tmux !== tm || pickD.pick.sid !== sid)) {
+      toast("Wait until the send to " + pickD.name + " finishes.", true);
+      return;
+    }
+    setPicker(false);
+    pickBind(pick, pickLabel(r));
+    // Shown already: showChatTarget only saves the choice; poll the new one.
+    if (deskShown === pickD) deskPoll(pickD);
+    showChatTarget(pickD, true);
+    renderTargetBar();
+    deskApplySends();
+  }
+
+  // The picker: the working list's other sessions, under the switch. Esc,
+  // a tap outside or a pick closes it.
+  function renderPicker() {
+    const box = $("ctgt-pick");
+    const rows = pickableRows(state);
+    const head = el("p", "pick-h", "Chat with a session");
+    if (state && state.sessions === null) { box.replaceChildren(head, el("p", "empty", "Session list unavailable.")); return; }
+    if (!rows.length) { box.replaceChildren(head, el("p", "empty", "No other running sessions")); return; }
+    box.replaceChildren(head, el("div", "", ...rows.map(r => {
+      const tm = str(r.tmux), name = pickLabel(r);
+      const l2 = el("div", "row-l2");
+      const lv = liveBadgeOf(str(r.status), str(r.since), tm);
+      if (lv) l2.append(lv);
+      if (str(r.model)) l2.append(el("span", "mdl", modelLabel(str(r.model), str(r.tool))));
+      const se = el("span", "sess", tm);
+      se.title = tm;
+      l2.append(se);
+      const b = fkey(el("button", "row pick-row", el("div", "row-main", workL1(r, tm), l2)), "pick:" + tm);
+      b.type = "button";
+      b.title = "Chat with " + name;
+      if (pickD && pickD.pick.tmux === tm && pickD.pick.sid === str(r.sessionId)) b.setAttribute("aria-current", "true");
+      b.addEventListener("click", () => pickSession(r));
+      return b;
+    })));
+  }
+  function setPicker(open) {
+    pickOpen = open;
+    $("ctgt-pick").hidden = !open;
+    $("ctgt-more").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) renderPicker();
+  }
+  $("ctgt-more").addEventListener("click", () => setPicker(!pickOpen));
+  document.addEventListener("pointerdown", e => {
+    if (pickOpen && !$("ctgt-pick").contains(e.target) && !$("ctgt-more").contains(e.target)) setPicker(false);
+  }, true);
+  document.addEventListener("keydown", e => {
+    if (!pickOpen || e.key !== "Escape") return;
+    e.preventDefault();
+    setPicker(false);
+    $("ctgt-more").focus();
+  });
+
   // applyDesk runs on every state answer: a desk named for the first time
   // gets its button and log.
   function applyDesk() {
@@ -5498,7 +5691,9 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     }
     if (!deskPicked) {
       deskPicked = true;
-      const D = desks.find(x => x.name === deskPref());
+      pickRestore();
+      const pref = deskPref();
+      const D = pref === "pick" ? pickD : desks.find(x => x.name === pref);
       if (D && deskUsable(deskInfo(D))) showChatTarget(D, false);
     }
     const D = deskShown, d = D && deskInfo(D);
@@ -5506,13 +5701,20 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       if (str(d.tmux) !== D.tmux) { deskBind(D, str(d.tmux)); deskPoll(D); }
       else if (D.waiting) deskPoll(D);
     }
+    if (pickD) pickAdopt(pickD);
+    // The picked session renamed: its button follows.
+    const pr = pickD && pickableRows(state).find(r => str(r.tmux) === pickD.pick.tmux && str(r.sessionId) === pickD.pick.sid);
+    if (pr) pickBind(pickD.pick, pickLabel(pr));
+    if (pickOpen) keepFocus(renderPicker);
     renderTargetBar();
     deskApplySends();
   }
 
   // deskURL is a /fleet/session read for D's bound tmux session, pinned to
-  // D: the server refuses it unless that session still holds D.
-  const deskURL = D => "/fleet/session?desk=" + encodeURIComponent(D.name) + "&t=" + encodeURIComponent(D.tmux);
+  // D: the server refuses it unless that session still holds D (a desk), or
+  // still runs D's session id (the picked slot).
+  const deskURL = D => "/fleet/session?" + (D.pick ? "sid=" + encodeURIComponent(D.pick.sid) : "desk=" + encodeURIComponent(D.name)) +
+    "&t=" + encodeURIComponent(D.tmux);
 
   // deskPoll asks for what is new every DESK_POLL ms while D is shown,
   // usable at the bound tmux session, and the page is visible. As svPoll,
@@ -5619,16 +5821,17 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   async function deskSend(D) {
     const e = D.els, text = e.say.value.trim(), imgs = D.att.items.slice();
     if (D.sending || (!text && !imgs.length) || !deskCanSend(D)) return;
-    const tmux = D.tmux;
+    const tmux = D.tmux, pin = D.pick ? D.pick.sid : "";
     D.sending = true;
     deskApplySend(D);
     const up = imgs.length ? await uploadImages(imgs) : {ok: true, paths: []};
     const full = up.ok ? withImages(text, up.paths) : "";
     // The uploads take time: D may have moved or gone meanwhile. desk: D's
-    // name has the server refuse a tmux session that no longer holds D.
+    // name has the server refuse a tmux session that no longer holds D; sid
+    // (the picked slot) one that no longer runs the picked session.
     const res = !up.ok ? {ok: false, error: up.error} : tooLong(full) ? {ok: false, error: TOO_LONG}
-      : !(deskCanSend(D) && D.tmux === tmux) ? {ok: false, error: D.name + " changed while the images uploaded. Nothing was sent."}
-      : await postSay("/fleet/session/say", {target: tmux, text: full, desk: D.name}, D.sendErrors);
+      : !(deskCanSend(D) && D.tmux === tmux && (D.pick ? D.pick.sid : "") === pin) ? {ok: false, error: D.name + " changed while the images uploaded. Nothing was sent."}
+      : await postSay("/fleet/session/say", pin ? {target: tmux, text: full, sid: pin} : {target: tmux, text: full, desk: D.name}, D.sendErrors);
     D.sending = false;
     if (res.ok) {
       if (e.say.value.trim() === text) { e.say.value = ""; deskGrow(D); }
@@ -5642,7 +5845,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       toast("Delivery not confirmed. Check the transcript before you send again.", true);
     } else {
       // Another session in D's tmux: block send until a poll finds D.
-      if (res.code === "not_desk") D.error = res.error;
+      if (res.code === "not_desk" || res.code === "not_session") D.error = res.error;
       toast(res.error, true);
     }
     deskApplySend(D);

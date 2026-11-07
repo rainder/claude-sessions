@@ -71,7 +71,7 @@ func TestFleetWorkRowsFilterAndOrder(t *testing.T) {
 	}
 	r := rows[1]
 	if r.PID != 24 || r.Name != "Fix it" || r.NameSource != "user" || !reflect.DeepEqual(r.Tickets, []string{"DR-5"}) ||
-		r.Tool != "claude" || r.Since != "2026-10-13T09:00:00Z" || r.StartedAt != "2026-10-13T08:00:00Z" {
+		r.Tool != "claude" || r.SessionID != "idle-a" || r.Since != "2026-10-13T09:00:00Z" || r.StartedAt != "2026-10-13T08:00:00Z" {
 		t.Fatalf("idle row = %+v", r)
 	}
 	if rows[0].Tool != "grok" || rows[0].Model != "grok-4" {

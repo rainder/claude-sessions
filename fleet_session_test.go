@@ -511,3 +511,94 @@ func TestFleetSessionFilterPlumbing(t *testing.T) {
 		t.Fatalf("turns %q, want %q", got, want)
 	}
 }
+
+// TestFleetSessionSIDPin: the chat panel's picked session reads with
+// sid=<its session id>. The row in that tmux session must still run that
+// session; a malformed id is refused before anything resolves.
+func TestFleetSessionSIDPin(t *testing.T) {
+	s := fleetSessionServer(t, fleetUUID(140))
+	for _, c := range []struct {
+		q, code string
+		status  int
+	}{
+		{"t=other", "", 200}, // no pin: unchanged
+		{"t=other&sid=not-on-a-card", "", 200},
+		{"t=spawn-dr-1-fix&sid=" + fleetUUID(140), "", 200},
+		{"t=other&sid=" + fleetUUID(141), "not_session", 409}, // a new session in that tmux
+		{"t=other&sid=", "bad_target", 400},
+		{"t=other&sid=a%3Bb", "bad_target", 400},
+		{"t=other&sid=..%2Fx", "bad_target", 400},
+		{"t=other&sid=" + strings.Repeat("a", 65), "bad_target", 400},
+		{"t=nobody&sid=not-on-a-card", "not_allowed", 403}, // the allowlist first
+		{"t=fleet&sid=fleet-sid", "fleet_self", 403},
+		{"t=ended-dr-3&sid=x", "gone", 404},
+	} {
+		code, out := getFleetSession(t, s, c.q)
+		if code != c.status || (c.code != "" && out["code"] != c.code) {
+			t.Errorf("%s: %d %v", c.q, code, out)
+		}
+	}
+
+	// With a desk pin too, both must pass.
+	d := fleetTestServer(t, deskRows())
+	d.fleet.disabled = deskDisabled
+	writeFleetFile(t, d, "state.json", fleetSessionState)
+	for _, c := range []struct {
+		q, code string
+		status  int
+	}{
+		{"t=desk&desk=CHAT&sid=" + deskSID, "", 200},
+		{"t=desk&desk=CHAT&sid=" + slackSID, "not_session", 409},
+		{"t=desk&desk=SLACK&sid=" + deskSID, "not_desk", 409},
+	} {
+		code, out := getFleetSession(t, d, c.q)
+		if code != c.status || (c.code != "" && out["code"] != c.code) {
+			t.Errorf("%s: %d %v", c.q, code, out)
+		}
+	}
+}
+
+func TestFleetSessionSaySIDPin(t *testing.T) {
+	rig, targets := sessionSayRig(t)
+	// The picked session itself: typed.
+	code, out := rig.postSession(t, `{"target":"other","text":"to the pick","sid":"not-on-a-card"}`, nil)
+	if code != 200 || out["ok"] != true || len(rig.typed) != 1 {
+		t.Fatalf("pinned, same session: %d %v typed %q", code, out, rig.typed)
+	}
+	// No pin, or null: unchanged.
+	rig.now = rig.now.Add(time.Minute)
+	code, out = rig.postSession(t, `{"target":"other","text":"no pin","sid":null}`, nil)
+	if code != 200 || out["ok"] != true || len(rig.typed) != 2 {
+		t.Fatalf("null pin: %d %v typed %q", code, out, rig.typed)
+	}
+	// Another session in that tmux: refused before any key.
+	rig.now = rig.now.Add(time.Minute)
+	n := len(*targets)
+	code, out = rig.postSession(t, `{"target":"other","text":"to the pick","sid":"`+fleetUUID(142)+`"}`, nil)
+	if code != 409 || out["code"] != "not_session" || out["target"] != "other" || len(*targets) != n {
+		t.Fatalf("pinned, another session: %d %v keys %v", code, out, (*targets)[n:])
+	}
+	// Malformed ids: 400 bad_target (a wrong JSON type is bad_json).
+	for _, c := range []struct{ sid, code string }{
+		{`""`, "bad_target"}, {`"a b"`, "bad_target"}, {`"../x"`, "bad_target"},
+		{`"` + strings.Repeat("a", 65) + `"`, "bad_target"}, {`5`, "bad_json"}, {`["x"]`, "bad_json"},
+	} {
+		code, out := rig.postSession(t, `{"target":"other","text":"x","sid":`+c.sid+`}`, nil)
+		if code != 400 || out["code"] != c.code || len(*targets) != n {
+			t.Errorf("sid %s: %d %v", c.sid, code, out)
+		}
+	}
+
+	// With a desk pin too, both must pass.
+	drig := newSayRig(t, deskRows())
+	drig.s.fleet.disabled = deskDisabled
+	writeFleetFile(t, drig.s, "state.json", fleetSessionState)
+	code, out = drig.postSession(t, `{"target":"desk","text":"x","desk":"CHAT","sid":"`+slackSID+`"}`, nil)
+	if code != 409 || out["code"] != "not_session" || len(drig.typed) != 0 {
+		t.Fatalf("desk ok, sid not: %d %v typed %q", code, out, drig.typed)
+	}
+	code, out = drig.postSession(t, `{"target":"desk","text":"x","desk":"CHAT","sid":"`+deskSID+`"}`, nil)
+	if code != 200 || out["ok"] != true || len(drig.typed) != 1 {
+		t.Fatalf("both pins pass: %d %v typed %q", code, out, drig.typed)
+	}
+}

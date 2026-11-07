@@ -128,6 +128,22 @@ func (s *server) fleetResolveSession(name string, sessions []Session) (Session, 
 	}
 }
 
+// fleetSessionPin refuses a request pinned to session id sid (the chat
+// panel's picked session: sid=<id>, "sid": "<id>") whose resolved row runs
+// another session. The page binds a picked session by tmux name; without
+// this, a new session started in that tmux after the picked one exited
+// would be shown and typed into as the old one. "" is no pin.
+func fleetSessionPin(row Session, sid string) *fleetSessionErr {
+	if sid == "" || row.SessionID == sid {
+		return nil
+	}
+	return &fleetSessionErr{http.StatusConflict, "not_session", "this tmux session now runs another session"}
+}
+
+// fleetBadSID is the refusal for a malformed session-id pin: present, but
+// empty or outside resumeSessionIDRe.
+var fleetBadSID = &fleetSessionErr{http.StatusBadRequest, "bad_target", "bad session id"}
+
 // fleetIsDerived reports whether a working-list row runs in tmux session
 // name, on the list the caller resolved from.
 func (s *server) fleetIsDerived(name string, sessions []Session) bool {
@@ -279,7 +295,8 @@ type fleetSessionViewBody struct {
 	Pane   *string            `json:"pane,omitempty"`
 }
 
-// fleetSessionGet is GET /fleet/session?t=<tmux>[&since=][&before=][&n=].
+// fleetSessionGet is GET /fleet/session?t=<tmux>[&since=][&before=][&n=]
+// [&desk=][&sid=].
 func (s *server) fleetSessionGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.fleetAuth(r) == fleetAuthNone {
@@ -304,6 +321,13 @@ func (s *server) fleetSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: "bad_request", Error: "bad desk"})
 		return
 	}
+	// sid=<id> is the chat panel's view of a picked session: the row must
+	// still run that session.
+	sid := q.Get("sid")
+	if q.Has("sid") && !resumeSessionIDRe.MatchString(sid) {
+		writeFleetSessionErr(w, fleetBadSID, "")
+		return
+	}
 	since, ok1 := num("since", 0, 1<<62, 0)
 	before, ok2 := num("before", 1, 1<<62, -1)
 	n, ok3 := num("n", 1, 200, fleetSessionTurnsDefault)
@@ -319,6 +343,9 @@ func (s *server) fleetSessionGet(w http.ResponseWriter, r *http.Request) {
 	row, card, rerr := s.fleetResolveSession(name, sessions)
 	if rerr == nil && pin != "" {
 		rerr = fleetDeskPin(name, pin, sessions)
+	}
+	if rerr == nil {
+		rerr = fleetSessionPin(row, sid)
 	}
 	if rerr != nil {
 		writeFleetSessionErr(w, rerr, "")
@@ -369,11 +396,14 @@ type fleetSessionSayResult struct {
 
 // fleetSessionSayBody is the say request. Desk names the desk a send from
 // the chat panel's desk view is for (fleetDeskJSON): it is refused unless the
-// target still holds that desk. desk is Desk read.
+// target still holds that desk. desk is Desk read. SID is the session id a
+// send from the chat panel's picked session is for (fleetSessionPin);
+// absent or null is no pin.
 type fleetSessionSayBody struct {
 	Target string          `json:"target"`
 	Text   string          `json:"text"`
 	Desk   json.RawMessage `json:"desk"`
+	SID    *string         `json:"sid"`
 	desk   string
 }
 
@@ -397,7 +427,7 @@ func decodeFleetSessionSayBody(w http.ResponseWriter, r *http.Request) (fleetSes
 
 var fleetSayOther = fleetSayWho{subject: "The session", pane: "the session pane"}
 
-// fleetSessionSay is POST /fleet/session/say {target, text, desk?}: the /fleet/say
+// fleetSessionSay is POST /fleet/session/say {target, text, desk?, sid?}: the /fleet/say
 // pipeline (fleetSayGateLocked, fleetTypeInto) aimed at an allowlisted
 // session, resolved from a fresh collect and a fresh state.json read. Sends
 // are logged to the say log as target and length only, never the text, and
@@ -428,6 +458,13 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 		writeFleetSessionErr(w, &fleetSessionErr{http.StatusBadRequest, "bad_target", "bad session name"}, "")
 		return
 	}
+	sid := ""
+	if body.SID != nil {
+		if sid = *body.SID; !resumeSessionIDRe.MatchString(sid) {
+			writeFleetSessionErr(w, fleetBadSID, "")
+			return
+		}
+	}
 
 	f := &s.fleet
 	f.sayMu.Lock()
@@ -446,6 +483,9 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 	row, _, rerr := s.fleetResolveSession(name, sessions)
 	if rerr == nil && body.desk != "" {
 		rerr = fleetDeskPin(name, body.desk, sessions)
+	}
+	if rerr == nil {
+		rerr = fleetSessionPin(row, sid)
 	}
 	if rerr != nil {
 		writeFleetSessionErr(w, rerr, name)

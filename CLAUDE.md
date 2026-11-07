@@ -244,6 +244,12 @@ types into panes. Spec and plan: `docs/superpowers/`.
   that tmux session still holds that desk on the list the handler resolved
   from. Each target keeps its own DOM log and composer (one `#desk-tpl`
   clone per desk): a draft never crosses.
+  After the desks, one picked-session slot (the `⋯` picker over
+  `state.sessions`, which carry `sessionId`; usable desks' tmux left out):
+  a desk object with `pick` set, rebound by a new pick, a draft kept per
+  picked session. Its requests pin the session id (`sid=<id>`, `"sid"`):
+  `fleetSessionPin` refuses 409 `not_session` when the resolved row runs
+  another session; a malformed id is 400 `bad_target`. Both pins may apply.
 - **Clarify:** claude FLEET only. The fork is exec'd (no shell) with
   `--setting-sources ""`, a fixed tool list and a deny list, and never
   resumes FLEET's own session id.
