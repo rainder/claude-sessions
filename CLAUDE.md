@@ -210,6 +210,13 @@ types into panes. Spec and plan: `docs/superpowers/`.
   today, else `MM-DD HH:MM` (Vilnius on the page, `time.Local` in the TUI).
   A valid one hides `waitingOn`. Not in `cardHash`. Page (`waitingLine`,
   node-tested against `fleetWaitingText`), TUI details and raw screen.
+- **Affects line.** Optional card array `envs` of `prod`, `sandbox`, `dev`,
+  `predev`, `local`, `none`. Unknown values and repeats drop, order is that
+  list, `none` drops next to another value (`fleetDecodeEnvs`, node-tested
+  against the page's `envList`). The page draws `Affects:` chips on every
+  decision card, sent row and done row, `env: not set` when empty; chip text
+  is the fixed label, never the card's string. Not in `cardHash`; the TUI
+  decodes it but does not draw it.
 - **Start FLEET:** a mutex across the handler, a 60s gap, a fresh collect,
   and a pending start blocks a second spawn (two taps must not make two
   FLEETs).

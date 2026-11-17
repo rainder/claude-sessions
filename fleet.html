@@ -217,6 +217,16 @@ section { min-width: 0; }
 .prio { padding: 0 6px; border: 1px solid var(--line); border-radius: 99px; font-size: 11px; font-weight: 650; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .prio.p1 { color: var(--red); background: var(--red-tint); border-color: var(--red-line); }
 .prio.p2 { color: var(--amber); background: var(--amber-tint); border-color: var(--amber-line); }
+/* Affects: the environments a card touches (envs), one line of chips under
+   the title. local, none and "not set" stay grey. */
+.envs { display: flex; align-items: center; gap: 4px; min-width: 0; margin: 3px 0 0; overflow: hidden; white-space: nowrap; font-size: 12px; font-weight: 450; color: var(--muted); }
+.envs-l { flex: none; margin-right: 2px; }
+.env { flex: none; padding: 0 6px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface2); font-size: 11px; font-weight: 650; line-height: 1.5; color: var(--muted); }
+.env-prod { color: var(--red); background: var(--red-tint); border-color: var(--red-line); }
+.env-sandbox { color: var(--amber); background: var(--amber-tint); border-color: var(--amber-line); }
+.env-dev { color: var(--accent); background: var(--accent-tint); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.env-predev { color: var(--magenta); background: color-mix(in srgb, var(--magenta) 12%, transparent); border-color: color-mix(in srgb, var(--magenta) 40%, transparent); }
+.env-unset { font-weight: 500; }
 .card .summary { margin: 10px 0 0; font-size: 14.5px; }
 /* A folded card: its header is one button that opens and closes it. Shut,
    the title keeps to two lines and the lean to one. */
@@ -2279,6 +2289,26 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     sp.title = "Priority " + p + " (" + PRIO_NAMES[p] + ")";
     return sp;
   }
+  // envList: the environments a card affects (envs), in ENV_ORDER, with
+  // unknown values and repeats dropped, and "none" only when nothing else is
+  // set. fleetDecodeEnvs (fleet_card.go) reads it the same way.
+  const ENV_ORDER = ["prod", "sandbox", "dev", "predev", "local", "none"];
+  function envList(c) {
+    const have = new Set(arr(c.envs).filter(v => typeof v === "string"));
+    const out = [];
+    for (const e of ENV_ORDER) if (have.has(e) && (e !== "none" || !out.length)) out.push(e);
+    return out;
+  }
+  // envRow: the card's "Affects:" line, always drawn: one chip per
+  // environment, or a grey "env: not set". Chip text comes from ENV_ORDER,
+  // never from the card.
+  function envRow(c) {
+    const list = envList(c);
+    const row = el("span", "envs", el("span", "envs-l", "Affects:"),
+      ...(list.length ? list.map(e => el("span", "env env-" + e, e)) : [el("span", "env env-unset", "env: not set")]));
+    row.title = list.length ? "Affects: " + list.join(", ") : "No environment set on this card";
+    return row;
+  }
   // byPrio: open cards by priority, then oldest firstSeenAt (fleet-state.py
   // stamps it). A card with no readable time goes after the rest, and ties
   // keep state.json order. fleetItems in fleet_view.go sorts the same way.
@@ -2350,7 +2380,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       leanEl = o ? el("span", "fold-lean", "FLEET recommends: ", el("b", "", str(o.label) || str(o.send) || lean))
         : el("span", "fold-lean", "Lean: ", el("b", "", lean));
     }
-    const b = el("button", "card-tog", el("span", "chev"), el("span", "fold-title", meta, name, leanEl));
+    const b = el("button", "card-tog", el("span", "chev"), el("span", "fold-title", meta, name, envRow(c), leanEl));
     b.type = "button";
     b.setAttribute("aria-expanded", open ? "true" : "false");
     b.setAttribute("aria-controls", bodyId);
@@ -2408,7 +2438,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       const wo = waitSpan(c);
       if (wo) meta.append(wo);
       if (cardAge(c)) meta.append(relSpan(cardAge(c)));
-      title.append(meta);
+      title.append(meta, envRow(c));
       card.append(el("div", "card-top", title, chatBtn(c)));
     }
 
@@ -2615,8 +2645,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const sum = str(c.summary), links = linksNode(c), chat = chatBtn(c);
     if (!sum && !links) {
       const row = el("div", "row");
-      row.append(chat ? el("div", "row-head has-act", el("div", "row-main", l1, l2.childNodes.length ? l2 : null), chat)
-        : el("div", "row-head", l1, l2.childNodes.length ? l2 : null));
+      row.append(chat ? el("div", "row-head has-act", el("div", "row-main", l1, envRow(c), l2.childNodes.length ? l2 : null), chat)
+        : el("div", "row-head", l1, envRow(c), l2.childNodes.length ? l2 : null));
       return row;
     }
     const row = el("details", "row");
@@ -2628,7 +2658,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       if (row.open) expanded.add("row:" + id); else expanded.delete("row:" + id);
     });
     // Chat stops its click, so a tap does not also toggle the row.
-    row.append(el("summary", "", el("div", "row-main", l1, l2.childNodes.length ? l2 : null), chat, el("span", "chev")));
+    row.append(el("summary", "", el("div", "row-main", l1, envRow(c), l2.childNodes.length ? l2 : null), chat, el("span", "chev")));
     const body = el("div", "row-body");
     if (sum) body.append(el("div", "summary rich", renderSummary(sum)));
     if (links) body.append(links);
@@ -3225,7 +3255,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       el("span", "", a.state === "sending" ? "Sending: " : "Sent: ", el("b", "", a.label)),
       a.lean ? el("span", "pick", "FLEET's pick") : null,
       parseTime(a.at) !== null ? relSpan(a.at) : null);
-    row.append(el("summary", "", el("div", "row-main", l1, l2), el("span", "chev")));
+    row.append(el("summary", "", el("div", "row-main", l1, envRow(c), l2), el("span", "chev")));
     row.append(el("div", "row-body", decisionCard(c, explicit)));
     return row;
   }

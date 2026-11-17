@@ -9,6 +9,13 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- FLEET page: every decision card (shut or open), sent row and done row shows
+  an `Affects:` line under the title, one chip per environment from the
+  card's new optional `envs` list (`prod` red, `sandbox` amber, `dev` blue,
+  `predev` purple, `local` and `none` grey), always in that order. A card
+  without `envs` shows a grey `env: not set`. Unknown values are dropped.
+  `envs` is not part of the card hash, so setting it never reopens an answer.
+
 - FLEET page: the chat panel switch is now `FLEET | CHAT | SLACK`. SLACK is
   Andy's Slack-triage session, the one session named `SLACK`, with CHAT's
   guards, its own log, draft, images and send note, and it polls only while

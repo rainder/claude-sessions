@@ -31,6 +31,11 @@ type fleetCardView struct {
 	// not in the card hash.
 	Waiting *fleetWaiting
 
+	// Envs is the environments the card affects (`envs`), allowlisted,
+	// deduplicated and in fleetEnvOrder; nil when none is set. Not in the
+	// card hash.
+	Envs []string
+
 	// rawSession and rawTicket are session and ticket as decoded, before the
 	// TUI sanitizes the drawn fields. The Fleet view's attach matches them
 	// against the server's working list; they are never drawn.
@@ -62,6 +67,7 @@ func (c *fleetCardView) UnmarshalJSON(b []byte) error {
 		c.Priority = int(p)
 	}
 	c.Waiting = fleetDecodeWaiting(m["waiting"])
+	c.Envs = fleetDecodeEnvs(m["envs"])
 	c.rawSession, c.rawTicket = c.Session, c.Ticket
 	if list, ok := m["options"].([]any); ok {
 		for _, o := range list {
@@ -163,6 +169,34 @@ func fleetWaitingStamp(t, now time.Time) string {
 	return t.Format("01-02 15:04")
 }
 
+// fleetEnvOrder is every value a card's `envs` may hold, in display order.
+// "none" means the decision touches no environment (a mail, a ticket).
+var fleetEnvOrder = []string{"prod", "sandbox", "dev", "predev", "local", "none"}
+
+// fleetDecodeEnvs reads a card's `envs` value leniently, as the page's
+// envList does: anything but an array is nil, unknown values and repeats are
+// dropped, the rest comes back in fleetEnvOrder. fleet-state.py refuses
+// "none" next to another value; should one get through, "none" is dropped.
+func fleetDecodeEnvs(v any) []string {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, x := range list {
+		if s, ok := x.(string); ok {
+			have[s] = true
+		}
+	}
+	var out []string
+	for _, e := range fleetEnvOrder {
+		if have[e] && (e != "none" || len(out) == 0) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // fleetPriorityNormal is the priority of a card that sets none.
 const fleetPriorityNormal = 3
 
@@ -180,8 +214,8 @@ func (c fleetCardView) priority() int {
 // fleetCardHash identifies what a card asks, so an answer can tell whether
 // the question changed under it. It covers kind, status, title, ticket,
 // summary, lean and each option's key, label, line and send, and never
-// updatedAt (FLEET stamps it on every write), id, session, links, waitingOn
-// or waiting.
+// updatedAt (FLEET stamps it on every write), id, session, links, waitingOn,
+// waiting or envs.
 // 16 hex chars of sha256 over canonical JSON.
 func fleetCardHash(c fleetCardView) string {
 	opts := make([][4]string, 0, len(c.Options))

@@ -51,7 +51,7 @@ func TestFleetCardHashIgnoresVolatileFields(t *testing.T) {
 	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(base) {
 		t.Fatalf("hash %q", base)
 	}
-	for _, field := range []string{"updatedAt", "id", "session", "links", "waitingOn", "waiting"} {
+	for _, field := range []string{"updatedAt", "id", "session", "links", "waitingOn", "waiting", "envs"} {
 		m := map[string]any{}
 		if err := json.Unmarshal([]byte(baseCardJSON), &m); err != nil {
 			t.Fatal(err)
