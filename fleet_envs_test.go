@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fleetEnvsCases are the `envs` values both readers must agree on.
@@ -129,5 +130,68 @@ func TestFleetPageEnvRow(t *testing.T) {
 	}
 	if body := page[i : i+j]; strings.Contains(body, "c.envs") || strings.Contains(body, "str(") {
 		t.Errorf("envRow must draw only envList's fixed labels:\n%s", body)
+	}
+}
+
+// TestFleetEnvsShownInDetailsAndRaw: the details panel draws the affects line
+// right under the title's meta line, prod in red and none dim; the raw screen
+// prints it plain. A card without envs (an older card) draws no line.
+func TestFleetEnvsShownInDetailsAndRaw(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name   string
+		envs   []string
+		line   string
+		styled string
+	}{
+		{"prod and dev", []string{"prod", "dev"}, "Affects: prod, dev", colorize(fleetSGRRed, "prod") + ","},
+		{"none", []string{"none"}, "Affects: none", dim("none")},
+		{"no envs", nil, "", ""},
+	} {
+		card := fleetTestCard("a", "needs-you")
+		card.Title, card.Summary, card.Envs = "Ship it?", "Body", c.envs
+		it := fleetItem{Card: card, Section: fleetSecApprove}
+		lines := fleetDetailLines(&fleetViewState{}, it, 120, now)
+		details := stripANSI(strings.Join(lines, "\n"))
+		raw := strings.Join(fleetRawLines(it, now), "\n")
+		if c.line == "" {
+			if strings.Contains(details, "Affects") || strings.Contains(raw, "Affects") {
+				t.Errorf("%s: an affects line drawn:\n%s\n--\n%s", c.name, details, raw)
+			}
+			continue
+		}
+		if len(lines) < 3 || stripANSI(lines[2]) != c.line {
+			t.Errorf("%s: details line 3 is not %q:\n%s", c.name, c.line, details)
+		}
+		if !strings.Contains(lines[2], c.styled) {
+			t.Errorf("%s: details line %q lacks styled %q", c.name, lines[2], c.styled)
+		}
+		if !strings.Contains(raw, "\n"+c.line+"\n") {
+			t.Errorf("%s: raw lacks %q:\n%s", c.name, c.line, raw)
+		}
+	}
+}
+
+// TestFleetEnvLinesWrap: on a narrow panel the affects line wraps between
+// environments, every piece within cols, and loses none of them.
+func TestFleetEnvLinesWrap(t *testing.T) {
+	envs := []string{"prod", "sandbox", "dev", "predev", "local"}
+	lines := fleetEnvLines(envs, 14)
+	if len(lines) < 2 {
+		t.Fatalf("not wrapped: %q", lines)
+	}
+	var plain []string
+	for _, l := range lines {
+		p := stripANSI(l)
+		if cellWidth(p) > 14 {
+			t.Errorf("line %q wider than 14", p)
+		}
+		plain = append(plain, p)
+	}
+	if got, want := strings.Join(plain, " "), "Affects: prod, sandbox, dev, predev, local"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if fleetEnvLines(nil, 80) != nil {
+		t.Error("no envs must draw no line")
 	}
 }

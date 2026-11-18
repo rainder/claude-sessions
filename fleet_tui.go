@@ -1213,7 +1213,8 @@ func fleetCardAge(c fleetCardView, now time.Time) string {
 }
 
 // fleetDetailLines is the selected card in full for the details panel: its
-// title, a line with section, ticket, priority and age, then its body.
+// title, a line with section, ticket, priority and age, the environments it
+// affects when it names any, then its body.
 func fleetDetailLines(st *fleetViewState, it fleetItem, cols int, now time.Time) []string {
 	c := it.Card
 	var out []string
@@ -1233,6 +1234,7 @@ func fleetDetailLines(st *fleetViewState, it fleetItem, cols int, now time.Time)
 		meta = append(meta, age+" old")
 	}
 	out = append(out, strings.Join(meta, dim(" · ")))
+	out = append(out, fleetEnvLines(c.Envs, cols)...)
 	return append(out, fleetExpandedLines(st, it, cols, now)...)
 }
 

@@ -21,7 +21,7 @@ import (
 const fleetRawHelp = "raw card text · drag selects, Cmd+C copies · ↑↓ PgUp/PgDn scroll · any other key: back"
 
 // fleetRawLines is the card's text for the raw screen: title, ticket and
-// priority, the summary unchanged, what it waits on (times in now's
+// priority, the environments it affects, the summary unchanged, what it waits on (times in now's
 // location), and the options. The
 // strings are the view's sanitized copies (fleetDisplayText), so no escape
 // reaches the terminal.
@@ -43,6 +43,9 @@ func fleetRawLines(it fleetItem, now time.Time) []string {
 	}
 	if len(meta) > 0 {
 		out = append(out, strings.Join(meta, " · "))
+	}
+	if envs := fleetEnvText(c.Envs); envs != "" {
+		out = append(out, envs)
 	}
 	if strings.TrimSpace(c.Summary) != "" {
 		out = append(out, "")

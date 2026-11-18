@@ -197,6 +197,50 @@ func fleetDecodeEnvs(v any) []string {
 	return out
 }
 
+// fleetEnvSGR is each environment's colour in the TUI, as the page colours
+// its chips: prod red, sandbox amber, dev blue, predev magenta. local and
+// none are dim.
+var fleetEnvSGR = map[string]string{
+	"prod":    fleetSGRRed,
+	"sandbox": fleetSGRAmber,
+	"dev":     fleetSGRURL,
+	"predev":  fleetSGRRef,
+}
+
+// fleetEnvText is a card's affects line as plain text, "Affects: prod, dev";
+// "" when the card has no envs (an older card).
+func fleetEnvText(envs []string) string {
+	if len(envs) == 0 {
+		return ""
+	}
+	return "Affects: " + strings.Join(envs, ", ")
+}
+
+// fleetEnvLines is the affects line for the details panel, wrapped at cols,
+// the label and local/none dim, every other environment in its fleetEnvSGR
+// colour; nil when the card has no envs. Its words are fleetEnvOrder's fixed
+// labels, never card text.
+func fleetEnvLines(envs []string, cols int) []string {
+	text := fleetEnvText(envs)
+	if text == "" {
+		return nil
+	}
+	var out []string
+	for _, l := range wrapRunes(text, cols) {
+		words := strings.Split(l, " ")
+		for i, w := range words {
+			name := strings.TrimSuffix(w, ",")
+			if code, ok := fleetEnvSGR[name]; ok {
+				words[i] = colorize(code, name) + w[len(name):]
+			} else {
+				words[i] = dim(name) + w[len(name):]
+			}
+		}
+		out = append(out, strings.Join(words, " "))
+	}
+	return out
+}
+
 // fleetPriorityNormal is the priority of a card that sets none.
 const fleetPriorityNormal = 3
 

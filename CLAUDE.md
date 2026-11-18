@@ -215,8 +215,9 @@ types into panes. Spec and plan: `docs/superpowers/`.
   list, `none` drops next to another value (`fleetDecodeEnvs`, node-tested
   against the page's `envList`). The page draws `Affects:` chips on every
   decision card, sent row and done row, `env: not set` when empty; chip text
-  is the fixed label, never the card's string. Not in `cardHash`; the TUI
-  decodes it but does not draw it.
+  is the fixed label, never the card's string. Not in `cardHash`. The TUI
+  details panel draws it under the meta line (`fleetEnvLines`, same colours,
+  wrapped) and the raw screen plain; no line when empty.
 - **Start FLEET:** a mutex across the handler, a 60s gap, a fresh collect,
   and a pending start blocks a second spawn (two taps must not make two
   FLEETs).

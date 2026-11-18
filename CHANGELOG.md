@@ -16,6 +16,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without `envs` shows a grey `env: not set`. Unknown values are dropped.
   `envs` is not part of the card hash, so setting it never reopens an answer.
 
+- Fleet view (TUI): the details panel shows the same `Affects: prod, dev`
+  line under the card's section and priority line, each environment in the
+  page's colour and wrapped on a narrow terminal, and the raw text screen
+  (`t`) prints it plain. A card without `envs` shows no line.
+
 - FLEET page: the chat panel switch is now `FLEET | CHAT | SLACK`. SLACK is
   Andy's Slack-triage session, the one session named `SLACK`, with CHAT's
   guards, its own log, draft, images and send note, and it polls only while
