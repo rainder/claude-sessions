@@ -48,6 +48,9 @@ func TestFleetPageIsSelfContainedAndSafe(t *testing.T) {
 		// (state.caps), counted with the same helper as the Decide view.
 		`id="caps-working"`, "function renderCaps(", "function capTile(", "function fleetCounts(", "fleetCounts(workingRows()).all",
 		"state.caps", `{Opus: "Opus + Sonnet"}`, `"Show all"`, `"1 slot left"`, `"At limit"`, `"Over limit"`,
+		// A family Andy put on hold (state.holds) shows a HOLD pill and its
+		// reason, and keeps its tile with no session.
+		"state.holds", "function holdOf(", `el("span", "cap-hold", "HOLD")`, `el("span", "cap-why", hold)`, "fleetCounts([]).all",
 		// The Dependencies section draws state.deps as SVG, built with
 		// createElementNS (never markup), and joins sessions to the
 		// working list.

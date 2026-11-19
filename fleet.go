@@ -475,6 +475,9 @@ func (s *server) fleetState(w http.ResponseWriter, r *http.Request) {
 	out["deps"] = fleetDependencies(state, rows)
 	// FLEET's busy-session caps per model family, valid entries only.
 	out["caps"] = fleetCaps(state)
+	// The model families Andy put on hold, with their reasons, valid entries
+	// only.
+	out["holds"] = fleetHolds(state)
 	// Decision card hashes, which a client echoes back when it answers, and
 	// the answers the server recorded, pruned against the current cards. A
 	// bad state.json prunes nothing.

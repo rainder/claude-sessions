@@ -1,10 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -809,6 +812,11 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	if st.err == "" && st.loaded && st.view.StateError != "" {
 		top = append(top, colorize(fleetSGRRed, st.view.StateError))
 	}
+	if st.err == "" && st.loaded && len(st.view.Ambiguous) == 0 {
+		if l := fleetHoldLine(st.view.Holds, width); l != "" {
+			top = append(top, l)
+		}
+	}
 	top = append(top, sep)
 	bodyRows := -1
 	if rows > 0 {
@@ -1049,6 +1057,34 @@ func fleetHeaderLine(st *fleetViewState, cols int, now time.Time) string {
 		return left + strings.Repeat(" ", pad) + right
 	}
 	return left
+}
+
+// fleetHoldFamilies is the hold line's family order, the page's strip
+// order; another family comes after these, by name.
+var fleetHoldFamilies = []string{"Fable", "Opus", "Haiku", "Grok"}
+
+// fleetHoldLine is one amber line naming every held model family with its
+// reason ("Fable HOLD — no new spawns; …"), cut with … to cols. "" when no
+// family is held.
+func fleetHoldLine(holds map[string]string, cols int) string {
+	if len(holds) == 0 {
+		return ""
+	}
+	rank := func(f string) int {
+		if i := slices.Index(fleetHoldFamilies, f); i >= 0 {
+			return i
+		}
+		return len(fleetHoldFamilies)
+	}
+	fams := slices.Collect(maps.Keys(holds))
+	slices.SortFunc(fams, func(a, b string) int {
+		return cmp.Or(cmp.Compare(rank(a), rank(b)), strings.Compare(a, b))
+	})
+	parts := make([]string, len(fams))
+	for i, f := range fams {
+		parts[i] = f + " HOLD — " + holds[f]
+	}
+	return colorize(fleetSGRAmber, truncateRunes(strings.Join(parts, " · "), cols))
 }
 
 // fleetBottomRow is the active toast, "sending…" while a send runs, nothing

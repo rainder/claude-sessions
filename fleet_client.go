@@ -94,6 +94,9 @@ type fleetStateView struct {
 	// FleetTool is fleet.tool: "grok" for a grok FLEET, "" for claude.
 	// Clarify needs a claude FLEET.
 	FleetTool string
+	// Holds is /fleet/state's holds: model family -> why Andy put it on
+	// hold, one line each. nil when none.
+	Holds map[string]string
 	// Done is every done card with a readable finish stamp, in state.json
 	// order, for the empty view's "done today" and "last done". A done card
 	// is never a list item.
@@ -156,6 +159,18 @@ func decodeFleetStateView(data []byte) (fleetStateView, error) {
 		}
 	}
 	v.Sessions = decodeFleetWorkSessions(m["sessions"])
+	var holds map[string]json.RawMessage
+	if json.Unmarshal(m["holds"], &holds) == nil {
+		for f, raw := range holds {
+			var why string
+			if json.Unmarshal(raw, &why) == nil {
+				if v.Holds == nil {
+					v.Holds = map[string]string{}
+				}
+				v.Holds[f] = why
+			}
+		}
+	}
 	var clarify map[string]json.RawMessage
 	if json.Unmarshal(m["clarify"], &clarify) == nil {
 		v.Clarify = map[string]clarifySummary{}
@@ -262,6 +277,16 @@ func (v *fleetStateView) sanitize() {
 			o := &c.Options[j]
 			o.Key, o.Label, o.Line = fleetDisplayText(o.Key), fleetDisplayText(o.Label), fleetDisplayText(o.Line)
 		}
+	}
+	holds := map[string]string{}
+	for f, why := range v.Holds {
+		if f, why = fleetHoldReason(fleetDisplayText(f)), fleetHoldReason(fleetDisplayText(why)); f != "" && why != "" {
+			holds[f] = why
+		}
+	}
+	v.Holds = nil
+	if len(holds) > 0 {
+		v.Holds = holds
 	}
 	for i := range v.Done {
 		d := &v.Done[i]

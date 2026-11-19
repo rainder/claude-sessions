@@ -404,6 +404,12 @@ section { min-width: 0; }
 .cap.warn .cap-st { color: var(--amber); } .cap.warn .cap-bar i { background: var(--amber); }
 .cap.full { border-color: var(--red-line); } .cap.full .cap-st { color: var(--red); } .cap.full .cap-bar i { background: var(--red); }
 .cap.full[aria-pressed="true"] { border-color: var(--accent); }
+/* A family Andy put on hold (state.holds): an amber HOLD pill beside the
+   name and the reason on one line under the counts (all of it in the
+   tooltip). */
+.cap.held { border-color: var(--amber-line); }
+.cap-hold { padding: 0 6px; border: 1px solid var(--amber-line); border-radius: 99px; background: var(--amber-tint); color: var(--amber); font-size: 11px; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }
+.cap-why { font-size: 12px; color: var(--amber); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 359.98px) { .caps { grid-template-columns: minmax(0, 1fr); } }
 .row-body.note-body { padding-top: 0; margin-top: -4px; font-size: 13px; overflow-wrap: anywhere; }
 .ended { margin-top: 8px; }
@@ -2774,26 +2780,34 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const v = (obj(state && state.caps) || {})[f];
     return Number.isInteger(v) && v > 0 ? v : 0;
   }
+  // holdOf: why Andy put a family on hold (state.holds, which the server
+  // cleans), or "" when it is not held.
+  function holdOf(f) {
+    const v = (obj(state && state.holds) || {})[f];
+    return typeof v === "string" ? v.trim() : "";
+  }
   let workModel = "";
   // capTile: one family's tile. "<busy> busy of <cap>", a bar of busy / cap
   // (idle and shell take no slot, so they never fill it), and the other
   // counts, which add up to the total. One slot left is amber; at or over
-  // the cap is red. A family with no cap shows only "<busy> busy".
+  // the cap is red. A family with no cap shows only "<busy> busy". A held
+  // family adds a HOLD pill and its reason.
   function capTile(f, c) {
-    const cap = capOf(f), name = familyName(f), left = cap - c.busy;
+    const cap = capOf(f), name = familyName(f), left = cap - c.busy, hold = holdOf(f);
     const st = !cap ? "" : left < 0 ? "Over limit" : left === 0 ? "At limit" : left === 1 ? "1 slot left" : "";
     const level = !cap ? "" : left <= 0 ? " full" : left === 1 ? " warn" : "";
     const meta = [c.idle + " idle", c.shell + " shell", c.waiting ? c.waiting + " waiting" : "", c.other ? c.other + " other" : "", c.n + " total"].filter(Boolean);
     const fill = el("i");
     fill.style.width = cap ? Math.min(100, c.busy / cap * 100) + "%" : "0";
     const on = workModel === f;
-    const b = fkey(el("button", "cap" + level,
-      el("span", "cap-top", el("span", "cap-name", name), st ? el("span", "cap-st", st) : null),
+    const b = fkey(el("button", "cap" + level + (hold ? " held" : ""),
+      el("span", "cap-top", el("span", "cap-name", name), hold ? el("span", "cap-hold", "HOLD") : null, st ? el("span", "cap-st", st) : null),
       el("span", "cap-n", el("b", "", String(c.busy)), " busy", cap ? el("span", "cap-of", " of " + cap) : null),
       cap ? el("span", "cap-bar", fill) : null,
-      el("span", "cap-meta", ...meta.flatMap((m, i) => [i ? " · " : "", el("span", "", m)]))), "cap:" + f);
+      el("span", "cap-meta", ...meta.flatMap((m, i) => [i ? " · " : "", el("span", "", m)])),
+      hold ? el("span", "cap-why", hold) : null), "cap:" + f);
     b.type = "button";
-    const label = name + ": " + (cap ? c.busy + " of " + cap + " busy" : c.busy + " busy") + ", " + meta.join(", ") + (st ? ", " + st.toLowerCase() : "");
+    const label = name + ": " + (cap ? c.busy + " of " + cap + " busy" : c.busy + " busy") + ", " + meta.join(", ") + (st ? ", " + st.toLowerCase() : "") + (hold ? ", on hold: " + hold : "");
     b.setAttribute("aria-label", label);
     b.title = label + (on ? " (click to show all)" : " (click to show only " + name + ")");
     b.setAttribute("aria-pressed", on ? "true" : "false");
@@ -2802,9 +2816,13 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   }
   // renderCaps: the capacity strip, always from the whole working list
   // (the filter changes the list, not the counts). While a filter is on, a
-  // "Show all" control clears it.
+  // "Show all" control clears it. A held family gets a tile even with no
+  // session, so the hold always shows.
   function renderCaps(rows) {
     const {fam} = fleetCounts(rows);
+    for (const f of Object.keys(obj(state && state.holds) || {})) {
+      if (holdOf(f) && !fam.has(f)) fam.set(f, fleetCounts([]).all);
+    }
     const rank = f => { const i = FAMILIES.indexOf(f); return i < 0 ? FAMILIES.length : i; };
     const out = [];
     if (workModel) {

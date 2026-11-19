@@ -9,6 +9,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- FLEET holds: `/fleet/state` gains `holds`, the model families Andy put on
+  hold with a one-line reason each, cleaned from state.json's `holds` (which
+  fleet-state.py stamps from its `HOLDS`; null when none). The FLEET page's
+  capacity strip marks a held family with an amber `HOLD` pill and its
+  reason, and shows its tile even with no session. The Fleet view (TUI)
+  draws one amber line under the header, e.g. `Fable HOLD — no new spawns;
+  …`, cut to the terminal width.
+
 - FLEET page: every decision card (shut or open), sent row and done row shows
   an `Affects:` line under the title, one chip per environment from the
   card's new optional `envs` list (`prod` red, `sandbox` amber, `dev` blue,
