@@ -1,10 +1,30 @@
 package main
 
 import (
+	"context"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// collectCmdTimeout bounds the tmux and ps calls every collect makes. Without
+// it a wedged tmux server (seen when the user's cgroup sat over memory.high and
+// the kernel throttled tmux in reclaim) hangs every collect forever: /sessions
+// stops answering and each new request stacks another stuck child. A var so
+// tests can shorten it.
+var collectCmdTimeout = 5 * time.Second
+
+// collectOutput runs name with args and returns its stdout, killing it after
+// collectCmdTimeout. WaitDelay stops Output from waiting on a pipe a killed
+// child's descendants still hold open.
+func collectOutput(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), collectCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
+	return cmd.Output()
+}
 
 type tmuxPaneInfo struct {
 	Location string
@@ -12,7 +32,8 @@ type tmuxPaneInfo struct {
 }
 
 // tmuxPaneMap returns pane_pid → pane metadata for every tmux pane on the
-// default server. Empty map (no error) if tmux isn't running.
+// default server. Empty map (no error) if tmux isn't running or does not
+// answer within collectCmdTimeout.
 //
 // The format is space-separated with the free-text location last, never
 // tab-separated: a tmux client running without a UTF-8 locale — which is how
@@ -25,8 +46,8 @@ type tmuxPaneInfo struct {
 // session name readable; the separator still avoids tabs because the format
 // must parse even where -u is ignored.
 func tmuxPaneMap() (map[int]tmuxPaneInfo, error) {
-	out, err := exec.Command("tmux", "-u", "list-panes", "-a", "-F",
-		"#{pane_pid} #{session_attached} #{session_name}:#{window_index}.#{pane_index}").Output()
+	out, err := collectOutput("tmux", "-u", "list-panes", "-a", "-F",
+		"#{pane_pid} #{session_attached} #{session_name}:#{window_index}.#{pane_index}")
 	if err != nil {
 		return map[int]tmuxPaneInfo{}, nil
 	}
@@ -62,7 +83,7 @@ func parseTmuxPaneOutput(out string) map[int]tmuxPaneInfo {
 
 // ppidMap returns pid → ppid for every process on the system.
 func ppidMap() (map[int]int, error) {
-	out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=").Output()
+	out, err := collectOutput("ps", "-A", "-o", "pid=,ppid=")
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +107,7 @@ func ppidMap() (map[int]int, error) {
 // CollectLocal needs both, so folding them into one call saves N+1 ps
 // invocations per tick (one per session for CPU%) down to 1.
 func processInfo() (ppid map[int]int, cpu map[int]string, err error) {
-	out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,%cpu=").Output()
+	out, err := collectOutput("ps", "-A", "-o", "pid=,ppid=,%cpu=")
 	if err != nil {
 		return nil, nil, err
 	}
