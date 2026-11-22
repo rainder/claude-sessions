@@ -451,7 +451,7 @@ const (
 
 // writeUsage prints one Anthropic account rate-limit line under the title, or
 // nothing when usage data isn't available (nil). All buckets share the line:
-// "5h <bar> 42% 2h   wk <bar> 13% 3d   Fable <bar> 10% 5d   cr <bar> 5% $1,123".
+// "wk <bar> 13% 3d   Fable <bar> 10% 5d   5h <bar> 42% 2h   cr <bar> 5% $1,123".
 // The trailing figure is the time remaining until that bucket resets (rate
 // limits) or the amount of credits spent (extra usage). The model-scoped weekly
 // segment (labeled with the model's display name, e.g. "Fable") only appears
@@ -468,15 +468,12 @@ func writeUsage(w io.Writer, label string, u *UsageInfo, cols int) {
 	renderUsageSegs(w, label, segs, lineBarW(label, segs, 0, cols))
 }
 
-// claudeSegs builds the Anthropic header segments for a non-nil snapshot: the 5h
-// bucket when the endpoint reported one (nil = no bar, never 0%), the weekly
-// bucket, the model-scoped weekly segment when the account has one, and the
-// credits segment when extra usage is enabled.
+// claudeSegs builds the Anthropic header segments for a non-nil snapshot, in
+// this order: the weekly bucket, the model-scoped weekly segment when the
+// account has one, the 5h bucket when the endpoint reported one (nil = no bar,
+// never 0%), and the credits segment when extra usage is enabled.
 func claudeSegs(u *UsageInfo) []usageSeg {
 	var segs []usageSeg
-	if u.FiveHour != nil {
-		segs = append(segs, usageSeg{label: "5h", trailer: formatUntil(u.FiveHour.ResetsAt), pct: u.FiveHour.Pct})
-	}
 	segs = append(segs, usageSeg{label: "wk", trailer: formatUntil(u.SevenDay.ResetsAt), pct: u.SevenDay.Pct})
 	if u.WeeklyScopedLabel != "" {
 		segs = append(segs, usageSeg{
@@ -484,6 +481,9 @@ func claudeSegs(u *UsageInfo) []usageSeg {
 			trailer: formatUntil(u.WeeklyScoped.ResetsAt),
 			pct:     u.WeeklyScoped.Pct,
 		})
+	}
+	if u.FiveHour != nil {
+		segs = append(segs, usageSeg{label: "5h", trailer: formatUntil(u.FiveHour.ResetsAt), pct: u.FiveHour.Pct})
 	}
 	if c := u.Credits; c.Enabled && c.Limit > 0 {
 		sym := c.Currency

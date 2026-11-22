@@ -1310,7 +1310,7 @@ func TestWriteUsageHeaderFitTiers(t *testing.T) {
 			name: "tier 4: nothing fits, labels drop and the full marker stays", accounts: screenshotUsageAccounts(now), cols: 64,
 			check: func(t *testing.T, lines []string) {
 				for i, l := range lines {
-					if !strings.HasPrefix(stripANSI(l), "5h ") {
+					if !strings.HasPrefix(stripANSI(l), "wk ") {
 						t.Errorf("line %d = %q, want no label", i, stripANSI(l))
 					}
 					if b := usageLineBarW(l, 4); b != usageBarMin {
@@ -1372,7 +1372,7 @@ func TestWriteUsageHeaderFitTiers(t *testing.T) {
 			name: "very narrow drops labels as before", accounts: similar, cols: 24,
 			check: func(t *testing.T, lines []string) {
 				for i, l := range lines {
-					if !strings.HasPrefix(stripANSI(l), "5h ") {
+					if !strings.HasPrefix(stripANSI(l), "wk ") {
 						t.Errorf("line %d = %q, want no label", i, stripANSI(l))
 					}
 				}
@@ -1859,12 +1859,12 @@ func TestRenderHeaderMixedBlocksLabelsPadEqual(t *testing.T) {
 		t.Errorf("codex line missing dim 'codex' tag: %q", usage[1])
 	}
 	plain0, plain1 := stripANSI(usage[0]), stripANSI(usage[1])
-	c0, c1 := strings.Index(plain0, "5h"), strings.Index(plain1, "wk")
+	c0, c1 := strings.Index(plain0, "wk"), strings.Index(plain1, "wk")
 	if c0 < 0 || c1 < 0 {
 		t.Fatalf("first segment missing: %q / %q", plain0, plain1)
 	}
 	if c0 != c1 {
-		t.Errorf("bars misaligned across blocks: claude 5h at col %d (%q), codex wk at col %d (%q)", c0, plain0, c1, plain1)
+		t.Errorf("bars misaligned across blocks: claude wk at col %d (%q), codex wk at col %d (%q)", c0, plain0, c1, plain1)
 	}
 }
 
@@ -1888,10 +1888,10 @@ func TestRenderHeaderMultiClaudePlusCodexAlign(t *testing.T) {
 	if len(usage) != 3 {
 		t.Fatalf("want 3 lines (2 claude + 1 codex), got %d: %#v", len(usage), usage)
 	}
-	// Claude lines lead with "5h", the codex line with "wk"; all must share one column.
+	// Every line leads with "wk"; all must share one column.
 	cols := []int{
-		strings.Index(stripANSI(usage[0]), "5h"),
-		strings.Index(stripANSI(usage[1]), "5h"),
+		strings.Index(stripANSI(usage[0]), "wk"),
+		strings.Index(stripANSI(usage[1]), "wk"),
 		strings.Index(stripANSI(usage[2]), "wk"),
 	}
 	for i, c := range cols {
@@ -2390,12 +2390,12 @@ func TestRenderHeaderThreeProvidersAlign(t *testing.T) {
 		t.Fatalf("want 3 lines (claude + codex + grok), got %d: %#v", len(usage), usage)
 	}
 	plain0, plain1, plain2 := stripANSI(usage[0]), stripANSI(usage[1]), stripANSI(usage[2])
-	c0, c1, c2 := strings.Index(plain0, "5h"), strings.Index(plain1, "wk"), strings.Index(plain2, "wk")
+	c0, c1, c2 := strings.Index(plain0, "wk"), strings.Index(plain1, "wk"), strings.Index(plain2, "wk")
 	if c0 < 0 || c1 < 0 || c2 < 0 {
 		t.Fatalf("first segment missing: %q / %q / %q", plain0, plain1, plain2)
 	}
 	if c0 != c1 || c1 != c2 {
-		t.Errorf("bars misaligned: claude 5h col %d, codex wk col %d, grok wk col %d\n%q\n%q\n%q",
+		t.Errorf("bars misaligned: claude wk col %d, codex wk col %d, grok wk col %d\n%q\n%q\n%q",
 			c0, c1, c2, plain0, plain1, plain2)
 	}
 }
@@ -4227,5 +4227,24 @@ func TestDedupeAccountsFillsANumberlessLiveLine(t *testing.T) {
 	// An unknown live identity has nothing to match.
 	if lines := dedupeAccounts(AccountUsage{}, nil, remotes); len(lines) != 0 {
 		t.Fatalf("lines = %#v, want none with no live email", lines)
+	}
+}
+
+// The Claude header reads wk, then the model-scoped weekly, then 5h, then
+// credits (Andy, 2026-11-22).
+func TestClaudeSegsOrder(t *testing.T) {
+	info := &UsageInfo{
+		FiveHour:          &usageBucket{Pct: 42},
+		SevenDay:          usageBucket{Pct: 13},
+		WeeklyScopedLabel: "Fable",
+		WeeklyScoped:      usageBucket{Pct: 10},
+		Credits:           creditsInfo{Enabled: true, Limit: 100, Used: 5},
+	}
+	var got []string
+	for _, s := range claudeSegs(info) {
+		got = append(got, s.label)
+	}
+	if want := "wk Fable 5h cr"; strings.Join(got, " ") != want {
+		t.Fatalf("claudeSegs order = %q, want %q", strings.Join(got, " "), want)
 	}
 }

@@ -2159,7 +2159,7 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
     const out = [];
     if (p === "claude") {
       const ws = obj(a.weeklyScoped);
-      out.push(["5h", obj(a.fiveHour)], ["7d", obj(a.sevenDay)], [ws && str(ws.label) ? str(ws.label) : "Scoped", ws]);
+      out.push(["7d", obj(a.sevenDay)], [ws && str(ws.label) ? str(ws.label) : "Scoped", ws], ["5h", obj(a.fiveHour)]);
     } else {
       for (const w of arr(a.windows)) { const wo = obj(w); if (wo) out.push([str(wo.label) || "use", wo]); }
     }
