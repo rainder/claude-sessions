@@ -2010,7 +2010,7 @@ func formatHostBar(value *float64) string {
 	return colorize(usageColor(clamped), usageBar(clamped, hostUsageBarWidth))
 }
 
-// hostUsageBarWidth is the fixed width of the CPU/MEM bars in the host
+// hostUsageBarWidth is the fixed width of the CPU/MEM/DISK bars in the host
 // heading line.
 const hostUsageBarWidth = 5
 
@@ -2066,7 +2066,7 @@ func formatHostLoad(load *LoadAverage, cores int) string {
 
 // renderHostHeading prints a section's host heading: the bold host name,
 // padded to nameWidth (see sectionNameWidth), followed by its whole-host CPU,
-// memory, and load-average usage, and finally the host's logged-in account
+// memory, home-filesystem disk, and load-average usage, and finally the host's logged-in account
 // email, dimmed, when known. Used for the local section and every remote
 // section across all three views so the layout stays uniform. Padding is
 // applied to the plain name before bolding — bolding first would let fmt's
@@ -2079,10 +2079,11 @@ func renderHostHeading(w io.Writer, sec section, nameWidth int) {
 	if sec.account != "" {
 		account = "  " + dim(sec.account)
 	}
-	fmt.Fprintf(w, "  %s  CPU %s  MEM %s  LOAD %s%s\n",
+	fmt.Fprintf(w, "  %s  CPU %s  MEM %s  DISK %s  LOAD %s%s\n",
 		bold(paddedName),
 		formatHostBar(sec.hostUsage.CPUPercent),
 		formatHostBar(sec.hostUsage.MemoryPercent),
+		formatHostBar(sec.hostUsage.DiskPercent),
 		formatHostLoad(sec.hostUsage.Load, sec.hostUsage.NumCPU),
 		account)
 }

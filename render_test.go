@@ -3099,7 +3099,7 @@ func TestHostUsageHeadingsAllViews(t *testing.T) {
 	local := LocalHost{
 		Name:      "workstation",
 		Sessions:  []Session{{PID: 1, CWD: "/local-dir"}},
-		HostUsage: HostUsage{CPUPercent: floatPtr(12.5), MemoryPercent: floatPtr(50), Load: hostLoadAverage(1.24, 0.96, 0.72)},
+		HostUsage: HostUsage{CPUPercent: floatPtr(12.5), MemoryPercent: floatPtr(50), DiskPercent: floatPtr(91), Load: hostLoadAverage(1.24, 0.96, 0.72)},
 	}
 	remotes := []RemoteResult{{
 		Name:      "beluga",
@@ -3116,13 +3116,14 @@ func TestHostUsageHeadingsAllViews(t *testing.T) {
 			localHeading := findRow(t, out, "workstation")
 			wantLocalCPU := colorize(usageColor(12.5), usageBar(12.5, hostUsageBarWidth))
 			wantLocalMem := colorize(usageColor(50), usageBar(50, hostUsageBarWidth))
-			if !strings.Contains(localHeading, "CPU "+wantLocalCPU+"  MEM "+wantLocalMem+"  LOAD "+wantLocalLoad) {
+			wantLocalDisk := colorize(usageColor(91), usageBar(91, hostUsageBarWidth))
+			if !strings.Contains(localHeading, "CPU "+wantLocalCPU+"  MEM "+wantLocalMem+"  DISK "+wantLocalDisk+"  LOAD "+wantLocalLoad) {
 				t.Fatalf("local heading = %q", localHeading)
 			}
 			remoteHeading := findRow(t, out, "beluga")
 			wantRemoteCPU := colorize(usageColor(0), usageBar(0, hostUsageBarWidth))
 			wantRemoteMem := dim(strings.Repeat("░", hostUsageBarWidth))
-			if !strings.Contains(remoteHeading, "CPU "+wantRemoteCPU+"  MEM "+wantRemoteMem+"  LOAD "+wantRemoteLoad) {
+			if !strings.Contains(remoteHeading, "CPU "+wantRemoteCPU+"  MEM "+wantRemoteMem+"  DISK "+wantRemoteMem+"  LOAD "+wantRemoteLoad) {
 				t.Fatalf("remote heading = %q", remoteHeading)
 			}
 			if strings.Index(out, "workstation") > strings.Index(out, "local-dir") {

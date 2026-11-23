@@ -200,6 +200,7 @@ func (c *darwinHostUsageCollector) Sample(ctx context.Context) HostUsage {
 	if vmOut, err := c.runVMStat(ctx); err == nil {
 		usage.MemoryPercent = parseDarwinMemory(string(vmOut), c.memSizeBytes)
 	}
+	usage.DiskPercent = homeDiskPercent()
 	usage.NumCPU = runtime.NumCPU()
 	return usage
 }

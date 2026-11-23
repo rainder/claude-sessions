@@ -32,6 +32,7 @@ type LoadAverage struct {
 type HostUsage struct {
 	CPUPercent    *float64     `json:"cpuPercent,omitempty"`
 	MemoryPercent *float64     `json:"memoryPercent,omitempty"`
+	DiskPercent   *float64     `json:"diskPercent,omitempty"`
 	Load          *LoadAverage `json:"loadAverage,omitempty"`
 	NumCPU        int          `json:"numCPU,omitempty"`
 }
