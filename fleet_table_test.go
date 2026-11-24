@@ -1,13 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
 )
 
 func TestFleetTablePlain(t *testing.T) {
-	s := "Verdicts:\n| Doc | Verdict |\n|---|--:|\n| a | ok |\n| `b\\|c` | **no** |\nafter"
+	s := "Verdicts:\n| Doc | Verdict |\n|---|---:|\n| a | ok |\n| b\\|c | **no** |\nafter"
 	want := []string{
 		"Verdicts:",
 		"Doc │ Verdict",
@@ -52,8 +54,7 @@ func TestFleetTableNarrowFallsBackToList(t *testing.T) {
 func TestFleetTableNotATable(t *testing.T) {
 	for _, s := range []string{
 		"| a | b |\nno separator",
-		"| a | b |\n---",
-		"| a | b |\n|---|",       // cell count differs
+		"| a | b |\n|--|--|",     // a rule needs three dashes
 		"```\n| a |\n|---|\n```", // inside a fence
 		"a | b\n|---|---|",       // header has no leading pipe
 	} {
@@ -93,6 +94,60 @@ func TestFleetTableStyledFits(t *testing.T) {
 	for _, l := range fleetSummaryStyledLines("| **x** |\n|---|", 80) {
 		if strings.Contains(l, "\033[1;"+fleetSGRHeading+"m") {
 			t.Errorf("cell drawn as heading: %q", l)
+		}
+	}
+}
+
+func TestFleetTableRaggedRows(t *testing.T) {
+	// The header sets the columns, whatever the rule row or a body row holds.
+	s := "| a | b |\n---\n| 1 |\n| 2 | 3 | 4 |"
+	want := []string{"a │ b", "──┼──", "1 │", "2 │ 3"}
+	if got := fleetSummaryLines(s, 80); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q\nwant %q", got, want)
+	}
+}
+
+// TestFleetTableMatchesPage runs the page's TABLE_RULE and tableCells under
+// node on the same rows as fleetTableSepRe and fleetTableCells, so the TUI and
+// the page agree on what is a table and where its cells split. Skipped where
+// node is not installed.
+func TestFleetTableMatchesPage(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	page := string(fleetPageHTML)
+	i := strings.Index(page, "  const TABLE_RULE = ")
+	j := strings.Index(page, "  // richTable builds")
+	if i < 0 || j < i {
+		t.Fatal("fleet.html: TABLE_RULE .. richTable not found in order")
+	}
+	rows := []string{
+		"|---|---|", "---", "|--|", "| :--- | ---: | :-: |", "a | b", "|-|-|",
+		"| a | b |", "a|b|", "| a |", "| `x|y` | z |", "| a \\| b |", "| a \\|",
+		"|", "||", "| |  |", "  | é | ✓ |  ", "| `open | b |", "| a | b | ",
+	}
+	js, _ := json.Marshal(rows)
+	src := page[i:j] + `console.log(JSON.stringify(` + string(js) + `.map(r => [TABLE_RULE.test(r), tableCells(r)])));`
+	out, err := exec.Command(node, "-e", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v: %s", err, out)
+	}
+	var got [][2]json.RawMessage
+	if err := json.Unmarshal(out, &got); err != nil || len(got) != len(rows) {
+		t.Fatalf("node output %q: %v", out, err)
+	}
+	for k, r := range rows {
+		var rule bool
+		var cells []string
+		if json.Unmarshal(got[k][0], &rule) != nil || json.Unmarshal(got[k][1], &cells) != nil {
+			t.Fatalf("row %q: bad node result %s", r, got[k])
+		}
+		if g := fleetTableSepRe.MatchString(r); g != rule {
+			t.Errorf("rule %q: TUI %v, page %v", r, g, rule)
+		}
+		if g := fleetTableCells(r); !reflect.DeepEqual(g, cells) {
+			t.Errorf("cells %q: TUI %q, page %q", r, g, cells)
 		}
 	}
 }

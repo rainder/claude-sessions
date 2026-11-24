@@ -305,9 +305,11 @@ section { min-width: 0; }
 .rich ul, .rich ol { margin: 0 0 .5em; padding-left: 1.4em; }
 /* Pipe tables: a wide table scrolls in its own box, never the page. */
 .rich .tbl { max-width: 100%; overflow-x: auto; margin: 0 0 .5em; scrollbar-width: thin; }
-.rich table { width: max-content; border-collapse: collapse; font-size: .92em; line-height: 1.35; }
-.rich th, .rich td { padding: 4px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; white-space: nowrap; overflow-wrap: normal; }
-.rich th { background: var(--surface2); font-weight: 650; white-space: nowrap; }
+/* Cells wrap between words only, so prose fits a phone; an unbreakable
+   token (a URL, a path) still widens its column and the box scrolls. */
+.rich table { border-collapse: collapse; font-size: .92em; line-height: 1.35; }
+.rich th, .rich td { padding: 4px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; min-width: 5em; white-space: normal; overflow-wrap: normal; word-break: normal; }
+.rich th { background: var(--surface2); font-weight: 650; }
 .rich li { margin: 0 0 .2em; }
 .rich > :last-child, .rich li:last-child { margin-bottom: 0; }
 .rich code { font-family: var(--mono); font-size: .88em; padding: .05em .3em; border-radius: 4px;

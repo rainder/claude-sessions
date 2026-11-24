@@ -5,10 +5,10 @@ import (
 	"strings"
 )
 
-// fleetTableSepRe matches a markdown table's delimiter row (|---|:--:|),
-// without the pipe check: fleetTableAt also wants one "|" so a bare "---"
-// stays text.
-var fleetTableSepRe = regexp.MustCompile(`^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$`)
+// fleetTableSepRe matches a markdown table's delimiter row (|---|:--:|). It
+// and fleetTableCells mirror the page's TABLE_RULE and tableCells
+// (fleet.html), so the TUI and the page agree on what is a table.
+var fleetTableSepRe = regexp.MustCompile(`^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$`)
 
 // fleetTableMinCol is the narrowest a column shrinks to before a table falls
 // back to one list item per row.
@@ -18,21 +18,23 @@ const fleetTableMinCol = 6
 const fleetTableSep = " │ "
 
 // fleetTableAt reads a markdown table at the top of lines: a "|" header row,
-// a delimiter row with the same cell count, then every following "|" row. It
-// returns the header cells, each column's alignment ('l', 'r' or 'c'), the body
-// rows padded or cut to the header's width, and how many lines it used; n is 0
-// when lines does not start with a table.
+// a delimiter row, then every following "|" row. The header sets the column
+// count: a body row is padded or cut to it, and a column the delimiter row
+// does not cover aligns left. It returns the header cells, each column's
+// alignment ('l', 'r' or 'c'), the body rows, and how many lines it used; n
+// is 0 when lines does not start with a table.
 func fleetTableAt(lines []string) (head []string, align []byte, rows [][]string, n int) {
 	if len(lines) < 2 || !strings.HasPrefix(strings.TrimSpace(lines[0]), "|") ||
-		!strings.Contains(lines[1], "|") || !fleetTableSepRe.MatchString(lines[1]) {
+		!fleetTableSepRe.MatchString(lines[1]) {
 		return nil, nil, nil, 0
 	}
 	head = fleetTableCells(lines[0])
 	seps := fleetTableCells(lines[1])
-	if len(head) != len(seps) {
-		return nil, nil, nil, 0
-	}
-	for _, c := range seps {
+	for j := range head {
+		c := ""
+		if j < len(seps) {
+			c = seps[j]
+		}
 		switch {
 		case strings.HasPrefix(c, ":") && strings.HasSuffix(c, ":"):
 			align = append(align, 'c')
@@ -53,29 +55,39 @@ func fleetTableAt(lines []string) (head []string, align []byte, rows [][]string,
 	return head, align, rows, n
 }
 
-// fleetTableCells splits one table row on its unescaped pipes, drops the
-// outer ones and trims each cell; "\|" is a literal pipe.
+// fleetTableCells splits one row on "|", but not on "\|" (a literal pipe) or
+// a "|" inside `code`; it drops a leading pipe's empty cell and a trailing
+// one, and trims each cell.
 func fleetTableCells(line string) []string {
-	line = strings.TrimSpace(line)
-	line = strings.TrimPrefix(line, "|")
-	if strings.HasSuffix(line, "|") && !strings.HasSuffix(line, "\\|") {
-		line = line[:len(line)-1]
-	}
+	t := strings.TrimSpace(line)
 	var cells []string
 	var cur strings.Builder
-	for i := 0; i < len(line); i++ {
-		switch {
-		case line[i] == '\\' && i+1 < len(line) && line[i+1] == '|':
+	code := false
+	for k := 0; k < len(t); k++ {
+		ch := t[k]
+		if ch == '\\' && k+1 < len(t) && t[k+1] == '|' && !code {
 			cur.WriteByte('|')
-			i++
-		case line[i] == '|':
+			k++
+			continue
+		}
+		if ch == '`' {
+			code = !code
+		}
+		if ch == '|' && !code {
 			cells = append(cells, strings.TrimSpace(cur.String()))
 			cur.Reset()
-		default:
-			cur.WriteByte(line[i])
+			continue
 		}
+		cur.WriteByte(ch)
 	}
-	return append(cells, strings.TrimSpace(cur.String()))
+	cells = append(cells, strings.TrimSpace(cur.String()))
+	if strings.HasPrefix(t, "|") {
+		cells = cells[1:]
+	}
+	if len(cells) > 1 && cells[len(cells)-1] == "" {
+		cells = cells[:len(cells)-1]
+	}
+	return cells
 }
 
 // fleetTableRender draws a table in width columns: cells styled as
