@@ -246,7 +246,17 @@ func fleetSummaryStyledLines(s string, width int) []string {
 func fleetSummaryRender(s string, width int, styled bool) []string {
 	var out []string
 	fence, first := false, true
-	for _, line := range strings.Split(s, "\n") {
+	lines := strings.Split(s, "\n")
+	for li := 0; li < len(lines); li++ {
+		line := lines[li]
+		if !fence {
+			if head, align, rows, n := fleetTableAt(lines[li:]); n > 0 {
+				out = append(out, fleetTableRender(head, align, rows, width, styled)...)
+				li += n - 1
+				first = false
+				continue
+			}
+		}
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
 			fence, first = !fence, false
 			continue
