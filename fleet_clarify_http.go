@@ -31,10 +31,17 @@ const (
 	clarifyErrFailed  = "the fork failed; see the server log"
 )
 
-// clarifyDraftPrompt is the fixed question a draft asks the fork.
+// clarifyDraftPrompt is the fixed question a draft asks the fork. The draft
+// is FLEET's only way to hear about the chat, so it carries every action Andy
+// asked for in full. It is sent as one line of at most sendKeysMaxLen bytes
+// with "Andy decides on <id>: " in front; longer text is cut.
 func clarifyDraftPrompt(cardID string) string {
 	return "Write the decision I reached in this chat about card " + cardID +
-		" as one short paragraph addressed to FLEET. No greeting, no preamble: output only the message."
+		" as one message addressed to FLEET. Start with the decision in a sentence or two. " +
+		"Then list every action I asked for in this chat, each with what FLEET needs to do it without seeing this chat: " +
+		"for a ticket, where it goes, its title and its body. " +
+		"No greeting, no preamble: output only the message. It is sent as one line, so number the actions inline rather than relying on line breaks, " +
+		"and keep it under 3500 characters."
 }
 
 // clarifyChatResponse is GET /fleet/clarify. Turns is never null.

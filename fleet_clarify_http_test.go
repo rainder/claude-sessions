@@ -417,8 +417,11 @@ func TestClarifyDraftAndDiscard(t *testing.T) {
 	if c.argv[len(c.argv)-1] != clarifyDraftPrompt("dr-1") || !hasRun(c.argv, "--resume", clarifyForkID) {
 		t.Fatalf("argv %q", c.argv)
 	}
-	if clarifyDraftPrompt("dr-1") != "Write the decision I reached in this chat about card dr-1 as one short paragraph addressed to FLEET. No greeting, no preamble: output only the message." {
-		t.Fatalf("draft prompt %q", clarifyDraftPrompt("dr-1"))
+	for _, w := range []string{"about card dr-1", "addressed to FLEET", "every action I asked for",
+		"without seeing this chat", "its title and its body", "output only the message", "under 3500 characters"} {
+		if !strings.Contains(clarifyDraftPrompt("dr-1"), w) {
+			t.Fatalf("draft prompt lacks %q: %q", w, clarifyDraftPrompt("dr-1"))
+		}
 	}
 	chat, _ := rig.chat(t, "dr-1")
 	if chat.Draft == nil || chat.Draft.Text != "Go with yes." || len(chat.Turns) != 2 {

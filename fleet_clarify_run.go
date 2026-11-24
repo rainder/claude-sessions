@@ -113,10 +113,20 @@ func clarifyPreamble(c fleetCardView) string {
 	b.WriteString("Answer plainly. You may look things up with the tools you have; if a look-up is refused, say so plainly in your answer. ")
 	b.WriteString("You must not act on the fleet: do not change files, start sessions or send messages. ")
 	b.WriteString("Never resume, re-run or finish any step FLEET left unfinished when you were forked; that work is not yours. ")
-	b.WriteString("Nothing you write reaches FLEET.\n\n")
+	b.WriteString("Nothing you write reaches FLEET on its own.\n\n")
+	b.WriteString(clarifyHandoffNote)
 	b.WriteString(clarifyCardBlock(c))
 	return b.String()
 }
+
+// clarifyHandoffNote tells the fork how an action gets done. Without it a
+// fork asked to file two tickets said FLEET would file them "as soon as those
+// tools are back", which nothing makes happen (2026-11-24). The hand-off is
+// the draft: ctrl-d in the terminal, Draft for FLEET on the page
+// (clarifyDraftPrompt), which Andy reads and sends as his answer on the card.
+const clarifyHandoffNote = "When Andy asks for something to be done (file or comment on a ticket, post on Slack, change code, start work), you cannot do it and must not say FLEET will do it later. " +
+	"Write out exactly what should be done, with what FLEET needs to do it (for a ticket: where it goes, the title and the body), " +
+	"then tell Andy to press ctrl-d in the terminal or Draft for FLEET on the page: that sends the decision and those actions to FLEET as his answer on this card, and FLEET does them.\n\n"
 
 // clarifyToolsNote lists what the fork may run. It resumes FLEET's
 // conversation, where the ClickUp and Slack tools and any shell were there:

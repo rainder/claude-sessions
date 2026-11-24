@@ -71,7 +71,8 @@ func TestClarifyPreamble(t *testing.T) {
 	for _, w := range []string{
 		"read-only side chat", "forked from FLEET",
 		"Never resume, re-run or finish any step FLEET left unfinished",
-		"say so plainly in your answer", "Nothing you write reaches FLEET",
+		"say so plainly in your answer", "Nothing you write reaches FLEET on its own",
+		"must not say FLEET will do it later", "the title and the body", "ctrl-d in the terminal", "Draft for FLEET on the page",
 		"DR-5302", "T", "S", "A: x", "B: y", "FLEET leans B",
 	} {
 		if !strings.Contains(got, w) {
