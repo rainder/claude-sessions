@@ -84,6 +84,29 @@ func sanitizeFleetText(s string) (string, error) {
 	return s, nil
 }
 
+// sanitizeFleetLines is sanitizeFleetText for a plain chat message to a
+// claude FLEET, which fleetTypeInto types a line at a time: line breaks
+// ("\r\n", "\r" or "\n") stay as "\n" instead of flattening, tabs become
+// spaces, and every other control character is refused. The text is
+// trimmed as a whole (blank lines at either end go); a line keeps its own
+// spacing.
+func sanitizeFleetLines(s string) (string, error) {
+	if !utf8.ValidString(s) {
+		return "", errors.New("bad text")
+	}
+	s = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\t", " ").Replace(s)
+	for _, r := range s {
+		if (r < 0x20 && r != '\n') || r == 0x7f {
+			return "", errors.New("bad text")
+		}
+	}
+	s = strings.TrimSpace(s)
+	if s == "" || len(s) > sendKeysMaxLen {
+		return "", errors.New("bad text")
+	}
+	return s, nil
+}
+
 // sameOrigin is the CSRF guard for cookie-authenticated sends.
 func sameOrigin(r *http.Request) bool {
 	src := r.Header.Get("Origin")
@@ -163,13 +186,30 @@ func tmuxTypeLiteral(target, text string) error {
 // The box was empty before the text was typed, so whatever it holds now came
 // from this send. A long paste shows in Claude Code as a "[Pasted text ...]"
 // placeholder instead; grok wraps it inside the box.
+//
+// A multi-line text is typed a line at a time, so each long line may become
+// its own placeholder: in a claude box every "[Pasted text #N ...]" is cut
+// out and each piece of text between them must be a piece of the sent text.
 func fleetTextLandedFor(row Session, box, sent string) bool {
 	if !row.IsGrok() && strings.HasPrefix(box, "[Pasted text") {
+		return true
+	}
+	if !row.IsGrok() && fleetPastedRe.MatchString(box) {
+		t := stripSpace(sent)
+		for _, piece := range fleetPastedRe.Split(box, -1) {
+			if p := stripSpace(piece); p != "" && !strings.Contains(t, p) {
+				return false
+			}
+		}
 		return true
 	}
 	b := stripSpace(box)
 	return b != "" && strings.Contains(stripSpace(sent), b)
 }
+
+// fleetPastedRe is Claude Code's placeholder for a long typed or pasted
+// text: "[Pasted text #1]", "[Pasted text #2 +12 lines]".
+var fleetPastedRe = regexp.MustCompile(`\[Pasted text #\d+[^\]]*\]`)
 
 // fleetLeftoverMatches is the stricter check before Enter is pressed on a
 // box this send did not just type into: the box may hold someone else's
@@ -191,6 +231,15 @@ func stripSpace(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// tmuxTypeNewline types a line break into a Claude Code input box
+// (tmuxNewlineKey, send_keys.go, says how it was chosen).
+func tmuxTypeNewline(target string) error {
+	if target == "" {
+		return errors.New("no tmux pane")
+	}
+	return exec.Command("tmux", "send-keys", "-t", tmuxExactTarget(target), tmuxNewlineKey).Run()
 }
 
 func tmuxPressEnter(target string) error {
@@ -340,12 +389,27 @@ const fleetReservedTagMsg = "Text may not contain [claude-sessions event]. That 
 
 // fleetCleanSayText makes raw safe to type as one prompt. When it is not,
 // code is "reserved_tag" or "bad_text" and msg the 400 reason. Every page
-// send goes through here; the idle-event sender does not.
+// send goes through here or fleetCleanChatText; the idle-event sender does
+// not.
 func fleetCleanSayText(raw string) (text, code, msg string) {
+	return fleetCleanText(raw, sanitizeFleetText)
+}
+
+// fleetCleanChatText is fleetCleanSayText for a plain chat message to FLEET
+// (a /fleet/say with no card): its line breaks stay (sanitizeFleetLines), and
+// fleetTypeInto types them as line breaks in the box, never as Enter. The
+// tag check folds whitespace, line breaks too, so a tag split across lines
+// is refused; the "!"/"#" check is on the first character of the first
+// line, the only one Claude Code reads as a mode switch.
+func fleetCleanChatText(raw string) (text, code, msg string) {
+	return fleetCleanText(raw, sanitizeFleetLines)
+}
+
+func fleetCleanText(raw string, sanitize func(string) (string, error)) (text, code, msg string) {
 	if fleetHasEventTag(raw) {
 		return "", "reserved_tag", fleetReservedTagMsg
 	}
-	text, err := sanitizeFleetText(raw)
+	text, err := sanitize(raw)
 	if err != nil {
 		return "", "bad_text", "bad text"
 	}
@@ -410,6 +474,7 @@ var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane", paneLo
 type fleetPaneSeams struct {
 	capture    func(string) (string, error)
 	typeText   func(target, text string) error
+	newline    func(target string) error
 	pressEnter func(target string) error
 	sleep      func(time.Duration)
 	inMode     func(target string) (bool, error)
@@ -417,12 +482,15 @@ type fleetPaneSeams struct {
 
 func (s *server) fleetPaneSeams() fleetPaneSeams {
 	f := &s.fleet
-	sc := fleetPaneSeams{capture: f.capture, typeText: f.typeText, pressEnter: f.pressEnter, sleep: f.sleep, inMode: f.paneInMode}
+	sc := fleetPaneSeams{capture: f.capture, typeText: f.typeText, newline: f.typeNewline, pressEnter: f.pressEnter, sleep: f.sleep, inMode: f.paneInMode}
 	if sc.capture == nil {
 		sc.capture = capturePane
 	}
 	if sc.typeText == nil {
 		sc.typeText = tmuxTypeLiteral
+	}
+	if sc.newline == nil {
+		sc.newline = tmuxTypeNewline
 	}
 	if sc.pressEnter == nil {
 		sc.pressEnter = tmuxPressEnter
@@ -445,12 +513,19 @@ func (s *server) fleetPaneSeams() fleetPaneSeams {
 // (fleetRecoverLeftover); when that text is this send's own text, that
 // Enter was this send's delivery and nothing is typed. Any other text in the
 // box refuses as input_busy.
+// A text with line breaks (a chat message, fleetCleanChatText) is typed a
+// line at a time with tmuxNewlineKey between the lines (typeLines), so only
+// the one Enter below submits; a grok row gets it flattened to one line,
+// since grok's line-break key is unknown.
 // row must be a freshly resolved session: its Tmux is the only pane address
 // used. Caller holds sayMu. The result is the response envelope; ok false
 // with code not_submitted means the text was typed but is still in the box.
 func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetSayResult {
 	f := &s.fleet
 	refuse := func(code, msg string) fleetSayResult { return fleetSayResult{Code: code, Error: msg} }
+	if row.IsGrok() {
+		text = sendKeysFlatten(text)
+	}
 	if row.Waiting() {
 		return refuse("dialog", who.subject+" shows a dialog. Answer it in the terminal.")
 	}
@@ -502,7 +577,10 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 		return refuse("pane_mode", strings.ToUpper(who.pane[:1])+who.pane[1:]+" is in scroll mode. Press q in the terminal, then try again.")
 	}
 
-	if err := sc.typeText(pane, text); err != nil {
+	err = typeLines(text,
+		func(line string) error { return sc.typeText(pane, line) },
+		func() error { return sc.newline(pane) })
+	if err != nil {
 		return refuse("send_failed", "send text: "+err.Error())
 	}
 	notSubmitted := func(screen string) fleetSayResult {
@@ -691,7 +769,13 @@ func (s *server) fleetSay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad cardHash", http.StatusBadRequest)
 		return
 	}
-	text, code, msg := fleetCleanSayText(body.Text)
+	clean := fleetCleanSayText
+	if cardID == "" {
+		// A plain chat message keeps its line breaks; a card answer is one
+		// line, as its recorded comment check (fleetRecordAnswer) expects.
+		clean = fleetCleanChatText
+	}
+	text, code, msg := clean(body.Text)
 	if code == "reserved_tag" {
 		writeJSON(w, http.StatusBadRequest, fleetSayResult{Code: code, Error: msg})
 		return

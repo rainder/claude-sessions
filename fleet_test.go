@@ -32,7 +32,8 @@ func fleetTestServer(t *testing.T, sessions []Session) *server {
 			home:     t.TempDir(),
 			// No test may shell out to tmux: every started session is gone.
 			paneCommand: func(string) (string, bool) { return "", false },
-			paneHistory: func(string) (string, error) { return "", errors.New("test: no tmux") }},
+			paneHistory: func(string) (string, error) { return "", errors.New("test: no tmux") },
+			typeNewline: func(string) error { return nil }},
 	}
 }
 

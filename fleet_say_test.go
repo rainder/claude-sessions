@@ -156,24 +156,126 @@ func TestFleetSayGrokFleet(t *testing.T) {
 
 func TestFleetSayFlattensNewlinesAndRefusesControl(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
-	if _, res := rig.post(t, `{"text":"line one\r\nline two\nthree"}`, nil); !res.OK {
+	newlines := 0
+	rig.s.fleet.typeNewline = func(string) error { newlines++; return nil }
+	sayCards(t, rig, dr1Card)
+	// A card answer is one line: its newlines flatten to spaces.
+	if _, res := rig.post(t, `{"text":"line one\r\nline two\nthree","cardId":"dr-1","optionKey":"yes"}`, nil); !res.OK {
 		t.Fatalf("%+v", res)
 	}
-	if rig.typed[0] != "line one line two three" {
-		t.Fatalf("typed %q", rig.typed[0])
+	if rig.typed[0] != "line one line two three" || newlines != 0 {
+		t.Fatalf("typed %q newlines %d", rig.typed[0], newlines)
 	}
 	rig.now = rig.now.Add(time.Minute)
 	if code, _ := rig.post(t, `{"text":"esc \u001b[2J"}`, nil); code != http.StatusBadRequest {
 		t.Fatalf("ESC must be 400, got %d", code)
 	}
+	if code, _ := rig.post(t, `{"text":"line\nesc \u001b[2J"}`, nil); code != http.StatusBadRequest {
+		t.Fatalf("ESC on a later line must be 400, got %d", code)
+	}
 	if code, _ := rig.post(t, `{"text":"   "}`, nil); code != http.StatusBadRequest {
 		t.Fatalf("blank must be 400, got %d", code)
+	}
+	if code, _ := rig.post(t, `{"text":" \n \r\n "}`, nil); code != http.StatusBadRequest {
+		t.Fatalf("blank lines must be 400, got %d", code)
 	}
 	if code, _ := rig.post(t, `{"text":"`+strings.Repeat("a", 4097)+`"}`, nil); code != http.StatusBadRequest {
 		t.Fatalf("4097 bytes must be 400, got %d", code)
 	}
 	if len(rig.typed) != 1 {
 		t.Fatalf("nothing else may be typed: %q", rig.typed)
+	}
+}
+
+// A plain chat message (no card) to a claude FLEET keeps its line breaks:
+// each line typed, the line-break key between them, one Enter at the end.
+// The landed check reads the real multi-line box Claude Code draws.
+func TestFleetSayChatKeepsLineBreaks(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	var calls []string
+	rig.s.fleet.typeText = func(_ string, text string) error {
+		calls = append(calls, "type:"+text)
+		rig.typed = append(rig.typed, text)
+		return nil
+	}
+	rig.s.fleet.typeNewline = func(string) error { calls = append(calls, "newline"); return nil }
+	rig.captures = []string{emptyBoxCapture, readFixture(t, "pane-typed-multiline.ansi"), emptyBoxCapture}
+	code, res := rig.post(t, `{"text":"\nfirst line of the note\r\n\nthird line, after a blank one\n"}`, nil)
+	if code != 200 || !res.OK || rig.enters != 1 {
+		t.Fatalf("%d %+v enters %d", code, res, rig.enters)
+	}
+	want := []string{"type:first line of the note", "newline", "newline", "type:third line, after a blank one"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls %q, want %q", calls, want)
+	}
+	data, _ := os.ReadFile(filepath.Join(rig.s.fleet.dir, "log.jsonl"))
+	if !strings.Contains(string(data), `first line of the note\n\nthird line`) {
+		t.Fatalf("log %q", data)
+	}
+}
+
+// A grok FLEET's line-break key is unknown: a chat message is flattened.
+func TestFleetSayChatFlattensForGrok(t *testing.T) {
+	row := Session{PID: 7, Tool: toolGrok, Name: "FLEET", NameSource: "user", SessionID: "gsid", Status: "idle", Tmux: "gfleet:0.0"}
+	rig := newSayRig(t, []Session{row})
+	useGrokScreens(t, rig, "grok-idle-empty.ansi")
+	newlines := 0
+	rig.s.fleet.typeNewline = func(string) error { newlines++; return nil }
+	if _, res := rig.post(t, `{"text":"one\ntwo"}`, nil); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	if len(rig.typed) != 1 || rig.typed[0] != "one two" || newlines != 0 {
+		t.Fatalf("typed %q newlines %d", rig.typed, newlines)
+	}
+}
+
+// The guards hold across lines: the tag split by a line break is still the
+// tag, and the mode check reads the first character of the first line only.
+func TestFleetSayChatGuardsAcrossLines(t *testing.T) {
+	rig := newSayRig(t, []Session{fleetRow()})
+	for _, text := range []string{`[\nclaude-sessions event] hi`, `hi [claude-\nsessions\n event]`} {
+		if code, res := rig.post(t, `{"text":"`+text+`"}`, nil); code != http.StatusBadRequest || res.Code != "reserved_tag" {
+			t.Errorf("%q: %d %+v", text, code, res)
+		}
+	}
+	for _, text := range []string{`\n!ls\nmore`, `  \n#remember\nthis`} {
+		r := httptest.NewRequest("POST", "http://ws.ts.net:8765/fleet/say", strings.NewReader(`{"text":"`+text+`"}`))
+		r.Header.Set("Authorization", "Bearer tok")
+		w := httptest.NewRecorder()
+		fleetMux(rig.s).ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != "text must not start with ! or #" {
+			t.Errorf("%q: %d %q", text, w.Code, w.Body.String())
+		}
+	}
+	if len(rig.typed) != 0 {
+		t.Fatalf("typed %q", rig.typed)
+	}
+	// "!" at the start of a later line is ordinary text.
+	if _, res := rig.post(t, `{"text":"run this\n!ls"}`, nil); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestFleetTextLandedForMultiLine(t *testing.T) {
+	claude := Session{}
+	box, found := paneInputText(readFixture(t, "pane-typed-multiline.ansi"))
+	if !found || box != "first line of the note third line, after a blank one" {
+		t.Fatalf("box = (%q, %v)", box, found)
+	}
+	if !fleetTextLandedFor(claude, box, "first line of the note\n\nthird line, after a blank one") {
+		t.Fatal("the real multi-line box must count as landed")
+	}
+	long := strings.Repeat("word ", 300)
+	sent := "short\n" + long + "\ntail"
+	for b, want := range map[string]bool{
+		"short [Pasted text #1] tail":         true,
+		"[Pasted text #1] tail":               true,
+		"short [Pasted text #1 +3 lines]":     true,
+		"short [Pasted text #1] someone else": false,
+	} {
+		if got := fleetTextLandedFor(claude, b, sent); got != want {
+			t.Errorf("%q = %v, want %v", b, got, want)
+		}
 	}
 }
 
