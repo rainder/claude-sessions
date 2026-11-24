@@ -131,7 +131,8 @@ type failingReader struct{}
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
 
 func TestValidateSendKeysText(t *testing.T) {
-	ok := []string{"hi", "-R hello", "Enter", "C-c", "ünïcode ✓", strings.Repeat("x", sendKeysMaxLen)}
+	ok := []string{"hi", "-R hello", "Enter", "C-c", "ünïcode ✓", strings.Repeat("x", sendKeysMaxLen),
+		"a\nb", "first line\n\nthird line"}
 	for _, s := range ok {
 		if err := validateSendKeysText(s); err != nil {
 			t.Errorf("validateSendKeysText(%q) = %v, want nil", s, err)
@@ -140,7 +141,8 @@ func TestValidateSendKeysText(t *testing.T) {
 	bad := map[string]string{
 		"":                                    "must not be empty",
 		strings.Repeat("x", sendKeysMaxLen+1): "exceeds",
-		"a\nb":                                "control characters",
+		"a\r\nb":                              "control characters",
+		"bad \xff utf8":                       "valid UTF-8",
 		"a\rb":                                "control characters",
 		"a\x00b":                              "control characters",
 		"a\x1b[2Jb":                           "control characters",

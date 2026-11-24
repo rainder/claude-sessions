@@ -116,8 +116,19 @@ func RenderInspector(w io.Writer, view inspectorViewState, summaryLines []string
 		fmt.Fprintln(w, clipLine(dim(strings.Repeat("-", cols)), cols))
 	}
 
+	// The compose box grows upward from the footer row, so the body gives
+	// up a row for each box row past the first.
+	var box []string
+	if view.composing {
+		box = view.composeView
+		if box == nil {
+			ed := view.compose
+			box = inspectorComposeLines(&ed, cols, rows, inspectorSummaryExtraRows(summaryLines))
+		}
+	}
+
 	// Remaining rows above the footer: content body.
-	bodyRows := rows - 4 - inspectorSummaryExtraRows(summaryLines)
+	bodyRows := rows - 4 - inspectorSummaryExtraRows(summaryLines) - max(len(box)-1, 0)
 	if bodyRows < 0 {
 		bodyRows = 0
 	}
@@ -127,7 +138,7 @@ func RenderInspector(w io.Writer, view inspectorViewState, summaryLines []string
 	// the normal Back/Refresh/Follow/Compose controls.
 	var hits []hitRegion
 	if view.composing {
-		hits = inspectorComposeBar(w, view, cols)
+		hits = inspectorComposeBar(w, view, box, cols)
 	} else {
 		hits = inspectorFooter(w, view, cols, rows-1)
 	}
@@ -398,30 +409,50 @@ func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []
 	return hits
 }
 
-// inspectorComposeBar draws the send-keys compose row in place of the normal
-// footer while view.composing is true: a "> text_" prompt on the same
-// reverse-video bar the footer uses, styled after new_picker.go's
-// renderPromptInput (new_picker.go:221-230). No hit regions — clicking during
-// compose is out of scope; the box only responds to the keyboard.
+// inspectorComposeLines lays out the compose box for a frame of cols x rows
+// whose ticket summary costs summaryExtra rows: the editor's rows, cols-2
+// wide (after the "> " prompt), at most textEditorMaxRows tall and never
+// more than about half the body, so a short terminal keeps its preview.
+func inspectorComposeLines(e *textEditor, cols, rows, summaryExtra int) []string {
+	avail := rows - inspectorChromeRows - summaryExtra // body rows beside a one-row box
+	return e.view(cols-2, min(textEditorMaxRows, max(1, (avail+1)/2)))
+}
+
+// inspectorComposeBar draws the send-keys compose box in place of the normal
+// footer while view.composing is true: box (inspectorComposeLines) on the
+// same reverse-video bar the footer uses, the first row after a "> "
+// prompt, the cursor a reverse cell inside it. No hit regions — clicking
+// during compose is out of scope; the box only responds to the keyboard.
 //
-// composeStatus is appended whenever non-empty, with no composeStatusUntil
-// expiry check: handleInspectorEvent (tui.go) sets it to "sending…" while
-// composing is still true, and on a failed send leaves composing true (by
-// design, so the text survives for a retry) with the failure message in
-// composeStatus. Neither of those is ever otherwise visible, since
-// inspectorFooter/inspectorFooterRight — the only other place composeStatus
-// renders, with the expiry check — is skipped entirely while composing. The
-// status stays until either the user's next submit attempt overwrites it with
-// a new "sending…", or cancels out of compose entirely: handleInspectorCompose
-// (tui_state.go) clears composeStatus/composeStatusUntil on Esc/Ctrl-C, since a
-// cancelled compose has nothing left to retry and a stale failure message must
-// not linger past it.
-func inspectorComposeBar(w io.Writer, view inspectorViewState, cols int) []hitRegion {
-	line := "> " + view.composeText + dim("_")
-	if view.composeStatus != "" {
-		line += "  " + dim(view.composeStatus)
+// composeStatus is appended to the last row whenever non-empty, with no
+// composeStatusUntil expiry check: handleInspectorEvent (tui.go) sets it to
+// "sending…" while composing is still true, and on a failed send leaves
+// composing true (by design, so the text survives for a retry) with the
+// failure message in composeStatus. Neither of those is ever otherwise
+// visible, since inspectorFooter/inspectorFooterRight — the only other place
+// composeStatus renders, with the expiry check — is skipped entirely while
+// composing. The status stays until either the user's next submit attempt
+// overwrites it with a new "sending…", or cancels out of compose entirely:
+// handleInspectorCompose (tui_state.go) clears composeStatus/
+// composeStatusUntil on Esc/Ctrl-C, since a cancelled compose has nothing
+// left to retry and a stale failure message must not linger past it.
+func inspectorComposeBar(w io.Writer, view inspectorViewState, box []string, cols int) []hitRegion {
+	if len(box) == 0 {
+		box = []string{""}
 	}
-	fmt.Fprintln(w, ansiPreviewBar+clipLine(line, cols)+ansiReset)
+	for i, row := range box {
+		line := "  " + row
+		if i == 0 {
+			line = "> " + row
+		}
+		if i == len(box)-1 && view.composeStatus != "" {
+			line += "  " + dim(view.composeStatus) + ansiPreviewBar
+		}
+		if pad := cols - visualLen(line); pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		fmt.Fprintln(w, ansiPreviewBar+clipLine(line, cols)+ansiReset)
+	}
 	return nil
 }
 

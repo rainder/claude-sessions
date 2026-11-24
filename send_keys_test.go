@@ -95,6 +95,39 @@ func TestSendKeysTypesLiteralWithDashDashThenEnter(t *testing.T) {
 	}
 }
 
+func TestSendKeysTypesMultiLineWithNewlineKey(t *testing.T) {
+	calls := stubSendKeys(t, false, nil)
+	if err := sendKeys(Session{PID: 1, Tmux: "work:0.1"}, "first\n\nthird"); err != nil {
+		t.Fatal(err)
+	}
+	// One literal call per non-empty line, M-Enter between lines (an empty
+	// line is two M-Enter in a row), and the one real Enter last.
+	want := [][]string{
+		{"send-keys", "-t", "=work:0.1", "-l", "--", "first"},
+		{"send-keys", "-t", "=work:0.1", "M-Enter"},
+		{"send-keys", "-t", "=work:0.1", "M-Enter"},
+		{"send-keys", "-t", "=work:0.1", "-l", "--", "third"},
+		{"send-keys", "-t", "=work:0.1", "Enter"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("calls = %q, want %q", *calls, want)
+	}
+}
+
+func TestSendKeysJoinsLinesForGrok(t *testing.T) {
+	calls := stubSendKeys(t, false, nil)
+	if err := sendKeys(Session{PID: 1, Tmux: "work:0.1", Tool: toolGrok}, "first\nsecond"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"send-keys", "-t", "=work:0.1", "-l", "--", "first second"},
+		{"send-keys", "-t", "=work:0.1", "Enter"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("calls = %q, want %q", *calls, want)
+	}
+}
+
 func TestSendKeysRefusesPaneInCopyMode(t *testing.T) {
 	calls := stubSendKeys(t, true, nil)
 	err := sendKeys(Session{PID: 1, Tmux: "work:0.1"}, "quit")

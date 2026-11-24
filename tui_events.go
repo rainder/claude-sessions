@@ -8,6 +8,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -29,6 +30,12 @@ const (
 	KeyEnd      = "\x00end"
 	KeyPageUp   = "\x00page-up"
 	KeyPageDown = "\x00page-down"
+	KeyDelete   = "\x00delete"
+	// KeyAltEnter and KeyShiftEnter put a line break into a multi-line
+	// editor (text_editor.go). Every other view ignores them: they are
+	// sentinels, never printable text.
+	KeyAltEnter   = "\x00alt-enter"
+	KeyShiftEnter = "\x00shift-enter"
 )
 
 // fixedSequences maps complete escape sequences to their key constant.
@@ -44,6 +51,11 @@ var fixedSequences = map[string]string{
 	"\x1bOH": KeyHome, "\x1bOF": KeyEnd,
 	"\x1b[1~": KeyHome, "\x1b[4~": KeyEnd,
 	"\x1b[5~": KeyPageUp, "\x1b[6~": KeyPageDown,
+	"\x1b[3~": KeyDelete,
+	// Shift-Enter and Alt-Enter as terminals with extended keys report them:
+	// the kitty/CSI-u form and xterm's modifyOtherKeys form.
+	"\x1b[13;2u": KeyShiftEnter, "\x1b[27;2;13~": KeyShiftEnter,
+	"\x1b[13;3u": KeyAltEnter, "\x1b[27;3;13~": KeyAltEnter,
 }
 
 // eventKind distinguishes the payload carried by an inputEvent.
@@ -138,6 +150,21 @@ func (d *inputDecoder) decodeOne() (ev *inputEvent, n int, complete bool) {
 		return &inputEvent{kind: eventKey, key: KeyEnter}, 1, true
 	}
 
+	if b0 >= 0x80 {
+		// A UTF-8 sequence is one key, so an editor gets "é", not two
+		// Latin-1 runes. An incomplete one waits for its next byte (a
+		// terminal writes a rune whole, so it follows at once); a byte that
+		// starts no valid rune, and a C1 control, is dropped.
+		if !utf8.FullRune(buf) {
+			return nil, 0, false
+		}
+		r, size := utf8.DecodeRune(buf)
+		if r == utf8.RuneError || (r >= 0x80 && r < 0xa0) {
+			return nil, size, true
+		}
+		return &inputEvent{kind: eventKey, key: string(buf[:size])}, size, true
+	}
+
 	if b0 != 0x1b {
 		return &inputEvent{kind: eventKey, key: string(rune(b0))}, 1, true
 	}
@@ -147,6 +174,12 @@ func (d *inputDecoder) decodeOne() (ev *inputEvent, n int, complete bool) {
 	// arriving. Report incomplete so Feed/Flush can decide based on timing.
 	if len(buf) < 2 {
 		return nil, 0, false
+	}
+
+	// Alt-Enter: ESC CR in one write. Decoded as one key, so a multi-line
+	// editor gets a line break rather than Esc (cancel) and then Enter.
+	if buf[1] == '\r' {
+		return &inputEvent{kind: eventKey, key: KeyAltEnter}, 2, true
 	}
 
 	// SGR mouse report: ESC [ < ...

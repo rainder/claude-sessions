@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -262,7 +263,7 @@ func TestRenderInspectorComposingShowsInputBar(t *testing.T) {
 	view := inspectorViewState{
 		viewportRows: 10,
 		composing:    true,
-		composeText:  "hello",
+		compose:      editorWith("hello"),
 		snapshot:     InspectorSnapshot{Session: Session{PID: 1}},
 	}
 	RenderInspector(&buf, view, nil, false, 80, 14)
@@ -271,12 +272,45 @@ func TestRenderInspectorComposingShowsInputBar(t *testing.T) {
 	}
 }
 
+func TestRenderInspectorComposingGrowsMultiLineBox(t *testing.T) {
+	var buf strings.Builder
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("body %d", i)
+	}
+	view := inspectorViewState{
+		viewportRows: 10,
+		composing:    true,
+		compose:      editorWith("one\ntwo\nthree"),
+		snapshot:     InspectorSnapshot{Session: Session{PID: 1}, Lines: lines},
+	}
+	RenderInspector(&buf, view, nil, false, 80, 14)
+	rows := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	if len(rows) != 14 {
+		t.Fatalf("frame has %d rows, want 14", len(rows))
+	}
+	tail := []string{visibleText(rows[11]), visibleText(rows[12]), visibleText(rows[13])}
+	if !strings.HasPrefix(tail[0], "> one") || !strings.HasPrefix(tail[1], "  two") || !strings.HasPrefix(tail[2], "  three") {
+		t.Fatalf("box rows = %q", tail)
+	}
+	// The box never grows past textEditorMaxRows.
+	view.compose = editorWith(strings.Repeat("x\n", 20))
+	buf.Reset()
+	RenderInspector(&buf, view, nil, false, 80, 40)
+	if n := strings.Count(buf.String(), "\n"); n != 40 {
+		t.Fatalf("frame has %d rows, want 40", n)
+	}
+	if lines := inspectorComposeLines(&view.compose, 80, 40, 0); len(lines) != textEditorMaxRows {
+		t.Fatalf("box rows = %d, want %d", len(lines), textEditorMaxRows)
+	}
+}
+
 func TestRenderInspectorComposingShowsSendingStatus(t *testing.T) {
 	var buf strings.Builder
 	view := inspectorViewState{
 		viewportRows:  10,
 		composing:     true,
-		composeText:   "hello",
+		compose:       editorWith("hello"),
 		composeStatus: "sending…",
 		snapshot:      InspectorSnapshot{Session: Session{PID: 1}},
 	}
@@ -295,7 +329,7 @@ func TestRenderInspectorComposingShowsFailureStatus(t *testing.T) {
 	view := inspectorViewState{
 		viewportRows:  10,
 		composing:     true,
-		composeText:   "hello",
+		compose:       editorWith("hello"),
 		composeStatus: "send failed: broken pipe",
 		snapshot:      InspectorSnapshot{Session: Session{PID: 1}},
 	}

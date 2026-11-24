@@ -483,7 +483,15 @@ func RunTUI(interval time.Duration) error {
 			// scrolling and the footer row in agreement.
 			summaryLines, summaryTrimmed := inspectorTicketSummaryLines(ticketSummarySec.snapshot(), cols, state.inspector.summaryExpanded)
 			summaryLines = inspectorSummaryFit(summaryLines, rows)
-			state.inspector.resize(rows - inspectorChromeRows - inspectorSummaryExtraRows(summaryLines))
+			extra := inspectorSummaryExtraRows(summaryLines)
+			state.inspector.composeView = nil
+			if state.inspector.composing {
+				// Laid out here, through the pointer, so the editor keeps
+				// the width Up/Down wrap at and its scroll.
+				state.inspector.composeView = inspectorComposeLines(&state.inspector.compose, cols, rows, extra)
+				extra += len(state.inspector.composeView) - 1
+			}
+			state.inspector.resize(rows - inspectorChromeRows - extra)
 			var buf strings.Builder
 			state.hits = RenderInspector(&buf, state.inspector, summaryLines, summaryTrimmed, cols, rows)
 			_ = screen.Draw(buf.String(), cols, rows)
@@ -873,9 +881,10 @@ func RunTUI(interval time.Duration) error {
 			refresh(false)
 			markInspectorEndedIfGone()
 		}
+		inBatch := fleetKeyBatch(events)
 		for _, ev := range events {
 			if state.mode == screenInspector {
-				quit, absorb := handleInspectorEvent(ev, state, &inspectorHub, closeInspector, render, func() {
+				quit, absorb := handleInspectorEvent(ev, inBatch, state, &inspectorHub, closeInspector, render, func() {
 					// Revert must land before the real attach, or the window
 					// stays pinned at the previewer's size for the whole
 					// interactive session (see preview-resize design spec).
@@ -894,8 +903,8 @@ func RunTUI(interval time.Duration) error {
 					return nil
 				}
 				if absorb {
-					// A paste's trailing bytes after the newline that just
-					// submitted (or cancelled) compose mode belong to the
+					// A batch's trailing bytes after the key that just
+					// cancelled (or submitted) compose mode belong to the
 					// compose box, not this screen's hotkeys — drop them
 					// rather than let e.g. a trailing 'k' fall through to
 					// kill. See handleInspectorEvent's doc comment.
@@ -1146,18 +1155,20 @@ func RunTUI(interval time.Duration) error {
 // handleInspectorEvent dispatches one decoded event while the inspector screen
 // is active. It returns quit=true when the app should exit (Ctrl-C/Ctrl-D
 // outside compose mode, or Ctrl-D while composing — composing itself
-// intercepts a bare Ctrl-C as cancel, not quit). absorbBatch is true exactly
-// when this event ended compose mode (a successful submit or a cancel): the
-// caller must then drop any remaining events already queued from the same
-// input read (i.e. the rest of the current Feed()/decode batch — not
-// necessarily the rest of a paste: a remote send can block on sendText for up
-// to remoteRequest's ~30s timeout, and any key typed during that wait arrives
-// in a later, separate read after compose mode has already ended, so it is
-// NOT covered by this and dispatches as a normal hotkey instead of being
-// discarded). Without this, a paste containing an embedded newline mid-buffer
-// would submit on that newline and let its trailing bytes fall through to
-// this screen's normal hotkeys (e.g. Ctrl+X triggering kill) instead of being
-// discarded along with the rest of the batch. Back commands close the
+// intercepts a bare Ctrl-C as cancel, not quit). inBatch is true when ev came
+// in one read with other keys (a paste, fleetKeyBatch): an Enter there is a
+// new line in the compose box and never submits, so a paste with newlines
+// lands whole. absorbBatch is true exactly when this event ended compose
+// mode (a successful submit or a cancel): the caller must then drop any
+// remaining events already queued from the same input read (i.e. the rest
+// of the current Feed()/decode batch — not necessarily the rest of a paste:
+// a remote send can block on sendText for up to remoteRequest's ~30s
+// timeout, and any key typed during that wait arrives in a later, separate
+// read after compose mode has already ended, so it is NOT covered by this
+// and dispatches as a normal hotkey instead of being discarded). A submit
+// only comes from a read with one key, so this matters for a cancel: an Esc
+// (or Ctrl-C) mid-batch must not let the batch's trailing bytes fall through
+// to this screen's normal hotkeys (e.g. Ctrl+X triggering kill). Back commands close the
 // inspector; refresh/follow touch the hub or viewport; scrolling keys and the
 // wheel mutate the view and repaint. hubPtr is the loop's inspectorHub
 
@@ -1170,7 +1181,7 @@ func RunTUI(interval time.Duration) error {
 // dim "no tmux pane" hint when the session has no pane to send into. sendText
 // performs the actual send (local vs. remote is the caller's concern, not
 // this function's) and is only ever invoked with a non-empty compose buffer.
-func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach, kill func(), sendText func(Session, string) (bool, string)) (quit, absorbBatch bool) {
+func handleInspectorEvent(ev inputEvent, inBatch bool, state *tuiState, hubPtr **InspectorHub, closeInspector, render, attach, kill func(), sendText func(Session, string) (bool, string)) (quit, absorbBatch bool) {
 	if ev.kind == eventMouse {
 		switch state.handleInspectorMouse(ev.mouse) {
 		case commandBack:
@@ -1195,13 +1206,13 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 		if ev.key == "\x04" {
 			return true, false
 		}
-		submit, cancel := state.handleInspectorCompose(ev.key)
+		submit, cancel := state.handleInspectorCompose(ev.key, inBatch)
 		switch {
 		case cancel:
 			render()
 			return false, true
 		case submit:
-			text := state.inspector.composeText
+			text := state.inspector.compose.Text()
 			sess := state.inspector.snapshot.Session
 			state.inspector.composeStatus = "sending…"
 			render()
@@ -1209,7 +1220,7 @@ func handleInspectorEvent(ev inputEvent, state *tuiState, hubPtr **InspectorHub,
 			state.inspector.composeStatusUntil = time.Now().Add(4 * time.Second)
 			if ok {
 				state.inspector.composing = false
-				state.inspector.composeText = ""
+				state.inspector.compose.Clear()
 				state.inspector.composeStatus = "sent"
 			} else {
 				state.inspector.composeStatus = msg

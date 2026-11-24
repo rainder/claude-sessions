@@ -201,10 +201,12 @@ func sessionIDPrecondition(w http.ResponseWriter, r *http.Request) (string, erro
 // /sessions/{pid}/send-keys. Unlike sessionIDPrecondition, session_id is
 // mandatory: this endpoint has no legacy caller predating the identity
 // guard, so there is no reason to allow an unguarded send. text is bounded
-// and rejected if empty or if it contains any C0 control byte (0x00-0x1f) or
-// DEL (0x7f) — send-keys is single-line by design; a caller wanting those
-// bytes belongs on the tmux-key-name surface sendKeys's -l flag deliberately
-// avoids, not in message content.
+// and rejected if empty, if it is not valid UTF-8, or if it contains any C0
+// control byte (0x00-0x1f) other than the newline, or DEL (0x7f)
+// (validateSendKeysText). A newline is a line break in the message, typed
+// as one by sendKeys; a caller wanting other control bytes belongs on the
+// tmux-key-name surface sendKeys's -l flag deliberately avoids, not in
+// message content.
 func sendKeysBody(w http.ResponseWriter, r *http.Request) (sessionID, text string, err error) {
 	var body struct {
 		SessionID string `json:"session_id"`

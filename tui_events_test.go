@@ -37,6 +37,56 @@ func TestInputDecoderExtendedKeys(t *testing.T) {
 	}
 }
 
+func TestInputDecoderLineBreakAndDeleteKeys(t *testing.T) {
+	cases := map[string]string{
+		"\x1b\r":        KeyAltEnter,
+		"\x1b[13;3u":    KeyAltEnter,
+		"\x1b[27;3;13~": KeyAltEnter,
+		"\x1b[13;2u":    KeyShiftEnter,
+		"\x1b[27;2;13~": KeyShiftEnter,
+		"\x1b[3~":       KeyDelete,
+		"\r":            KeyEnter,
+		"\n":            KeyEnter,
+	}
+	for seq, want := range cases {
+		d := newInputDecoder()
+		got := d.Feed([]byte(seq), time.Unix(0, 0))
+		if len(got) != 1 || got[0].key != want {
+			t.Errorf("%q = %#v, want %q", seq, got, want)
+		}
+	}
+	// Esc then Enter in separate reads stay two keys.
+	d := newInputDecoder()
+	if got := d.Feed([]byte("\x1b"), time.Unix(0, 0)); len(got) != 0 {
+		t.Fatalf("lone ESC = %#v", got)
+	}
+	got := d.Flush(time.Unix(0, 0).Add(escapeSequenceDelay))
+	got = append(got, d.Feed([]byte("\r"), time.Unix(1, 0))...)
+	if len(got) != 2 || got[0].key != KeyEsc || got[1].key != KeyEnter {
+		t.Fatalf("Esc, Enter = %#v", got)
+	}
+}
+
+func TestInputDecoderUTF8Runes(t *testing.T) {
+	d := newInputDecoder()
+	in := []byte("aé漢")
+	var keys []string
+	// Byte by byte: a rune split across reads still decodes whole.
+	for i := range in {
+		for _, ev := range d.Feed(in[i:i+1], time.Unix(0, 0)) {
+			keys = append(keys, ev.key)
+		}
+	}
+	if len(keys) != 3 || keys[0] != "a" || keys[1] != "é" || keys[2] != "漢" {
+		t.Fatalf("keys = %q", keys)
+	}
+	// A stray continuation byte and a C1 control (U+009B, CSI) are dropped.
+	got := d.Feed([]byte("\x80x\u009by"), time.Unix(0, 0))
+	if len(got) != 2 || got[0].key != "x" || got[1].key != "y" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
 func TestInputDecoderSGRMouse(t *testing.T) {
 	cases := []struct {
 		seq     string

@@ -42,14 +42,18 @@ type inspectorViewState struct {
 	viewportRows int
 	follow       bool
 	newLines     int
-	// composing, composeText, composeStatus, and composeStatusUntil back the
+	// composing, compose, composeStatus, and composeStatusUntil back the
 	// 'i'-key compose box (send-keys, see docs/superpowers/specs/
-	// 2026-08-03-inspector-send-keys-design.md). composeText is deliberately
-	// NOT cleared on a failed send — the caller (handleInspectorEvent) leaves
-	// composing true and the text intact so the user can correct and resend
-	// without retyping.
+	// 2026-08-03-inspector-send-keys-design.md). compose is the multi-line
+	// editor (text_editor.go). It is deliberately NOT cleared on a failed
+	// send — the caller (handleInspectorEvent) leaves composing true and the
+	// text intact so the user can correct and resend without retyping.
+	// composeView is the box as the last render laid it out (the loop draws
+	// it through a pointer, so the editor keeps its width and scroll);
+	// RenderInspector lays it out itself when it is nil.
 	composing          bool
-	composeText        string
+	compose            textEditor
+	composeView        []string
 	composeStatus      string
 	composeStatusUntil time.Time
 	// summaryExpanded toggles the ticket-summary block between its fixed

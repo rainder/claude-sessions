@@ -81,7 +81,8 @@ func isAllDigits(s string) bool {
 // limit, so an oversized message still fails validateSendKeysText's length
 // check (rather than being cut silently) while a full-length line ending in
 // "\r\n" still fits. One trailing "\n" or "\r\n" is stripped; any other
-// newline stays and is refused as a control byte.
+// newline stays as a line break in the message (sendKeys types it as one),
+// and a CR left inside is refused as a control byte.
 func sendKeysText(words []string, stdin io.Reader) (string, error) {
 	if len(words) != 1 || words[0] != "-" {
 		return strings.Join(words, " "), nil

@@ -124,62 +124,62 @@ func TestInspectorKeyHandlers(t *testing.T) {
 func TestHandleInspectorComposeAppendsPrintableAndBackspaces(t *testing.T) {
 	s := &tuiState{inspector: inspectorViewState{composing: true}}
 	for _, k := range []string{"h", "i"} {
-		if submit, cancel := s.handleInspectorCompose(k); submit || cancel {
-			t.Fatalf("handleInspectorCompose(%q) = (%v,%v), want (false,false)", k, submit, cancel)
+		if submit, cancel := s.handleInspectorCompose(k, false); submit || cancel {
+			t.Fatalf("handleInspectorCompose(%q, false) = (%v,%v), want (false,false)", k, submit, cancel)
 		}
 	}
-	if s.inspector.composeText != "hi" {
-		t.Fatalf("composeText = %q, want hi", s.inspector.composeText)
+	if s.inspector.compose.Text() != "hi" {
+		t.Fatalf("composeText = %q, want hi", s.inspector.compose.Text())
 	}
-	s.handleInspectorCompose("\x7f")
-	if s.inspector.composeText != "h" {
-		t.Fatalf("composeText after backspace = %q, want h", s.inspector.composeText)
+	s.handleInspectorCompose("\x7f", false)
+	if s.inspector.compose.Text() != "h" {
+		t.Fatalf("composeText after backspace = %q, want h", s.inspector.compose.Text())
 	}
 }
 
 func TestHandleInspectorComposeEnterOnEmptyIsNoop(t *testing.T) {
 	s := &tuiState{inspector: inspectorViewState{composing: true}}
-	submit, cancel := s.handleInspectorCompose(KeyEnter)
+	submit, cancel := s.handleInspectorCompose(KeyEnter, false)
 	if submit || cancel {
-		t.Fatalf("handleInspectorCompose(Enter on empty) = (%v,%v), want (false,false)", submit, cancel)
+		t.Fatalf("handleInspectorCompose(Enter on empty, false) = (%v,%v), want (false,false)", submit, cancel)
 	}
 }
 
 func TestHandleInspectorComposeEnterOnNonEmptySubmitsAndPreservesText(t *testing.T) {
-	s := &tuiState{inspector: inspectorViewState{composing: true, composeText: "hello"}}
-	submit, cancel := s.handleInspectorCompose(KeyEnter)
+	s := &tuiState{inspector: inspectorViewState{composing: true, compose: editorWith("hello")}}
+	submit, cancel := s.handleInspectorCompose(KeyEnter, false)
 	if !submit || cancel {
-		t.Fatalf("handleInspectorCompose(Enter on \"hello\") = (%v,%v), want (true,false)", submit, cancel)
+		t.Fatalf("handleInspectorCompose(Enter on \"hello\", false) = (%v,%v), want (true,false)", submit, cancel)
 	}
-	if !s.inspector.composing || s.inspector.composeText != "hello" {
-		t.Fatalf("state after submit = composing=%v text=%q, want composing=true text=\"hello\" (caller clears on success)", s.inspector.composing, s.inspector.composeText)
+	if !s.inspector.composing || s.inspector.compose.Text() != "hello" {
+		t.Fatalf("state after submit = composing=%v text=%q, want composing=true text=\"hello\" (caller clears on success)", s.inspector.composing, s.inspector.compose.Text())
 	}
 }
 
 func TestHandleInspectorComposeEscCancelsAndDiscards(t *testing.T) {
-	s := &tuiState{inspector: inspectorViewState{composing: true, composeText: "hello"}}
-	submit, cancel := s.handleInspectorCompose(KeyEsc)
+	s := &tuiState{inspector: inspectorViewState{composing: true, compose: editorWith("hello")}}
+	submit, cancel := s.handleInspectorCompose(KeyEsc, false)
 	if submit || !cancel {
-		t.Fatalf("handleInspectorCompose(Esc) = (%v,%v), want (false,true)", submit, cancel)
+		t.Fatalf("handleInspectorCompose(Esc, false) = (%v,%v), want (false,true)", submit, cancel)
 	}
-	if s.inspector.composing || s.inspector.composeText != "" {
-		t.Fatalf("state after Esc = composing=%v text=%q, want composing=false text=\"\"", s.inspector.composing, s.inspector.composeText)
+	if s.inspector.composing || s.inspector.compose.Text() != "" {
+		t.Fatalf("state after Esc = composing=%v text=%q, want composing=false text=\"\"", s.inspector.composing, s.inspector.compose.Text())
 	}
 }
 
 func TestHandleInspectorComposeCtrlCCancelsAndDiscards(t *testing.T) {
-	s := &tuiState{inspector: inspectorViewState{composing: true, composeText: "hello"}}
-	submit, cancel := s.handleInspectorCompose("\x03")
+	s := &tuiState{inspector: inspectorViewState{composing: true, compose: editorWith("hello")}}
+	submit, cancel := s.handleInspectorCompose("\x03", false)
 	if submit || !cancel {
-		t.Fatalf("handleInspectorCompose(Ctrl-C) = (%v,%v), want (false,true)", submit, cancel)
+		t.Fatalf("handleInspectorCompose(Ctrl-C, false) = (%v,%v), want (false,true)", submit, cancel)
 	}
 }
 
 func TestHandleInspectorComposeIgnoresNonPrintableBytes(t *testing.T) {
 	s := &tuiState{inspector: inspectorViewState{composing: true}}
-	s.handleInspectorCompose("\x01")
-	if s.inspector.composeText != "" {
-		t.Fatalf("composeText = %q, want empty (control byte ignored)", s.inspector.composeText)
+	s.handleInspectorCompose("\x01", false)
+	if s.inspector.compose.Text() != "" {
+		t.Fatalf("composeText = %q, want empty (control byte ignored)", s.inspector.compose.Text())
 	}
 }
 
@@ -189,15 +189,15 @@ func TestHandleInspectorComposeIgnoresNonPrintableBytes(t *testing.T) {
 // instead of succeeding locally and then 400ing on submit.
 func TestHandleInspectorComposeStopsAppendingAtMaxLen(t *testing.T) {
 	s := &tuiState{inspector: inspectorViewState{
-		composing:   true,
-		composeText: strings.Repeat("x", sendKeysMaxLen),
+		composing: true,
+		compose:   editorWith(strings.Repeat("x", sendKeysMaxLen)),
 	}}
-	submit, cancel := s.handleInspectorCompose("y")
+	submit, cancel := s.handleInspectorCompose("y", false)
 	if submit || cancel {
-		t.Fatalf("handleInspectorCompose(append at cap) = (%v,%v), want (false,false)", submit, cancel)
+		t.Fatalf("handleInspectorCompose(append at cap, false) = (%v,%v), want (false,false)", submit, cancel)
 	}
-	if len(s.inspector.composeText) != sendKeysMaxLen {
-		t.Fatalf("composeText len = %d, want %d (append past cap must be a no-op)", len(s.inspector.composeText), sendKeysMaxLen)
+	if len(s.inspector.compose.Text()) != sendKeysMaxLen {
+		t.Fatalf("composeText len = %d, want %d (append past cap must be a no-op)", len(s.inspector.compose.Text()), sendKeysMaxLen)
 	}
 }
 
@@ -208,11 +208,11 @@ func TestHandleInspectorComposeStopsAppendingAtMaxLen(t *testing.T) {
 func TestHandleInspectorComposeCancelClearsStaleStatus(t *testing.T) {
 	s := &tuiState{inspector: inspectorViewState{
 		composing:          true,
-		composeText:        "hello",
+		compose:            editorWith("hello"),
 		composeStatus:      "send failed: broken pipe",
 		composeStatusUntil: time.Now().Add(4 * time.Second),
 	}}
-	s.handleInspectorCompose(KeyEsc)
+	s.handleInspectorCompose(KeyEsc, false)
 	if s.inspector.composeStatus != "" {
 		t.Fatalf("composeStatus after Esc = %q, want empty", s.inspector.composeStatus)
 	}

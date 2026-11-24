@@ -4604,7 +4604,6 @@ func TestSendKeysHandlerRejectsControlCharacters(t *testing.T) {
 		name string
 		body string
 	}{
-		{"newline", `{"session_id":"sess-1","text":"hello\nworld"}`},
 		{"carriage return", `{"session_id":"sess-1","text":"hello\rworld"}`},
 		{"nul byte", `{"session_id":"sess-1","text":"hello\u0000world"}`},
 		{"escape byte", `{"session_id":"sess-1","text":"hello\u001bworld"}`},

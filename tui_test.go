@@ -33,7 +33,7 @@ func TestHandleInspectorEventArmsComposeOnIWhenTmuxPresent(t *testing.T) {
 	noop := func() {}
 	ev := inputEvent{kind: eventKey, key: "i"}
 
-	quit, absorb := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, nil)
+	quit, absorb := handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, noop, nil)
 
 	if quit || absorb {
 		t.Fatalf("handleInspectorEvent('i') = (%v,%v), want (false,false)", quit, absorb)
@@ -51,7 +51,7 @@ func TestHandleInspectorEventIgnoresIWhenNoTmux(t *testing.T) {
 	noop := func() {}
 	ev := inputEvent{kind: eventKey, key: "i"}
 
-	handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, nil)
+	handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, noop, nil)
 
 	if state.inspector.composing {
 		t.Fatal("composing = true, want false (no tmux pane to send into)")
@@ -66,9 +66,9 @@ func TestHandleInspectorEventIgnoresIWhenNoTmux(t *testing.T) {
 
 func TestHandleInspectorEventSubmitCallsSendTextAndClearsOnSuccess(t *testing.T) {
 	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
-		composing:   true,
-		composeText: "hello",
-		snapshot:    InspectorSnapshot{Session: Session{PID: 42, Tmux: "work:0.0"}},
+		composing: true,
+		compose:   editorWith("hello"),
+		snapshot:  InspectorSnapshot{Session: Session{PID: 42, Tmux: "work:0.0"}},
 	}}
 	var hub *InspectorHub
 	noop := func() {}
@@ -79,7 +79,7 @@ func TestHandleInspectorEventSubmitCallsSendTextAndClearsOnSuccess(t *testing.T)
 	}
 	ev := inputEvent{kind: eventKey, key: KeyEnter}
 
-	quit, absorb := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, sendText)
+	quit, absorb := handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, noop, sendText)
 
 	if quit || !absorb {
 		t.Fatalf("handleInspectorEvent(Enter submit) = (%v,%v), want (false,true)", quit, absorb)
@@ -87,8 +87,8 @@ func TestHandleInspectorEventSubmitCallsSendTextAndClearsOnSuccess(t *testing.T)
 	if gotText != "hello" {
 		t.Fatalf("sendText got %q, want hello", gotText)
 	}
-	if state.inspector.composing || state.inspector.composeText != "" {
-		t.Fatalf("state after success = composing=%v text=%q, want cleared", state.inspector.composing, state.inspector.composeText)
+	if state.inspector.composing || state.inspector.compose.Text() != "" {
+		t.Fatalf("state after success = composing=%v text=%q, want cleared", state.inspector.composing, state.inspector.compose.Text())
 	}
 	if state.inspector.composeStatus != "sent" {
 		t.Fatalf("composeStatus = %q, want sent", state.inspector.composeStatus)
@@ -97,9 +97,9 @@ func TestHandleInspectorEventSubmitCallsSendTextAndClearsOnSuccess(t *testing.T)
 
 func TestHandleInspectorEventSubmitPreservesTextOnFailure(t *testing.T) {
 	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
-		composing:   true,
-		composeText: "hello",
-		snapshot:    InspectorSnapshot{Session: Session{PID: 42, Tmux: "work:0.0"}},
+		composing: true,
+		compose:   editorWith("hello"),
+		snapshot:  InspectorSnapshot{Session: Session{PID: 42, Tmux: "work:0.0"}},
 	}}
 	var hub *InspectorHub
 	noop := func() {}
@@ -108,13 +108,13 @@ func TestHandleInspectorEventSubmitPreservesTextOnFailure(t *testing.T) {
 	}
 	ev := inputEvent{kind: eventKey, key: KeyEnter}
 
-	quit, absorb := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, sendText)
+	quit, absorb := handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, noop, sendText)
 
 	if quit || absorb {
 		t.Fatalf("handleInspectorEvent(Enter, failed send) = (%v,%v), want (false,false) — still composing, nothing to absorb", quit, absorb)
 	}
-	if !state.inspector.composing || state.inspector.composeText != "hello" {
-		t.Fatalf("state after failure = composing=%v text=%q, want composing=true text=hello (preserved for retry)", state.inspector.composing, state.inspector.composeText)
+	if !state.inspector.composing || state.inspector.compose.Text() != "hello" {
+		t.Fatalf("state after failure = composing=%v text=%q, want composing=true text=hello (preserved for retry)", state.inspector.composing, state.inspector.compose.Text())
 	}
 	if state.inspector.composeStatus != "PID 42 is a different session now" {
 		t.Fatalf("composeStatus = %q, want the failure message", state.inspector.composeStatus)
@@ -123,30 +123,86 @@ func TestHandleInspectorEventSubmitPreservesTextOnFailure(t *testing.T) {
 
 func TestHandleInspectorEventEscCancelsCompose(t *testing.T) {
 	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
-		composing:   true,
-		composeText: "hello",
+		composing: true,
+		compose:   editorWith("hello"),
 	}}
 	var hub *InspectorHub
 	noop := func() {}
 	ev := inputEvent{kind: eventKey, key: KeyEsc}
 
-	quit, absorb := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, nil)
+	quit, absorb := handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, noop, nil)
 
 	if quit || !absorb {
 		t.Fatalf("handleInspectorEvent(Esc cancel) = (%v,%v), want (false,true)", quit, absorb)
 	}
-	if state.inspector.composing || state.inspector.composeText != "" {
-		t.Fatalf("state after cancel = composing=%v text=%q, want cleared", state.inspector.composing, state.inspector.composeText)
+	if state.inspector.composing || state.inspector.compose.Text() != "" {
+		t.Fatalf("state after cancel = composing=%v text=%q, want cleared", state.inspector.composing, state.inspector.compose.Text())
+	}
+}
+
+func TestHandleInspectorEventPasteWithNewlinesNeverSubmits(t *testing.T) {
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{
+		composing: true,
+		compose:   newTextEditor(sendKeysMaxLen),
+		snapshot:  InspectorSnapshot{Session: Session{PID: 42, Tmux: "work:0.0"}},
+	}}
+	var hub *InspectorHub
+	noop := func() {}
+	sent := 0
+	sendText := func(Session, string) (bool, string) { sent++; return true, "" }
+	killed := false
+	kill := func() { killed = true }
+	// One read: "one", Enter, "two", Enter, ctrl-x — the paste's Enters are
+	// line breaks and its ctrl-x is not the kill binding.
+	for _, k := range []string{"o", "n", "e", KeyEnter, "t", "w", "o", KeyEnter, "\x18"} {
+		quit, absorb := handleInspectorEvent(inputEvent{kind: eventKey, key: k}, true, state, &hub, noop, noop, noop, kill, sendText)
+		if quit || absorb {
+			t.Fatalf("key %q in a paste = (%v,%v)", k, quit, absorb)
+		}
+	}
+	if sent != 0 || killed {
+		t.Fatalf("sent=%d killed=%v, want neither", sent, killed)
+	}
+	if got := state.inspector.compose.Text(); got != "one\ntwo\n" {
+		t.Fatalf("text = %q", got)
+	}
+	// Alt-Enter and backslash-Enter typed alone are line breaks too; a
+	// plain Enter then sends the whole text.
+	for _, k := range []string{"x", KeyAltEnter, "y", "\\", KeyEnter, "z"} {
+		handleInspectorEvent(inputEvent{kind: eventKey, key: k}, false, state, &hub, noop, noop, noop, kill, sendText)
+	}
+	var got string
+	sendText = func(_ Session, text string) (bool, string) { got = text; return true, "" }
+	if _, absorb := handleInspectorEvent(inputEvent{kind: eventKey, key: KeyEnter}, false, state, &hub, noop, noop, noop, kill, sendText); !absorb {
+		t.Fatal("submit did not end compose mode")
+	}
+	if got != "one\ntwo\nx\ny\nz" {
+		t.Fatalf("sent %q", got)
+	}
+}
+
+func TestHandleInspectorEventArrowsEditWhileComposing(t *testing.T) {
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{composing: true, compose: editorWith("ac")}}
+	var hub *InspectorHub
+	noop := func() {}
+	for _, k := range []string{KeyLeft, "b", KeyUp, KeyHome, "^", KeyEnd, KeyDown} {
+		handleInspectorEvent(inputEvent{kind: eventKey, key: k}, false, state, &hub, noop, noop, noop, noop, nil)
+	}
+	if got := state.inspector.compose.Text(); got != "^abc" {
+		t.Fatalf("text = %q", got)
+	}
+	if state.inspector.top != 0 || !state.inspector.composing {
+		t.Fatal("arrows while composing must not scroll the preview or leave compose")
 	}
 }
 
 func TestHandleInspectorEventCtrlDStillQuitsWhileComposing(t *testing.T) {
-	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{composing: true, composeText: "hello"}}
+	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{composing: true, compose: editorWith("hello")}}
 	var hub *InspectorHub
 	noop := func() {}
 	ev := inputEvent{kind: eventKey, key: "\x04"}
 
-	quit, _ := handleInspectorEvent(ev, state, &hub, noop, noop, noop, noop, nil)
+	quit, _ := handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, noop, nil)
 
 	if !quit {
 		t.Fatal("quit = false, want true (Ctrl-D quits even while composing)")
@@ -164,13 +220,13 @@ func TestHandleInspectorEventPlainCharWhileComposingDoesNotDispatchHotkey(t *tes
 	kill := func() { killCalled = true }
 	ev := inputEvent{kind: eventKey, key: "k"}
 
-	handleInspectorEvent(ev, state, &hub, noop, noop, noop, kill, nil)
+	handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, kill, nil)
 
 	if killCalled {
 		t.Fatal("kill was called for 'k' typed while composing, want buffered as text")
 	}
-	if state.inspector.composeText != "k" {
-		t.Fatalf("composeText = %q, want k", state.inspector.composeText)
+	if state.inspector.compose.Text() != "k" {
+		t.Fatalf("composeText = %q, want k", state.inspector.compose.Text())
 	}
 }
 
