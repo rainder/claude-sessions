@@ -327,6 +327,8 @@ section { min-width: 0; }
 .rich strong { font-weight: 650; }
 .rich em { font-style: italic; }
 .rich .md-h { margin-top: .2em; }
+.rich .md-quote { margin: 0 0 .5em; padding: 2px 0 2px 10px; border-left: 3px solid var(--line); color: var(--muted); }
+.rich .md-quote > :last-child { margin-bottom: 0; }
 /* Card summary blocks (renderSummary): section headings, label grids,
    option keys and the colours the terminal card uses. */
 .summary .md-sec { margin: 14px 0 6px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--amber); }
@@ -1186,8 +1188,8 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // nodes, so raw HTML in the text shows as literal text. Blocks: paragraphs
   // (a blank line ends one, a single newline is <br>), "- " / "* " lists,
   // "1." / "2)" numbered lists (start kept), ``` fenced blocks (text as-is),
-  // and "#".."###" lines as a bold line. Inline: see richInline. Anything
-  // else, and every unclosed marker, stays literal.
+  // "#".."######" lines as a bold line, "> " quotes and pipe tables. Inline:
+  // see richInline. Anything else, and every unclosed marker, stays literal.
   const TABLE_RULE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
   // tableCells splits one row on "|", but not on "\|" or a "|" in `code`.
   function tableCells(line) {
@@ -1217,10 +1219,13 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
   // lines is a two-column grid (md-blocks), and the bullets, numbered items
   // and fences right under a label line go in its value cell (md-val); an
   // option bullet "- **A** — ..." shows its key as a pill (md-key).
+  // QUOTE_DEPTH_MAX caps nesting (fleetQuoteDepthMax in the TUI): a deeper
+  // ">" stays literal, so a line of many ">" cannot recurse without bound.
+  const QUOTE = /^ {0,3}> ?(.*)$/, QUOTE_DEPTH_MAX = 8;
   const CARD_SEC = /^\s*\*\*([^*]+)\*\*\s*$/;
   const CARD_LABEL = /^\*\*([^*]{1,24}):\*\* +(.*)$/;
   const CARD_OPT = /^\*\*([^*\s]{1,6})\*\* *[\u2014\u2013-] *(.*)$/;
-  function renderRich(text, card) {
+  function renderRich(text, card, depth = 0) {
     const frag = document.createDocumentFragment();
     const lines = str(text).split(/\r?\n/);
     // target is where blocks go: the fragment, or the value cell of the
@@ -1264,11 +1269,22 @@ dialog.sheet.clarify { height: min(760px, calc(100% - 48px)); }
       }
       // Linear on purpose: a lazy group before "[ #]*$" rescans long runs
       // of spaces or "#" quadratically. The closing "#"s are trimmed after.
-      const head = /^ {0,3}#{1,3} +(.*)$/.exec(line);
+      const head = /^ {0,3}#{1,6} +(.*)$/.exec(line);
       const headText = head ? head[1].trimEnd().replace(/\s#+$/, "").trimEnd() : "";
       if (headText) {
         para = list = null;
         frag.append(el("p", "md-h", richInline(el("strong"), headText)));
+        continue;
+      }
+      // A run of "> " lines is a quote: its text, without the ">", rendered
+      // as rich text of its own (lists, tables and nested quotes work).
+      if (depth < QUOTE_DEPTH_MAX && QUOTE.test(line)) {
+        let j = i;
+        while (j < lines.length && QUOTE.test(lines[j])) j++;
+        para = list = null;
+        if (!val) top();
+        target.append(el("blockquote", "md-quote", renderRich(lines.slice(i, j).map(l => QUOTE.exec(l)[1]).join("\n"), false, depth + 1)));
+        i = j - 1;
         continue;
       }
       // A pipe table: a "|" row, then a |---|---| rule, then more "|" rows.

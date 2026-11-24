@@ -244,6 +244,15 @@ func fleetSummaryStyledLines(s string, width int) []string {
 }
 
 func fleetSummaryRender(s string, width int, styled bool) []string {
+	return fleetSummaryRenderAt(s, width, styled, 0)
+}
+
+// fleetQuoteDepthMax is how deep quotes nest; a deeper ">" stays literal, so
+// a line of many ">" from untrusted text cannot recurse without bound. The
+// page's renderRich has the same cap (QUOTE_DEPTH_MAX).
+const fleetQuoteDepthMax = 8
+
+func fleetSummaryRenderAt(s string, width int, styled bool, depth int) []string {
 	var out []string
 	fence, first := false, true
 	lines := strings.Split(s, "\n")
@@ -253,6 +262,28 @@ func fleetSummaryRender(s string, width int, styled bool) []string {
 			if head, align, rows, n := fleetTableAt(lines[li:]); n > 0 {
 				out = append(out, fleetTableRender(head, align, rows, width, styled)...)
 				li += n - 1
+				first = false
+				continue
+			}
+			if n := fleetQuoteLen(lines[li:]); n > 0 && depth < fleetQuoteDepthMax {
+				out = append(out, fleetQuoteRender(lines[li:li+n], width, styled, depth)...)
+				li += n - 1
+				first = false
+				continue
+			}
+			if text, ok := fleetHeading(line); ok {
+				vis, sty := fleetLineStyles(text, false)
+				for i := range sty {
+					if !styled {
+						sty[i] = fleetStyle{}
+						continue
+					}
+					sty[i].bold = true
+					if sty[i].fg == "" {
+						sty[i].fg = fleetSGRHeading
+					}
+				}
+				out = append(out, fleetWrapStyled(vis, sty, width)...)
 				first = false
 				continue
 			}
@@ -310,6 +341,63 @@ func fleetSummaryRender(s string, width int, styled bool) []string {
 			continue
 		}
 		out = append(out, fleetWrapStyled(vis, sty, width)...)
+	}
+	return out
+}
+
+// fleetHeadingRe is a "#".."######" heading line, as the page's renderRich
+// reads one; fleetHeadingTailRe is its optional closing "#"s.
+var (
+	fleetHeadingRe     = regexp.MustCompile(`^ {0,3}#{1,6} +(.*)$`)
+	fleetHeadingTailRe = regexp.MustCompile(`\s#+$`)
+)
+
+// fleetHeading returns a heading line's text without its "#" markers; ok is
+// false when line is no heading or its text is empty.
+func fleetHeading(line string) (string, bool) {
+	m := fleetHeadingRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	t := strings.TrimRight(m[1], " \t")
+	t = strings.TrimRight(fleetHeadingTailRe.ReplaceAllString(t, ""), " \t")
+	return t, t != ""
+}
+
+// fleetQuoteRe is a "> " quote line; group 1 is its text.
+var fleetQuoteRe = regexp.MustCompile(`^ {0,3}> ?(.*)$`)
+
+// fleetQuoteBar leads every line of a quote.
+const fleetQuoteBar = "│ "
+
+// fleetQuoteLen is how many quote lines lines starts with.
+func fleetQuoteLen(lines []string) int {
+	n := 0
+	for n < len(lines) && fleetQuoteRe.MatchString(lines[n]) {
+		n++
+	}
+	return n
+}
+
+// fleetQuoteRender draws a run of quote lines: their text without the ">",
+// rendered as a summary of its own (so lists, headings, tables and nested
+// quotes inside work) two columns narrower, each line behind a dim bar.
+func fleetQuoteRender(lines []string, width int, styled bool, depth int) []string {
+	inner := make([]string, len(lines))
+	for i, l := range lines {
+		inner[i] = fleetQuoteRe.FindStringSubmatch(l)[1]
+	}
+	bw := len([]rune(fleetQuoteBar))
+	var out []string
+	for _, l := range fleetSummaryRenderAt(strings.Join(inner, "\n"), width-bw, styled, depth+1) {
+		bar := fleetQuoteBar
+		if l == "" {
+			bar = strings.TrimRight(bar, " ")
+		}
+		if styled {
+			bar = dim(bar)
+		}
+		out = append(out, bar+l)
 	}
 	return out
 }
