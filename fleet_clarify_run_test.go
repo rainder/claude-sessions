@@ -104,11 +104,16 @@ func TestClarifyAskPrompt(t *testing.T) {
 			t.Errorf("first ask lacks %q:\n%s", w, first)
 		}
 	}
-	if !strings.HasSuffix(first, "\nMy question: why can't you run it?") {
-		t.Errorf("first ask must end with the question:\n%s", first)
+	if !strings.HasSuffix(first, "\nMy question: why can't you run it?"+clarifyAskReminder) {
+		t.Errorf("first ask must end with the question and the reminder:\n%s", first)
 	}
-	if got := clarifyAskPrompt(c, false, "and then?"); got != "Still about card dr5791-count (run the count): and then?" {
+	if got := clarifyAskPrompt(c, false, "and then?"); got != "Still about card dr5791-count (run the count): and then?"+clarifyAskReminder {
 		t.Errorf("later ask = %q", got)
+	}
+	for _, w := range []string{"cannot send messages, file tickets", "ctrl-d in the terminal", "Draft for FLEET on the page", "reconnect tools"} {
+		if !strings.Contains(clarifyAskReminder, w) {
+			t.Errorf("reminder lacks %q", w)
+		}
 	}
 }
 

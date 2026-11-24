@@ -167,14 +167,23 @@ func clarifyCardBlock(c fleetCardView) string {
 // system prompt too, but the fork resumes FLEET's long conversation, and a
 // question such as "why can't you run it?" was read against FLEET's last turn
 // instead of the card (DR-5791, 2026-10-27). So every ask names the card, and
-// the first one carries it in full.
+// the first one carries it in full. For the same reason every ask ends with
+// clarifyAskReminder: with clarifyHandoffNote only in the system prompt, a
+// fork asked to message Dzhamal still told Andy to "reconnect the Slack tool
+// or switch this session out of don't-ask mode" (2026-11-24).
 func clarifyAskPrompt(c fleetCardView, first bool, question string) string {
 	if first {
 		return "I am asking about this one FLEET card, not about anything else in the conversation above.\n\n" +
-			clarifyCardBlock(c) + "\nMy question: " + question
+			clarifyCardBlock(c) + "\nMy question: " + question + clarifyAskReminder
 	}
-	return fmt.Sprintf("Still about card %s (%s): %s", c.ID, c.Title, question)
+	return fmt.Sprintf("Still about card %s (%s): %s", c.ID, c.Title, question) + clarifyAskReminder
 }
+
+// clarifyAskReminder closes every ask (not a draft): the hand-off rule, where
+// FLEET's long conversation above cannot outweigh it.
+const clarifyAskReminder = "\n\n(Reminder: in this chat you cannot send messages, file tickets or change anything, and FLEET does not see it. " +
+	"If I ask for an action, write out exactly what should be done and tell me to press ctrl-d in the terminal or Draft for FLEET on the page. " +
+	"Do not tell me to reconnect tools or change modes.)"
 
 type clarifyRunResult struct {
 	SessionID string
