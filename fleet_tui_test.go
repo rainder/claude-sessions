@@ -384,6 +384,16 @@ func waitFleetJobs(t *testing.T, l *fleetLoop) {
 				running = true
 			}
 		}
+		for _, j := range l.chats {
+			if _, ok := j.snapshot(); !ok {
+				running = true
+			}
+		}
+		for _, j := range l.chatSends {
+			if _, ok := j.snapshot(); !ok {
+				running = true
+			}
+		}
 		if !running {
 			return
 		}

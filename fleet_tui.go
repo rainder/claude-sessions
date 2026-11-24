@@ -164,12 +164,17 @@ type fleetLoop struct {
 	// detaches. nil: the a key does nothing.
 	attach func(fleetAttachRequest) error
 	// clarify runs one Clarify request of the given kind (fleetClarifyVia).
-	clarify  func(fleetClarifyRequest, fleetCmd) fleetClarifyJobResult
+	clarify func(fleetClarifyRequest, fleetCmd) fleetClarifyJobResult
+	// chatGet reads FLEET's chat from source (fleetChatVia).
+	chatGet  func(source string, since int64) fleetChatFetch
 	interval time.Duration
 	nextPoll time.Time
 	// nextClarify is when the open chat's next read is due; zero unless a
 	// fork runs for it.
 	nextClarify time.Time
+	// nextChat is when the open chat with FLEET is read next; zero while
+	// it is closed.
+	nextChat time.Time
 	// nextFrame is when the ship screen's next animation frame is due; zero
 	// while the ship screen is not showing, so no frame timer runs then.
 	nextFrame time.Time
@@ -191,6 +196,10 @@ type fleetLoop struct {
 	// clarifies holds at most one job: a chat request is never sent beside
 	// another, so a read cannot land after a newer ask's answer.
 	clarifies []*fleetJob[fleetClarifyDone]
+	// chats holds at most one chat read, so reads land in order;
+	// chatSends at most one chat send (st.chatSending).
+	chats     []*fleetJob[fleetChatFetch]
+	chatSends []*fleetJob[fleetChatSent]
 
 	// sleep waits between a batch's sends; nil is time.Sleep.
 	sleep func(time.Duration)
@@ -253,10 +262,32 @@ func (l *fleetLoop) reap(now time.Time) {
 		l.applied = f.seq
 		l.st.applyState(f.view, f.err, now)
 	}
-	var chats []fleetClarifyDone
-	l.clarifies, chats = reapFleetJobs(l.clarifies)
-	for _, d := range chats {
+	var asked []fleetClarifyDone
+	l.clarifies, asked = reapFleetJobs(l.clarifies)
+	for _, d := range asked {
 		l.applyClarifyJob(d, now)
+	}
+	var chatSent []fleetChatSent
+	l.chatSends, chatSent = reapFleetJobs(l.chatSends)
+	for _, d := range chatSent {
+		l.st.applyChatSend(d, now)
+		if d.res.Moved {
+			l.startState()
+		}
+		// Read the chat now, so the message shows without waiting a poll.
+		l.nextChat = now
+	}
+	var read []fleetChatFetch
+	l.chats, read = reapFleetJobs(l.chats)
+	for _, f := range read {
+		l.st.applyChat(f, now)
+		if f.moved {
+			l.startState()
+		}
+		if c := l.st.chat; c != nil && c.again {
+			c.again = false
+			l.nextChat = now
+		}
 	}
 	// A chat opened while another card's job ran had its first read
 	// skipped; it gets it once that job is gone.
@@ -370,9 +401,43 @@ func (l *fleetLoop) tickClarify(now time.Time) {
 	l.nextClarify = now.Add(fleetClarifyPoll)
 }
 
+// startChat starts one read of the open chat, from its last position.
+// While one runs no second starts.
+func (l *fleetLoop) startChat() {
+	c := l.st.chat
+	if c == nil || l.chatGet == nil || len(l.chats) > 0 {
+		return
+	}
+	get, source, since := l.chatGet, c.source, c.pos
+	l.chats = append(l.chats, startFleetJob(func() fleetChatFetch {
+		f := get(source, since)
+		f.chat = c
+		return f
+	}))
+}
+
+// tickChat reads the open chat every fleetChatPoll, and never while it is
+// closed.
+func (l *fleetLoop) tickChat(now time.Time) {
+	if l.st.chat == nil {
+		l.nextChat = time.Time{}
+		return
+	}
+	if l.nextChat.IsZero() {
+		l.nextChat = now.Add(fleetChatPoll)
+		return
+	}
+	if now.Before(l.nextChat) || len(l.chats) > 0 {
+		return
+	}
+	l.startChat()
+	l.nextChat = now.Add(fleetChatPoll)
+}
+
 // tick starts the periodic poll once nextPoll has passed and no fetch runs.
 func (l *fleetLoop) tick(now time.Time) {
 	l.tickClarify(now)
+	l.tickChat(now)
 	if now.Before(l.nextPoll) || len(l.states) > 0 {
 		return
 	}
@@ -431,6 +496,20 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 		err := l.attach(*req)
 		l.st.applyAttach(err, time.Now())
 		l.startState()
+	case fleetCmdChatGet:
+		l.startChat()
+		l.nextChat = now.Add(fleetChatPoll)
+	case fleetCmdChatSend:
+		req := l.st.chatSend
+		l.st.chatSend = nil
+		if req == nil || l.send == nil {
+			l.st.chatSending = false
+			return false
+		}
+		send, r := l.send, *req
+		l.chatSends = append(l.chatSends, startFleetJob(func() fleetChatSent {
+			return fleetChatSent{text: r.Text, res: send(r)}
+		}))
 	case fleetCmdClarifyGet, fleetCmdClarifyAsk, fleetCmdClarifyDraft, fleetCmdClarifyDiscard:
 		if (cmd == fleetCmdClarifyDraft || cmd == fleetCmdClarifyDiscard) && len(l.clarifies) > 0 {
 			l.st.setToast("wait for the last request", fleetToastWarn, now)
@@ -459,6 +538,12 @@ func (l *fleetLoop) wakes(base []wakeFD) []wakeFD {
 	for _, j := range l.clarifies {
 		out = append(out, j.wake())
 	}
+	for _, j := range l.chats {
+		out = append(out, j.wake())
+	}
+	for _, j := range l.chatSends {
+		out = append(out, j.wake())
+	}
 	return out
 }
 
@@ -476,6 +561,12 @@ func (l *fleetLoop) closeAll() {
 		j.close()
 	}
 	for _, j := range l.clarifies {
+		j.close()
+	}
+	for _, j := range l.chats {
+		j.close()
+	}
+	for _, j := range l.chatSends {
 		j.close()
 	}
 }
@@ -546,6 +637,22 @@ func fleetClarifyVia(src *fleetLocal) func(fleetClarifyRequest, fleetCmd) fleetC
 	}
 }
 
+// fleetChatVia is the chat read's job body, pinned to the chat's source like
+// a send: a client for another host gives moved and reads nothing.
+func fleetChatVia(src *fleetLocal) func(source string, since int64) fleetChatFetch {
+	return func(source string, since int64) fleetChatFetch {
+		c, err := src.Client()
+		if err != nil {
+			return fleetChatFetch{err: err}
+		}
+		if c.base != source {
+			return fleetChatFetch{moved: true}
+		}
+		v, err := c.ChatGet(since, fleetChatKeep)
+		return fleetChatFetch{view: v, err: err}
+	}
+}
+
 // fleetDismissToast maps a dismiss result to its toast.
 func fleetDismissToast(r fleetDismissResult) (string, fleetToastKind) {
 	switch {
@@ -587,6 +694,12 @@ func (l *fleetLoop) timeout(now time.Time) time.Duration {
 	// The chat's read counts the same way: while one is held its pipe wakes
 	// the loop.
 	if c := l.clarifyPollAt(now); !c.IsZero() && len(l.clarifies) == 0 && (pollAt.IsZero() || c.Before(pollAt)) {
+		pollAt = c
+	}
+	if c := l.nextChat; l.st.chat != nil && len(l.chats) == 0 && (pollAt.IsZero() || c.Before(pollAt)) {
+		if c.IsZero() {
+			c = now.Add(fleetChatPoll)
+		}
 		pollAt = c
 	}
 	if l.pipeless() {
@@ -682,6 +795,7 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 		send:     fleetSendVia(src),
 		dismiss:  fleetDismissVia(src),
 		clarify:  fleetClarifyVia(src),
+		chatGet:  fleetChatVia(src),
 		interval: fleetBadgeInterval,
 	}
 	if attach != nil {
@@ -748,6 +862,9 @@ const (
 	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
 	// fleetHelpClarifyHint goes after "o other" when k opens Clarify.
 	fleetHelpClarifyHint = "k clarify"
+	// fleetHelpChatHint goes after "o other" (after "k clarify" when both
+	// show) when i opens the chat with FLEET.
+	fleetHelpChatHint = "i chat"
 	// fleetHelpLeanHint goes after "1-9 pick option" when r would send the
 	// selected card's lean option.
 	fleetHelpLeanHint = "r FLEET's pick"
@@ -795,11 +912,16 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	if width <= 0 {
 		width = 80
 	}
-	if st.clarify != nil {
-		// The chat replaces the whole view; the mouse has no rows to hit.
+	if st.chat != nil || st.clarify != nil {
+		// A chat replaces the whole view; the mouse has no rows to hit.
 		st.hit = fleetHitMap{}
 		st.noteDrawn(false, now)
-		lines := fleetClarifyLines(st, width, rows, now)
+		var lines []string
+		if st.chat != nil {
+			lines = fleetChatLines(st, width, rows, now)
+		} else {
+			lines = fleetClarifyLines(st, width, rows, now)
+		}
 		for i, l := range lines {
 			lines[i] = clipLine(l, width)
 		}
@@ -1120,6 +1242,9 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 	}
 	if picks != "" {
 		row = strings.Replace(row, " · 1-9 pick option · ", " · 1-9 pick option · "+picks, 1)
+	}
+	if st.canChat() {
+		row = strings.Replace(row, " · o other · ", " · o other · "+fleetHelpChatHint+" · ", 1)
 	}
 	if st.canClarify() {
 		row = strings.Replace(row, " · o other · ", " · o other · "+fleetHelpClarifyHint+" · ", 1)

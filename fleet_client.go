@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,7 @@ var (
 
 const (
 	fleetStateBodyMax = 2 << 20
+	fleetChatBodyMax  = 8 << 20 // 100 chat turns; FLEET's answers can be long
 	fleetSayBodyMax   = 64 << 10
 	fleetBodyTextMax  = 300
 )
@@ -581,6 +583,68 @@ func (c *fleetClient) clarifyPost(path string, payload any) (string, error) {
 		}
 	}
 	return "", &fleetStatusError{Status: resp.StatusCode}
+}
+
+// fleetChatView is GET /fleet/chat (FLEET's transcript mirror) as the TUI
+// reads it. Every string has passed through fleetDisplayText.
+type fleetChatView struct {
+	Turns     []fleetChatTurn
+	Pos       int64
+	Reset     bool
+	SessionID string
+	ReadOnly  bool   // FLEET is down: the last session, mirrored
+	Reason    string // why there is no live chat, when there is none
+}
+
+func decodeFleetChatView(data []byte) (fleetChatView, error) {
+	var r struct {
+		Turns     []fleetChatTurn `json:"turns"`
+		Pos       int64           `json:"pos"`
+		Reset     bool            `json:"reset"`
+		SessionID string          `json:"sessionId"`
+		ReadOnly  bool            `json:"readOnly"`
+		Reason    string          `json:"reason"`
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(data, &m) != nil || m == nil || json.Unmarshal(data, &r) != nil || r.Pos < 0 {
+		return fleetChatView{}, errors.New("bad chat answer")
+	}
+	v := fleetChatView{Pos: r.Pos, Reset: r.Reset, SessionID: fleetDisplayText(r.SessionID),
+		ReadOnly: r.ReadOnly, Reason: fleetDisplayText(r.Reason)}
+	for _, t := range r.Turns {
+		v.Turns = append(v.Turns, fleetChatTurn{UUID: fleetDisplayText(t.UUID), Role: fleetDisplayText(t.Role),
+			At: fleetDisplayText(t.At), Text: fleetDisplayText(t.Text)})
+	}
+	return v, nil
+}
+
+// ChatGet reads FLEET's chat: the last n turns, or with since > 0 the turns
+// that changed after that position (the pos of the last answer). A non-200
+// answer is a *fleetStatusError.
+func (c *fleetClient) ChatGet(since int64, n int) (fleetChatView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fleetStateTimeout)
+	defer cancel()
+	path := "/fleet/chat?n=" + strconv.Itoa(n)
+	if since > 0 {
+		path += "&since=" + strconv.FormatInt(since, 10)
+	}
+	hr, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return fleetChatView{}, err
+	}
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		return fleetChatView{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fleetChatView{}, &fleetStatusError{Status: resp.StatusCode}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, fleetChatBodyMax))
+	if err != nil {
+		return fleetChatView{}, err
+	}
+	return decodeFleetChatView(data)
 }
 
 // connectLocalFleet finds this host's service (loopback, then Tailscale) and

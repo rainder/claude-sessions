@@ -50,6 +50,10 @@ const (
 	fleetCmdClarifyAsk     // send st.clarifyReq as a question
 	fleetCmdClarifyDraft   // ask the fork for a draft answer
 	fleetCmdClarifyDiscard // drop the draft
+
+	// The chat with FLEET (fleet_tui_chat.go).
+	fleetCmdChatGet  // read the open chat now
+	fleetCmdChatSend // send st.chatSend; the loop takes it
 )
 
 type fleetToastKind int
@@ -106,6 +110,10 @@ type fleetViewState struct {
 	attach        *fleetAttachRequest  // set with fleetCmdAttach; the loop takes it
 	clarify       *fleetClarifyMode    // the open Clarify side chat; nil in the list
 	clarifyReq    *fleetClarifyRequest // set with fleetCmdClarifyAsk; the loop takes it
+	chat          *fleetChatMode       // the open chat with FLEET (i); nil in the list
+	chatDraft     textEditor           // the chat's composer; kept while the chat is closed
+	chatSend      *fleetSayRequest     // set with fleetCmdChatSend; the loop takes it
+	chatSending   bool                 // a chat send job runs
 	nextAfter     string               // card id just sent; the next applyState selects the next open card
 	justSent      string               // card id our own answer reached; locked until a state shows it answered or gone
 	batchSent     map[string]bool      // card ids an R batch's answers reached; each locked as justSent is
@@ -360,6 +368,11 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		}
 	}
 
+	if c := st.chat; c != nil && v.Source != c.source {
+		st.chat = nil
+		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
+	}
+
 	if p := st.panel; p != nil {
 		id := p.item.Card.ID
 		if !fleetCardStillAsked(v, id, p.hash) {
@@ -442,6 +455,9 @@ func (st *fleetViewState) selected() *fleetItem {
 // handleKey applies one key. inBatch is true while the key arrived in the
 // same read as others (a paste), which never presses Enter on the panel.
 func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleetCmd {
+	if st.chat != nil {
+		return st.handleChatKey(k, inBatch, now)
+	}
 	if st.clarify != nil {
 		return st.handleClarifyKey(k, inBatch, now)
 	}
@@ -543,6 +559,8 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return st.openOther(now)
 	case "k":
 		return st.openClarify(now)
+	case "i":
+		return st.openChat(now)
 	case "r":
 		return st.pickLean(inBatch, now)
 	case "R":
@@ -853,6 +871,19 @@ func (st *fleetViewState) handleEvent(ev inputEvent, inBatch bool, now time.Time
 // Releases, other buttons, and every row outside the list and the panel do
 // nothing, and so does every body but the card list (st.hit.on).
 func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
+	if c := st.chat; c != nil {
+		// The chat is the whole body, as Clarify's is.
+		switch {
+		case m.release:
+		case m.button == mouseWheelUp:
+			c.scroll += fleetMouseStep
+			return fleetCmdRender
+		case m.button == mouseWheelDown:
+			c.scroll = max(c.scroll-fleetMouseStep, 0)
+			return fleetCmdRender
+		}
+		return fleetCmdNone
+	}
 	if c := st.clarify; c != nil {
 		// The chat is the whole body: the wheel scrolls it anywhere, as
 		// PgUp/PgDn do, and nothing else does anything.
