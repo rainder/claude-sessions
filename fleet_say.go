@@ -167,15 +167,20 @@ func decodeFleetSayBody(w http.ResponseWriter, r *http.Request) (fleetSayBody, e
 	return out, nil
 }
 
-// tmuxTypeLiteral types text into target as literal keys. The "--" ends
-// tmux's flag parsing: without it a message that starts with "-" is read as
-// flags ("-R hello" fails with "invalid flag"; others could change what
-// send-keys does).
+// tmuxTypeLiteral types text into target as literal keys, in one tmux call
+// (tmuxTypeArgs): a line break as tmuxNewlineKey, a trailing ";" as its hex
+// key. The "--" ends tmux's flag parsing: without it a message that starts
+// with "-" is read as flags ("-R hello" fails with "invalid flag"; others
+// could change what send-keys does).
 func tmuxTypeLiteral(target, text string) error {
 	if target == "" {
 		return errors.New("no tmux pane")
 	}
-	return exec.Command("tmux", "send-keys", "-t", tmuxExactTarget(target), "-l", "--", text).Run()
+	args := tmuxTypeArgs(tmuxExactTarget(target), text)
+	if len(args) == 0 {
+		return nil
+	}
+	return exec.Command("tmux", args...).Run()
 }
 
 // fleetTextLandedFor reports whether the input box holds what was just
@@ -231,15 +236,6 @@ func stripSpace(s string) string {
 		}
 		return r
 	}, s)
-}
-
-// tmuxTypeNewline types a line break into a Claude Code input box
-// (tmuxNewlineKey, send_keys.go, says how it was chosen).
-func tmuxTypeNewline(target string) error {
-	if target == "" {
-		return errors.New("no tmux pane")
-	}
-	return exec.Command("tmux", "send-keys", "-t", tmuxExactTarget(target), tmuxNewlineKey).Run()
 }
 
 func tmuxPressEnter(target string) error {
@@ -474,7 +470,6 @@ var fleetSayFLEET = fleetSayWho{subject: "FLEET", pane: "the FLEET pane", paneLo
 type fleetPaneSeams struct {
 	capture    func(string) (string, error)
 	typeText   func(target, text string) error
-	newline    func(target string) error
 	pressEnter func(target string) error
 	sleep      func(time.Duration)
 	inMode     func(target string) (bool, error)
@@ -482,15 +477,12 @@ type fleetPaneSeams struct {
 
 func (s *server) fleetPaneSeams() fleetPaneSeams {
 	f := &s.fleet
-	sc := fleetPaneSeams{capture: f.capture, typeText: f.typeText, newline: f.typeNewline, pressEnter: f.pressEnter, sleep: f.sleep, inMode: f.paneInMode}
+	sc := fleetPaneSeams{capture: f.capture, typeText: f.typeText, pressEnter: f.pressEnter, sleep: f.sleep, inMode: f.paneInMode}
 	if sc.capture == nil {
 		sc.capture = capturePane
 	}
 	if sc.typeText == nil {
 		sc.typeText = tmuxTypeLiteral
-	}
-	if sc.newline == nil {
-		sc.newline = tmuxTypeNewline
 	}
 	if sc.pressEnter == nil {
 		sc.pressEnter = tmuxPressEnter
@@ -513,10 +505,10 @@ func (s *server) fleetPaneSeams() fleetPaneSeams {
 // (fleetRecoverLeftover); when that text is this send's own text, that
 // Enter was this send's delivery and nothing is typed. Any other text in the
 // box refuses as input_busy.
-// A text with line breaks (a chat message, fleetCleanChatText) is typed a
-// line at a time with tmuxNewlineKey between the lines (typeLines), so only
-// the one Enter below submits; a grok row gets it flattened to one line,
-// since grok's line-break key is unknown.
+// A text with line breaks (a chat message, fleetCleanChatText) is typed in
+// one typeText call with tmuxNewlineKey between the lines (tmuxTypeArgs), so
+// only the one Enter below submits; a grok row gets it flattened to one
+// line, since grok's line-break key is unknown.
 // row must be a freshly resolved session: its Tmux is the only pane address
 // used. Caller holds sayMu. The result is the response envelope; ok false
 // with code not_submitted means the text was typed but is still in the box.
@@ -577,10 +569,7 @@ func (s *server) fleetTypeInto(row Session, text string, who fleetSayWho) fleetS
 		return refuse("pane_mode", strings.ToUpper(who.pane[:1])+who.pane[1:]+" is in scroll mode. Press q in the terminal, then try again.")
 	}
 
-	err = typeLines(text,
-		func(line string) error { return sc.typeText(pane, line) },
-		func() error { return sc.newline(pane) })
-	if err != nil {
+	if err := sc.typeText(pane, text); err != nil {
 		return refuse("send_failed", "send text: "+err.Error())
 	}
 	notSubmitted := func(screen string) fleetSayResult {

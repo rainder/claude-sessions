@@ -95,22 +95,58 @@ func TestSendKeysTypesLiteralWithDashDashThenEnter(t *testing.T) {
 	}
 }
 
-func TestSendKeysTypesMultiLineWithNewlineKey(t *testing.T) {
+func TestSendKeysTypesMultiLineInOneCall(t *testing.T) {
 	calls := stubSendKeys(t, false, nil)
 	if err := sendKeys(Session{PID: 1, Tmux: "work:0.1"}, "first\n\nthird"); err != nil {
 		t.Fatal(err)
 	}
-	// One literal call per non-empty line, M-Enter between lines (an empty
-	// line is two M-Enter in a row), and the one real Enter last.
+	// One tmux call types every line, M-Enter between lines (an empty line
+	// is two M-Enter in a row); the one real Enter is its own call.
+	p := "=work:0.1"
 	want := [][]string{
-		{"send-keys", "-t", "=work:0.1", "-l", "--", "first"},
-		{"send-keys", "-t", "=work:0.1", "M-Enter"},
-		{"send-keys", "-t", "=work:0.1", "M-Enter"},
-		{"send-keys", "-t", "=work:0.1", "-l", "--", "third"},
-		{"send-keys", "-t", "=work:0.1", "Enter"},
+		{"send-keys", "-t", p, "-l", "--", "first", ";", "send-keys", "-t", p, "M-Enter", ";",
+			"send-keys", "-t", p, "M-Enter", ";", "send-keys", "-t", p, "-l", "--", "third"},
+		{"send-keys", "-t", p, "Enter"},
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("calls = %q, want %q", *calls, want)
+	}
+}
+
+// tmux reads a trailing ";" of any argument as a command separator, so no
+// literal piece may end in one: trailing ones go as hex keys.
+func TestTmuxTypeArgsTrailingSemicolons(t *testing.T) {
+	p := "=w:0.0"
+	lit := func(s string) []string { return []string{"send-keys", "-t", p, "-l", "--", s} }
+	semi := []string{"send-keys", "-t", p, "-H", "3b"}
+	nl := []string{"send-keys", "-t", p, "M-Enter"}
+	join := func(cmds ...[]string) []string {
+		var out []string
+		for i, c := range cmds {
+			if i > 0 {
+				out = append(out, ";")
+			}
+			out = append(out, c...)
+		}
+		return out
+	}
+	for text, want := range map[string][]string{
+		"int x = 1;\nfoo();": join(lit("int x = 1"), semi, nl, lit("foo()"), semi),
+		";;;":                join(semi, semi, semi),
+		"a;b":                join(lit("a;b")),
+		"x\\;":               join(lit("x\\"), semi),
+		"plain":              join(lit("plain")),
+		"":                   nil,
+	} {
+		got := tmuxTypeArgs(p, text)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%q:\n got %q\nwant %q", text, got, want)
+		}
+		for i, a := range got {
+			if a != ";" && strings.HasSuffix(a, ";") {
+				t.Errorf("%q: argv[%d] %q ends in ;", text, i, a)
+			}
+		}
 	}
 }
 

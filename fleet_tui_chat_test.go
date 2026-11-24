@@ -80,7 +80,7 @@ func TestChatKeyOpens(t *testing.T) {
 		t.Error("ship over the chat")
 	}
 
-	// Never over another panel, a batch, Clarify or ship mode.
+	// Never over another panel, a batch or Clarify.
 	st = chatTestState(now)
 	st.handleKey("o", false, now)
 	if cmd := st.handleKey("i", false, now); st.chat != nil || cmd == fleetCmdChatGet {
@@ -97,8 +97,12 @@ func TestChatKeyOpens(t *testing.T) {
 	if !st.shipOn() {
 		t.Fatal("test setup: no ship mode")
 	}
-	if cmd := st.handleKey("i", false, now); st.chat != nil || cmd == fleetCmdChatGet {
-		t.Error("i in ship mode opened the chat")
+	// The ship screen (no card needs Andy) is where the chat is wanted most.
+	if cmd := st.handleKey("i", false, now); st.chat == nil || cmd != fleetCmdChatGet {
+		t.Error("i on the ship screen did not open the chat")
+	}
+	if st.shipOn() {
+		t.Error("ship over the chat")
 	}
 	st = chatTestState(now)
 	st.view.Ambiguous = []string{"a", "b"}

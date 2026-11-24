@@ -54,11 +54,11 @@ type fleetChatSent struct {
 }
 
 // canChat reports whether i opens the chat: a loaded state from one host
-// and nothing else open. FLEET may be down; the chat then shows its last
-// session and refuses to send.
+// and nothing else open; the ship screen counts as nothing open. FLEET may
+// be down; the chat then shows its last session and refuses to send.
 func (st *fleetViewState) canChat() bool {
 	return st.loaded && st.err == "" && len(st.view.Ambiguous) == 0 && st.view.Source != "" &&
-		st.panel == nil && st.batch == nil && st.clarify == nil && st.chat == nil && !st.shipOn()
+		st.panel == nil && st.batch == nil && st.clarify == nil && st.chat == nil
 }
 
 func (st *fleetViewState) openChat(now time.Time) fleetCmd {

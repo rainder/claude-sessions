@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -162,6 +163,34 @@ func TestSendKeysRemotePropagatesRefusal(t *testing.T) {
 	}
 	if r.OK || r.Code != codeSessionMismatch {
 		t.Fatalf("result = %+v, want refusal with codeSessionMismatch", r)
+	}
+}
+
+// A server from before multi-line text refuses the newline as a control
+// character: the user is told to update it, and nothing is flattened.
+func TestSendKeysRemoteOldServerMultiLine(t *testing.T) {
+	var bodies []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		http.Error(w, "text must not contain control characters", http.StatusBadRequest)
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerYAML(t, home, "box", u.Hostname(), u.Port(), "secret")
+
+	if _, err := sendKeysRemote("box", 42, "sess-1", "a\nb"); !errors.Is(err, errSendKeysRemoteTooOld) {
+		t.Fatalf("multi-line err = %v", err)
+	}
+	if len(bodies) != 1 || bodies[0] != `{"session_id":"sess-1","text":"a\nb"}` {
+		t.Fatalf("bodies = %q", bodies)
+	}
+	// One line refused the same way is the server's own words.
+	if _, err := sendKeysRemote("box", 42, "sess-1", "a\tb"); err == nil || errors.Is(err, errSendKeysRemoteTooOld) {
+		t.Fatalf("one-line err = %v", err)
 	}
 }
 

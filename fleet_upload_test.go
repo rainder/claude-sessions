@@ -260,7 +260,7 @@ func TestFleetUploadPathReachesTheSession(t *testing.T) {
 		t.Fatalf("%d %+v", code, res)
 	}
 	// A plain message keeps its line break: the path goes on its own line.
-	if len(rig.typed) != 2 || rig.typed[0] != "what is wrong here?" || rig.typed[1] != "Image: "+up.Path {
+	if len(rig.typed) != 1 || rig.typed[0] != "what is wrong here?\nImage: "+up.Path {
 		t.Fatalf("typed %q", rig.typed)
 	}
 

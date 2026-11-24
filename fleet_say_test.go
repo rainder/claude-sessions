@@ -18,7 +18,10 @@ const (
 	dialogCapture   = "────────────────────\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n"
 )
 
+// boxCapture is a claude box holding text; a line break continues on an
+// indented row, as Claude Code draws it.
 func boxCapture(text string) string {
+	text = strings.ReplaceAll(text, "\n", "\n  ")
 	return "out\n────────────────────\n❯ " + text + "\n────────────────────\n status\n"
 }
 
@@ -156,15 +159,13 @@ func TestFleetSayGrokFleet(t *testing.T) {
 
 func TestFleetSayFlattensNewlinesAndRefusesControl(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
-	newlines := 0
-	rig.s.fleet.typeNewline = func(string) error { newlines++; return nil }
 	sayCards(t, rig, dr1Card)
 	// A card answer is one line: its newlines flatten to spaces.
 	if _, res := rig.post(t, `{"text":"line one\r\nline two\nthree","cardId":"dr-1","optionKey":"yes"}`, nil); !res.OK {
 		t.Fatalf("%+v", res)
 	}
-	if rig.typed[0] != "line one line two three" || newlines != 0 {
-		t.Fatalf("typed %q newlines %d", rig.typed[0], newlines)
+	if rig.typed[0] != "line one line two three" {
+		t.Fatalf("typed %q", rig.typed[0])
 	}
 	rig.now = rig.now.Add(time.Minute)
 	if code, _ := rig.post(t, `{"text":"esc \u001b[2J"}`, nil); code != http.StatusBadRequest {
@@ -188,25 +189,18 @@ func TestFleetSayFlattensNewlinesAndRefusesControl(t *testing.T) {
 }
 
 // A plain chat message (no card) to a claude FLEET keeps its line breaks:
-// each line typed, the line-break key between them, one Enter at the end.
-// The landed check reads the real multi-line box Claude Code draws.
+// the whole text goes to one typeText call (tmuxTypeLiteral types it with
+// the line-break key between the lines), then one Enter. The landed check
+// reads the real multi-line box Claude Code draws.
 func TestFleetSayChatKeepsLineBreaks(t *testing.T) {
 	rig := newSayRig(t, []Session{fleetRow()})
-	var calls []string
-	rig.s.fleet.typeText = func(_ string, text string) error {
-		calls = append(calls, "type:"+text)
-		rig.typed = append(rig.typed, text)
-		return nil
-	}
-	rig.s.fleet.typeNewline = func(string) error { calls = append(calls, "newline"); return nil }
 	rig.captures = []string{emptyBoxCapture, readFixture(t, "pane-typed-multiline.ansi"), emptyBoxCapture}
 	code, res := rig.post(t, `{"text":"\nfirst line of the note\r\n\nthird line, after a blank one\n"}`, nil)
 	if code != 200 || !res.OK || rig.enters != 1 {
 		t.Fatalf("%d %+v enters %d", code, res, rig.enters)
 	}
-	want := []string{"type:first line of the note", "newline", "newline", "type:third line, after a blank one"}
-	if strings.Join(calls, "|") != strings.Join(want, "|") {
-		t.Fatalf("calls %q, want %q", calls, want)
+	if len(rig.typed) != 1 || rig.typed[0] != "first line of the note\n\nthird line, after a blank one" {
+		t.Fatalf("typed %q", rig.typed)
 	}
 	data, _ := os.ReadFile(filepath.Join(rig.s.fleet.dir, "log.jsonl"))
 	if !strings.Contains(string(data), `first line of the note\n\nthird line`) {
@@ -219,13 +213,11 @@ func TestFleetSayChatFlattensForGrok(t *testing.T) {
 	row := Session{PID: 7, Tool: toolGrok, Name: "FLEET", NameSource: "user", SessionID: "gsid", Status: "idle", Tmux: "gfleet:0.0"}
 	rig := newSayRig(t, []Session{row})
 	useGrokScreens(t, rig, "grok-idle-empty.ansi")
-	newlines := 0
-	rig.s.fleet.typeNewline = func(string) error { newlines++; return nil }
 	if _, res := rig.post(t, `{"text":"one\ntwo"}`, nil); !res.OK {
 		t.Fatalf("%+v", res)
 	}
-	if len(rig.typed) != 1 || rig.typed[0] != "one two" || newlines != 0 {
-		t.Fatalf("typed %q newlines %d", rig.typed, newlines)
+	if len(rig.typed) != 1 || rig.typed[0] != "one two" {
+		t.Fatalf("typed %q", rig.typed)
 	}
 }
 

@@ -46,8 +46,7 @@ type fleetDeps struct {
 
 	logMu sync.Mutex // serializes this process's log.jsonl appends
 
-	typeText    func(target, text string) error     // nil → tmux send-keys -l
-	typeNewline func(target string) error           // nil → tmux send-keys M-Enter (tmuxNewlineKey)
+	typeText    func(target, text string) error     // nil → tmuxTypeLiteral (one tmux call, all lines)
 	pressEnter  func(target string) error           // nil → tmux send-keys Enter
 	sleep       func(time.Duration)                 // nil → time.Sleep
 	paneInMode  func(target string) (bool, error)   // nil → tmux display #{pane_in_mode}

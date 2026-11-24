@@ -163,8 +163,11 @@ rows. Actions route on `s.Host != ""` to `remote_actions.go`.
   all slots in flight = `503`. `group` (1..9, 0 = `400`) is best effort after
   the spawn: the server assigns in the background, the CLI waits.
 - send-keys and resize require `session_id` and do one fresh
-  `resolveLivePID`. send-keys uses `send-keys -l --` and refuses a pane in
-  copy-mode. Resize revert is `set-window-option -u window-size`, never
+  `resolveLivePID`. send-keys types through `tmuxTypeArgs` and refuses a
+  pane in copy-mode. Text may hold `\n` (no other control byte, not only
+  whitespace): a claude row gets `M-Enter` between lines (`tmuxNewlineKey`,
+  probe notes there), a grok row the lines joined. An old remote's 400 on a
+  newline reads "too old for multi-line text". Resize revert is `set-window-option -u window-size`, never
   `resize-window -A` (that leaves `window-size manual` for good). `RunTUI`
   defers a revert; the local revert falls back to the snapshot's tmux name.
 - The `send-keys` CLI (cmd_send_keys.go) takes the TUI compose box's path
@@ -191,14 +194,20 @@ types into panes. Spec and plan: `docs/superpowers/`.
 - **Typing into a pane** (`fleetTypeInto`, shared by every sender): refuse
   when `WaitingFor` is set, the input box is not visible or not empty, the
   pane is in copy-mode, or a grok row is busy and the sender sets
-  `refuseBusyGrok`. Type with `send-keys -l --`. Press Enter only when the
-  box holds a contiguous piece of our text, then verify Enter took. Never
+  `refuseBusyGrok`. Type the whole text in one tmux call (`tmuxTypeArgs`:
+  `send-keys -l --` per line, chained with `;` argv). tmux eats a trailing
+  `;` of any argv, so no literal ends in one; those go as `-H 3b`. Press
+  Enter only when the box holds a contiguous piece of our text (a claude
+  `[Pasted text #N]` placeholder splits it into pieces that each must be
+  ours), then verify Enter took. Never
   press Enter on text the server did not type. The box parsers
   (`paneInputText`, `grokPaneInputText`) fail closed; when a CLI changes how
   it draws, refresh `testdata/fleet/*.ansi` from a real pane.
-- **Say text:** newlines flatten to spaces, control bytes and a leading
-  `!`/`#` are refused, and `[claude-sessions event]` is refused on folded
-  text (`fleetFoldText`).
+- **Say text:** newlines flatten to spaces, except a no-card chat to a
+  claude FLEET (`fleetCleanChatText`), which keeps line breaks (`M-Enter`
+  between lines, one tmux call); a grok FLEET gets them joined. Control
+  bytes and a leading `!`/`#` on the first line are refused, and
+  `[claude-sessions event]` is refused on folded text (`fleetFoldText`).
 - **Answer store** is server-side. Its guard runs in `fleetSay` under `sayMu`
   on a fresh state.json, right before typing. `cardHash` never includes
   `updatedAt` or `priority`. Lock order: `sayMu`, then the store's mutex.
@@ -290,7 +299,11 @@ types into panes. Spec and plan: `docs/superpowers/`.
   `fleetBatchJob` through the same send path, 1.1s apart; a host move,
   failed re-check, unclear result, 401 or a FLEET-wide refusal
   (`fleetBatchStopCodes`) stops it. Sent cards lock in `batchSent` as
-  `justSent` does.
+  `justSent` does. `i` (list or ship screen, no panel/batch/Clarify open)
+  opens the chat with FLEET (fleet_tui_chat.go): `/fleet/chat` read in a
+  `fleetJob` every 2s while open, pinned to `Source`; the composer is the
+  shared `textEditor` (Enter sends, alt-Enter / `\`-Enter a new line, a
+  paste's Enter never sends); Esc keeps the draft.
 - **Uploads:** type sniffed from the bytes, server-chosen file names, pruned
   after 7 days.
 - **Web Push:** stdlib RFC 8291/8292. The endpoint host allowlist is the SSRF
@@ -384,7 +397,10 @@ status` prints them.
 
 `keychainRead`, `keychainWrite`, `usageInfoFetch` and `profileEmailFetch`
 panic in `TestMain`; every test installs a fake. Never run the real
-`security` command in a test.
+`security` command in a test. Never type into real tmux in a test:
+send-keys tests stub `sendKeysTmux` and `sendKeysPaneInMode`; FLEET say
+rigs stub `fleetDeps.typeText` (it gets the whole text, all lines),
+`pressEnter`, `capture` and `paneInMode`.
 
 ### Misc
 

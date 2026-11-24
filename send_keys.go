@@ -17,8 +17,8 @@ const sendKeysMaxLen = 4096
 // validateSendKeysText is the text rule for one send-keys message, shared by
 // the server (sendKeysBody) and the send-keys CLI, which checks before it
 // resolves or sends anything so a local and a remote send refuse the same
-// text. Empty, oversized and invalid UTF-8 text is refused, and so is every
-// C0 control byte except the newline. A newline is a line break inside the
+// text. Empty (or only whitespace), oversized and invalid UTF-8 text is
+// refused, and so is every C0 control byte except the newline. A newline is a line break inside the
 // message (sendKeys types it as one, never as Enter); every other control
 // byte is refused, not just CR/NUL: sendKeys's -l flag only keeps tmux
 // itself from parsing text as key names. It says nothing about the
@@ -27,7 +27,7 @@ const sendKeysMaxLen = 4096
 // sequence. DEL (0x7f) is rejected alongside it for the same reason: neither
 // belongs in message content.
 func validateSendKeysText(text string) error {
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("text must not be empty")
 	}
 	if len(text) > sendKeysMaxLen {
@@ -63,23 +63,35 @@ func validateSendKeysText(text string) error {
 //     M-Enter in a row). Chosen: it needs no tmux option and no app mode.
 const tmuxNewlineKey = "M-Enter"
 
-// typeLines types text line by line: typeLine for each non-empty line,
-// newline between lines. Neither ever gets a "\n".
-func typeLines(text string, typeLine func(string) error, newline func() error) error {
+// tmuxTypeArgs is the tmux argv that types text into pane in one tmux call:
+// each line as a literal (-l --), tmuxNewlineKey between lines, the commands
+// chained by ";" argv elements. One call, so no other key can land between
+// the lines. tmux reads a trailing ";" of any argument as a command
+// separator, even after -l ("a;" types "a"; "\;" is no reliable escape), so
+// a literal never ends in ";": the trailing ones are cut off and each typed
+// as its hex key (-H 3b). nil when there is nothing to type.
+func tmuxTypeArgs(pane, text string) []string {
+	var cmds [][]string
 	for i, line := range strings.Split(text, "\n") {
 		if i > 0 {
-			if err := newline(); err != nil {
-				return err
-			}
+			cmds = append(cmds, []string{"send-keys", "-t", pane, tmuxNewlineKey})
 		}
-		if line == "" {
-			continue
+		body := strings.TrimRight(line, ";")
+		if body != "" {
+			cmds = append(cmds, []string{"send-keys", "-t", pane, "-l", "--", body})
 		}
-		if err := typeLine(line); err != nil {
-			return err
+		for range len(line) - len(body) {
+			cmds = append(cmds, []string{"send-keys", "-t", pane, "-H", "3b"})
 		}
 	}
-	return nil
+	var args []string
+	for i, c := range cmds {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, c...)
+	}
+	return args
 }
 
 // sendKeysFlatten is a multi-line text as one line, for a session whose
@@ -94,11 +106,11 @@ var (
 )
 
 // sendKeys injects text into s's tmux pane as literal keystrokes followed by
-// Enter — two calls, matching the existing tmuxSendLiteral (paste.go:403-405).
-// A multi-line text is typed a line at a time with tmuxNewlineKey between
-// the lines (typeLines), so only the final Enter submits; a grok session
-// gets it flattened to one line (sendKeysFlatten) instead.
-// The -l flag on the first call is required: without it tmux parses text as
+// Enter — two tmux calls. The first (tmuxTypeArgs) types a multi-line text
+// line by line with tmuxNewlineKey between the lines, so only the final
+// Enter submits; a grok session gets it flattened to one line
+// (sendKeysFlatten) instead.
+// The -l flag on the literal pieces is required: without it tmux parses text as
 // key names, so a message that happens to read "Enter" or "C-c" would trigger
 // that tmux action instead of being typed literally. The "--" after it ends
 // tmux's flag parsing: without it a text that starts with "-" is read as
@@ -134,11 +146,10 @@ func sendKeys(s Session, text string) error {
 	if s.IsGrok() {
 		text = sendKeysFlatten(text)
 	}
-	err = typeLines(text,
-		func(line string) error { return sendKeysTmux("send-keys", "-t", pane, "-l", "--", line) },
-		func() error { return sendKeysTmux("send-keys", "-t", pane, tmuxNewlineKey) })
-	if err != nil {
-		return fmt.Errorf("send text: %w", err)
+	if args := tmuxTypeArgs(pane, text); len(args) > 0 {
+		if err := sendKeysTmux(args...); err != nil {
+			return fmt.Errorf("send text: %w", err)
+		}
 	}
 	if err := sendKeysTmux("send-keys", "-t", pane, "Enter"); err != nil {
 		return fmt.Errorf("send enter: %w", err)

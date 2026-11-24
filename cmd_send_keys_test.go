@@ -83,7 +83,7 @@ func TestSendKeysTextStdin(t *testing.T) {
 		{"hello\n", "hello"},
 		{"hello\r\n", "hello"},
 		{"hello", "hello"},
-		{"hello\n\n", "hello\n"}, // only one newline stripped; the rest is refused later
+		{"hello\n\n", "hello\n"}, // only one newline stripped; the rest stays a line break
 		{"a\nb\n", "a\nb"},
 		{"hello\r", "hello\r"}, // a bare CR is not a line ending here
 		{"", ""},
@@ -140,6 +140,8 @@ func TestValidateSendKeysText(t *testing.T) {
 	}
 	bad := map[string]string{
 		"":                                    "must not be empty",
+		"\n\n":                                "must not be empty",
+		" \n ":                                "must not be empty",
 		strings.Repeat("x", sendKeysMaxLen+1): "exceeds",
 		"a\r\nb":                              "control characters",
 		"bad \xff utf8":                       "valid UTF-8",

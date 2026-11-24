@@ -463,10 +463,14 @@ func killRemote(host string, pid int, sessionID string) (actionResult, error) {
 	return r, nil
 }
 
+var errSendKeysRemoteTooOld = errors.New("the remote host's claude-sessions is too old for multi-line text; update it")
+
 // sendKeysRemote asks host's server to send text as literal keystrokes plus
 // Enter into pid's tmux pane. Unlike killRemote/migrateRemote, sessionID is
 // never optional here — there is no legacy caller this must stay compatible
 // with (see sendKeysBody, server.go), so there is no bare-{} fallback body.
+// A server from before multi-line text refuses a newline as a control
+// character (HTTP 400); that refusal says to update it instead.
 func sendKeysRemote(host string, pid int, sessionID, text string) (actionResult, error) {
 	body, err := json.Marshal(map[string]string{"session_id": sessionID, "text": text})
 	if err != nil {
@@ -474,6 +478,9 @@ func sendKeysRemote(host string, pid int, sessionID, text string) (actionResult,
 	}
 	resp, err := remoteRequest(host, fmt.Sprintf("/sessions/%d/send-keys", pid), "POST", body)
 	if err != nil {
+		if strings.Contains(text, "\n") && strings.HasPrefix(err.Error(), "HTTP 400:") && strings.Contains(err.Error(), "control characters") {
+			return actionResult{}, errSendKeysRemoteTooOld
+		}
 		return actionResult{}, err
 	}
 	var r actionResult
