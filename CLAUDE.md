@@ -204,8 +204,9 @@ types into panes. Spec and plan: `docs/superpowers/`.
   (`paneInputText`, `grokPaneInputText`) fail closed; when a CLI changes how
   it draws, refresh `testdata/fleet/*.ansi` from a real pane.
 - **Say text:** newlines flatten to spaces, except a no-card chat to a
-  claude FLEET (`fleetCleanChatText`), which keeps line breaks (`M-Enter`
-  between lines, one tmux call); a grok FLEET gets them joined. Control
+  claude FLEET and every `/fleet/session/say` to a claude row
+  (`fleetCleanChatText`), which keep line breaks (`M-Enter` between lines,
+  one tmux call); a grok target gets them joined. Control
   bytes and a leading `!`/`#` on the first line are refused, and
   `[claude-sessions event]` is refused on folded text (`fleetFoldText`).
 - **Answer store** is server-side. Its guard runs in `fleetSay` under `sayMu`
@@ -249,7 +250,8 @@ types into panes. Spec and plan: `docs/superpowers/`.
   and does not end the episode; a list error sends nothing. Kill switch:
   `claude-sessions auto-switch off`, which also pins the live account.
 - **Session view:** `fleetResolveSession` is the allowlist (a card's
-  session, a working-list row, a local row disabled for FLEET that passes
+  session: its `tmux` field, else its `session`, as the page's
+  `cardSession` reads them; a working-list row, a local row disabled for FLEET that passes
   the list's other rules, or a usable desk; never FLEET's tmux); the pane
   address always comes from the resolved row, never the request.
 - **Desks (CHAT, SLACK):** the chat panel's other targets are the sessions
@@ -303,7 +305,17 @@ types into panes. Spec and plan: `docs/superpowers/`.
   opens the chat with FLEET (fleet_tui_chat.go): `/fleet/chat` read in a
   `fleetJob` every 2s while open, pinned to `Source`; the composer is the
   shared `textEditor` (Enter sends, alt-Enter / `\`-Enter a new line, a
-  paste's Enter never sends); Esc keeps the draft.
+  paste's Enter never sends); Esc keeps the draft. `a` (attach) and `s`
+  (chat) on a card share `fleetCardSession`, the page's `cardSession` on
+  the raw card fields: `tmux` decides when set (not live = ended, no
+  fallback), else `session` by display or tmux name, and the ticket only
+  when the card has neither; no one session toasts why. `s` (list screen,
+  not in a paste) opens the same chat panel on that session
+  (`/fleet/session`, `/fleet/session/say`, pinned to the row's `sid` and
+  `Source`; `gone`/`not_session` end it), one draft per tmux+sid beside
+  FLEET's, and once per card id per run tells FLEET "Andy opened chat on
+  card <id> (<tmux>)" (no card id; id and tmux must pass
+  `fleetSessionNameRe`; a refusal is a toast).
 - **Uploads:** type sniffed from the bytes, server-chosen file names, pruned
   after 7 days.
 - **Web Push:** stdlib RFC 8291/8292. The endpoint host allowlist is the SSRF
