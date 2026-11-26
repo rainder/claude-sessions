@@ -301,21 +301,25 @@ types into panes. Spec and plan: `docs/superpowers/`.
   `fleetBatchJob` through the same send path, 1.1s apart; a host move,
   failed re-check, unclear result, 401 or a FLEET-wide refusal
   (`fleetBatchStopCodes`) stops it. Sent cards lock in `batchSent` as
-  `justSent` does. `i` (list or ship screen, no panel/batch/Clarify open)
+  `justSent` does. `f` (list or ship screen, no panel/batch/Clarify open)
   opens the chat with FLEET (fleet_tui_chat.go): `/fleet/chat` read in a
   `fleetJob` every 2s while open, pinned to `Source`; the composer is the
   shared `textEditor` (Enter sends, alt-Enter / `\`-Enter a new line, a
-  paste's Enter never sends); Esc keeps the draft. `a` (attach) and `s`
-  (chat) on a card share `fleetCardSession`, the page's `cardSession` on
-  the raw card fields: `tmux` decides when set (not live = ended, no
-  fallback), else `session` by display or tmux name, and the ticket only
-  when the card has neither; no one session toasts why. `s` (list screen,
-  not in a paste) opens the same chat panel on that session
+  paste's Enter never sends); Esc keeps the draft, Ctrl-C clears it (the
+  inspector's compose box and Clarify's input follow the same rule). `a`
+  (attach) and `i` or `→` (chat) on a card share `fleetCardSession`, the
+  page's `cardSession` on the raw card fields: `tmux` decides when set (not
+  live = ended, no fallback), else `session` by display or tmux name, and
+  the ticket only when the card has neither; no one session toasts why.
+  `i`/`→` (list screen, not in a paste) opens the same chat panel on that session
   (`/fleet/session`, `/fleet/session/say`, pinned to the row's `sid` and
   `Source`; `gone`/`not_session` end it), one draft per tmux+sid beside
   FLEET's, and once per card id per run tells FLEET "Andy opened chat on
   card <id> (<tmux>)" (no card id; id and tmux must pass
-  `fleetSessionNameRe`; a refusal is a toast).
+  `fleetSessionNameRe`; a refusal is a toast). `?` (list or ship screen)
+  opens the key help (fleet_tui_help.go), which swallows every other key.
+  The key help row offers `c`/`x` only through `canCorrect`/`canDismiss`,
+  the keys' own checks, and `fleetFitHelp` drops its generic parts first.
 - **Uploads:** type sniffed from the bytes, server-chosen file names, pruned
   after 7 days.
 - **Web Push:** stdlib RFC 8291/8292. The endpoint host allowlist is the SSRF
