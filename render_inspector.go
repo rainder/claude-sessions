@@ -11,12 +11,12 @@ import (
 
 // Inspector layout floor. Below either dimension the fullscreen preview cannot
 // lay out its five fixed rows (title, metadata, separator, at least one body
-// line, footer) or fit the footer's "Back  Refresh  Follow" strip (21 cols), so
-// the renderer degrades to a single "terminal too small" notice plus a Back
-// control instead of drawing a corrupted frame.
+// line, footer) or fit the footer's "q back  r refresh  G follow" strip (27
+// cols), so the renderer degrades to a single "terminal too small" notice plus
+// a Back control instead of drawing a corrupted frame.
 const (
 	minInspectorRows = 5
-	minInspectorCols = 24
+	minInspectorCols = 30
 )
 
 // footerLabels are the inspector's clickable controls, laid left-to-right with a
@@ -30,10 +30,10 @@ var footerLabels = []struct {
 	text   string
 	action hitAction
 }{
-	{"Back", hitInspectorBack},
-	{"Refresh", hitInspectorRefresh},
-	{"Follow", hitInspectorFollow},
-	{"Compose", hitInspectorCompose},
+	{"q back", hitInspectorBack},
+	{"r refresh", hitInspectorRefresh},
+	{"G follow", hitInspectorFollow},
+	{"i compose", hitInspectorCompose},
 }
 
 const footerGap = "  "
@@ -116,8 +116,8 @@ func RenderInspector(w io.Writer, view inspectorViewState, summaryLines []string
 		fmt.Fprintln(w, clipLine(dim(strings.Repeat("-", cols)), cols))
 	}
 
-	// The compose box grows upward from the footer row, so the body gives
-	// up a row for each box row past the first.
+	// The compose box and its key hint grow upward from the footer row, so
+	// the body gives up a row for each of their rows past the first.
 	var box []string
 	if view.composing {
 		box = view.composeView
@@ -128,7 +128,7 @@ func RenderInspector(w io.Writer, view inspectorViewState, summaryLines []string
 	}
 
 	// Remaining rows above the footer: content body.
-	bodyRows := rows - 4 - inspectorSummaryExtraRows(summaryLines) - max(len(box)-1, 0)
+	bodyRows := rows - 4 - inspectorSummaryExtraRows(summaryLines) - inspectorComposeExtraRows(view.composing, box)
 	if bodyRows < 0 {
 		bodyRows = 0
 	}
@@ -246,7 +246,7 @@ func inspectorSummaryFit(summaryLines []string, rows int) []string {
 // returned hit region points at the Back label.
 func renderInspectorTooSmall(w io.Writer, cols, rows int) []hitRegion {
 	fmt.Fprintln(w, clipLine("terminal too small", cols))
-	label := "Back"
+	label := "q back"
 	fmt.Fprintln(w, clipLine(label, cols))
 	x1 := len(label) - 1
 	if x1 > cols-1 {
@@ -414,15 +414,26 @@ func inspectorFooter(w io.Writer, view inspectorViewState, cols, footerY int) []
 // wide (after the "> " prompt), at most textEditorMaxRows tall and never
 // more than about half the body, so a short terminal keeps its preview.
 func inspectorComposeLines(e *textEditor, cols, rows, summaryExtra int) []string {
-	avail := rows - inspectorChromeRows - summaryExtra // body rows beside a one-row box
+	avail := rows - inspectorChromeRows - summaryExtra - 1 // body rows beside the hint and a one-row box
 	return e.view(cols-2, min(textEditorMaxRows, max(1, (avail+1)/2)))
 }
 
+// inspectorComposeExtraRows is how many rows past the footer's one the
+// compose box costs the body: its key hint and every box row after the
+// first (a box with no rows still draws one). 0 when not composing.
+func inspectorComposeExtraRows(composing bool, box []string) int {
+	if !composing {
+		return 0
+	}
+	return max(len(box), 1)
+}
+
 // inspectorComposeBar draws the send-keys compose box in place of the normal
-// footer while view.composing is true: box (inspectorComposeLines) on the
-// same reverse-video bar the footer uses, the first row after a "> "
-// prompt, the cursor a reverse cell inside it. No hit regions — clicking
-// during compose is out of scope; the box only responds to the keyboard.
+// footer while view.composing is true: a dim key hint (composeHint), then
+// box (inspectorComposeLines) on the same reverse-video bar the footer
+// uses, the first row after a "> " prompt, the cursor a reverse cell inside
+// it. No hit regions — clicking during compose is out of scope; the box
+// only responds to the keyboard.
 //
 // composeStatus is appended to the last row whenever non-empty, with no
 // composeStatusUntil expiry check: handleInspectorEvent (tui.go) sets it to
@@ -440,6 +451,7 @@ func inspectorComposeBar(w io.Writer, view inspectorViewState, box []string, col
 	if len(box) == 0 {
 		box = []string{""}
 	}
+	fmt.Fprintln(w, clipLine(dim(composeHint), cols))
 	for i, row := range box {
 		line := "  " + row
 		if i == 0 {

@@ -196,16 +196,19 @@ func TestHandleInspectorEventArrowsEditWhileComposing(t *testing.T) {
 	}
 }
 
-func TestHandleInspectorEventCtrlDStillQuitsWhileComposing(t *testing.T) {
+func TestHandleInspectorEventCtrlDIgnoredWhileComposing(t *testing.T) {
 	state := &tuiState{mode: screenInspector, inspector: inspectorViewState{composing: true, compose: editorWith("hello")}}
 	var hub *InspectorHub
 	noop := func() {}
 	ev := inputEvent{kind: eventKey, key: "\x04"}
 
-	quit, _ := handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, noop, nil)
+	quit, absorb := handleInspectorEvent(ev, false, state, &hub, noop, noop, noop, noop, nil)
 
-	if !quit {
-		t.Fatal("quit = false, want true (Ctrl-D quits even while composing)")
+	if quit || absorb {
+		t.Fatalf("quit=%v absorb=%v, want neither (Ctrl-D does nothing while composing)", quit, absorb)
+	}
+	if !state.inspector.composing || state.inspector.compose.Text() != "hello" {
+		t.Fatalf("composing=%v text=%q, want the box and its text kept", state.inspector.composing, state.inspector.compose.Text())
 	}
 }
 

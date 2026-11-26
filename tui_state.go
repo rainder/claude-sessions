@@ -214,14 +214,23 @@ type tuiState struct {
 	// consumed; plain re-renders and wheel scrolling leave it unset, so the
 	// viewport is free to move off the selection.
 	anchorSelection bool
-	hits            []hitRegion
-	lastClickID     string
-	lastClickAt     time.Time
-	inspector       inspectorViewState
+	// listRows and listViewRows are the last session-list frame's selectable
+	// rows and its viewport height (resolveListOffset records them), so a
+	// page key moves the selection by what one screen shows.
+	listRows     []tableRow
+	listViewRows int
+	hits         []hitRegion
+	lastClickID  string
+	lastClickAt  time.Time
+	inspector    inspectorViewState
 	// inspectorTargetGone is set when the inspected session has left the
 	// session list; render overlays a terminal "ended" verdict so the view
 	// stops reading as live while preserving the last content.
 	inspectorTargetGone bool
+	// composeDrafts holds the compose box text Esc kept, by Session.ID(), so
+	// i on the same session brings it back; Ctrl-C and a sent message drop
+	// it. Memory only.
+	composeDrafts map[string]string
 }
 
 // newTUIState starts on the session list with no selection.
@@ -271,6 +280,49 @@ func (s *tuiState) navigate(targets []selectionTarget, delta int) {
 	s.pending = nil
 	s.sel = navTargets(targets, s.sel, delta)
 	s.anchorSelection = true
+}
+
+// page moves the selection one screen in dir (-1 PgUp, +1 PgDn) without
+// wrapping (pageTarget). Like navigate it is explicit navigation.
+func (s *tuiState) page(targets []selectionTarget, dir int) {
+	s.selectID(pageTarget(targets, s.listRows, s.listViewRows, s.sel, dir))
+}
+
+// pageTarget is the target a page key lands on: the row furthest in dir that
+// is still at most a screen (viewRows-1 lines) from sel's line in the last
+// frame (rows), at least the next row, and clamped to the first or last
+// target. Without a frame line for sel it pages by viewRows-1 targets.
+func pageTarget(targets []selectionTarget, rows []tableRow, viewRows int, sel string, dir int) string {
+	n := len(targets)
+	if n == 0 {
+		return ""
+	}
+	step := max(viewRows-1, 1)
+	cur := -1
+	for i, r := range rows {
+		if r.targetID == sel {
+			cur = i
+			break
+		}
+	}
+	if cur < 0 || findSelectionTarget(targets, sel) == nil {
+		return navTargetsClamped(targets, sel, dir*step)
+	}
+	goal := rows[cur].line + dir*step
+	pick := cur
+	for i := cur + dir; i >= 0 && i < len(rows); i += dir {
+		if (dir > 0 && rows[i].line > goal) || (dir < 0 && rows[i].line < goal) {
+			break
+		}
+		pick = i
+	}
+	if pick == cur && cur+dir >= 0 && cur+dir < len(rows) {
+		pick = cur + dir // a row taller than the screen still moves
+	}
+	if findSelectionTarget(targets, rows[pick].targetID) == nil {
+		return navTargetsClamped(targets, sel, dir*step)
+	}
+	return rows[pick].targetID
 }
 
 // selectID moves the selection directly to id (if non-empty) and requests a
@@ -352,6 +404,7 @@ func (s *tuiState) handleListMouse(m mouseEvent, now time.Time) tuiCommand {
 // frame's phantom trailing "" line (from the terminating newline) is excluded
 // from the effective line count.
 func (s *tuiState) resolveListOffset(frame tableFrame, viewRows int) {
+	s.listRows, s.listViewRows = frame.rows, viewRows
 	effLines := len(frame.lines)
 	if effLines > 0 {
 		effLines--
@@ -422,13 +475,16 @@ func (s *tuiState) handleInspectorKey(key string) tuiCommand {
 // non-empty buffer returns submit=true but does NOT itself clear composing
 // or the text — the caller (handleInspectorEvent) owns that, because a
 // failed send must leave both in place for the user to retry. Enter on an
-// empty buffer is a no-op. Esc and Ctrl-C both cancel: composing, the text,
-// and any leftover composeStatus/composeStatusUntil from a prior failed send
-// are all cleared immediately, since a cancel has nothing left to retry and a
-// stale failure message must not linger past it.
+// empty buffer is a no-op. Esc and Ctrl-C both close the box: Esc keeps the
+// text as the session's draft (composeDrafts) for the next i, Ctrl-C drops
+// it. Either way composing, the box and any leftover composeStatus/
+// composeStatusUntil from a prior failed send are cleared immediately, since
+// a closed box has nothing left to retry and a stale failure message must
+// not linger past it.
 func (s *tuiState) handleInspectorCompose(key string, inBatch bool) (submit, cancel bool) {
 	switch key {
 	case KeyEsc, "\x03":
+		s.setComposeDraft(key == KeyEsc)
 		s.inspector.composing = false
 		s.inspector.compose.Clear()
 		s.inspector.composeStatus = ""
@@ -452,11 +508,27 @@ func (s *tuiState) armCompose() {
 	if s.inspector.snapshot.Session.Tmux != "" {
 		s.inspector.composing = true
 		s.inspector.compose = newTextEditor(sendKeysMaxLen)
+		s.inspector.compose.SetText(s.composeDrafts[s.inspector.snapshot.Session.ID()])
 		s.inspector.composeStatus = ""
 		return
 	}
 	s.inspector.composeStatus = "no tmux pane"
 	s.inspector.composeStatusUntil = time.Now().Add(4 * time.Second)
+}
+
+// setComposeDraft keeps the compose box's text as the inspected session's
+// draft when keep is set and the box holds more than whitespace, and drops
+// the session's draft otherwise.
+func (s *tuiState) setComposeDraft(keep bool) {
+	id := s.inspector.snapshot.Session.ID()
+	if keep && !s.inspector.compose.Empty() {
+		if s.composeDrafts == nil {
+			s.composeDrafts = map[string]string{}
+		}
+		s.composeDrafts[id] = s.inspector.compose.Text()
+		return
+	}
+	delete(s.composeDrafts, id)
 }
 
 // handleInspectorMouse applies a mouse event to the inspector viewport. Release

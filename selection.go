@@ -75,6 +75,25 @@ func navTargets(targets []selectionTarget, sel string, delta int) string {
 	return targets[0].id
 }
 
+// navTargetsClamped moves sel by delta targets like navTargets but stops at
+// the first and last target instead of wrapping. An unknown or empty sel
+// lands on the first target for a move down and the last for a move up.
+func navTargetsClamped(targets []selectionTarget, sel string, delta int) string {
+	n := len(targets)
+	if n == 0 {
+		return ""
+	}
+	for i, target := range targets {
+		if target.id == sel {
+			return targets[min(max(i+delta, 0), n-1)].id
+		}
+	}
+	if delta > 0 {
+		return targets[0].id
+	}
+	return targets[n-1].id
+}
+
 // selectionForTmux returns the id of the target whose session is running in
 // the given tmux session (matched on the host + "<name>:" prefix of its Tmux
 // pane string), or "" if no target has picked it up yet. Used after spawning

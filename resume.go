@@ -1120,19 +1120,41 @@ func padLeft(s string, n int) string {
 // ShowPrompts is a one-shot request raised by → and cleared by the loop that
 // services it, the same shape newPickerState uses for its 'p' prompt overlay:
 // the state stays pure and testable, the loop owns the terminal.
+//
+// Page is how many rows one screen shows (the loop sets it from the drawn
+// window); PgUp/PgDn move by it, 10 before the first draw.
 type resumePickerState struct {
 	Row         int
 	RowCount    int
 	Filter      string
 	ShowPrompts bool
+	Page        int
 }
 
 // handle applies one key event, reporting whether to confirm the selection or
-// cancel. Up/Down move (wrapping); Right raises ShowPrompts for the selected
-// row; Enter confirms; Esc / Ctrl+C cancel; Backspace trims the filter; any
-// printable ASCII byte extends it and resets the cursor to the top match.
+// cancel. Up/Down move (wrapping); PgUp/PgDn move a page and Home/End to the
+// first/last row (no wrapping; letters such as g are filter text here);
+// Right raises ShowPrompts for the selected row; Enter confirms; Esc /
+// Ctrl+C cancel; Backspace trims the filter; any printable ASCII byte
+// extends it and resets the cursor to the top match.
 func (s *resumePickerState) handle(key string) (confirm, cancel bool) {
+	page := s.Page
+	if page <= 0 {
+		page = 10
+	}
 	switch key {
+	case KeyPageUp:
+		s.Row = max(s.Row-page, 0)
+	case KeyPageDown:
+		if s.RowCount > 0 {
+			s.Row = min(s.Row+page, s.RowCount-1)
+		}
+	case KeyHome:
+		s.Row = 0
+	case KeyEnd:
+		if s.RowCount > 0 {
+			s.Row = s.RowCount - 1
+		}
 	case KeyUp:
 		if s.RowCount > 0 {
 			s.Row = (s.Row + s.RowCount - 1) % s.RowCount
@@ -1263,6 +1285,9 @@ func pickResumeSession(title string, sessions []ResumableSession, localHome, loc
 		var header string
 		lines, header = resumeRows(sessions, localHome, localName, resumeRowCols(cols), time.Now())
 		filtered, indices := sync()
+		if start, end := resumeWindow(len(filtered), state.Row, rows, state.Filter != "", note != ""); end > start {
+			state.Page = end - start
+		}
 		_ = renderer.Draw(renderResumePicker(title, header, filtered, state, note, rows), cols, rows)
 		keys, _ := readModalEvents(decoder, wakes)
 		for _, key := range keys {
@@ -1355,7 +1380,7 @@ func resumeWindow(total, sel, rows int, hasFilter, hasNote bool) (start, end int
 }
 
 func resumeFooter() string {
-	return "↑/↓ move · → prompts · type to filter · ⌫ edit · Enter resume · Esc cancel"
+	return "↑/↓ move · PgUp/PgDn Home/End jump · → prompts · type to filter · ⌫ edit · Enter resume · Esc cancel"
 }
 
 const (

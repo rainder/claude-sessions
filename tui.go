@@ -489,7 +489,7 @@ func RunTUI(interval time.Duration) error {
 				// Laid out here, through the pointer, so the editor keeps
 				// the width Up/Down wrap at and its scroll.
 				state.inspector.composeView = inspectorComposeLines(&state.inspector.compose, cols, rows, extra)
-				extra += len(state.inspector.composeView) - 1
+				extra += inspectorComposeExtraRows(true, state.inspector.composeView)
 			}
 			state.inspector.resize(rows - inspectorChromeRows - extra)
 			var buf strings.Builder
@@ -906,8 +906,8 @@ func RunTUI(interval time.Duration) error {
 					// A batch's trailing bytes after the key that just
 					// cancelled (or submitted) compose mode belong to the
 					// compose box, not this screen's hotkeys — drop them
-					// rather than let e.g. a trailing 'k' fall through to
-					// kill. See handleInspectorEvent's doc comment.
+					// rather than let e.g. a trailing Ctrl+X fall through
+					// to kill. See handleInspectorEvent's doc comment.
 					break
 				}
 				continue
@@ -985,6 +985,31 @@ func RunTUI(interval time.Duration) error {
 			case KeyDown:
 				state.navigate(targets, 1)
 				render()
+			case KeyPageUp:
+				state.page(targets, -1)
+				render()
+			case KeyPageDown:
+				state.page(targets, 1)
+				render()
+			case KeyHome, "g":
+				if len(targets) > 0 {
+					state.selectID(targets[0].id)
+				}
+				render()
+			case KeyEnd, "G":
+				if len(targets) > 0 {
+					state.selectID(targets[len(targets)-1].id)
+				}
+				render()
+			case KeyEsc:
+				// Esc clears a committed '/' filter; with none it does nothing
+				// (select mode took its Esc above).
+				if next, changed := textFilterClear(textFilter); changed {
+					textFilter = next
+					settleRows(false)
+					state.requestSelectionAnchor()
+					render()
+				}
 			case "\t":
 				state.selectID(firstIdleTarget(targets))
 				render()
@@ -1154,8 +1179,8 @@ func RunTUI(interval time.Duration) error {
 
 // handleInspectorEvent dispatches one decoded event while the inspector screen
 // is active. It returns quit=true when the app should exit (Ctrl-C/Ctrl-D
-// outside compose mode, or Ctrl-D while composing — composing itself
-// intercepts a bare Ctrl-C as cancel, not quit). inBatch is true when ev came
+// outside compose mode; composing takes Ctrl-C as close-and-clear and
+// ignores Ctrl-D, so neither quits with a draft open). inBatch is true when ev came
 // in one read with other keys (a paste, fleetKeyBatch): an Enter there is a
 // new line in the compose box and never submits, so a paste with newlines
 // lands whole. absorbBatch is true exactly when this event ended compose
@@ -1171,7 +1196,6 @@ func RunTUI(interval time.Duration) error {
 // to this screen's normal hotkeys (e.g. Ctrl+X triggering kill). Back commands close the
 // inspector; refresh/follow touch the hub or viewport; scrolling keys and the
 // wheel mutate the view and repaint. hubPtr is the loop's inspectorHub
-
 // variable so a Refresh reaches the live hub. Enter attaches to the session
 // (mirroring the session-list Enter binding) and closes the inspector — but
 // only outside compose mode, where Enter instead submits the compose buffer.
@@ -1204,7 +1228,8 @@ func handleInspectorEvent(ev inputEvent, inBatch bool, state *tuiState, hubPtr *
 
 	if state.inspector.composing {
 		if ev.key == "\x04" {
-			return true, false
+			// Ctrl-D quits everywhere else; here it would drop a draft.
+			return false, false
 		}
 		submit, cancel := state.handleInspectorCompose(ev.key, inBatch)
 		switch {
@@ -1219,6 +1244,7 @@ func handleInspectorEvent(ev inputEvent, inBatch bool, state *tuiState, hubPtr *
 			ok, msg := sendText(sess, text)
 			state.inspector.composeStatusUntil = time.Now().Add(4 * time.Second)
 			if ok {
+				state.setComposeDraft(false)
 				state.inspector.composing = false
 				state.inspector.compose.Clear()
 				state.inspector.composeStatus = "sent"
@@ -1467,6 +1493,16 @@ func textFilterTransition(cur textFilterState, k string) (next textFilterState, 
 	}
 }
 
+// textFilterClear is Esc on the session list outside '/'-input mode: it
+// drops a committed query, and changed is false when there is none (Esc then
+// does nothing).
+func textFilterClear(cur textFilterState) (next textFilterState, changed bool) {
+	if cur.editing || cur.committed == "" {
+		return cur, false
+	}
+	return textFilterState{}, true
+}
+
 // isTextInput reports whether decoded key k is literal text to append to the
 // filter buffer rather than a control or navigation key. Control bytes (< 0x20)
 // and DEL (0x7f) are rejected, which also excludes the "\x00…" navigation
@@ -1552,6 +1588,8 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("NAVIGATION"))
 	fmt.Fprintln(&b, "    ↑ / ↓        move selection")
+	fmt.Fprintln(&b, "    PgUp / PgDn  move selection a page")
+	fmt.Fprintln(&b, "    Home / End   first / last row (also g / G)")
 	fmt.Fprintln(&b, "    Tab          jump to topmost idle (or shell) session")
 	fmt.Fprintln(&b, "    mouse click  select row · double-click opens")
 	fmt.Fprintln(&b, "    mouse wheel  scroll list or inspector")
@@ -1564,20 +1602,23 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    - / +        disable / enable session")
 	fmt.Fprintln(&b, "    Shift-0..9   assign session to group ⓪..⑨ (⓪ = top priority · same group again ungroups)")
 	fmt.Fprintln(&b, "    Ctrl-X       kill the session (tmux-aware)")
-	fmt.Fprintln(&b, "    a            attach (or migrate to tmux first)")
-	fmt.Fprintln(&b, "    Enter / p    open full-screen inspector")
+	fmt.Fprintln(&b, "    Enter / a    attach (or migrate to tmux first)")
+	fmt.Fprintln(&b, "    → / p        open full-screen inspector")
 	fmt.Fprintln(&b, "    i            show session info (ticket + conversation summary)")
 	fmt.Fprintln(&b, "    Ctrl-W       switch that host's Claude account (⏎ applies · esc cancels)")
-	fmt.Fprintln(&b, "    F            FLEET decision cards (1-9 pick · o other · Enter send · t raw text · Esc back)")
-	fmt.Fprintln(&b, "                 the mouse is off there, so a drag selects card text; links are Cmd+click")
+	fmt.Fprintln(&b, "    f / F        FLEET decision cards (1-9 pick · r FLEET's pick · o other · a attach")
+	fmt.Fprintln(&b, "                 · i/→ session chat · f FLEET chat · k clarify · t raw text · Esc back)")
+	fmt.Fprintln(&b, "                 ? in the Fleet view lists all keys; links are Cmd+click")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("INSPECTOR"))
-	fmt.Fprintln(&b, "    Home / End   oldest output / resume live follow")
-	fmt.Fprintln(&b, "    PgUp / PgDn  scroll inspector by page")
+	fmt.Fprintln(&b, "    Home / End   oldest output / resume live follow (also g / G)")
+	fmt.Fprintln(&b, "    PgUp / PgDn  scroll inspector by page (Space: page down)")
 	fmt.Fprintln(&b, "    r            refresh now")
+	fmt.Fprintln(&b, "    i            compose: type into the session (Esc keeps the draft · Ctrl-C clears)")
+	fmt.Fprintln(&b, "    Enter        attach")
 	fmt.Fprintln(&b, "    Ctrl-X       kill the session (tmux-aware)")
 	fmt.Fprintln(&b, "    v            select mode (mouse off; v or Esc: mouse on)")
-	fmt.Fprintln(&b, "    Esc / q / p  return from inspector")
+	fmt.Fprintln(&b, "    Esc / q / p / ←  return from inspector")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("VIEW"))
 	fmt.Fprintln(&b, "    m            cycle mode (full → intermediate → minimal)  ·  persisted")
@@ -1585,6 +1626,7 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    h then 1..9  hide group(s) (repeat to add/remove · last one shows all)")
 	fmt.Fprintln(&b, "    d            hide/show disabled sessions")
 	fmt.Fprintln(&b, "    /            filter rows by text (type to narrow · Enter commits · Esc clears)")
+	fmt.Fprintln(&b, "    Esc          clear a committed / filter")
 	fmt.Fprintln(&b, "    s / S        open sort-by dialog (↑/↓ select · g group first · ⏎ confirm · esc cancel)")
 	groupSortLabel := "off"
 	if groupSortOn {

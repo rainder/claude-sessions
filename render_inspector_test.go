@@ -67,7 +67,7 @@ func TestRenderInspectorMetadataAndLiveFooter(t *testing.T) {
 	var b strings.Builder
 	hits := RenderInspector(&b, v, nil, false, 100, 20)
 	out := b.String()
-	for _, want := range []string{"api-refactor", "PID 42", "dev", "opus", "busy", "LIVE", "Back", "Refresh", "Follow", "Compose"} {
+	for _, want := range []string{"api-refactor", "PID 42", "dev", "opus", "busy", "LIVE", "q back", "r refresh", "G follow", "i compose"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -84,7 +84,7 @@ func TestRenderInspectorNarrowDropsMetadataBeforeControls(t *testing.T) {
 	if strings.Contains(b.String(), "$1.28") {
 		t.Fatalf("cost not collapsed:\n%s", b.String())
 	}
-	if !strings.Contains(b.String(), "Back") || !hasHit(hits, hitInspectorBack) {
+	if !strings.Contains(b.String(), "q back") || !hasHit(hits, hitInspectorBack) {
 		t.Fatalf("Back missing")
 	}
 }
@@ -365,51 +365,52 @@ func TestInspectorFooterRightFallsBackAfterExpiry(t *testing.T) {
 }
 
 // TestRenderInspectorFooterRightWinsOverComposeWhenNarrow is a regression test
-// for the width-threshold bug: adding the "Compose" footer-left label grew the
-// left side from 21 to 30 visible columns, which pushed every footer-right
-// threshold up by 9 and re-hid text — including the "no tmux pane" hint — at
-// widths (like 35) where it used to fit. cols=35 fits the pre-Compose 3-label
-// footer ("Back  Refresh  Follow" = 21 cols) plus "no tmux pane" (12 runes)
-// with room to spare (21+12+2=35), but does not fit the 4-label footer
-// (30+12+2=44). Compose must be the one dropped so the hint stays visible.
+// for the width-threshold bug: adding the "i compose" footer-left label grew
+// the left side from 27 to 38 visible columns, which pushed every
+// footer-right threshold up by 11 and re-hid text — including the "no tmux
+// pane" hint — at widths (like 41) where it used to fit. cols=41 fits the
+// 3-label footer ("q back  r refresh  G follow" = 27 cols) plus "no tmux pane"
+// (12 runes) with room to spare (27+12+2=41), but does not fit the 4-label
+// footer (38+12+2=52). Compose must be the one dropped so the hint stays
+// visible.
 func TestRenderInspectorFooterRightWinsOverComposeWhenNarrow(t *testing.T) {
 	v := populatedInspectorView()
 	v.composeStatus = "no tmux pane"
 	v.composeStatusUntil = time.Now().Add(4 * time.Second)
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, false, 35, 20)
+	hits := RenderInspector(&b, v, nil, false, 41, 20)
 	out := b.String()
 
 	if !strings.Contains(out, "no tmux pane") {
-		t.Fatalf("footer-right hint dropped at cols=35:\n%s", out)
+		t.Fatalf("footer-right hint dropped at cols=41:\n%s", out)
 	}
-	if strings.Contains(out, "Compose") {
-		t.Fatalf("Compose label should have been dropped to make room at cols=35:\n%s", out)
+	if strings.Contains(out, "compose") {
+		t.Fatalf("Compose label should have been dropped to make room at cols=41:\n%s", out)
 	}
-	for _, want := range []string{"Back", "Refresh", "Follow"} {
+	for _, want := range []string{"q back", "r refresh", "G follow"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("footer-left label %q missing at cols=35:\n%s", want, out)
+			t.Errorf("footer-left label %q missing at cols=41:\n%s", want, out)
 		}
 	}
 	if !hasHit(hits, hitInspectorBack) || !hasHit(hits, hitInspectorRefresh) || !hasHit(hits, hitInspectorFollow) {
-		t.Fatalf("footer hits missing a floor control at cols=35: %#v", hits)
+		t.Fatalf("footer hits missing a floor control at cols=41: %#v", hits)
 	}
 	if hasHit(hits, hitInspectorCompose) {
 		t.Fatalf("Compose hit region should not exist when its label is dropped: %#v", hits)
 	}
 	for _, ln := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
-		if visibleWidth(ln) > 35 {
+		if visibleWidth(ln) > 41 {
 			t.Fatalf("line exceeds width: %q (%d cols)", ln, visibleWidth(ln))
 		}
 	}
 }
 
 // TestRenderInspectorFooterAtMinColsNeverOverflows exercises the floor of the
-// drop logic: cols=24 is minInspectorCols, and the longest realistic
+// drop logic: cols=30 is minInspectorCols, and the longest realistic
 // footer-right text ("tmux · SESSION ENDED", 20 runes) can't fit alongside
-// even the 3-label floor (21+20+2=43 > 24). Compose must still be dropped
+// even the 3-label floor (27+20+2=49 > 30). Compose must still be dropped
 // (its label would otherwise clip mid-word, since the full 4-label footer is
-// 30 cols on its own), the floor controls must still render and stay
+// 38 cols on its own), the floor controls must still render and stay
 // clickable, and — the actual regression class this guards against — no
 // emitted line may exceed cols regardless of how the drop math falls out.
 func TestRenderInspectorFooterAtMinColsNeverOverflows(t *testing.T) {
@@ -419,7 +420,7 @@ func TestRenderInspectorFooterAtMinColsNeverOverflows(t *testing.T) {
 	hits := RenderInspector(&b, v, nil, false, minInspectorCols, 20)
 	out := b.String()
 
-	if strings.Contains(out, "Compose") {
+	if strings.Contains(out, "compose") {
 		t.Fatalf("Compose label should have been dropped at cols=%d:\n%s", minInspectorCols, out)
 	}
 	if hasHit(hits, hitInspectorCompose) {
@@ -437,39 +438,39 @@ func TestRenderInspectorFooterAtMinColsNeverOverflows(t *testing.T) {
 
 // TestRenderInspectorFooterShowsComposeWhenRoomAllows confirms Compose is not
 // dropped unconditionally — once cols is wide enough for both the full
-// 4-label footer-left and the footer-right text (44 cols for a 12-rune hint:
-// 30+12+2), both render together.
+// 4-label footer-left and the footer-right text (52 cols for a 12-rune hint:
+// 38+12+2), both render together.
 func TestRenderInspectorFooterShowsComposeWhenRoomAllows(t *testing.T) {
 	v := populatedInspectorView()
 	v.composeStatus = "no tmux pane"
 	v.composeStatusUntil = time.Now().Add(4 * time.Second)
 	var b strings.Builder
-	hits := RenderInspector(&b, v, nil, false, 44, 20)
+	hits := RenderInspector(&b, v, nil, false, 52, 20)
 	out := b.String()
 
 	if !strings.Contains(out, "no tmux pane") {
-		t.Fatalf("footer-right hint missing at cols=44:\n%s", out)
+		t.Fatalf("footer-right hint missing at cols=52:\n%s", out)
 	}
-	if !strings.Contains(out, "Compose") {
-		t.Fatalf("Compose label unnecessarily dropped at cols=44:\n%s", out)
+	if !strings.Contains(out, "i compose") {
+		t.Fatalf("Compose label unnecessarily dropped at cols=52:\n%s", out)
 	}
 	if !hasHit(hits, hitInspectorCompose) {
-		t.Fatalf("Compose hit region missing at cols=44: %#v", hits)
+		t.Fatalf("Compose hit region missing at cols=52: %#v", hits)
 	}
 }
 
 // TestRenderInspectorFooterHitColumns checks the footer hit regions land on the
-// visible label columns of "Back  Refresh  Follow  Compose".
+// visible label columns of "q back  r refresh  G follow  i compose".
 func TestRenderInspectorFooterHitColumns(t *testing.T) {
 	v := populatedInspectorView()
 	var b strings.Builder
 	hits := RenderInspector(&b, v, nil, false, 100, 20)
 
 	want := map[hitAction][2]int{
-		hitInspectorBack:    {0, 3},   // "Back"
-		hitInspectorRefresh: {6, 12},  // "Refresh"
-		hitInspectorFollow:  {15, 20}, // "Follow"
-		hitInspectorCompose: {23, 29}, // "Compose"
+		hitInspectorBack:    {0, 5},   // "q back"
+		hitInspectorRefresh: {8, 16},  // "r refresh"
+		hitInspectorFollow:  {19, 26}, // "G follow"
+		hitInspectorCompose: {29, 37}, // "i compose"
 	}
 	footerY := 20 - 1
 	for _, h := range hits {
@@ -781,7 +782,7 @@ func TestRenderInspectorSummaryAboveBody(t *testing.T) {
 	if !strings.Contains(lines[4+len(summary)], "one") {
 		t.Errorf("body did not start at row %d: %q", 4+len(summary), lines[4+len(summary)])
 	}
-	if !strings.Contains(lines[19], "Back") {
+	if !strings.Contains(lines[19], "q back") {
 		t.Errorf("footer not on the last row: %q", lines[19])
 	}
 	for _, h := range hits {
@@ -805,7 +806,7 @@ func TestRenderInspectorSummaryClampedOnShortTerminal(t *testing.T) {
 		if len(lines) != rows {
 			t.Fatalf("rows=%d: frame has %d lines, want %d:\n%s", rows, len(lines), rows, b.String())
 		}
-		if !strings.Contains(lines[rows-1], "Back") {
+		if !strings.Contains(lines[rows-1], "q back") {
 			t.Errorf("rows=%d: footer not on the last row: %q", rows, lines[rows-1])
 		}
 	}
@@ -829,7 +830,7 @@ func TestRenderInspectorNilSummaryUnchanged(t *testing.T) {
 	if !strings.Contains(lines[3], "one") {
 		t.Errorf("body did not start at row 3: %q", lines[3])
 	}
-	if !strings.Contains(lines[19], "Back") {
+	if !strings.Contains(lines[19], "q back") {
 		t.Errorf("footer not on the last row: %q", lines[19])
 	}
 
