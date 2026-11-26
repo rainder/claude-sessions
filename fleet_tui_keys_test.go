@@ -71,13 +71,58 @@ func TestFleetHelpRowFits(t *testing.T) {
 			t.Fatalf("fit lost %q: %q", want, fit)
 		}
 	}
-	if got := fleetFitHelp("a · b", 3); got != "a · b" {
-		t.Fatalf("no droppable part: %q", got)
+	if got := fleetFitHelp("? keys", 3); got != "? keys" {
+		t.Fatalf("nothing left to drop: %q", got)
 	}
 	for _, l := range strings.Split(fleetRendered(st, 60, 20, now), "\n") {
 		if cellWidth(l) > 60 {
 			t.Fatalf("line wider than 60: %q", l)
 		}
+	}
+}
+
+// The busiest unanswered card at exactly 80 columns: every hint that can
+// show does (lean pick, R, Clarify, the FLEET chat, attach and chat), so
+// the row overflows after every first-tier drop; "? keys" still survives,
+// whole and last, and the row fits without the final clip.
+func TestFleetHelpRowBusyAt80(t *testing.T) {
+	now := time.Unix(1000, 0)
+	v := sessChatView()
+	for i := range v.Cards {
+		c := &v.Cards[i]
+		c.Options = fleetTestCard(c.ID, "needs-you").Options
+		c.Lean = "yes"
+	}
+	st := fleetTestState(v, now)
+	full := stripANSI(fleetBottomRow(st, now))
+	for _, want := range []string{fleetHelpLeanHint, fleetHelpBatchHint, fleetHelpClarifyHint, fleetHelpChatHint, "a attach", "i/→ chat", "? keys"} {
+		if !strings.Contains(full, want) {
+			t.Fatalf("busy row lacks %q: %q", want, full)
+		}
+	}
+	firstTier := full
+	for _, d := range fleetHelpDropOrder {
+		firstTier = strings.Replace(firstTier, d+" · ", "", 1)
+	}
+	if cellWidth(firstTier) <= 80 {
+		t.Fatalf("not a busy case: %d cells after the first drops: %q", cellWidth(firstTier), firstTier)
+	}
+	fit := stripANSI(fleetBottomRowFit(st, now, 80))
+	if cellWidth(fit) > 80 || !strings.HasSuffix(fit, " · ? keys") {
+		t.Fatalf("fit at 80 (%d cells) = %q", cellWidth(fit), fit)
+	}
+	for _, want := range []string{fleetHelpLeanHint, "a attach"} {
+		if !strings.Contains(fit, want) {
+			t.Fatalf("fit lost %q: %q", want, fit)
+		}
+	}
+	lines := strings.Split(stripANSI(fleetRendered(st, 80, 24, now)), "\n")
+	if last := lines[len(lines)-1]; !strings.HasSuffix(last, "? keys") {
+		t.Fatalf("drawn bottom row %q", last)
+	}
+	// "? keys" alone on a screen too narrow for anything else.
+	if got := fleetFitHelp("a attach · i/→ chat · ? keys", 8); got != "? keys" {
+		t.Fatalf("narrow = %q", got)
 	}
 }
 
@@ -148,12 +193,34 @@ func TestFleetHelpPanel(t *testing.T) {
 	if st.help.scroll != 0 {
 		t.Fatalf("Up at the top: scroll %d", st.help.scroll)
 	}
+	// PgDn steps by the help body's drawn height (12 rows: 8 body lines),
+	// one line of overlap, not by the details panel's height.
+	st.panelRows = 30
 	st.handleKey(KeyPageDown, false, now)
-	if st.help.scroll == 0 {
-		t.Fatal("PgDn did not scroll")
+	if st.help.page != 8 || st.help.scroll != 7 {
+		t.Fatalf("PgDn: page %d scroll %d", st.help.page, st.help.scroll)
+	}
+	st.handleKey(KeyPageUp, false, now)
+	if st.help.scroll != 0 {
+		t.Fatalf("PgUp: scroll %d", st.help.scroll)
+	}
+	if h := (&fleetHelpMode{}); h.pageStep() != fleetPageStep {
+		t.Fatalf("undrawn help step %d", h.pageStep())
 	}
 	if cmd := st.handleMouse(mouseEvent{button: mouseWheelUp}); cmd != fleetCmdRender {
 		t.Fatalf("wheel = %v", cmd)
+	}
+
+	// A toast that lands while the help is open (a send, R or dismiss
+	// result) takes the key line's place until it expires.
+	st.setToast("Sent.", fleetToastInfo, now)
+	lines = strings.Split(fleetRendered(st, 80, 12, now), "\n")
+	if len(lines) != 12 || stripANSI(lines[11]) != "Sent." {
+		t.Fatalf("toast row: %q", lines[11])
+	}
+	lines = strings.Split(fleetRendered(st, 80, 12, now.Add(time.Hour)), "\n")
+	if len(lines) != 12 || !strings.Contains(lines[11], "Esc / q / ? close") {
+		t.Fatalf("expired toast: %q", lines[11])
 	}
 
 	for _, k := range []string{KeyEsc, "q", "?", "\x03"} {

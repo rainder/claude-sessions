@@ -122,18 +122,24 @@ func TestSessionChatKeyOpens(t *testing.T) {
 	if c == nil || c.source != "http://src" || c.target == nil || *c.target != (fleetChatTarget{Tmux: "promote-prod-1", SID: sessChatSID, Name: "Promote prod"}) || st.toast != "" {
 		t.Fatalf("chat = %+v target %+v toast %q", c, c.target, st.toast)
 	}
-	if n := st.chatNotice; n == nil || *n != (fleetSayRequest{Source: "http://src", Text: "Andy opened chat on card p (promote-prod-1)"}) {
-		t.Fatalf("notice = %+v", st.chatNotice)
+	// Opening tells FLEET nothing: the first message that goes through does.
+	if c.card != "p" || len(st.chatTold) != 0 {
+		t.Fatalf("open: card %q told %v", c.card, st.chatTold)
+	}
+	if n := st.chatNoticeFor("p", "promote-prod-1", "http://src"); n == nil || *n != (fleetSayRequest{Source: "http://src", Text: "Andy opened chat on card p (promote-prod-1)"}) {
+		t.Fatalf("notice = %+v", n)
 	}
 	head := fleetChatHead(st, 80)
 	if !strings.Contains(stripANSI(head), "Chat with Promote prod · promote-prod-1") || strings.Contains(head, "\x07") {
 		t.Fatalf("head %q", head)
 	}
-	// Once per card per run: close and reopen tells FLEET nothing new.
-	st.chatNotice = nil
-	st.handleKey(KeyEsc, false, now)
-	if cmd := st.handleKey("i", false, now); cmd != fleetCmdChatGet || st.chatNotice != nil {
-		t.Fatalf("reopen: %v notice %+v", cmd, st.chatNotice)
+	// Once per card per run; another host's send tells nothing.
+	st.markChatTold("p")
+	if n := st.chatNoticeFor("p", "promote-prod-1", "http://src"); n != nil {
+		t.Fatalf("told twice: %+v", n)
+	}
+	if n := st.chatNoticeFor("q", "fix-two", "http://other"); n != nil {
+		t.Fatalf("moved host: %+v", n)
 	}
 	st.handleKey(KeyEsc, false, now)
 
@@ -142,8 +148,8 @@ func TestSessionChatKeyOpens(t *testing.T) {
 	if cmd := st.handleKey("i", false, now); cmd != fleetCmdChatGet || st.chat.target.Tmux != "fix-two" || st.chat.target.SID != "sid-two" {
 		t.Fatalf("display name: %v %+v", cmd, st.chat)
 	}
-	if st.chatNotice == nil || st.chatNotice.Text != "Andy opened chat on card q (fix-two)" {
-		t.Fatalf("notice %+v", st.chatNotice)
+	if st.chat.card != "q" {
+		t.Fatalf("card %q", st.chat.card)
 	}
 	st.handleKey(KeyEsc, false, now)
 
@@ -162,16 +168,16 @@ func TestSessionChatKeyOpens(t *testing.T) {
 	v := sessChatView()
 	v.Fleet.Alive = false
 	st = fleetTestState(v, now)
-	if st.handleKey("i", false, now); st.chat == nil || st.chatNotice != nil || st.chatTold["p"] {
-		t.Fatalf("FLEET down: chat %+v notice %+v", st.chat, st.chatNotice)
+	if st.handleKey("i", false, now); st.chat == nil || st.chatNoticeFor("p", "promote-prod-1", "http://src") != nil {
+		t.Fatalf("FLEET down: chat %+v", st.chat)
 	}
 	// A card id the page would not type is never typed.
 	v = sessChatView()
 	v.Cards[0].ID = "p q"
 	v.CardHashes["p q"] = "h"
 	st = fleetTestState(v, now)
-	if st.handleKey("i", false, now); st.chat == nil || st.chatNotice != nil {
-		t.Fatalf("bad id: chat %+v notice %+v", st.chat, st.chatNotice)
+	if st.handleKey("i", false, now); st.chat == nil || st.chatNoticeFor(st.chat.card, st.chat.target.Tmux, "http://src") != nil {
+		t.Fatalf("bad id: chat %+v", st.chat)
 	}
 	// A row id outside resumeSessionIDRe is no pin.
 	v = sessChatView()
@@ -388,7 +394,7 @@ func TestSessionChatLoop(t *testing.T) {
 	l.nextPoll = now.Add(time.Hour)
 	defer l.closeAll()
 	l.run(l.st.handleKey("i", false, now), now)
-	if len(l.chats) != 1 || len(l.notices) != 1 || l.st.chatNotice != nil {
+	if len(l.chats) != 1 || len(l.notices) != 0 {
 		t.Fatalf("open: reads %d notices %d", len(l.chats), len(l.notices))
 	}
 	waitFleetJobs(t, l)
@@ -397,11 +403,8 @@ func TestSessionChatLoop(t *testing.T) {
 	if len(reads) != 1 || reads[0] != (sessChatCall{"http://src", want, 0}) {
 		t.Fatalf("reads %+v", reads)
 	}
-	if len(notices) != 1 || notices[0] != (fleetSayRequest{Source: "http://src", Text: "Andy opened chat on card p (promote-prod-1)"}) {
-		t.Fatalf("notices %+v", notices)
-	}
-	if l.st.toast != "" {
-		t.Fatalf("accepted notice toasted %q", l.st.toast)
+	if len(notices) != 0 {
+		t.Fatalf("open told FLEET: %+v", notices)
 	}
 	l.tick(now.Add(fleetChatPoll))
 	waitFleetJobs(t, l)
@@ -427,6 +430,28 @@ func TestSessionChatLoop(t *testing.T) {
 	if l.st.chatSending || l.st.chatEditor().Text() != "" || l.st.toast != fleetToastSent {
 		t.Fatalf("after send: sending %v draft %q toast %q", l.st.chatSending, l.st.chatEditor().Text(), l.st.toast)
 	}
+	// FLEET hears of the chat only now, after Andy's message went through.
+	if len(l.notices) != 1 || !l.st.chatTold["p"] {
+		t.Fatalf("notice after send: %d told %v", len(l.notices), l.st.chatTold)
+	}
+	waitFleetJobs(t, l)
+	l.reap(late)
+	if len(notices) != 1 || notices[0] != (fleetSayRequest{Source: "http://src", Text: "Andy opened chat on card p (promote-prod-1)"}) {
+		t.Fatalf("notices %+v", notices)
+	}
+	if l.st.toast != fleetToastSent {
+		t.Fatalf("accepted notice toasted %q", l.st.toast)
+	}
+	// A second send in the same chat tells FLEET nothing new.
+	l.st.chatEditor().SetText("more")
+	l.run(l.st.handleKey(KeyEnter, false, late), late)
+	waitFleetJobs(t, l)
+	l.reap(late)
+	waitFleetJobs(t, l)
+	l.reap(late)
+	if len(says) != 2 || len(notices) != 1 {
+		t.Fatalf("second send: says %d notices %d", len(says), len(notices))
+	}
 
 	// The session went away under the send: the chat ends, the text stays.
 	sayRes = fleetSendResult{Out: fleetSayOutcome{Status: 404, Result: fleetSayResult{Code: "gone", Error: "this session has ended"}}}
@@ -449,15 +474,40 @@ func TestSessionChatLoop(t *testing.T) {
 		t.Errorf("timeout with an ended chat = %v", d)
 	}
 
-	// A refused notice is a quiet toast and never closes the panel.
+	// The gone send told FLEET nothing.
+	if len(notices) != 1 {
+		t.Fatalf("failed send told FLEET: %+v", notices)
+	}
+
+	// The next card: a failed send marks nothing; the first send that goes
+	// through tells FLEET; a refused notice is a quiet toast and never
+	// closes the panel.
 	l.st.chat = nil
 	l.st.handleKey(KeyDown, false, later)
-	noticeRes = fleetSendResult{Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{Code: "rate_limited"}}}
 	l.run(l.st.handleKey("i", false, later), later)
 	waitFleetJobs(t, l)
 	l.reap(later)
+	armed := later.Add(3 * time.Second)
+	sayRes = fleetSendResult{Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{Code: "rate_limited", Error: "wait a moment"}}}
+	l.st.chatEditor().SetText("hi")
+	l.run(l.st.handleKey(KeyEnter, false, armed), armed)
+	waitFleetJobs(t, l)
+	l.reap(armed)
+	if len(notices) != 1 || l.st.chatTold["q"] {
+		t.Fatalf("refused send: notices %d told %v", len(notices), l.st.chatTold)
+	}
+	sayRes = fleetSendResult{Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{OK: true}}}
+	noticeRes = fleetSendResult{Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{Code: "rate_limited"}}}
+	l.run(l.st.handleKey(KeyEnter, false, armed), armed)
+	waitFleetJobs(t, l)
+	l.reap(armed)
+	waitFleetJobs(t, l)
+	l.reap(armed)
 	if l.st.chat == nil || l.st.toast != "FLEET was not told about this chat" || l.st.toastKind != fleetToastInfo || len(notices) != 2 {
 		t.Fatalf("refused notice: chat %+v toast %q notices %d", l.st.chat, l.st.toast, len(notices))
+	}
+	if notices[1].Text != "Andy opened chat on card q (fix-two)" || says[len(says)-1].Target != "fix-two" {
+		t.Fatalf("second card: notice %+v say %+v", notices[1], says[len(says)-1])
 	}
 }
 

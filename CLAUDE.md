@@ -314,8 +314,11 @@ types into panes. Spec and plan: `docs/superpowers/`.
   `i`/`→` (list screen, not in a paste) opens the same chat panel on that session
   (`/fleet/session`, `/fleet/session/say`, pinned to the row's `sid` and
   `Source`; `gone`/`not_session` end it), one draft per tmux+sid beside
-  FLEET's, and once per card id per run tells FLEET "Andy opened chat on
-  card <id> (<tmux>)" (no card id; id and tmux must pass
+  FLEET's. Opening tells FLEET nothing; the first send to that session
+  that goes through tells FLEET "Andy opened chat on card <id> (<tmux>)",
+  once per card id per run, after Andy's send (the server's 1 s say gap
+  is shared, and a no-card line that hits it is held, never refused), and
+  marks the card told only once sent (no card id; id and tmux must pass
   `fleetSessionNameRe`; a refusal is a toast). `?` (list or ship screen)
   opens the key help (fleet_tui_help.go), which swallows every other key.
   The key help row offers `c`/`x` only through `canCorrect`/`canDismiss`,

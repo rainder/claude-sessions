@@ -10,12 +10,14 @@ import (
 )
 
 // Inspector layout floor. Below either dimension the fullscreen preview cannot
-// lay out its five fixed rows (title, metadata, separator, at least one body
-// line, footer) or fit the footer's "q back  r refresh  G follow" strip (27
-// cols), so the renderer degrades to a single "terminal too small" notice plus
-// a Back control instead of drawing a corrupted frame.
+// lay out its six fixed rows (title, metadata, separator, at least one body
+// line, then the footer, or while composing the compose key hint plus a
+// one-row box, so the hint never takes the only body row) or fit the
+// footer's "q back  r refresh  G follow" strip (27 cols), so the renderer
+// degrades to a single "terminal too small" notice plus a Back control
+// instead of drawing a corrupted frame.
 const (
-	minInspectorRows = 5
+	minInspectorRows = 6
 	minInspectorCols = 30
 )
 

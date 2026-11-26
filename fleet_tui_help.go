@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // The Fleet view's key help: ? on the card list or the ship screen opens a
 // scrollable panel listing every key of the view, its panels and chats.
@@ -68,9 +71,20 @@ var fleetHelpText = []string{
 }
 
 // fleetHelpMode is the open help panel. scroll is the first body line shown;
-// fleetHelpLines clamps it.
+// fleetHelpLines clamps it. page is the body height it last drew (0 before
+// the first frame), the PgUp/PgDn step.
 type fleetHelpMode struct {
 	scroll int
+	page   int
+}
+
+// pageStep is one PgUp/PgDn of the help body: its drawn height less one line
+// of overlap, or fleetPageStep before the first frame.
+func (h *fleetHelpMode) pageStep() int {
+	if h.page <= 0 {
+		return fleetPageStep
+	}
+	return max(h.page-1, 1)
 }
 
 // openHelp is ? on the card list or the ship screen. handleKey routes every
@@ -98,9 +112,9 @@ func (st *fleetViewState) handleHelpKey(k string) fleetCmd {
 	case KeyDown:
 		h.scroll++
 	case KeyPageUp:
-		h.scroll = max(h.scroll-st.pageStep(), 0)
+		h.scroll = max(h.scroll-h.pageStep(), 0)
 	case KeyPageDown, " ":
-		h.scroll += st.pageStep()
+		h.scroll += h.pageStep()
 	case KeyHome:
 		h.scroll = 0
 	case KeyEnd:
@@ -113,9 +127,10 @@ func (st *fleetViewState) handleHelpKey(k string) fleetCmd {
 
 // fleetHelpLines draws the help as the whole view: a head line, the body
 // window from h.scroll (clamped here so a key past the end moves at once on
-// the way back), and the key line. With rows > 0 the frame is exactly rows
-// lines.
-func fleetHelpLines(st *fleetViewState, cols, rows int) []string {
+// the way back), and the key line, or a toast in its place while one shows
+// (a send, R or dismiss result that lands while the help is open), as the
+// chat does. With rows > 0 the frame is exactly rows lines.
+func fleetHelpLines(st *fleetViewState, cols, rows int, now time.Time) []string {
 	h := st.help
 	sep := dim(strings.Repeat("─", cols))
 	head := bold("FLEET VIEW · KEYS")
@@ -130,6 +145,7 @@ func fleetHelpLines(st *fleetViewState, cols, rows int) []string {
 	if rows > 0 {
 		n = max(rows-4, 0)
 	}
+	h.page = n
 	h.scroll = max(min(h.scroll, len(body)-n), 0)
 	end := min(h.scroll+n, len(body))
 	keys := fleetHelpKeys
@@ -140,7 +156,11 @@ func fleetHelpLines(st *fleetViewState, cols, rows int) []string {
 	for rows > 0 && len(out) < rows-2 {
 		out = append(out, "")
 	}
-	out = append(out, sep, dim(truncateCells(keys, cols)))
+	last := fleetToastLine(st, now)
+	if last == "" {
+		last = dim(truncateCells(keys, cols))
+	}
+	out = append(out, sep, last)
 	if rows > 0 && len(out) > rows {
 		// A screen shorter than the head and key lines: keep the key line.
 		out = append(out[:max(rows-1, 0)], out[len(out)-1])

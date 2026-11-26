@@ -207,7 +207,7 @@ type fleetLoop struct {
 	chats     []*fleetJob[fleetChatFetch]
 	chatSends []*fleetJob[fleetChatSent]
 	// notices are the "Andy opened chat on card" lines to FLEET
-	// (st.chatNotice), fire-and-forget: only a refusal shows, as a toast.
+	// (tellFleetChat), fire-and-forget: only a refusal shows, as a toast.
 	notices []*fleetJob[fleetSendResult]
 
 	// sleep waits between a batch's sends; nil is time.Sleep.
@@ -283,6 +283,7 @@ func (l *fleetLoop) reap(now time.Time) {
 		if d.res.Moved {
 			l.startState()
 		}
+		l.tellFleetChat(d)
 		// Read the chat now, so the message shows without waiting a poll.
 		l.nextChat = now
 	}
@@ -310,6 +311,27 @@ func (l *fleetLoop) reap(now time.Time) {
 	if c := l.st.clarify; c != nil && !c.loaded && c.err == "" && len(l.clarifies) == 0 {
 		l.startClarify(fleetCmdClarifyGet)
 	}
+}
+
+// tellFleetChat sends FLEET the card's chat notice (chatNoticeFor) after a
+// message reached that card's session. It goes only after Andy's own
+// message is done, never beside it: the server's 1 s gap after any say
+// (fleetSayGateLocked) is shared by FLEET and the sessions, and a no-card
+// line that hits it is held in FLEET's outbox and typed later, while a
+// session say that hit it would be refused. So Andy's message always goes
+// first, and the notice never costs it its send.
+func (l *fleetLoop) tellFleetChat(d fleetChatSent) {
+	r := d.res
+	if d.target == nil || d.card == "" || l.send == nil || r.CheckErr != nil || r.Moved || !r.Out.Result.OK {
+		return
+	}
+	n := l.st.chatNoticeFor(d.card, d.target.Tmux, d.source)
+	if n == nil {
+		return
+	}
+	send, req := l.send, *n
+	l.notices = append(l.notices, startFleetJob(func() fleetSendResult { return send(req) }))
+	l.st.markChatTold(d.card)
 }
 
 // applyClarifyJob takes one clarify job's result. A result for a chat that
@@ -536,11 +558,6 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 	case fleetCmdChatGet:
 		l.startChat()
 		l.nextChat = now.Add(fleetChatPoll)
-		if n := l.st.chatNotice; n != nil && l.send != nil {
-			send, r := l.send, *n
-			l.notices = append(l.notices, startFleetJob(func() fleetSendResult { return send(r) }))
-		}
-		l.st.chatNotice = nil
 	case fleetCmdChatSend:
 		if sreq := l.st.sessionSend; sreq != nil {
 			l.st.sessionSend = nil
@@ -550,8 +567,12 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 			}
 			say, r := l.sessionSay, *sreq
 			target := fleetChatTarget{Tmux: r.Target, SID: r.SID}
+			card := ""
+			if c := l.st.chat; c != nil && c.target != nil && c.target.key() == target.key() {
+				card = c.card
+			}
 			l.chatSends = append(l.chatSends, startFleetJob(func() fleetChatSent {
-				return fleetChatSent{text: r.Text, res: say(r), target: &target}
+				return fleetChatSent{text: r.Text, res: say(r), target: &target, card: card, source: r.Source}
 			}))
 			return false
 		}
@@ -1019,7 +1040,7 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 		st.noteDrawn(false, now)
 		var lines []string
 		if st.help != nil {
-			lines = fleetHelpLines(st, width, rows)
+			lines = fleetHelpLines(st, width, rows, now)
 		} else if st.chat != nil {
 			lines = fleetChatLines(st, width, rows, now)
 		} else {
@@ -1373,26 +1394,41 @@ func fleetBottomRowFit(st *fleetViewState, now time.Time, cols int) string {
 
 // fleetHelpDropOrder is the key help's parts in the order they go when the
 // row is wider than the screen: what the full help (?) or the screen itself
-// already says goes first, the keys that act on the selected card and
-// "? keys" never.
-var fleetHelpDropOrder = []string{"PgUp/PgDn scroll", "↑↓ card", "t raw text", "Esc back", "o other", "1-9 pick option"}
+// already says goes first. fleetHelpDropLater goes next: the keys not about
+// the selected card alone. Then the card's own keys go from the right, and
+// "? keys" never: it is the way to every key that went.
+var (
+	fleetHelpDropOrder = []string{"PgUp/PgDn scroll", "↑↓ card", "t raw text", "Esc back", "o other", "1-9 pick option"}
+	fleetHelpDropLater = []string{fleetHelpChatHint, fleetHelpBatchHint}
+)
 
-// fleetFitHelp drops parts of a " · "-separated key help row, in
-// fleetHelpDropOrder, until it fits cols cells; a row that still does not
-// fit is left for the caller's clip. cols <= 0 keeps the row whole.
+// fleetHelpKeysHint is the key help's last part, kept while anything else
+// can go.
+const fleetHelpKeysHint = "? keys"
+
+// fleetFitHelp drops parts of a " · "-separated key help row until it fits
+// cols cells: fleetHelpDropOrder, then fleetHelpDropLater, then from the
+// right, all but "? keys". A row that still does not fit ("? keys" alone on
+// a tiny screen) is left for the caller's clip. cols <= 0 keeps the row
+// whole.
 func fleetFitHelp(row string, cols int) string {
 	if cols <= 0 || cellWidth(row) <= cols {
 		return row
 	}
 	parts := strings.Split(row, " · ")
-	for _, drop := range fleetHelpDropOrder {
-		i := slices.Index(parts, drop)
-		if i < 0 {
-			continue
-		}
+	drop := func(i int) bool {
 		parts = slices.Delete(parts, i, i+1)
-		if row = strings.Join(parts, " · "); cellWidth(row) <= cols {
-			break
+		row = strings.Join(parts, " · ")
+		return cellWidth(row) <= cols
+	}
+	for _, d := range slices.Concat(fleetHelpDropOrder, fleetHelpDropLater) {
+		if i := slices.Index(parts, d); i >= 0 && drop(i) {
+			return row
+		}
+	}
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i] != fleetHelpKeysHint && drop(i) {
+			return row
 		}
 	}
 	return row

@@ -41,6 +41,7 @@ func (t fleetChatTarget) key() string { return t.Tmux + "\x00" + t.SID }
 type fleetChatMode struct {
 	source   string
 	target   *fleetChatTarget // the session chat's session; nil is the chat with FLEET
+	card     string           // the card a session chat was opened on, for chatNoticeFor
 	pane     *string          // a session read from its pane (no transcript): the sanitized text
 	tool     string           // the session's tool, from its last read
 	ended    bool             // the session refused the chat for good: no more reads or sends
@@ -68,11 +69,14 @@ type fleetChatFetch struct {
 }
 
 // fleetChatSent is a finished chat send with the text it sent, and the
-// session it went to (nil: FLEET).
+// session it went to (nil: FLEET), with the card that session chat was
+// opened on and the host it was sent to.
 type fleetChatSent struct {
 	text   string
 	res    fleetSendResult
 	target *fleetChatTarget
+	card   string
+	source string
 }
 
 // canChat reports whether f opens the chat: a loaded state from one host
@@ -97,8 +101,8 @@ func (st *fleetViewState) openChat(now time.Time) fleetCmd {
 
 // openSessionChat is i or → on the list: the selected card's session
 // (fleetCardSession, as a resolves it) in the chat panel. A paste never
-// opens it. A card with no one session toasts why. The first open per card
-// id per run tells FLEET (tellFleetChat).
+// opens it. A card with no one session toasts why. Opening tells FLEET
+// nothing: the first message that reaches the session does (chatNoticeFor).
 func (st *fleetViewState) openSessionChat(inBatch bool, now time.Time) fleetCmd {
 	if inBatch || !st.canChat() {
 		return fleetCmdNone
@@ -119,28 +123,35 @@ func (st *fleetViewState) openSessionChat(inBatch bool, now time.Time) fleetCmd 
 		sid = ""
 	}
 	t := &fleetChatTarget{Tmux: pick.Tmux, SID: sid, Name: strings.Join(strings.Fields(fleetDisplayText(pick.Name)), " ")}
-	st.chat = &fleetChatMode{source: st.view.Source, openedAt: now, target: t}
+	st.chat = &fleetChatMode{source: st.view.Source, openedAt: now, target: t, card: it.Card.ID}
 	st.sessionDraft(t.key())
 	st.toast, st.toastUntil = "", time.Time{}
-	st.tellFleetChat(it.Card.ID, t.Tmux)
 	return fleetCmdChatGet
 }
 
-// tellFleetChat mirrors the page's openCardChat: once per card id per run,
-// and only while FLEET can take a send, FLEET gets "Andy opened chat on card
+// chatNoticeFor is the line that tells FLEET Andy chats on card id's
+// session (tmux), as the page's openCardChat does: "Andy opened chat on card
 // <id> (<tmux>)" as a plain message (no card id, so never an answer), to
-// re-read that session and maybe close the card. The loop sends it with the
-// chat's first read (st.chatNotice), fire-and-forget. An id or name outside
-// fleetSessionNameRe is never typed.
-func (st *fleetViewState) tellFleetChat(id, tmux string) {
-	if !st.view.Fleet.Alive || st.chatTold[id] || !fleetSessionNameRe.MatchString(id) || !fleetSessionNameRe.MatchString(tmux) {
-		return
+// re-read that session and maybe close the card. The loop sends it after
+// the first message to that session went through, never on open (a stray
+// → must not type into FLEET's pane), fire-and-forget, once per card id
+// per run (markChatTold, only once it is really sent). nil when FLEET is
+// down, it was told already, the view moved off source, or the id or name
+// is outside fleetSessionNameRe (never typed).
+func (st *fleetViewState) chatNoticeFor(id, tmux, source string) *fleetSayRequest {
+	if !st.view.Fleet.Alive || st.chatTold[id] || source == "" || st.view.Source != source ||
+		!fleetSessionNameRe.MatchString(id) || !fleetSessionNameRe.MatchString(tmux) {
+		return nil
 	}
+	return &fleetSayRequest{Source: source, Text: "Andy opened chat on card " + id + " (" + tmux + ")"}
+}
+
+// markChatTold records that FLEET was sent the chat notice for card id.
+func (st *fleetViewState) markChatTold(id string) {
 	if st.chatTold == nil {
 		st.chatTold = map[string]bool{}
 	}
 	st.chatTold[id] = true
-	st.chatNotice = &fleetSayRequest{Source: st.view.Source, Text: "Andy opened chat on card " + id + " (" + tmux + ")"}
 }
 
 // sessionDraft is the composer of the session chat with key, made on first

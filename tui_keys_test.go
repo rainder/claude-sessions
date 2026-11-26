@@ -108,12 +108,24 @@ func TestRenderInspectorComposeHint(t *testing.T) {
 	if !strings.Contains(lines[18], "> one") || !strings.Contains(lines[19], "two") {
 		t.Fatalf("box rows = %q / %q", lines[18], lines[19])
 	}
-	for _, rows := range []int{5, 6, 8} {
+	v.compose = editorWith("x")
+	for _, rows := range []int{6, 8} {
 		var b strings.Builder
 		RenderInspector(&b, v, nil, false, 60, rows)
-		if n := len(inspectorFrameLines(b.String())); n != rows {
-			t.Fatalf("rows=%d: frame has %d lines", rows, n)
+		lines := inspectorFrameLines(b.String())
+		if len(lines) != rows {
+			t.Fatalf("rows=%d: frame has %d lines", rows, len(lines))
 		}
+		// The hint never takes the only body row: row 3 is body.
+		if stripANSI(lines[rows-2]) != clipLine(composeHint, 60) || stripANSI(lines[3]) == clipLine(composeHint, 60) {
+			t.Fatalf("rows=%d: hint %q body %q", rows, lines[rows-2], lines[3])
+		}
+	}
+	// One row fewer is the too-small notice, not a frame with no body.
+	var b5 strings.Builder
+	RenderInspector(&b5, v, nil, false, 60, minInspectorRows-1)
+	if !strings.Contains(b5.String(), "terminal too small") {
+		t.Fatalf("rows=%d: %q", minInspectorRows-1, b5.String())
 	}
 }
 

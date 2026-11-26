@@ -125,8 +125,7 @@ type fleetViewState struct {
 	// The session chat (i or →, fleet_tui_chat.go).
 	sessionDrafts map[string]*textEditor  // the session chats' composers, by fleetChatTarget.key; memory only
 	sessionSend   *fleetSessionSayRequest // set with fleetCmdChatSend for a session chat; the loop takes it
-	chatTold      map[string]bool         // card ids FLEET was told about a session chat on (i), once per run
-	chatNotice    *fleetSayRequest        // that line, set with fleetCmdChatGet; the loop takes it
+	chatTold      map[string]bool         // card ids FLEET was sent the session chat notice for, once per run
 
 	toast      string
 	toastKind  fleetToastKind

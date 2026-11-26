@@ -799,7 +799,7 @@ func TestRenderInspectorSummaryAboveBody(t *testing.T) {
 func TestRenderInspectorSummaryClampedOnShortTerminal(t *testing.T) {
 	v := populatedInspectorView()
 	summary := []string{bold("ticket: DR-1234:"), "one", "two", dim("…")}
-	for _, rows := range []int{5, 6, 7, 8, 9, 12} {
+	for _, rows := range []int{6, 7, 8, 9, 12} {
 		var b strings.Builder
 		RenderInspector(&b, v, summary, false, 100, rows)
 		lines := inspectorFrameLines(b.String())
