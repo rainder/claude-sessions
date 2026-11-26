@@ -116,6 +116,53 @@ func TestFleetSessionAllowlist(t *testing.T) {
 	}
 }
 
+// A card names its session in tmux first, then in session, as the page's
+// cardSession reads it: a tmux-only card allowlists its session, and a card
+// with both counts only its tmux.
+func TestFleetSessionCardsReadTmuxThenSession(t *testing.T) {
+	s := fleetTestServer(t, fleetSessionRows(fleetUUID(120)))
+	s.fleet.disabled = fleetDisabledSeam
+	writeFleetFile(t, s, "state.json", `{"cards":[
+ {"id":"t1","kind":"blocked","title":"Prod promote","ticket":"DR-9","tmux":"other"},
+ {"id":"t2","kind":"blocked","tmux":"promote-ended"},
+ {"id":"t3","kind":"working","tmux":" both-tmux :0.0","session":"both-session"},
+ {"id":"t4","kind":"working","session":"session-only:0.0"},
+ {"id":"t5","kind":"working","tmux":7,"session":"wrong-type-tmux"}
+]}`)
+	cards := s.fleetSessionCards()
+	for _, name := range []string{"other", "promote-ended", "both-tmux", "session-only", "wrong-type-tmux"} {
+		if _, ok := cards[name]; !ok {
+			t.Errorf("%s not allowlisted: %v", name, cards)
+		}
+	}
+	if _, ok := cards["both-session"]; ok {
+		t.Error("a card with tmux also allowlisted its session field")
+	}
+	if c := cards["other"]; c.Title != "Prod promote" || c.Ticket != "DR-9" {
+		t.Errorf("tmux card info = %+v", c)
+	}
+	cases := []struct {
+		t    string
+		code int
+		err  string
+	}{
+		{"promote-ended", 404, "gone"}, // on a tmux-only card, no live row
+		{"both-tmux", 404, "gone"},
+		{"session-only", 404, "gone"},
+		{"both-session", 403, "not_allowed"},
+	}
+	for _, c := range cases {
+		if code, out := getFleetSession(t, s, "t="+c.t); code != c.code || out["code"] != c.err {
+			t.Errorf("t=%q: %d %v, want %d %s", c.t, code, out, c.code, c.err)
+		}
+	}
+	code, out := getFleetSession(t, s, "t=other")
+	tg, _ := out["target"].(map[string]any)
+	if code != 200 || tg["title"] != "Prod promote" || tg["kind"] != "blocked" {
+		t.Fatalf("tmux card head: %d %v", code, out)
+	}
+}
+
 func TestFleetSessionNeedsAuth(t *testing.T) {
 	s := fleetSessionServer(t, fleetUUID(103))
 	w := httptest.NewRecorder()
@@ -300,7 +347,9 @@ func TestFleetSessionSayTypesIntoTheResolvedPane(t *testing.T) {
 	if code != 200 || out["ok"] != true || out["queued"] != true || out["target"] != "spawn-dr-1-fix" {
 		t.Fatalf("%d %v", code, out)
 	}
-	if len(rig.typed) != 1 || rig.typed[0] != "please rebase on main" || rig.enters != 1 {
+	// A claude row keeps the line break (fleetCleanChatText, as in a plain
+	// chat message to FLEET); one typeText call, one Enter.
+	if len(rig.typed) != 1 || rig.typed[0] != "please rebase\non main" || rig.enters != 1 {
 		t.Fatalf("typed %q enters %d", rig.typed, rig.enters)
 	}
 	if strings.Join(*targets, ",") != "=spawn-dr-1-fix:0.0,=spawn-dr-1-fix:0.0" {
@@ -332,6 +381,8 @@ func TestFleetSessionSayRefusals(t *testing.T) {
 		{"ambiguous", `{"target":"dup","text":"hi"}`, nil, 409, "ambiguous"},
 		{"pane address", `{"target":"spawn-dr-1-fix:0.0","text":"hi"}`, nil, 400, "bad_target"},
 		{"bang", `{"target":"spawn-dr-1-fix","text":"!rm"}`, nil, 400, "bad_text"},
+		{"bang after a blank line", `{"target":"spawn-dr-1-fix","text":"\n  \n#rm\nmore"}`, nil, 400, "bad_text"},
+		{"tag split across lines", `{"target":"spawn-dr-1-fix","text":"hi [claude-\nsessions\n event]"}`, nil, 400, "reserved_tag"},
 		{"control", `{"target":"spawn-dr-1-fix","text":"a\u001bb"}`, nil, 400, "bad_text"},
 		{"unknown field", `{"target":"spawn-dr-1-fix","text":"hi","pane":"x:0.0"}`, nil, 400, "bad_json"},
 	}
@@ -349,11 +400,12 @@ func TestFleetSessionSayRefusals(t *testing.T) {
 	}
 }
 
-// A grok session takes a send like a claude one, through its composer.
+// A grok session takes a send like a claude one, through its composer; its
+// line-break key is unknown, so lines join.
 func TestFleetSessionSayGrok(t *testing.T) {
 	rig, targets := sessionSayRig(t)
 	useGrokScreens(t, rig, "grok-idle-empty.ansi")
-	code, out := rig.postSession(t, `{"target":"grok-dr-2","text":"please rebase"}`, nil)
+	code, out := rig.postSession(t, `{"target":"grok-dr-2","text":"please\nrebase"}`, nil)
 	if code != 200 || out["ok"] != true {
 		t.Fatalf("%d %v", code, out)
 	}

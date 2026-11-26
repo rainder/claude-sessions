@@ -54,6 +54,12 @@ func tmuxSessionPart(t string) string {
 	return name
 }
 
+// fleetCardTmuxPart is the tmux session part of a card's tmux or session
+// field, as the page's sessOf reads it: before the first ":", trimmed.
+func fleetCardTmuxPart(v string) string {
+	return strings.TrimSpace(tmuxSessionPart(v))
+}
+
 // fleetCardInfo is what the session view shows from the card naming a session.
 type fleetCardInfo struct {
 	Ticket, Title, Kind string
@@ -61,8 +67,10 @@ type fleetCardInfo struct {
 
 // fleetSessionCards maps every tmux session named by a card in the current
 // state.json (the mtime-checked loader: a bad file serves the last good copy)
-// to the first card naming it. A card field of the wrong type is ignored,
-// not the whole card.
+// to the first card naming it. A card names its session in `tmux` (the
+// page's cardSession reads it first), else in `session` (a tmux name, maybe
+// "name:0.0"; a display name simply matches no tmux session). A card field
+// of the wrong type is ignored, not the whole card.
 func (s *server) fleetSessionCards() map[string]fleetCardInfo {
 	state, _ := s.loadFleetState()
 	var cards []map[string]json.RawMessage
@@ -74,7 +82,10 @@ func (s *server) fleetSessionCards() map[string]fleetCardInfo {
 	}
 	out := map[string]fleetCardInfo{}
 	for _, c := range cards {
-		name := tmuxSessionPart(str(c, "session"))
+		name := fleetCardTmuxPart(str(c, "tmux"))
+		if name == "" {
+			name = fleetCardTmuxPart(str(c, "session"))
+		}
 		if name == "" {
 			continue
 		}
@@ -454,7 +465,9 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: "bad_json", Error: "bad json"})
 		return
 	}
-	text, code, msg := fleetCleanSayText(raw)
+	// Line breaks stay, as in a plain chat message to FLEET: fleetTypeInto
+	// types them as line breaks for a claude row and joins them for grok.
+	text, code, msg := fleetCleanChatText(raw)
 	if msg != "" {
 		writeJSON(w, http.StatusBadRequest, fleetSessionErrBody{Code: code, Error: msg})
 		return
@@ -474,7 +487,7 @@ func (s *server) fleetSessionSay(w http.ResponseWriter, r *http.Request) {
 	f := &s.fleet
 	f.sayMu.Lock()
 	defer f.sayMu.Unlock()
-	key := name + "\x00" + text // never equals a FLEET key: text holds no control bytes
+	key := name + "\x00" + text // never equals a FLEET key: text holds no NUL
 	if res := s.fleetSayGateLocked(key); res != nil {
 		writeJSON(w, http.StatusOK, fleetSessionSayResult{*res, name})
 		return
