@@ -130,13 +130,17 @@ func TestFleetSessionCardsReadTmuxThenSession(t *testing.T) {
  {"id":"t5","kind":"working","tmux":7,"session":"wrong-type-tmux"}
 ]}`)
 	cards := s.fleetSessionCards()
-	for _, name := range []string{"other", "promote-ended", "both-tmux", "session-only", "wrong-type-tmux"} {
+	// t5: a numeric tmux reads as "7" (fleetPushStr, as the TUI and page read
+	// it), so its session field is not the fallback.
+	for _, name := range []string{"other", "promote-ended", "both-tmux", "session-only", "7"} {
 		if _, ok := cards[name]; !ok {
 			t.Errorf("%s not allowlisted: %v", name, cards)
 		}
 	}
-	if _, ok := cards["both-session"]; ok {
-		t.Error("a card with tmux also allowlisted its session field")
+	for _, name := range []string{"both-session", "wrong-type-tmux"} {
+		if _, ok := cards[name]; ok {
+			t.Errorf("a card with tmux also allowlisted its session field %q", name)
+		}
 	}
 	if c := cards["other"]; c.Title != "Prod promote" || c.Ticket != "DR-9" {
 		t.Errorf("tmux card info = %+v", c)

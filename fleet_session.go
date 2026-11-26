@@ -80,17 +80,24 @@ func (s *server) fleetSessionCards() map[string]fleetCardInfo {
 		_ = json.Unmarshal(m[k], &v)
 		return v
 	}
+	// The session names read a number as its text (fleetPushStr), as the TUI
+	// card (fleet_card.go) and the page read them.
+	name := func(m map[string]json.RawMessage, k string) string {
+		var v any
+		_ = json.Unmarshal(m[k], &v)
+		return fleetCardTmuxPart(fleetPushStr(v))
+	}
 	out := map[string]fleetCardInfo{}
 	for _, c := range cards {
-		name := fleetCardTmuxPart(str(c, "tmux"))
-		if name == "" {
-			name = fleetCardTmuxPart(str(c, "session"))
+		n := name(c, "tmux")
+		if n == "" {
+			n = name(c, "session")
 		}
-		if name == "" {
+		if n == "" {
 			continue
 		}
-		if _, seen := out[name]; !seen {
-			out[name] = fleetCardInfo{Ticket: str(c, "ticket"), Title: str(c, "title"), Kind: str(c, "kind")}
+		if _, seen := out[n]; !seen {
+			out[n] = fleetCardInfo{Ticket: str(c, "ticket"), Title: str(c, "title"), Kind: str(c, "kind")}
 		}
 	}
 	return out
