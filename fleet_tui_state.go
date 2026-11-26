@@ -110,18 +110,25 @@ type fleetViewState struct {
 	attach        *fleetAttachRequest  // set with fleetCmdAttach; the loop takes it
 	clarify       *fleetClarifyMode    // the open Clarify side chat; nil in the list
 	clarifyReq    *fleetClarifyRequest // set with fleetCmdClarifyAsk; the loop takes it
-	chat          *fleetChatMode       // the open chat with FLEET (i); nil in the list
+	chat          *fleetChatMode       // the open chat with FLEET (i) or a card's session (s); nil in the list
 	chatDraft     textEditor           // the chat's composer; kept while the chat is closed
 	chatSend      *fleetSayRequest     // set with fleetCmdChatSend; the loop takes it
-	chatSending   bool                 // a chat send job runs
+	chatSending   bool                 // a chat send job runs (FLEET or a session)
 	nextAfter     string               // card id just sent; the next applyState selects the next open card
 	justSent      string               // card id our own answer reached; locked until a state shows it answered or gone
 	batchSent     map[string]bool      // card ids an R batch's answers reached; each locked as justSent is
 	unclear       string               // card id whose send result is unknown; locked until the next applied state
 	drawn         fleetDrawnCard       // renderFleetView keeps it; r waits fleetLeanPickDelay on it
-	toast         string
-	toastKind     fleetToastKind
-	toastUntil    time.Time
+
+	// The session chat (s, fleet_tui_chat.go).
+	sessionDrafts map[string]*textEditor  // the session chats' composers, by fleetChatTarget.key; memory only
+	sessionSend   *fleetSessionSayRequest // set with fleetCmdChatSend for a session chat; the loop takes it
+	chatTold      map[string]bool         // card ids FLEET was told about a session chat on (s), once per run
+	chatNotice    *fleetSayRequest        // that line, set with fleetCmdChatGet; the loop takes it
+
+	toast      string
+	toastKind  fleetToastKind
+	toastUntil time.Time
 
 	// hit is where the last render put the list and the panel on screen, for
 	// the mouse. applyState clears it, since a new state can move every row.
@@ -558,6 +565,8 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return st.openClarify(now)
 	case "i":
 		return st.openChat(now)
+	case "s":
+		return st.openSessionChat(inBatch, now)
 	case "r":
 		return st.pickLean(inBatch, now)
 	case "R":

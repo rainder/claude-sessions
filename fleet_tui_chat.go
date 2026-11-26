@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -9,8 +10,12 @@ import (
 // The Fleet view's chat with FLEET itself, opened with i on the card list:
 // FLEET's recent conversation (GET /fleet/chat, the page's Chat tab) above a
 // multi-line composer (text_editor.go) whose Enter sends a plain message
-// (POST /fleet/say with no card). State, keys and drawing are here; the loop
-// (fleet_tui.go) runs the jobs the commands ask for.
+// (POST /fleet/say with no card). s on a card opens the same panel on the
+// card's session instead (fleetCardSession): its transcript or pane (GET
+// /fleet/session, the page's session view) and its say (POST
+// /fleet/session/say), pinned to the row's session id. Each target keeps its
+// own composer. State, keys and drawing are here; the loop (fleet_tui.go)
+// runs the jobs the commands ask for.
 
 const (
 	// fleetChatPoll is how often the open chat is read.
@@ -21,18 +26,32 @@ const (
 	fleetHelpChat = "Enter send · alt-Enter / \\⏎ new line · PgUp/PgDn scroll · Esc close"
 )
 
+// fleetChatTarget is the session a session chat talks to: its tmux session,
+// the session id it is pinned to ("" is no pin) and its display name
+// (sanitized, one line; "" when unknown).
+type fleetChatTarget struct {
+	Tmux, SID, Name string
+}
+
+// key is the target's composer key: one draft per tmux session and session.
+func (t fleetChatTarget) key() string { return t.Tmux + "\x00" + t.SID }
+
 // fleetChatMode is the open chat. source is the state's Source when it
 // opened: reads and sends are pinned to it like a card answer.
 type fleetChatMode struct {
 	source   string
-	turns    []fleetChatTurn // oldest first, at most fleetChatKeep, every string sanitized
-	pos      int64           // the last read's pos; 0 reads the tail again
-	sid      string          // the FLEET session the turns belong to
-	loaded   bool            // the first read landed
-	readOnly bool            // FLEET is down: the last session, mirrored
-	reason   string          // why there is no live chat, from the server
-	err      string          // a fixed line when the chat could not be read
-	scroll   int             // lines scrolled up from the newest
+	target   *fleetChatTarget // the session chat's session; nil is the chat with FLEET
+	pane     *string          // a session read from its pane (no transcript): the sanitized text
+	tool     string           // the session's tool, from its last read
+	ended    bool             // the session refused the chat for good: no more reads or sends
+	turns    []fleetChatTurn  // oldest first, at most fleetChatKeep, every string sanitized
+	pos      int64            // the last read's pos; 0 reads the tail again
+	sid      string           // the FLEET session the turns belong to
+	loaded   bool             // the first read landed
+	readOnly bool             // FLEET is down: the last session, mirrored
+	reason   string           // why there is no live chat, from the server
+	err      string           // a fixed line when the chat could not be read
+	scroll   int              // lines scrolled up from the newest
 	openedAt time.Time
 	// again: the last read found another FLEET session and started over
 	// from its tail; the loop reads again at once.
@@ -41,16 +60,19 @@ type fleetChatMode struct {
 
 // fleetChatFetch is one chat read's result, with the chat it was read for.
 type fleetChatFetch struct {
-	chat  *fleetChatMode
-	view  fleetChatView
-	err   error
-	moved bool // FLEET is on another host than the chat; nothing was read
+	chat    *fleetChatMode
+	view    fleetChatView
+	session fleetSessionView // a session chat's read
+	err     error
+	moved   bool // FLEET is on another host than the chat; nothing was read
 }
 
-// fleetChatSent is a finished chat send with the text it sent.
+// fleetChatSent is a finished chat send with the text it sent, and the
+// session it went to (nil: FLEET).
 type fleetChatSent struct {
-	text string
-	res  fleetSendResult
+	text   string
+	res    fleetSendResult
+	target *fleetChatTarget
 }
 
 // canChat reports whether i opens the chat: a loaded state from one host
@@ -73,6 +95,77 @@ func (st *fleetViewState) openChat(now time.Time) fleetCmd {
 	return fleetCmdChatGet
 }
 
+// openSessionChat is s on the list: the selected card's session
+// (fleetCardSession, as a resolves it) in the chat panel. A paste never
+// opens it. A card with no one session toasts why. The first open per card
+// id per run tells FLEET (tellFleetChat).
+func (st *fleetViewState) openSessionChat(inBatch bool, now time.Time) fleetCmd {
+	if inBatch || !st.canChat() {
+		return fleetCmdNone
+	}
+	it := st.selected()
+	if it == nil {
+		return fleetCmdNone
+	}
+	pick := fleetCardSession(it.Card, st.view.Sessions)
+	if msg := fleetCardPickRefusal(pick, it.Card.Ticket); msg != "" {
+		st.setToast(msg, fleetToastWarn, now)
+		return fleetCmdRender
+	}
+	// A row id the server would refuse as a pin is no pin; without one the
+	// server still resolves the tmux session through its allowlist.
+	sid := pick.SID
+	if !resumeSessionIDRe.MatchString(sid) {
+		sid = ""
+	}
+	t := &fleetChatTarget{Tmux: pick.Tmux, SID: sid, Name: strings.Join(strings.Fields(fleetDisplayText(pick.Name)), " ")}
+	st.chat = &fleetChatMode{source: st.view.Source, openedAt: now, target: t}
+	st.sessionDraft(t.key())
+	st.toast, st.toastUntil = "", time.Time{}
+	st.tellFleetChat(it.Card.ID, t.Tmux)
+	return fleetCmdChatGet
+}
+
+// tellFleetChat mirrors the page's openCardChat: once per card id per run,
+// and only while FLEET can take a send, FLEET gets "Andy opened chat on card
+// <id> (<tmux>)" as a plain message (no card id, so never an answer), to
+// re-read that session and maybe close the card. The loop sends it with the
+// chat's first read (st.chatNotice), fire-and-forget. An id or name outside
+// fleetSessionNameRe is never typed.
+func (st *fleetViewState) tellFleetChat(id, tmux string) {
+	if !st.view.Fleet.Alive || st.chatTold[id] || !fleetSessionNameRe.MatchString(id) || !fleetSessionNameRe.MatchString(tmux) {
+		return
+	}
+	if st.chatTold == nil {
+		st.chatTold = map[string]bool{}
+	}
+	st.chatTold[id] = true
+	st.chatNotice = &fleetSayRequest{Source: st.view.Source, Text: "Andy opened chat on card " + id + " (" + tmux + ")"}
+}
+
+// sessionDraft is the composer of the session chat with key, made on first
+// use; memory only.
+func (st *fleetViewState) sessionDraft(key string) *textEditor {
+	if st.sessionDrafts == nil {
+		st.sessionDrafts = map[string]*textEditor{}
+	}
+	e := st.sessionDrafts[key]
+	if e == nil {
+		ed := newTextEditor(sendKeysMaxLen)
+		e = &ed
+		st.sessionDrafts[key] = e
+	}
+	return e
+}
+
+// chatEditor is the open chat's composer: FLEET's, or the session's own.
+func (st *fleetViewState) chatEditor() *textEditor {
+	if c := st.chat; c != nil && c.target != nil {
+		return st.sessionDraft(c.target.key())
+	}
+	return &st.chatDraft
+}
+
 // handleChatKey is handleKey while the chat is open. Esc and Ctrl-C close it
 // (the draft stays for the next open); PgUp/PgDn scroll the log; every
 // other key is the composer's. Enter is ignored for fleetArmDelay after the
@@ -90,7 +183,7 @@ func (st *fleetViewState) handleChatKey(k string, inBatch bool, now time.Time) f
 		c.scroll = max(c.scroll-st.pageStep(), 0)
 		return fleetCmdRender
 	}
-	switch st.chatDraft.key(k, inBatch) {
+	switch st.chatEditor().key(k, inBatch) {
 	case editorSubmit:
 		if now.Before(c.openedAt.Add(fleetArmDelay)) {
 			return fleetCmdNone
@@ -115,11 +208,22 @@ func (st *fleetViewState) chatSubmit(now time.Time) fleetCmd {
 		st.chat = nil
 		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
 		return fleetCmdRender
-	case !st.view.Fleet.Alive || c.readOnly:
+	case c.target != nil && c.ended:
+		msg := c.err
+		if msg == "" {
+			msg = "this session has ended"
+		}
+		st.setToast(msg, fleetToastWarn, now)
+		return fleetCmdRender
+	case c.target == nil && (!st.view.Fleet.Alive || c.readOnly):
 		st.setToast("FLEET is not running", fleetToastWarn, now)
 		return fleetCmdRender
 	}
-	st.chatSend = &fleetSayRequest{Source: c.source, Text: st.chatDraft.Text()}
+	if t := c.target; t != nil {
+		st.sessionSend = &fleetSessionSayRequest{Source: c.source, Target: t.Tmux, Text: st.chatEditor().Text(), SID: t.SID}
+	} else {
+		st.chatSend = &fleetSayRequest{Source: c.source, Text: st.chatDraft.Text()}
+	}
 	st.chatSending = true
 	return fleetCmdChatSend
 }
@@ -134,6 +238,10 @@ func (st *fleetViewState) applyChat(f fleetChatFetch, now time.Time) {
 	if f.moved {
 		st.chat = nil
 		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
+		return
+	}
+	if c.target != nil {
+		st.applySessionRead(c, f, now)
 		return
 	}
 	if f.err != nil {
@@ -156,10 +264,17 @@ func (st *fleetViewState) applyChat(f fleetChatFetch, now time.Time) {
 		return
 	}
 	c.sid = v.SessionID
-	if v.Reset {
+	c.merge(v.Turns, v.Reset, v.Pos)
+}
+
+// merge takes one read's turns: reset replaces the log, otherwise a turn
+// replaces the one with its uuid or is appended; the newest fleetChatKeep
+// stay. pos is where the next read starts.
+func (c *fleetChatMode) merge(turns []fleetChatTurn, reset bool, pos int64) {
+	if reset {
 		c.turns = nil
 	}
-	for _, t := range v.Turns {
+	for _, t := range turns {
 		if t.UUID == "" {
 			continue
 		}
@@ -172,7 +287,54 @@ func (st *fleetViewState) applyChat(f fleetChatFetch, now time.Time) {
 	if n := len(c.turns) - fleetChatKeep; n > 0 {
 		c.turns = append([]fleetChatTurn(nil), c.turns[n:]...)
 	}
-	c.pos = v.Pos
+	c.pos = pos
+}
+
+// fleetSessionRefusalText is the fixed line for a session endpoint's
+// refusal code; code is sanitized.
+func fleetSessionRefusalText(code string) string {
+	switch code {
+	case "gone":
+		return "this session has ended"
+	case "not_session":
+		return "this tmux session now runs another session"
+	case "not_allowed":
+		return "this session is not on a card or the session list any more"
+	case "ambiguous":
+		return "two or more sessions share this tmux session"
+	case "fleet_self":
+		return "this is FLEET's own session"
+	}
+	return "the server refused the chat: " + truncateCells(code, 40)
+}
+
+// applySessionRead takes one read of a session chat. A refusal (the session
+// ended, its tmux session runs another one, it left the allowlist) ends the
+// chat with a toast: no more reads or sends, the log stays. A pane read
+// replaces the log with the pane's text.
+func (st *fleetViewState) applySessionRead(c *fleetChatMode, f fleetChatFetch, now time.Time) {
+	if f.err != nil {
+		var ref *fleetSessionRefusal
+		switch {
+		case errors.Is(f.err, errFleetUnauthorized):
+			c.err = fleetToastTokenBad
+		case errors.As(f.err, &ref):
+			c.ended, c.err = true, fleetSessionRefusalText(ref.Code)
+			st.setToast(c.err, fleetToastWarn, now)
+		default:
+			c.err = "could not read the session"
+		}
+		return
+	}
+	v := f.session
+	c.err, c.loaded, c.tool = "", true, v.Tool
+	if v.Pane != nil {
+		c.pane, c.turns, c.pos = v.Pane, nil, 0
+		return
+	}
+	reset := v.Reset || c.pane != nil
+	c.pane = nil
+	c.merge(v.Turns, reset, v.Pos)
 }
 
 func fleetChatTurnIndex(turns []fleetChatTurn, uuid string) int {
@@ -184,9 +346,10 @@ func fleetChatTurnIndex(turns []fleetChatTurn, uuid string) int {
 	return -1
 }
 
-// applyChatSend takes a finished chat send. A message FLEET took (typed,
-// queued behind its turn, or held in the outbox) leaves the composer when
-// the composer still holds it; anything else keeps it there and toasts why.
+// applyChatSend takes a finished chat send. A message FLEET (or the
+// session) took (typed, queued behind its turn, or held in the outbox)
+// leaves its composer when the composer still holds it; anything else keeps
+// it there and toasts why.
 func (st *fleetViewState) applyChatSend(d fleetChatSent, now time.Time) {
 	st.chatSending = false
 	r := d.res
@@ -203,6 +366,10 @@ func (st *fleetViewState) applyChatSend(d fleetChatSent, now time.Time) {
 		st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
 		return
 	}
+	if d.target != nil {
+		st.applySessionSend(d, now)
+		return
+	}
 	msg, kind, _ := fleetSendToast(r.Out)
 	switch {
 	case r.Out.Result.OK && r.Out.Result.Held:
@@ -214,6 +381,52 @@ func (st *fleetViewState) applyChatSend(d fleetChatSent, now time.Time) {
 		st.chatDraft.Clear()
 	}
 	st.setToast(msg, kind, now)
+}
+
+// applySessionSend is applyChatSend for a send to a session. The draft it
+// clears is the one of the session it went to, whichever chat is open now;
+// a gone or not_session refusal ends that session's chat when it is open.
+func (st *fleetViewState) applySessionSend(d fleetChatSent, now time.Time) {
+	o := d.res.Out
+	msg, kind := fleetSessionSendToast(o)
+	if o.Result.OK {
+		if e := st.sessionDrafts[d.target.key()]; e != nil && e.Text() == d.text {
+			e.Clear()
+		}
+	}
+	if code := o.Result.Code; !o.Result.OK && (code == "gone" || code == "not_session") {
+		if c := st.chat; c != nil && c.target != nil && c.target.key() == d.target.key() {
+			c.ended, c.err = true, msg
+		}
+	}
+	st.setToast(msg, kind, now)
+}
+
+// fleetSessionSendToast maps a session say outcome to its toast. Only fixed
+// copy and text the client stripped of escapes reach it.
+func fleetSessionSendToast(o fleetSayOutcome) (string, fleetToastKind) {
+	r := o.Result
+	switch {
+	case o.Unclear:
+		return "delivery not confirmed — check the session", fleetToastWarn
+	case o.Status == 401:
+		return fleetToastTokenBad, fleetToastErr
+	case r.OK && r.Queued:
+		return "the session is busy — it reads your message next", fleetToastInfo
+	case r.OK:
+		return fleetToastSent, fleetToastInfo
+	case r.Code == "gone", r.Code == "not_session":
+		return fleetSessionRefusalText(r.Code), fleetToastWarn
+	case r.Code == "not_submitted":
+		return "typed but not submitted — check the session's pane", fleetToastWarn
+	case r.Error != "":
+		return r.Error, fleetToastErr
+	case r.Code != "":
+		return r.Code, fleetToastErr
+	case o.Body != "":
+		return o.Body, fleetToastErr
+	}
+	return fmt.Sprintf("HTTP %d", o.Status), fleetToastErr
 }
 
 // fleetChatLines draws the open chat as the whole view: a head line, the
@@ -238,7 +451,7 @@ func fleetChatLines(st *fleetViewState, cols, rows int, now time.Time) []string 
 	if rows > 0 {
 		boxMax = min(boxMax, max(1, (rows-len(top)-2)/2))
 	}
-	box := st.chatDraft.view(cols-2, boxMax)
+	box := st.chatEditor().view(cols-2, boxMax)
 	for i, l := range box {
 		if i == 0 {
 			box[i] = "› " + l
@@ -271,17 +484,31 @@ func fleetChatLines(st *fleetViewState, cols, rows int, now time.Time) []string 
 	return out
 }
 
-// fleetChatHead is "Chat with FLEET" with FLEET's state at the right edge.
+// fleetChatHead is "Chat with FLEET" (or with the session: its name and
+// tmux session) with its state at the right edge.
 func fleetChatHead(st *fleetViewState, cols int) string {
 	c := st.chat
 	right, sgr := "live", fleetSGRAlive
-	switch {
-	case c.readOnly || !st.view.Fleet.Alive:
-		right, sgr = "FLEET is not running · read-only", fleetSGRAmber
-	case st.view.FleetTool == "grok":
-		right = "live · grok: lines join"
-	}
 	left := "Chat with FLEET"
+	if t := c.target; t != nil {
+		left = "Chat with " + t.Tmux
+		if t.Name != "" && t.Name != t.Tmux {
+			left = "Chat with " + t.Name + " · " + t.Tmux
+		}
+		switch {
+		case c.ended:
+			right, sgr = "ended", fleetSGRAmber
+		case c.tool == "grok":
+			right = "live · grok: lines join"
+		}
+	} else {
+		switch {
+		case c.readOnly || !st.view.Fleet.Alive:
+			right, sgr = "FLEET is not running · read-only", fleetSGRAmber
+		case st.view.FleetTool == "grok":
+			right = "live · grok: lines join"
+		}
+	}
 	if cellWidth(left)+2+cellWidth(right) > cols {
 		return bold(truncateCells(left, cols))
 	}
@@ -289,11 +516,21 @@ func fleetChatHead(st *fleetViewState, cols int) string {
 }
 
 // fleetChatLogLines is the log, oldest first: each turn wrapped under its
-// label (you cyan, fleet magenta), a blank line between turns, and a read
-// error last.
+// label (you cyan, fleet or agent magenta), a blank line between turns, and
+// a read error last. A session read from its pane shows the pane's text.
 func fleetChatLogLines(c *fleetChatMode, cols int) []string {
 	if !c.loaded && c.err == "" {
 		return []string{dim("loading…")}
+	}
+	if c.pane != nil {
+		out := []string{dim(truncateCells("no transcript — the session's screen:", cols))}
+		for _, line := range strings.Split(*c.pane, "\n") {
+			out = append(out, wrapRunes(line, cols)...)
+		}
+		if c.err != "" {
+			out = append(out, colorize(fleetSGRRed, c.err))
+		}
+		return out
 	}
 	w := max(cols-fleetClarifyLabelW, 1)
 	pad := strings.Repeat(" ", fleetClarifyLabelW)
@@ -303,6 +540,9 @@ func fleetChatLogLines(c *fleetChatMode, cols int) []string {
 	var out []string
 	if c.loaded && len(c.turns) == 0 {
 		msg := "No messages yet. Write to FLEET below."
+		if c.target != nil {
+			msg = "No messages yet. Write to the session below."
+		}
 		if c.reason != "" {
 			msg = "No chat: " + c.reason
 		}
@@ -319,7 +559,11 @@ func fleetChatLogLines(c *fleetChatMode, cols int) []string {
 		case "user":
 			head = label(fleetSGRYou, "you")
 		case "assistant":
-			head = label(fleetSGRFork, "fleet")
+			who := "fleet"
+			if c.target != nil {
+				who = "agent"
+			}
+			head = label(fleetSGRFork, who)
 		}
 		for j, l := range fleetSummaryStyledLines(t.Text, w) {
 			if j > 0 {

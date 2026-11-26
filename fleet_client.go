@@ -398,13 +398,37 @@ func fleetBodyText(b []byte) string {
 // the TUI could not read is Unclear, so the caller never tells the user it
 // did not go.
 func (c *fleetClient) Say(req fleetSayRequest) fleetSayOutcome {
-	body, err := json.Marshal(req)
+	return c.postSay("/fleet/say", req)
+}
+
+// fleetSessionSayRequest is one POST /fleet/session/say from the session
+// chat: target is the tmux session, sid the session id it is pinned to
+// (fleetSessionPin; "" is no pin).
+type fleetSessionSayRequest struct {
+	// Source pins the send to the host of the state it was resolved
+	// against, like fleetSayRequest's; never on the wire.
+	Source string `json:"-"`
+	Target string `json:"target"`
+	Text   string `json:"text"`
+	SID    string `json:"sid,omitempty"`
+}
+
+// SessionSay posts one message to a session through the server's guarded
+// say path; the outcome reads as Say's does. A refusal (gone, not_session,
+// busy, ...) is Result.OK false with its Code, under a 2xx or a 4xx Status.
+func (c *fleetClient) SessionSay(req fleetSessionSayRequest) fleetSayOutcome {
+	return c.postSay("/fleet/session/say", req)
+}
+
+// postSay posts payload to a say endpoint.
+func (c *fleetClient) postSay(path string, payload any) fleetSayOutcome {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fleetSayOutcome{Unclear: true}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), fleetSayTimeout)
 	defer cancel()
-	hr, err := c.newRequest(ctx, http.MethodPost, "/fleet/say", body)
+	hr, err := c.newRequest(ctx, http.MethodPost, path, body)
 	if err != nil {
 		return fleetSayOutcome{Unclear: true}
 	}
@@ -649,6 +673,100 @@ func (c *fleetClient) ChatGet(since int64, n int) (fleetChatView, error) {
 		return fleetChatView{}, err
 	}
 	return decodeFleetChatView(data)
+}
+
+// fleetSessionView is GET /fleet/session (a session's transcript, or its
+// pane when it has none) as the session chat reads it. Every string has
+// passed through fleetDisplayText.
+type fleetSessionView struct {
+	Turns     []fleetChatTurn
+	Pos       int64
+	Reset     bool
+	Pane      *string // the pane's text when the server read no transcript (grok, or none on disk)
+	Tool      string  // "claude" or "grok"
+	SessionID string
+}
+
+// fleetSessionRefusal is a session endpoint's 4xx answer with a code: gone,
+// not_session, not_allowed, ambiguous, fleet_self, bad_target. The code is
+// sanitized.
+type fleetSessionRefusal struct {
+	Status int
+	Code   string
+}
+
+func (e *fleetSessionRefusal) Error() string { return fmt.Sprintf("HTTP %d %s", e.Status, e.Code) }
+
+func decodeFleetSessionView(data []byte) (fleetSessionView, error) {
+	var r struct {
+		Target struct {
+			Tool      string `json:"tool"`
+			SessionID string `json:"sessionId"`
+		} `json:"target"`
+		Source string          `json:"source"`
+		Turns  []fleetChatTurn `json:"turns"`
+		Pos    int64           `json:"pos"`
+		Reset  bool            `json:"reset"`
+		Pane   *string         `json:"pane"`
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(data, &m) != nil || m == nil || json.Unmarshal(data, &r) != nil || r.Pos < 0 {
+		return fleetSessionView{}, errors.New("bad session answer")
+	}
+	v := fleetSessionView{Pos: r.Pos, Reset: r.Reset, Tool: fleetDisplayText(r.Target.Tool), SessionID: fleetDisplayText(r.Target.SessionID)}
+	if r.Source == "pane" {
+		pane := ""
+		if r.Pane != nil {
+			pane = fleetDisplayText(*r.Pane)
+		}
+		v.Pane, v.Pos, v.Reset = &pane, 0, true
+		return v, nil
+	}
+	for _, t := range r.Turns {
+		v.Turns = append(v.Turns, fleetChatTurn{UUID: fleetDisplayText(t.UUID), Role: fleetDisplayText(t.Role),
+			At: fleetDisplayText(t.At), Text: fleetDisplayText(t.Text)})
+	}
+	return v, nil
+}
+
+// SessionGet reads tmux session tmux's chat, pinned to session id sid ("" is
+// no pin): the last n turns, or with since > 0 the turns that changed after
+// that position. A 401 is a *fleetStatusError, another 4xx with a code a
+// *fleetSessionRefusal.
+func (c *fleetClient) SessionGet(tmux, sid string, since int64, n int) (fleetSessionView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fleetStateTimeout)
+	defer cancel()
+	q := url.Values{"t": {tmux}, "n": {strconv.Itoa(n)}}
+	if since > 0 {
+		q.Set("since", strconv.FormatInt(since, 10))
+	}
+	if sid != "" {
+		q.Set("sid", sid)
+	}
+	hr, err := c.newRequest(ctx, http.MethodGet, "/fleet/session?"+q.Encode(), nil)
+	if err != nil {
+		return fleetSessionView{}, err
+	}
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		return fleetSessionView{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, fleetChatBodyMax))
+	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Code string `json:"code"`
+		}
+		if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode/100 == 4 && err == nil &&
+			json.Unmarshal(data, &e) == nil && e.Code != "" {
+			return fleetSessionView{}, &fleetSessionRefusal{Status: resp.StatusCode, Code: fleetDisplayText(e.Code)}
+		}
+		return fleetSessionView{}, &fleetStatusError{Status: resp.StatusCode}
+	}
+	if err != nil {
+		return fleetSessionView{}, err
+	}
+	return decodeFleetSessionView(data)
 }
 
 // connectLocalFleet finds this host's service (loopback, then Tailscale) and

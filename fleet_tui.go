@@ -166,7 +166,13 @@ type fleetLoop struct {
 	// clarify runs one Clarify request of the given kind (fleetClarifyVia).
 	clarify func(fleetClarifyRequest, fleetCmd) fleetClarifyJobResult
 	// chatGet reads FLEET's chat from source (fleetChatVia).
-	chatGet  func(source string, since int64) fleetChatFetch
+	chatGet func(source string, since int64) fleetChatFetch
+	// sessionGet reads a session chat from source (fleetSessionChatVia);
+	// sessionSay sends to it (fleetSessionSayVia). nil: s's chat stays
+	// empty and cannot send.
+	sessionGet func(source string, t fleetChatTarget, since int64) fleetChatFetch
+	sessionSay func(fleetSessionSayRequest) fleetSendResult
+
 	interval time.Duration
 	nextPoll time.Time
 	// nextClarify is when the open chat's next read is due; zero unless a
@@ -200,6 +206,9 @@ type fleetLoop struct {
 	// chatSends at most one chat send (st.chatSending).
 	chats     []*fleetJob[fleetChatFetch]
 	chatSends []*fleetJob[fleetChatSent]
+	// notices are the "Andy opened chat on card" lines to FLEET
+	// (st.chatNotice), fire-and-forget: only a refusal shows, as a toast.
+	notices []*fleetJob[fleetSendResult]
 
 	// sleep waits between a batch's sends; nil is time.Sleep.
 	sleep func(time.Duration)
@@ -276,6 +285,13 @@ func (l *fleetLoop) reap(now time.Time) {
 		}
 		// Read the chat now, so the message shows without waiting a poll.
 		l.nextChat = now
+	}
+	var told []fleetSendResult
+	l.notices, told = reapFleetJobs(l.notices)
+	for _, r := range told {
+		if r.CheckErr != nil || r.Moved || !r.Out.Result.OK {
+			l.st.setToast("FLEET was not told about this chat", fleetToastInfo, now)
+		}
 	}
 	var read []fleetChatFetch
 	l.chats, read = reapFleetJobs(l.chats)
@@ -405,7 +421,22 @@ func (l *fleetLoop) tickClarify(now time.Time) {
 // While one runs no second starts.
 func (l *fleetLoop) startChat() {
 	c := l.st.chat
-	if c == nil || l.chatGet == nil || len(l.chats) > 0 {
+	if c == nil || c.ended || len(l.chats) > 0 {
+		return
+	}
+	if t := c.target; t != nil {
+		if l.sessionGet == nil {
+			return
+		}
+		get, source, target, since := l.sessionGet, c.source, *t, c.pos
+		l.chats = append(l.chats, startFleetJob(func() fleetChatFetch {
+			f := get(source, target, since)
+			f.chat = c
+			return f
+		}))
+		return
+	}
+	if l.chatGet == nil {
 		return
 	}
 	get, source, since := l.chatGet, c.source, c.pos
@@ -416,10 +447,16 @@ func (l *fleetLoop) startChat() {
 	}))
 }
 
+// chatPolling reports whether an open chat is read every fleetChatPoll: open
+// and not ended.
+func (l *fleetLoop) chatPolling() bool {
+	return l.st.chat != nil && !l.st.chat.ended
+}
+
 // tickChat reads the open chat every fleetChatPoll, and never while it is
-// closed.
+// closed or ended.
 func (l *fleetLoop) tickChat(now time.Time) {
-	if l.st.chat == nil {
+	if !l.chatPolling() {
 		l.nextChat = time.Time{}
 		return
 	}
@@ -499,7 +536,25 @@ func (l *fleetLoop) run(cmd fleetCmd, now time.Time) (closeView bool) {
 	case fleetCmdChatGet:
 		l.startChat()
 		l.nextChat = now.Add(fleetChatPoll)
+		if n := l.st.chatNotice; n != nil && l.send != nil {
+			send, r := l.send, *n
+			l.notices = append(l.notices, startFleetJob(func() fleetSendResult { return send(r) }))
+		}
+		l.st.chatNotice = nil
 	case fleetCmdChatSend:
+		if sreq := l.st.sessionSend; sreq != nil {
+			l.st.sessionSend = nil
+			if l.sessionSay == nil {
+				l.st.chatSending = false
+				return false
+			}
+			say, r := l.sessionSay, *sreq
+			target := fleetChatTarget{Tmux: r.Target, SID: r.SID}
+			l.chatSends = append(l.chatSends, startFleetJob(func() fleetChatSent {
+				return fleetChatSent{text: r.Text, res: say(r), target: &target}
+			}))
+			return false
+		}
 		req := l.st.chatSend
 		l.st.chatSend = nil
 		if req == nil || l.send == nil {
@@ -544,6 +599,9 @@ func (l *fleetLoop) wakes(base []wakeFD) []wakeFD {
 	for _, j := range l.chatSends {
 		out = append(out, j.wake())
 	}
+	for _, j := range l.notices {
+		out = append(out, j.wake())
+	}
 	return out
 }
 
@@ -567,6 +625,9 @@ func (l *fleetLoop) closeAll() {
 		j.close()
 	}
 	for _, j := range l.chatSends {
+		j.close()
+	}
+	for _, j := range l.notices {
 		j.close()
 	}
 }
@@ -653,6 +714,38 @@ func fleetChatVia(src *fleetLocal) func(source string, since int64) fleetChatFet
 	}
 }
 
+// fleetSessionChatVia is the session chat read's job body, pinned to the
+// chat's source like a send: a client for another host gives moved and reads
+// nothing.
+func fleetSessionChatVia(src *fleetLocal) func(source string, t fleetChatTarget, since int64) fleetChatFetch {
+	return func(source string, t fleetChatTarget, since int64) fleetChatFetch {
+		c, err := src.Client()
+		if err != nil {
+			return fleetChatFetch{err: err}
+		}
+		if c.base != source {
+			return fleetChatFetch{moved: true}
+		}
+		v, err := c.SessionGet(t.Tmux, t.SID, since, fleetChatKeep)
+		return fleetChatFetch{session: v, err: err}
+	}
+}
+
+// fleetSessionSayVia is the session chat send's job body, pinned like a
+// card answer: a failed connect sent nothing, another host is Moved.
+func fleetSessionSayVia(src *fleetLocal) func(fleetSessionSayRequest) fleetSendResult {
+	return func(req fleetSessionSayRequest) fleetSendResult {
+		c, err := src.Client()
+		if err != nil {
+			return fleetSendResult{CheckErr: err}
+		}
+		if c.base != req.Source {
+			return fleetSendResult{Moved: true}
+		}
+		return fleetSendResult{Out: c.SessionSay(req)}
+	}
+}
+
 // fleetDismissToast maps a dismiss result to its toast.
 func fleetDismissToast(r fleetDismissResult) (string, fleetToastKind) {
 	switch {
@@ -696,7 +789,7 @@ func (l *fleetLoop) timeout(now time.Time) time.Duration {
 	if c := l.clarifyPollAt(now); !c.IsZero() && len(l.clarifies) == 0 && (pollAt.IsZero() || c.Before(pollAt)) {
 		pollAt = c
 	}
-	if c := l.nextChat; l.st.chat != nil && len(l.chats) == 0 && (pollAt.IsZero() || c.Before(pollAt)) {
+	if c := l.nextChat; l.chatPolling() && len(l.chats) == 0 && (pollAt.IsZero() || c.Before(pollAt)) {
 		if c.IsZero() {
 			c = now.Add(fleetChatPoll)
 		}
@@ -790,13 +883,15 @@ func runFleetView(src *fleetLocal, wakes []wakeFD, attach func(srv *ServerConfig
 	dec := newInputDecoder()
 	screen := newScreenRenderer(os.Stdout)
 	l := &fleetLoop{
-		st:       &fleetViewState{},
-		state:    src.State,
-		send:     fleetSendVia(src),
-		dismiss:  fleetDismissVia(src),
-		clarify:  fleetClarifyVia(src),
-		chatGet:  fleetChatVia(src),
-		interval: fleetBadgeInterval,
+		st:         &fleetViewState{},
+		state:      src.State,
+		send:       fleetSendVia(src),
+		dismiss:    fleetDismissVia(src),
+		clarify:    fleetClarifyVia(src),
+		chatGet:    fleetChatVia(src),
+		sessionGet: fleetSessionChatVia(src),
+		sessionSay: fleetSessionSayVia(src),
+		interval:   fleetBadgeInterval,
 	}
 	if attach != nil {
 		l.attach = fleetAttachVia(src, attach)
@@ -858,8 +953,8 @@ const (
 	fleetIndent     = "   "
 	fleetHelpRow    = "↑↓ card · 1-9 pick option · o other · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
 	// fleetHelpRowAttach is the key help when the selected card resolves to
-	// exactly one live session.
-	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
+	// exactly one live session (attachable): a attaches, s chats with it.
+	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · s chat · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
 	// fleetHelpClarifyHint goes after "o other" when k opens Clarify.
 	fleetHelpClarifyHint = "k clarify"
 	// fleetHelpChatHint goes after "o other" (after "k clarify" when both
