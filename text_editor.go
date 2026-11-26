@@ -6,10 +6,15 @@ import (
 )
 
 // The multi-line text box shared by the inspector's compose box (key i in a
-// preview) and the Fleet view's chat with FLEET (key i there): a rune buffer
+// preview) and the Fleet view's chats (keys f and i there): a rune buffer
 // with a cursor, edited one decoded key at a time (textEditor.key). It draws
 // itself wrapped to a width, with the cursor as a reverse-video cell; there
 // is no real terminal cursor in this TUI.
+
+// composeHint is the key line of every box that sends what it holds (the
+// inspector's compose box, the Fleet view's chats): Esc closes the box and
+// keeps the draft for the next open, Ctrl-C closes it and clears the draft.
+const composeHint = "Enter send · Alt-Enter new line · Esc keep draft · Ctrl-C clear"
 
 // textEditorMaxRows is the most rows a box grows to before it scrolls.
 const textEditorMaxRows = 8

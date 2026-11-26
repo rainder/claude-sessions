@@ -110,7 +110,7 @@ type fleetViewState struct {
 	attach        *fleetAttachRequest  // set with fleetCmdAttach; the loop takes it
 	clarify       *fleetClarifyMode    // the open Clarify side chat; nil in the list
 	clarifyReq    *fleetClarifyRequest // set with fleetCmdClarifyAsk; the loop takes it
-	chat          *fleetChatMode       // the open chat with FLEET (i) or a card's session (s); nil in the list
+	chat          *fleetChatMode       // the open chat with FLEET (f) or a card's session (i, →); nil in the list
 	chatDraft     textEditor           // the chat's composer; kept while the chat is closed
 	chatSend      *fleetSayRequest     // set with fleetCmdChatSend; the loop takes it
 	chatSending   bool                 // a chat send job runs (FLEET or a session)
@@ -119,11 +119,13 @@ type fleetViewState struct {
 	batchSent     map[string]bool      // card ids an R batch's answers reached; each locked as justSent is
 	unclear       string               // card id whose send result is unknown; locked until the next applied state
 	drawn         fleetDrawnCard       // renderFleetView keeps it; r waits fleetLeanPickDelay on it
+	help          *fleetHelpMode       // the open key help (?, fleet_tui_help.go); nil when closed
+	clarifyDrafts map[string]string    // Clarify input kept by Esc, by card id; memory only
 
-	// The session chat (s, fleet_tui_chat.go).
+	// The session chat (i or →, fleet_tui_chat.go).
 	sessionDrafts map[string]*textEditor  // the session chats' composers, by fleetChatTarget.key; memory only
 	sessionSend   *fleetSessionSayRequest // set with fleetCmdChatSend for a session chat; the loop takes it
-	chatTold      map[string]bool         // card ids FLEET was told about a session chat on (s), once per run
+	chatTold      map[string]bool         // card ids FLEET was told about a session chat on (i), once per run
 	chatNotice    *fleetSayRequest        // that line, set with fleetCmdChatGet; the loop takes it
 
 	toast      string
@@ -462,6 +464,9 @@ func (st *fleetViewState) selected() *fleetItem {
 // handleKey applies one key. inBatch is true while the key arrived in the
 // same read as others (a paste), which never presses Enter on the panel.
 func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleetCmd {
+	if st.help != nil {
+		return st.handleHelpKey(k)
+	}
 	if st.chat != nil {
 		return st.handleChatKey(k, inBatch, now)
 	}
@@ -517,11 +522,10 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		}
 		return fleetCmdClose
 	case "c":
-		it := st.selected()
-		if it == nil || it.Answer == nil || st.sending {
+		if !st.canCorrect() {
 			return fleetCmdNone
 		}
-		st.unlocked = it.Card.ID
+		st.unlocked = st.selected().Card.ID
 		st.setToast("pick the correction (1-9)", fleetToastInfo, now)
 		return fleetCmdRender
 	case "a":
@@ -552,21 +556,22 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		st.attach = &fleetAttachRequest{Tmux: pick.Tmux, Source: st.view.Source}
 		return fleetCmdAttach
 	case "x":
-		it := st.selected()
-		if it == nil || st.sending || st.dismissing || it.Answer == nil || it.Answer.latest().Status != fleetAttemptUnconfirmed {
+		if !st.canDismiss() {
 			return fleetCmdNone
 		}
-		st.dismissID, st.dismissSource = it.Card.ID, st.view.Source
+		st.dismissID, st.dismissSource = st.selected().Card.ID, st.view.Source
 		st.dismissing = true
 		return fleetCmdDismiss
 	case "o":
 		return st.openOther(now)
 	case "k":
 		return st.openClarify(now)
-	case "i":
+	case "f":
 		return st.openChat(now)
-	case "s":
+	case "i", KeyRight:
 		return st.openSessionChat(inBatch, now)
+	case "?":
+		return st.openHelp(inBatch)
 	case "r":
 		return st.pickLean(inBatch, now)
 	case "R":
@@ -605,6 +610,21 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		correction: it.Answer != nil,
 	}
 	return fleetCmdRender
+}
+
+// canCorrect reports whether c unlocks the selected card for a correction:
+// it has an answer and no send runs. The key help offers c only then.
+func (st *fleetViewState) canCorrect() bool {
+	it := st.selected()
+	return it != nil && it.Answer != nil && !st.sending
+}
+
+// canDismiss reports whether x dismisses the selected card's answer: its
+// latest attempt is unconfirmed and no send or dismiss runs. The key help
+// offers x only then.
+func (st *fleetViewState) canDismiss() bool {
+	it := st.selected()
+	return it != nil && !st.sending && !st.dismissing && it.Answer != nil && it.Answer.latest().Status == fleetAttemptUnconfirmed
 }
 
 // pickRefusal is why no option of it may be picked now, shared by a digit and
@@ -877,6 +897,19 @@ func (st *fleetViewState) handleEvent(ev inputEvent, inBatch bool, now time.Time
 // Releases, other buttons, and every row outside the list and the panel do
 // nothing, and so does every body but the card list (st.hit.on).
 func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
+	if h := st.help; h != nil {
+		// The help is the whole view: the wheel scrolls it, nothing else acts.
+		switch {
+		case m.release:
+		case m.button == mouseWheelUp:
+			h.scroll = max(h.scroll-fleetMouseStep, 0)
+			return fleetCmdRender
+		case m.button == mouseWheelDown:
+			h.scroll += fleetMouseStep
+			return fleetCmdRender
+		}
+		return fleetCmdNone
+	}
 	if c := st.chat; c != nil {
 		// The chat is the whole body, as Clarify's is.
 		switch {
@@ -947,7 +980,7 @@ func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
 }
 
 // attachable reports whether the selected card resolves to exactly one live
-// session (fleetCardSession), which is when the view offers a and s.
+// session (fleetCardSession), which is when the view offers a and i/→.
 func (st *fleetViewState) attachable() bool {
 	it := st.selected()
 	return it != nil && st.panel == nil && st.batch == nil && fleetCardSession(it.Card, st.view.Sessions).Tmux != ""

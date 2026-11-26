@@ -61,7 +61,7 @@ func chatTestState(now time.Time) *fleetViewState {
 // chatOpen is a state with the chat open and a first read of turns applied.
 func chatOpen(now time.Time, turns ...fleetChatTurn) *fleetViewState {
 	st := chatTestState(now)
-	st.handleKey("i", false, now)
+	st.handleKey("f", false, now)
 	st.applyChat(fleetChatFetch{chat: st.chat, view: fleetChatView{SessionID: "s1", Pos: 10, Turns: turns}}, now)
 	return st
 }
@@ -70,8 +70,8 @@ func TestChatKeyOpens(t *testing.T) {
 	now := time.Now()
 	st := chatTestState(now)
 	st.setToast("old", fleetToastInfo, now)
-	if cmd := st.handleKey("i", false, now); cmd != fleetCmdChatGet {
-		t.Fatalf("i = %v", cmd)
+	if cmd := st.handleKey("f", false, now); cmd != fleetCmdChatGet {
+		t.Fatalf("f = %v", cmd)
 	}
 	if c := st.chat; c == nil || c.source != "http://src" || st.toast != "" || st.chatDraft.maxBytes != sendKeysMaxLen {
 		t.Fatalf("chat = %+v toast %q", st.chat, st.toast)
@@ -83,13 +83,13 @@ func TestChatKeyOpens(t *testing.T) {
 	// Never over another panel, a batch or Clarify.
 	st = chatTestState(now)
 	st.handleKey("o", false, now)
-	if cmd := st.handleKey("i", false, now); st.chat != nil || cmd == fleetCmdChatGet {
-		t.Error("i with a panel open opened the chat")
+	if cmd := st.handleKey("f", false, now); st.chat != nil || cmd == fleetCmdChatGet {
+		t.Error("f with a panel open opened the chat")
 	}
 	st = chatTestState(now)
 	st.handleKey("k", false, now)
-	if cmd := st.handleKey("i", false, now); st.chat != nil || cmd == fleetCmdChatGet {
-		t.Error("i in Clarify opened the chat")
+	if cmd := st.handleKey("f", false, now); st.chat != nil || cmd == fleetCmdChatGet {
+		t.Error("f in Clarify opened the chat")
 	}
 	v := fleetTestView()
 	v.Source = "http://src"
@@ -98,23 +98,23 @@ func TestChatKeyOpens(t *testing.T) {
 		t.Fatal("test setup: no ship mode")
 	}
 	// The ship screen (no card needs Andy) is where the chat is wanted most.
-	if cmd := st.handleKey("i", false, now); st.chat == nil || cmd != fleetCmdChatGet {
-		t.Error("i on the ship screen did not open the chat")
+	if cmd := st.handleKey("f", false, now); st.chat == nil || cmd != fleetCmdChatGet {
+		t.Error("f on the ship screen did not open the chat")
 	}
 	if st.shipOn() {
 		t.Error("ship over the chat")
 	}
 	st = chatTestState(now)
 	st.view.Ambiguous = []string{"a", "b"}
-	if st.handleKey("i", false, now); st.chat != nil {
-		t.Error("i with two FLEETs opened the chat")
+	if st.handleKey("f", false, now); st.chat != nil {
+		t.Error("f with two FLEETs opened the chat")
 	}
 
 	// FLEET down: the chat opens read-only and refuses to send.
 	v = fleetTestView(fleetTestCard("c1", "needs-you"))
 	v.Source, v.Fleet.Alive = "http://src", false
 	st = fleetTestState(v, now)
-	if st.handleKey("i", false, now); st.chat == nil {
+	if st.handleKey("f", false, now); st.chat == nil {
 		t.Fatal("chat did not open with FLEET down")
 	}
 	st.chatDraft.SetText("hi")
@@ -169,7 +169,7 @@ func TestChatComposerKeys(t *testing.T) {
 	if st.chat != nil {
 		t.Fatal("Esc did not close")
 	}
-	st.handleKey("i", false, late)
+	st.handleKey("f", false, late)
 	if st.chat == nil || st.chatDraft.Text() != "one\ntwo qk1\n" {
 		t.Fatalf("draft after reopen %q", st.chatDraft.Text())
 	}
@@ -315,7 +315,7 @@ func TestFleetChatLinesRenderAndSanitize(t *testing.T) {
 	if !strings.HasPrefix(stripANSI(lines[18]), "  draft two") || !strings.HasPrefix(stripANSI(lines[19]), "Enter send") {
 		t.Fatalf("bottom = %q / %q", stripANSI(lines[18]), stripANSI(lines[19]))
 	}
-	if wide := fleetChatLines(st, 80, 20, now); !strings.HasSuffix(stripANSI(wide[19]), "Esc close") {
+	if wide := fleetChatLines(st, 80, 20, now); !strings.HasSuffix(stripANSI(wide[19]), "Ctrl-C clear · PgUp/PgDn") {
 		t.Errorf("help at 80 = %q", stripANSI(wide[19]))
 	}
 	// A short screen still draws the composer and help, never more rows.
@@ -324,7 +324,7 @@ func TestFleetChatLinesRenderAndSanitize(t *testing.T) {
 	}
 	// Before the first read: loading; with no turns: the hint.
 	st.handleKey(KeyEsc, false, now)
-	st.handleKey("i", false, now)
+	st.handleKey("f", false, now)
 	if !strings.Contains(stripANSI(strings.Join(fleetChatLines(st, 60, 20, now), "\n")), "loading") {
 		t.Fatal("no loading line")
 	}
@@ -387,7 +387,7 @@ func TestFleetChatLoopPollsWhileOpen(t *testing.T) {
 	l := chatLoop(now, get, nil)
 	defer l.closeAll()
 	l.nextPoll = now.Add(time.Hour)
-	l.run(l.st.handleKey("i", false, now), now)
+	l.run(l.st.handleKey("f", false, now), now)
 	if len(l.chats) != 1 {
 		t.Fatal("open did not read the chat")
 	}
@@ -437,7 +437,7 @@ func TestFleetChatLoopNewSessionReadsAgain(t *testing.T) {
 	}
 	l := chatLoop(now, get, nil)
 	defer l.closeAll()
-	l.run(l.st.handleKey("i", false, now), now)
+	l.run(l.st.handleKey("f", false, now), now)
 	waitFleetJobs(t, l)
 	l.reap(now)
 	l.tick(now.Add(fleetChatPoll)) // since 50: answers s2
@@ -465,7 +465,7 @@ func TestFleetChatLoopSend(t *testing.T) {
 	}
 	l := chatLoop(now, get, send)
 	defer l.closeAll()
-	l.run(l.st.handleKey("i", false, now), now)
+	l.run(l.st.handleKey("f", false, now), now)
 	waitFleetJobs(t, l)
 	l.reap(now)
 	late := now.Add(time.Second)

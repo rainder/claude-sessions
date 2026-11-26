@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// The Fleet view's chat with FLEET itself, opened with i on the card list:
+// The Fleet view's chat with FLEET itself, opened with f on the card list:
 // FLEET's recent conversation (GET /fleet/chat, the page's Chat tab) above a
 // multi-line composer (text_editor.go) whose Enter sends a plain message
-// (POST /fleet/say with no card). s on a card opens the same panel on the
+// (POST /fleet/say with no card). i or → on a card opens the same panel on the
 // card's session instead (fleetCardSession): its transcript or pane (GET
 // /fleet/session, the page's session view) and its say (POST
 // /fleet/session/say), pinned to the row's session id. Each target keeps its
@@ -23,7 +23,7 @@ const (
 	// fleetChatKeep is how many turns the chat keeps (and asks for).
 	fleetChatKeep = 100
 	// fleetHelpChat is the chat screen's key help.
-	fleetHelpChat = "Enter send · alt-Enter / \\⏎ new line · PgUp/PgDn scroll · Esc close"
+	fleetHelpChat = composeHint + " · PgUp/PgDn"
 )
 
 // fleetChatTarget is the session a session chat talks to: its tmux session,
@@ -75,7 +75,7 @@ type fleetChatSent struct {
 	target *fleetChatTarget
 }
 
-// canChat reports whether i opens the chat: a loaded state from one host
+// canChat reports whether f opens the chat: a loaded state from one host
 // and nothing else open; the ship screen counts as nothing open. FLEET may
 // be down; the chat then shows its last session and refuses to send.
 func (st *fleetViewState) canChat() bool {
@@ -95,7 +95,7 @@ func (st *fleetViewState) openChat(now time.Time) fleetCmd {
 	return fleetCmdChatGet
 }
 
-// openSessionChat is s on the list: the selected card's session
+// openSessionChat is i or → on the list: the selected card's session
 // (fleetCardSession, as a resolves it) in the chat panel. A paste never
 // opens it. A card with no one session toasts why. The first open per card
 // id per run tells FLEET (tellFleetChat).
@@ -166,14 +166,18 @@ func (st *fleetViewState) chatEditor() *textEditor {
 	return &st.chatDraft
 }
 
-// handleChatKey is handleKey while the chat is open. Esc and Ctrl-C close it
-// (the draft stays for the next open); PgUp/PgDn scroll the log; every
-// other key is the composer's. Enter is ignored for fleetArmDelay after the
+// handleChatKey is handleKey while the chat is open. Esc closes it and the
+// draft stays for the next open; Ctrl-C closes it and clears the draft;
+// PgUp/PgDn scroll the log; every other key is the composer's. Enter is ignored for fleetArmDelay after the
 // chat opens, so the key that opened nothing else cannot send.
 func (st *fleetViewState) handleChatKey(k string, inBatch bool, now time.Time) fleetCmd {
 	c := st.chat
 	switch k {
-	case KeyEsc, "\x03":
+	case KeyEsc:
+		st.chat = nil
+		return fleetCmdRender
+	case "\x03":
+		st.chatEditor().Clear()
 		st.chat = nil
 		return fleetCmdRender
 	case KeyPageUp:

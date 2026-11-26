@@ -530,13 +530,13 @@ func TestFleetShipEnterListsSent(t *testing.T) {
 	}
 }
 
-// On the ship screen ↑↓, a, digits and the card keys do nothing.
+// On the ship screen ↑↓, a, i, →, digits and the card keys do nothing.
 func TestFleetShipKeysIdle(t *testing.T) {
 	for _, v := range []fleetStateView{fleetShipView(), fleetShipSentView(2)} {
 		v.Sessions = []fleetWorkSession{{Tmux: "dr-1", Tickets: []string{"DR-1"}}}
 		v.Source = "http://src"
 		st := fleetTestState(v, fleetShipNow)
-		for _, k := range []string{KeyUp, KeyDown, "a", "1", "2", "9", "c", "x", "o", KeyPageUp, KeyPageDown} {
+		for _, k := range []string{KeyUp, KeyDown, "a", "i", "s", KeyRight, "1", "2", "9", "c", "x", "o", KeyPageUp, KeyPageDown} {
 			if cmd := st.handleKey(k, false, fleetShipNow); cmd != fleetCmdNone {
 				t.Errorf("%q: cmd %v", k, cmd)
 			}

@@ -115,8 +115,8 @@ func TestSessionChatKeyOpens(t *testing.T) {
 	now := time.Unix(1000, 0)
 	st := fleetTestState(sessChatView(), now)
 	st.setToast("old", fleetToastInfo, now)
-	if cmd := st.handleKey("s", false, now); cmd != fleetCmdChatGet {
-		t.Fatalf("s = %v", cmd)
+	if cmd := st.handleKey("i", false, now); cmd != fleetCmdChatGet {
+		t.Fatalf("i = %v", cmd)
 	}
 	c := st.chat
 	if c == nil || c.source != "http://src" || c.target == nil || *c.target != (fleetChatTarget{Tmux: "promote-prod-1", SID: sessChatSID, Name: "Promote prod"}) || st.toast != "" {
@@ -132,14 +132,14 @@ func TestSessionChatKeyOpens(t *testing.T) {
 	// Once per card per run: close and reopen tells FLEET nothing new.
 	st.chatNotice = nil
 	st.handleKey(KeyEsc, false, now)
-	if cmd := st.handleKey("s", false, now); cmd != fleetCmdChatGet || st.chatNotice != nil {
+	if cmd := st.handleKey("i", false, now); cmd != fleetCmdChatGet || st.chatNotice != nil {
 		t.Fatalf("reopen: %v notice %+v", cmd, st.chatNotice)
 	}
 	st.handleKey(KeyEsc, false, now)
 
 	// The display-name card: the row's tmux, and its own notice.
 	st.handleKey(KeyDown, false, now)
-	if cmd := st.handleKey("s", false, now); cmd != fleetCmdChatGet || st.chat.target.Tmux != "fix-two" || st.chat.target.SID != "sid-two" {
+	if cmd := st.handleKey("i", false, now); cmd != fleetCmdChatGet || st.chat.target.Tmux != "fix-two" || st.chat.target.SID != "sid-two" {
 		t.Fatalf("display name: %v %+v", cmd, st.chat)
 	}
 	if st.chatNotice == nil || st.chatNotice.Text != "Andy opened chat on card q (fix-two)" {
@@ -149,20 +149,20 @@ func TestSessionChatKeyOpens(t *testing.T) {
 
 	// The ended card: a toast, no chat.
 	st.handleKey(KeyDown, false, now)
-	if cmd := st.handleKey("s", false, now); cmd != fleetCmdRender || st.chat != nil || st.toast != "this card's session has ended" {
+	if cmd := st.handleKey("i", false, now); cmd != fleetCmdRender || st.chat != nil || st.toast != "this card's session has ended" {
 		t.Fatalf("ended: %v %+v %q", cmd, st.chat, st.toast)
 	}
 
 	// A paste never opens it.
 	st = fleetTestState(sessChatView(), now)
-	if cmd := st.handleKey("s", true, now); cmd != fleetCmdNone || st.chat != nil {
-		t.Fatalf("pasted s: %v", cmd)
+	if cmd := st.handleKey("i", true, now); cmd != fleetCmdNone || st.chat != nil {
+		t.Fatalf("pasted i: %v", cmd)
 	}
 	// FLEET down: the chat opens, FLEET is not told.
 	v := sessChatView()
 	v.Fleet.Alive = false
 	st = fleetTestState(v, now)
-	if st.handleKey("s", false, now); st.chat == nil || st.chatNotice != nil || st.chatTold["p"] {
+	if st.handleKey("i", false, now); st.chat == nil || st.chatNotice != nil || st.chatTold["p"] {
 		t.Fatalf("FLEET down: chat %+v notice %+v", st.chat, st.chatNotice)
 	}
 	// A card id the page would not type is never typed.
@@ -170,33 +170,56 @@ func TestSessionChatKeyOpens(t *testing.T) {
 	v.Cards[0].ID = "p q"
 	v.CardHashes["p q"] = "h"
 	st = fleetTestState(v, now)
-	if st.handleKey("s", false, now); st.chat == nil || st.chatNotice != nil {
+	if st.handleKey("i", false, now); st.chat == nil || st.chatNotice != nil {
 		t.Fatalf("bad id: chat %+v notice %+v", st.chat, st.chatNotice)
 	}
 	// A row id outside resumeSessionIDRe is no pin.
 	v = sessChatView()
 	v.Sessions[0].SessionID = "bad id"
 	st = fleetTestState(v, now)
-	if st.handleKey("s", false, now); st.chat == nil || st.chat.target.SID != "" {
+	if st.handleKey("i", false, now); st.chat == nil || st.chat.target.SID != "" {
 		t.Fatalf("bad sid: %+v", st.chat)
 	}
 
-	// The panel takes s as comment text; Clarify's draft mode owns s.
+	// The panel takes i and → as comment text and a cursor key; Clarify
+	// takes i as text.
+	for _, k := range []string{"i", KeyRight} {
+		st = fleetTestState(sessChatView(), now)
+		st.handleKey("1", false, now)
+		if st.handleKey(k, false, now); st.chat != nil {
+			t.Fatalf("%q on the panel: chat %+v", k, st.chat)
+		}
+		st = fleetTestState(sessChatView(), now)
+		st.handleKey("k", false, now)
+		if st.handleKey(k, false, now); st.chat != nil {
+			t.Fatalf("%q in Clarify opened the session chat", k)
+		}
+	}
 	st = fleetTestState(sessChatView(), now)
 	st.handleKey("1", false, now)
-	if st.handleKey("s", false, now); st.chat != nil || st.panel.comment != "s" {
-		t.Fatalf("panel: chat %+v", st.chat)
+	if st.handleKey("i", false, now); st.panel.comment != "i" {
+		t.Fatalf("panel comment %q", st.panel.comment)
 	}
+	// In the FLEET chat, i is text and → moves the cursor.
 	st = fleetTestState(sessChatView(), now)
-	st.handleKey("k", false, now)
-	if st.handleKey("s", false, now); st.chat != nil {
-		t.Fatal("s in Clarify opened the session chat")
-	}
-	// In the FLEET chat, s is text.
-	st = fleetTestState(sessChatView(), now)
-	st.handleKey("i", false, now)
-	if st.handleKey("s", false, now); st.chat.target != nil || st.chatDraft.Text() != "s" {
+	st.handleKey("f", false, now)
+	st.handleKey(KeyRight, false, now)
+	if st.handleKey("i", false, now); st.chat.target != nil || st.chatDraft.Text() != "i" {
 		t.Fatalf("FLEET chat: %+v %q", st.chat.target, st.chatDraft.Text())
+	}
+	// s no longer opens anything on the list.
+	st = fleetTestState(sessChatView(), now)
+	if cmd := st.handleKey("s", false, now); cmd != fleetCmdNone || st.chat != nil {
+		t.Fatalf("s = %v chat %+v", cmd, st.chat)
+	}
+	// → is i: the same chat, and never from a paste.
+	st = fleetTestState(sessChatView(), now)
+	if cmd := st.handleKey(KeyRight, false, now); cmd != fleetCmdChatGet || st.chat == nil || st.chat.target == nil || st.chat.target.Tmux != "promote-prod-1" {
+		t.Fatalf("→ = %v chat %+v", cmd, st.chat)
+	}
+	st = fleetTestState(sessChatView(), now)
+	if cmd := st.handleKey(KeyRight, true, now); cmd != fleetCmdNone || st.chat != nil {
+		t.Fatalf("pasted → = %v", cmd)
 	}
 }
 
@@ -205,21 +228,21 @@ func TestSessionChatDraftsSeparate(t *testing.T) {
 	now := time.Unix(1000, 0)
 	late := now.Add(time.Second)
 	st := fleetTestState(sessChatView(), now)
-	st.handleKey("i", false, now)
+	st.handleKey("f", false, now)
 	st.handleKey("f", false, late)
 	st.handleKey(KeyEsc, false, late)
-	st.handleKey("s", false, now)
+	st.handleKey("i", false, now)
 	if st.chatEditor().Text() != "" {
 		t.Fatalf("session draft starts with %q", st.chatEditor().Text())
 	}
 	st.handleKey("p", false, late)
 	st.handleKey(KeyEsc, false, late)
 	st.handleKey(KeyDown, false, now)
-	st.handleKey("s", false, now)
+	st.handleKey("i", false, now)
 	st.handleKey("q", false, late)
 	st.handleKey(KeyEsc, false, late)
 	st.handleKey(KeyUp, false, now)
-	st.handleKey("s", false, now)
+	st.handleKey("i", false, now)
 	if got := st.chatEditor().Text(); got != "p" {
 		t.Fatalf("p's draft %q", got)
 	}
@@ -227,7 +250,7 @@ func TestSessionChatDraftsSeparate(t *testing.T) {
 		t.Fatal("p's draft not drawn")
 	}
 	st.handleKey(KeyEsc, false, late)
-	st.handleKey("i", false, now)
+	st.handleKey("f", false, now)
 	if got := st.chatEditor().Text(); got != "f" || st.chatDraft.Text() != "f" {
 		t.Fatalf("FLEET draft %q", got)
 	}
@@ -239,7 +262,7 @@ func TestSessionChatDraftsSeparate(t *testing.T) {
 func TestSessionChatApplyRead(t *testing.T) {
 	now := time.Unix(1000, 0)
 	st := fleetTestState(sessChatView(), now)
-	st.handleKey("s", false, now)
+	st.handleKey("i", false, now)
 	c := st.chat
 	st.applyChat(fleetChatFetch{chat: c, session: fleetSessionView{Tool: "claude", Pos: 10, Reset: true,
 		Turns: []fleetChatTurn{{UUID: "u1", Role: "user", Text: "hi"}, {UUID: "u2", Role: "assistant", Text: "on it"}}}}, now)
@@ -278,7 +301,7 @@ func TestSessionChatApplyRead(t *testing.T) {
 	// with a toast, the log stays, and a send is refused.
 	for _, code := range []string{"gone", "not_session", "not_allowed"} {
 		st := fleetTestState(sessChatView(), now)
-		st.handleKey("s", false, now)
+		st.handleKey("i", false, now)
 		c := st.chat
 		st.applyChat(fleetChatFetch{chat: c, session: fleetSessionView{Pos: 1, Turns: []fleetChatTurn{{UUID: "u", Role: "user", Text: "hi"}}}}, now)
 		st.applyChat(fleetChatFetch{chat: c, err: &fleetSessionRefusal{Status: 404, Code: code}}, now)
@@ -364,7 +387,7 @@ func TestSessionChatLoop(t *testing.T) {
 	}
 	l.nextPoll = now.Add(time.Hour)
 	defer l.closeAll()
-	l.run(l.st.handleKey("s", false, now), now)
+	l.run(l.st.handleKey("i", false, now), now)
 	if len(l.chats) != 1 || len(l.notices) != 1 || l.st.chatNotice != nil {
 		t.Fatalf("open: reads %d notices %d", len(l.chats), len(l.notices))
 	}
@@ -430,7 +453,7 @@ func TestSessionChatLoop(t *testing.T) {
 	l.st.chat = nil
 	l.st.handleKey(KeyDown, false, later)
 	noticeRes = fleetSendResult{Out: fleetSayOutcome{Status: 200, Result: fleetSayResult{Code: "rate_limited"}}}
-	l.run(l.st.handleKey("s", false, later), later)
+	l.run(l.st.handleKey("i", false, later), later)
 	waitFleetJobs(t, l)
 	l.reap(later)
 	if l.st.chat == nil || l.st.toast != "FLEET was not told about this chat" || l.st.toastKind != fleetToastInfo || len(notices) != 2 {
@@ -488,12 +511,12 @@ func TestSessionChatViaFakeServer(t *testing.T) {
 func TestSessionChatHintInHelpRow(t *testing.T) {
 	now := time.Unix(1000, 0)
 	st := fleetTestState(sessChatView(), now)
-	if row := stripANSI(fleetBottomRow(st, now)); !strings.Contains(row, "a attach · s chat") {
+	if row := stripANSI(fleetBottomRow(st, now)); !strings.Contains(row, "a attach · i/→ chat") {
 		t.Fatalf("row %q", row)
 	}
 	st.handleKey(KeyDown, false, now)
 	st.handleKey(KeyDown, false, now)
-	if row := stripANSI(fleetBottomRow(st, now)); strings.Contains(row, "s chat") {
+	if row := stripANSI(fleetBottomRow(st, now)); strings.Contains(row, "i/→ chat") {
 		t.Fatalf("ended card shows the hint: %q", row)
 	}
 }
@@ -502,7 +525,7 @@ func TestSessionChatHintInHelpRow(t *testing.T) {
 func TestSessionChatClosesWhenHostMoves(t *testing.T) {
 	now := time.Unix(1000, 0)
 	st := fleetTestState(sessChatView(), now)
-	st.handleKey("s", false, now)
+	st.handleKey("i", false, now)
 	v := sessChatView()
 	v.Source = "http://other"
 	st.applyState(v, nil, now)

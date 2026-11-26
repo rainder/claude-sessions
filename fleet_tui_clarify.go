@@ -58,7 +58,11 @@ func (st *fleetViewState) openClarify(now time.Time) fleetCmd {
 	if !st.canClarify() {
 		return fleetCmdNone
 	}
-	st.clarify = &fleetClarifyMode{item: *st.selected(), source: st.view.Source, openedAt: now}
+	it := st.selected()
+	// The question Esc kept for this card comes back, once.
+	input := st.clarifyDrafts[it.Card.ID]
+	delete(st.clarifyDrafts, it.Card.ID)
+	st.clarify = &fleetClarifyMode{item: *it, source: st.view.Source, openedAt: now, input: input}
 	st.toast, st.toastUntil = "", time.Time{}
 	return fleetCmdClarifyGet
 }
@@ -99,13 +103,23 @@ func (st *fleetViewState) applyClarifyRefusal(code string, now time.Time) {
 
 // handleClarifyKey is handleKey while the side chat is open. Esc, q and
 // Ctrl-C never close the view from here: Esc and Ctrl-C go back to the list,
-// q is a letter.
+// q is a letter. Esc keeps the typed question for the card's next Clarify
+// (clarifyDrafts, memory only); Ctrl-C drops it.
 func (st *fleetViewState) handleClarifyKey(k string, inBatch bool, now time.Time) fleetCmd {
 	c := st.clarify
 	id := c.item.Card.ID
 	fits := func(t string) bool { return len(t) <= clarifyQuestionMax }
 	switch k {
-	case KeyEsc, "\x03":
+	case KeyEsc:
+		if c.input != "" {
+			if st.clarifyDrafts == nil {
+				st.clarifyDrafts = map[string]string{}
+			}
+			st.clarifyDrafts[id] = c.input
+		}
+		st.clarify = nil
+		return fleetCmdRender
+	case "\x03":
 		st.clarify = nil
 		return fleetCmdRender
 	case KeyPageUp:

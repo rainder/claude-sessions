@@ -20,8 +20,8 @@ import (
 const (
 	fleetShipFrame = 250 * time.Millisecond // one animation frame (4 fps)
 
-	fleetHelpShip     = "i chat · Esc back"
-	fleetHelpShipSent = "Enter sent cards · i chat · Esc back"
+	fleetHelpShip     = "f FLEET chat · Esc back · ? keys"
+	fleetHelpShipSent = "Enter sent cards · f FLEET chat · Esc back · ? keys"
 	fleetShipTitle    = "all clear, captain"
 	fleetShipTitleCut = 30 // a done card with no ticket shows this much of its title
 
@@ -386,10 +386,11 @@ func (st *fleetViewState) shipOn() bool {
 // handleShipKey is handleKey while the ship screen shows. Enter opens the
 // SENT cards as the normal list (Esc there comes back); every card key does
 // nothing. handled false leaves the key to handleKey: its own close (Esc,
-// q, Ctrl-C) and i, the FLEET chat, which an empty view needs most.
+// q, Ctrl-C), f, the FLEET chat, which an empty view needs most, and ?, the
+// key help.
 func (st *fleetViewState) handleShipKey(k string) (cmd fleetCmd, handled bool) {
 	switch k {
-	case KeyEsc, "q", "Q", "\x03", "i":
+	case KeyEsc, "q", "Q", "\x03", "f", "?":
 		return fleetCmdNone, false
 	case KeyEnter:
 		if len(st.items) == 0 {

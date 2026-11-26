@@ -46,7 +46,7 @@ func TestRenderFleetViewList(t *testing.T) {
 		"▸ DR-5241", "1  yes", "★ FLEET recommends", "2  not-yet", "You chose: keep cache",
 		"CI is green.", "Waiting on: Andy · session dr-5241", "merge with --merge, delete branch",
 		"DR-5302  Retry policy for OCR timeouts", "(3m ago)",
-		"↑↓ card · 1-9 pick option",
+		"1-9 pick option", "? keys",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)

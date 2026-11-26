@@ -347,7 +347,7 @@ func fleetBatchPanelLines(b *fleetBatchPanel, h int, now time.Time) []string {
 		tenths := math.Ceil(float64(arm.Sub(now)) / float64(100*time.Millisecond))
 		keys += fmt.Sprintf(" (ready in %.1f s)", tenths/10)
 	}
-	keyLine := dim(keys + " · Esc cancel")
+	keyLine := dim(keys + " · Esc/q cancel")
 	switch {
 	case h < 0:
 		b.seenAll = true

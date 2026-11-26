@@ -360,7 +360,7 @@ func TestFleetBatchPanelLines(t *testing.T) {
 		"Skipped:",
 		"DR-c — no FLEET pick",
 		"DR-d — pick names no option",
-		"Enter send all (ready in 0.4 s) · Esc cancel",
+		"Enter send all (ready in 0.4 s) · Esc/q cancel",
 	} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("frame lacks %q:\n%s", want, frame)
@@ -370,7 +370,7 @@ func TestFleetBatchPanelLines(t *testing.T) {
 		t.Error("cards not in list order")
 	}
 	frame = stripANSI(renderFleetView(st, 100, 40, now.Add(fleetArmDelay)))
-	if !strings.Contains(frame, "Enter send all · Esc cancel") {
+	if !strings.Contains(frame, "Enter send all · Esc/q cancel") {
 		t.Errorf("armed frame:\n%s", frame)
 	}
 	if st.drawn.id != "" {
@@ -397,7 +397,7 @@ func TestFleetBatchPanelLines(t *testing.T) {
 		const h = 6
 		top := fleetBatchPanelLines(st.batch, h, at)
 		if len(top) != h || stripANSI(top[0]) != "Send FLEET's pick on 12 cards?" ||
-			stripANSI(top[h-1]) != "Enter send all · Esc cancel" || !strings.Contains(stripANSI(top[h-2]), "↓ more") {
+			stripANSI(top[h-1]) != "Enter send all · Esc/q cancel" || !strings.Contains(stripANSI(top[h-2]), "↓ more") {
 			t.Fatalf("top = %q", top)
 		}
 		st.panelRows = h
@@ -407,7 +407,7 @@ func TestFleetBatchPanelLines(t *testing.T) {
 		st.handleKey(KeyPageDown, false, at)
 		down := fleetBatchPanelLines(st.batch, h, at)
 		if len(down) != h || stripANSI(down[0]) != "Send FLEET's pick on 12 cards?" ||
-			stripANSI(down[h-1]) != "Enter send all · Esc cancel" || !strings.Contains(stripANSI(down[1]), "↑ more") {
+			stripANSI(down[h-1]) != "Enter send all · Esc/q cancel" || !strings.Contains(stripANSI(down[1]), "↑ more") {
 			t.Fatalf("scrolled = %q", down)
 		}
 		if !strings.Contains(stripANSI(down[h-2]), "DR-11") {

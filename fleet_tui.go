@@ -168,7 +168,7 @@ type fleetLoop struct {
 	// chatGet reads FLEET's chat from source (fleetChatVia).
 	chatGet func(source string, since int64) fleetChatFetch
 	// sessionGet reads a session chat from source (fleetSessionChatVia);
-	// sessionSay sends to it (fleetSessionSayVia). nil: s's chat stays
+	// sessionSay sends to it (fleetSessionSayVia). nil: i's chat stays
 	// empty and cannot send.
 	sessionGet func(source string, t fleetChatTarget, since int64) fleetChatFetch
 	sessionSay func(fleetSessionSayRequest) fleetSendResult
@@ -951,24 +951,29 @@ const (
 	fleetSGRAmber   = "33"
 	fleetSGRRed     = "31"
 	fleetIndent     = "   "
-	fleetHelpRow    = "↑↓ card · 1-9 pick option · o other · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
+	fleetHelpRow    = "↑↓ card · 1-9 pick option · o other · t raw text · PgUp/PgDn scroll · Esc back · ? keys"
 	// fleetHelpRowAttach is the key help when the selected card resolves to
-	// exactly one live session (attachable): a attaches, s chats with it.
-	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · s chat · t raw text · c correct · x dismiss · PgUp/PgDn scroll · Esc back"
+	// exactly one live session (attachable): a attaches, i or → chats with it.
+	fleetHelpRowAttach = "↑↓ card · 1-9 pick option · o other · a attach · i/→ chat · t raw text · PgUp/PgDn scroll · Esc back · ? keys"
 	// fleetHelpClarifyHint goes after "o other" when k opens Clarify.
 	fleetHelpClarifyHint = "k clarify"
 	// fleetHelpChatHint goes after "o other" (after "k clarify" when both
-	// show) when i opens the chat with FLEET.
-	fleetHelpChatHint = "i chat"
+	// show) when f opens the chat with FLEET.
+	fleetHelpChatHint = "f FLEET chat"
 	// fleetHelpLeanHint goes after "1-9 pick option" when r would send the
 	// selected card's lean option.
 	fleetHelpLeanHint = "r FLEET's pick"
 	// fleetHelpBatchHint goes after those when R would send at least one card.
 	fleetHelpBatchHint = "R all picks"
+	// fleetHelpCorrectHint and fleetHelpDismissHint go after "t raw text"
+	// when c and x would act on the selected card (canCorrect, canDismiss).
+	fleetHelpCorrectHint = "c correct"
+	fleetHelpDismissHint = "x dismiss"
 
 	// The Clarify screen's help rows, without and with a draft.
-	fleetHelpClarify      = "Enter ask · Ctrl-D draft for FLEET · Esc back"
-	fleetHelpClarifyDraft = "Enter ask · s use draft as answer · x discard draft · Esc back"
+	// Esc keeps the typed question for the card's next Clarify; Ctrl-C clears it.
+	fleetHelpClarify      = "Enter ask · Ctrl-D draft for FLEET · Esc back · Ctrl-C clear"
+	fleetHelpClarifyDraft = "Enter ask · s use draft as answer · x discard draft · Esc back · Ctrl-C clear"
 )
 
 // fleetAge is the age of an RFC 3339 stamp, "" when it does not parse.
@@ -1007,12 +1012,15 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	if width <= 0 {
 		width = 80
 	}
-	if st.chat != nil || st.clarify != nil {
-		// A chat replaces the whole view; the mouse has no rows to hit.
+	if st.help != nil || st.chat != nil || st.clarify != nil {
+		// The help or a chat replaces the whole view; the mouse has no rows
+		// to hit.
 		st.hit = fleetHitMap{}
 		st.noteDrawn(false, now)
 		var lines []string
-		if st.chat != nil {
+		if st.help != nil {
+			lines = fleetHelpLines(st, width, rows)
+		} else if st.chat != nil {
 			lines = fleetChatLines(st, width, rows, now)
 		} else {
 			lines = fleetClarifyLines(st, width, rows, now)
@@ -1075,7 +1083,7 @@ func renderFleetView(st *fleetViewState, cols, rows int, now time.Time) string {
 	}
 
 	lines := append(top, body...)
-	lines = append(lines, sep, fleetBottomRow(st, now))
+	lines = append(lines, sep, fleetBottomRowFit(st, now, width))
 	if rows > 0 && len(lines) > rows {
 		// A screen shorter than the header and footer: keep the bottom row,
 		// which carries the toast.
@@ -1307,6 +1315,12 @@ func fleetHoldLine(holds map[string]string, cols int) string {
 // fleetBottomRow is the active toast, "sending…" while a send runs, nothing
 // while the panel (which has its own key line) is open, else the key help.
 func fleetBottomRow(st *fleetViewState, now time.Time) string {
+	return fleetBottomRowFit(st, now, 0)
+}
+
+// fleetBottomRowFit is fleetBottomRow with the key help fitted to cols
+// (fleetFitHelp); cols <= 0 is no fitting.
+func fleetBottomRowFit(st *fleetViewState, now time.Time, cols int) string {
 	if t := fleetToastLine(st, now); t != "" {
 		return t
 	}
@@ -1320,9 +1334,9 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 		// The sent line is the first to go on a small screen; the help
 		// row still says Enter opens the sent cards.
 		if len(st.items) > 0 {
-			return dim(fleetHelpShipSent)
+			return dim(fleetFitHelp(fleetHelpShipSent, cols))
 		}
-		return dim(fleetHelpShip)
+		return dim(fleetFitHelp(fleetHelpShip, cols))
 	}
 	row := fleetHelpRow
 	if st.attachable() {
@@ -1344,7 +1358,44 @@ func fleetBottomRow(st *fleetViewState, now time.Time) string {
 	if st.canClarify() {
 		row = strings.Replace(row, " · o other · ", " · o other · "+fleetHelpClarifyHint+" · ", 1)
 	}
-	return dim(row)
+	answer := ""
+	if st.canCorrect() {
+		answer += fleetHelpCorrectHint + " · "
+	}
+	if st.canDismiss() {
+		answer += fleetHelpDismissHint + " · "
+	}
+	if answer != "" {
+		row = strings.Replace(row, " · t raw text · ", " · t raw text · "+answer, 1)
+	}
+	return dim(fleetFitHelp(row, cols))
+}
+
+// fleetHelpDropOrder is the key help's parts in the order they go when the
+// row is wider than the screen: what the full help (?) or the screen itself
+// already says goes first, the keys that act on the selected card and
+// "? keys" never.
+var fleetHelpDropOrder = []string{"PgUp/PgDn scroll", "↑↓ card", "t raw text", "Esc back", "o other", "1-9 pick option"}
+
+// fleetFitHelp drops parts of a " · "-separated key help row, in
+// fleetHelpDropOrder, until it fits cols cells; a row that still does not
+// fit is left for the caller's clip. cols <= 0 keeps the row whole.
+func fleetFitHelp(row string, cols int) string {
+	if cols <= 0 || cellWidth(row) <= cols {
+		return row
+	}
+	parts := strings.Split(row, " · ")
+	for _, drop := range fleetHelpDropOrder {
+		i := slices.Index(parts, drop)
+		if i < 0 {
+			continue
+		}
+		parts = slices.Delete(parts, i, i+1)
+		if row = strings.Join(parts, " · "); cellWidth(row) <= cols {
+			break
+		}
+	}
+	return row
 }
 
 // fleetToastLine is the active toast in its kind's colour, "" when none.

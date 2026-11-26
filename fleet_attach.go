@@ -7,7 +7,7 @@ import (
 )
 
 // Attach from the Fleet view: `a` on a card opens the tmux session that card
-// belongs to, and the view comes back when Andy detaches. `s` opens the
+// belongs to, and the view comes back when Andy detaches. `i` (or →) opens the
 // same session in the chat panel (fleet_tui_chat.go).
 //
 // A card's session and ticket are written by an LLM from text strangers
