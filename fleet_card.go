@@ -36,10 +36,11 @@ type fleetCardView struct {
 	// card hash.
 	Envs []string
 
-	// rawSession and rawTicket are session and ticket as decoded, before the
-	// TUI sanitizes the drawn fields. The Fleet view's attach matches them
-	// against the server's working list; they are never drawn.
-	rawSession, rawTicket string
+	// rawTmux, rawSession and rawTicket are tmux, session and ticket as
+	// decoded, before the TUI sanitizes the drawn fields. The Fleet view's
+	// attach and session chat match them against the server's working list
+	// (fleetCardSession); they are never drawn.
+	rawTmux, rawSession, rawTicket string
 }
 
 // UnmarshalJSON fails only when b is not a JSON object.
@@ -68,7 +69,7 @@ func (c *fleetCardView) UnmarshalJSON(b []byte) error {
 	}
 	c.Waiting = fleetDecodeWaiting(m["waiting"])
 	c.Envs = fleetDecodeEnvs(m["envs"])
-	c.rawSession, c.rawTicket = c.Session, c.Ticket
+	c.rawTmux, c.rawSession, c.rawTicket = fleetPushStr(m["tmux"]), c.Session, c.Ticket
 	if list, ok := m["options"].([]any); ok {
 		for _, o := range list {
 			om, ok := o.(map[string]any)

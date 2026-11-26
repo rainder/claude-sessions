@@ -85,8 +85,9 @@ type fleetStateView struct {
 	Cards       []fleetCardView
 	CardHashes  map[string]string
 	Answered    map[string]fleetAnswer
-	// Sessions is the server's working list, raw and never drawn: only what
-	// the attach key needs, and its length for the empty view's count. nil
+	// Sessions is the server's working list, raw and never drawn as is: only
+	// what the attach and session chat keys need, and its length for the
+	// empty view's count. nil
 	// when the server sent null (its session list failed) or no list at
 	// all, which allows no attach.
 	Sessions []fleetWorkSession
@@ -214,7 +215,8 @@ func fleetDoneAt(c fleetCardView, raw json.RawMessage) (time.Time, bool) {
 
 // decodeFleetWorkSessions reads /fleet/state's "sessions" as leniently as
 // the cards: a row that is not an object or has no string tmux is skipped,
-// and a ticket that is not a string is dropped. Not an array (null, absent,
+// a name or sessionId that is not a string is empty, and a ticket that is
+// not a string is dropped. Not an array (null, absent,
 // anything else) is nil.
 func decodeFleetWorkSessions(data json.RawMessage) []fleetWorkSession {
 	var rows []json.RawMessage
@@ -231,6 +233,8 @@ func decodeFleetWorkSessions(data json.RawMessage) []fleetWorkSession {
 		if json.Unmarshal(m["tmux"], &row.Tmux) != nil || row.Tmux == "" {
 			continue
 		}
+		_ = json.Unmarshal(m["name"], &row.Name)
+		_ = json.Unmarshal(m["sessionId"], &row.SessionID)
 		var tickets []json.RawMessage
 		if json.Unmarshal(m["tickets"], &tickets) == nil {
 			for _, t := range tickets {

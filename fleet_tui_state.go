@@ -536,14 +536,11 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		if it == nil {
 			return fleetCmdNone
 		}
-		pick := fleetAttachTarget(it.Card, st.view.Sessions)
-		if pick.Many > 0 {
-			// Card.Ticket is the sanitized copy, safe to draw.
-			st.setToast(fmt.Sprintf("%d sessions for %s", pick.Many, it.Card.Ticket), fleetToastWarn, now)
+		pick := fleetCardSession(it.Card, st.view.Sessions)
+		// Card.Ticket is the sanitized copy, safe to draw.
+		if msg := fleetCardPickRefusal(pick, it.Card.Ticket); msg != "" {
+			st.setToast(msg, fleetToastWarn, now)
 			return fleetCmdRender
-		}
-		if pick.Tmux == "" {
-			return fleetCmdNone
 		}
 		st.attach = &fleetAttachRequest{Tmux: pick.Tmux, Source: st.view.Source}
 		return fleetCmdAttach
@@ -941,10 +938,10 @@ func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
 }
 
 // attachable reports whether the selected card resolves to exactly one live
-// session, which is when the view offers the attach key.
+// session (fleetCardSession), which is when the view offers a and s.
 func (st *fleetViewState) attachable() bool {
 	it := st.selected()
-	return it != nil && st.panel == nil && st.batch == nil && fleetAttachTarget(it.Card, st.view.Sessions).Tmux != ""
+	return it != nil && st.panel == nil && st.batch == nil && fleetCardSession(it.Card, st.view.Sessions).Tmux != ""
 }
 
 // applyAttach takes the attach's outcome once the terminal is back.

@@ -2,11 +2,13 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
 // Attach from the Fleet view: `a` on a card opens the tmux session that card
-// belongs to, and the view comes back when Andy detaches.
+// belongs to, and the view comes back when Andy detaches. `s` opens the
+// same session in the chat panel (fleet_tui_chat.go).
 //
 // A card's session and ticket are written by an LLM from text strangers
 // control, and on a remote host the name is parsed by that host's login
@@ -17,19 +19,24 @@ import (
 // prefix (tmuxExactTarget), so a gone session never prefix-matches another
 // and a name that starts with "-" is never read as a flag.
 
-// fleetWorkSession is one working-list row as the attach needs it, raw as
-// the server sent it and never drawn.
+// fleetWorkSession is one working-list row as the attach and the session
+// chat need it, raw as the server sent it and never drawn as is.
 type fleetWorkSession struct {
-	Tmux    string
-	Tickets []string
+	Tmux      string
+	Name      string // display name
+	SessionID string // the session the row runs; the chat's sid pin
+	Tickets   []string
 }
 
-// fleetAttachPick is where a card's attach goes: Tmux for exactly one live
-// session, Many ≥ 2 when that many live sessions name the card's ticket, and
-// the zero value when nothing does.
-type fleetAttachPick struct {
-	Tmux string
-	Many int
+// fleetCardPick is where a card's session resolves (fleetCardSession): Tmux
+// for exactly one live tmux session, with SID and Name from its row when
+// exactly one row runs there; Many ≥ 2 when that many tmux sessions match;
+// Ended when the card's tmux field names a session that is not live; the
+// zero value when nothing matches.
+type fleetCardPick struct {
+	Tmux, SID, Name string
+	Many            int
+	Ended           bool
 }
 
 // fleetAttachRequest is one attach the view asked for, pinned like a send to
@@ -41,46 +48,93 @@ type fleetAttachRequest struct {
 
 var errFleetAttachName = errors.New("bad tmux session name")
 
-// fleetAttachTarget resolves the session card c belongs to, against the
-// server's working list (nil: the list failed, so nothing). First the card's
-// session field (a "name:0.0" form counts only before ":", as the server
-// reads it) when a live row has that tmux name. A session field that names
-// no live row falls back to the ticket: the one tmux session whose row lists
-// the card's ticket (case-insensitive). Two rows in one tmux session are one
-// place to attach to; two tmux sessions are Many.
-func fleetAttachTarget(c fleetCardView, sessions []fleetWorkSession) fleetAttachPick {
-	if name := tmuxSessionPart(c.rawSession); fleetSessionNameRe.MatchString(name) {
-		for _, s := range sessions {
-			if s.Tmux == name {
-				return fleetAttachPick{Tmux: name}
-			}
+// fleetCardSession resolves the session card c belongs to against the
+// server's working list (nil: the list failed, so nothing), as the page's
+// cardSession does; a and s share it. Rows whose tmux fails
+// fleetSessionNameRe never count. The card's tmux field decides when set
+// (its part before ":"): live, or Ended, never a fallback. Otherwise its
+// session field: the rows whose display name equals it or whose tmux equals
+// its part before ":"; one tmux session, or Many. Only a card with neither
+// field falls back to its ticket (the TUI's own rule, not the page's): the
+// one tmux session whose row lists it (case-insensitive). Two rows in one
+// tmux session are one place.
+func fleetCardSession(c fleetCardView, sessions []fleetWorkSession) fleetCardPick {
+	var rows []fleetWorkSession
+	for _, s := range sessions {
+		if fleetSessionNameRe.MatchString(s.Tmux) {
+			rows = append(rows, s)
 		}
 	}
-	ticket := strings.TrimSpace(c.rawTicket)
-	if ticket == "" {
-		return fleetAttachPick{}
+	if tm := fleetCardTmuxPart(c.rawTmux); tm != "" {
+		if p := fleetPickTmux(rows, tm); p.Tmux != "" {
+			return p
+		}
+		return fleetCardPick{Ended: true}
+	}
+	var match func(fleetWorkSession) bool
+	if name := strings.TrimSpace(c.rawSession); name != "" {
+		tm := fleetCardTmuxPart(name)
+		match = func(r fleetWorkSession) bool { return r.Name == name || r.Tmux == tm }
+	} else if ticket := strings.TrimSpace(c.rawTicket); ticket != "" {
+		match = func(r fleetWorkSession) bool {
+			for _, t := range r.Tickets {
+				if strings.EqualFold(strings.TrimSpace(t), ticket) {
+					return true
+				}
+			}
+			return false
+		}
+	} else {
+		return fleetCardPick{}
 	}
 	var hits []string
 	seen := map[string]bool{}
-	for _, s := range sessions {
-		if seen[s.Tmux] || !fleetSessionNameRe.MatchString(s.Tmux) {
-			continue
-		}
-		for _, t := range s.Tickets {
-			if strings.EqualFold(strings.TrimSpace(t), ticket) {
-				seen[s.Tmux] = true
-				hits = append(hits, s.Tmux)
-				break
-			}
+	for _, r := range rows {
+		if !seen[r.Tmux] && match(r) {
+			seen[r.Tmux] = true
+			hits = append(hits, r.Tmux)
 		}
 	}
 	switch len(hits) {
 	case 0:
-		return fleetAttachPick{}
+		return fleetCardPick{}
 	case 1:
-		return fleetAttachPick{Tmux: hits[0]}
+		return fleetPickTmux(rows, hits[0])
 	}
-	return fleetAttachPick{Many: len(hits)}
+	return fleetCardPick{Many: len(hits)}
+}
+
+// fleetPickTmux is the pick for tmux session tm when a row runs there, with
+// that row's session id and name when it is the only one; zero otherwise.
+func fleetPickTmux(rows []fleetWorkSession, tm string) fleetCardPick {
+	var p fleetCardPick
+	n := 0
+	for _, r := range rows {
+		if r.Tmux == tm {
+			n++
+			p = fleetCardPick{Tmux: tm, SID: r.SessionID, Name: r.Name}
+		}
+	}
+	if n > 1 {
+		p.SID, p.Name = "", ""
+	}
+	return p
+}
+
+// fleetCardPickRefusal is the toast for a pick that names no one session,
+// "" for one that does. ticket is the card's sanitized ticket.
+func fleetCardPickRefusal(p fleetCardPick, ticket string) string {
+	switch {
+	case p.Tmux != "":
+		return ""
+	case p.Many > 0 && ticket != "":
+		return fmt.Sprintf("%d sessions for %s", p.Many, ticket)
+	case p.Many > 0:
+		return fmt.Sprintf("%d sessions match this card", p.Many)
+	case p.Ended:
+		return "this card's session has ended"
+	}
+	return "no session for this card"
 }
 
 // fleetAttachArgv is the command that attaches to tmux session name: on this

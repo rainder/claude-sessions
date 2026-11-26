@@ -17,48 +17,88 @@ func fleetAttachCard(id, session, ticket string) fleetCardView {
 	return c
 }
 
-func TestFleetAttachTarget(t *testing.T) {
+// fleetTmuxCard is a decision card whose raw tmux, session and ticket are
+// set as a decoded state.json card would have them.
+func fleetTmuxCard(id, tmux, session, ticket string) fleetCardView {
+	c := fleetAttachCard(id, session, ticket)
+	c.rawTmux = tmux
+	return c
+}
+
+func TestFleetCardSession(t *testing.T) {
 	work := []fleetWorkSession{
-		{Tmux: "dr-100-fix", Tickets: []string{"DR-100"}},
-		{Tmux: "dr-200-a", Tickets: []string{"DR-200"}},
-		{Tmux: "dr-200-b", Tickets: []string{"DR-200", "DR-300"}},
-		// Two rows in one tmux session are one place to attach to.
-		{Tmux: "dr-400", Tickets: []string{"DR-400"}},
-		{Tmux: "dr-400", Tickets: []string{"DR-400"}},
+		{Tmux: "dr-100-fix", Name: "DR-100 fix", SessionID: "sid-100", Tickets: []string{"DR-100"}},
+		{Tmux: "dr-200-a", Name: "same name", Tickets: []string{"DR-200"}},
+		{Tmux: "dr-200-b", Name: "same name", Tickets: []string{"DR-200", "DR-300"}},
+		// Two rows in one tmux session are one place to attach to, with no
+		// one row's id or name.
+		{Tmux: "dr-400", SessionID: "sid-400a", Tickets: []string{"DR-400"}},
+		{Tmux: "dr-400", SessionID: "sid-400b", Tickets: []string{"DR-400"}},
+		{Tmux: "promote-prod-1", Name: "Promote prod", SessionID: "sid-p"},
 		// A row the server should never list: a bad name never matches.
-		{Tmux: "x;rm -rf ~", Tickets: []string{"DR-500"}},
+		{Tmux: "x;rm -rf ~", Name: "evil", Tickets: []string{"DR-500"}},
 		{Tmux: "-foo", Tickets: []string{"DR-600"}},
 	}
+	one := func(tmux, sid, name string) fleetCardPick { return fleetCardPick{Tmux: tmux, SID: sid, Name: name} }
 	cases := []struct {
-		name            string
-		session, ticket string
-		sessions        []fleetWorkSession
-		want            fleetAttachPick
+		name                  string
+		tmux, session, ticket string
+		sessions              []fleetWorkSession
+		want                  fleetCardPick
 	}{
-		{"session field", "dr-100-fix", "", work, fleetAttachPick{Tmux: "dr-100-fix"}},
-		{"session pane form", "dr-100-fix:0.0", "", work, fleetAttachPick{Tmux: "dr-100-fix"}},
-		{"session wins over an ambiguous ticket", "dr-200-a", "DR-200", work, fleetAttachPick{Tmux: "dr-200-a"}},
-		{"session not live falls back to ticket", "gone-session", "DR-100", work, fleetAttachPick{Tmux: "dr-100-fix"}},
-		{"session not live and no ticket", "gone-session", "", work, fleetAttachPick{}},
-		{"ticket one row", "", "DR-300", work, fleetAttachPick{Tmux: "dr-200-b"}},
-		{"ticket is case-insensitive", "", " dr-100 ", work, fleetAttachPick{Tmux: "dr-100-fix"}},
-		{"ticket two rows", "", "DR-200", work, fleetAttachPick{Many: 2}},
-		{"ticket two rows in one tmux session", "", "DR-400", work, fleetAttachPick{Tmux: "dr-400"}},
-		{"ticket no row", "", "DR-999", work, fleetAttachPick{}},
-		{"no session no ticket", "", "", work, fleetAttachPick{}},
-		{"bad session name", "x;rm -rf ~", "", work, fleetAttachPick{}},
-		{"bad row name via ticket", "", "DR-500", work, fleetAttachPick{}},
-		{"dash name passes the regex", "-foo", "", work, fleetAttachPick{Tmux: "-foo"}},
-		{"null sessions", "dr-100-fix", "DR-100", nil, fleetAttachPick{}},
-		{"empty sessions", "dr-100-fix", "DR-100", []fleetWorkSession{}, fleetAttachPick{}},
+		{"tmux live", "promote-prod-1", "", "", work, one("promote-prod-1", "sid-p", "Promote prod")},
+		{"tmux pane form, padded", " promote-prod-1 :0.0", "", "", work, one("promote-prod-1", "sid-p", "Promote prod")},
+		{"tmux ended", "promote-prod-0", "", "DR-100", work, fleetCardPick{Ended: true}},
+		{"tmux ended, no session fallback", "promote-prod-0", "dr-100-fix", "", work, fleetCardPick{Ended: true}},
+		{"tmux beats session", "dr-100-fix", "promote-prod-1", "", work, one("dr-100-fix", "sid-100", "DR-100 fix")},
+		{"tmux bad name is ended", "x;rm -rf ~", "", "", work, fleetCardPick{Ended: true}},
+		{"tmux of a shared tmux session", "dr-400", "", "", work, fleetCardPick{Tmux: "dr-400"}},
+		{"session field", "", "dr-100-fix", "", work, one("dr-100-fix", "sid-100", "DR-100 fix")},
+		{"session pane form", "", "dr-100-fix:0.0", "", work, one("dr-100-fix", "sid-100", "DR-100 fix")},
+		{"session display name", "", " Promote prod ", "", work, one("promote-prod-1", "sid-p", "Promote prod")},
+		{"session display name on two", "", "same name", "", work, fleetCardPick{Many: 2}},
+		{"session wins over an ambiguous ticket", "", "dr-200-a", "DR-200", work, one("dr-200-a", "", "same name")},
+		{"session not live: no ticket fallback", "", "gone-session", "DR-100", work, fleetCardPick{}},
+		{"ticket one row", "", "", "DR-300", work, one("dr-200-b", "", "same name")},
+		{"ticket is case-insensitive", "", "", " dr-100 ", work, one("dr-100-fix", "sid-100", "DR-100 fix")},
+		{"ticket two rows", "", "", "DR-200", work, fleetCardPick{Many: 2}},
+		{"ticket two rows in one tmux session", "", "", "DR-400", work, fleetCardPick{Tmux: "dr-400"}},
+		{"ticket no row", "", "", "DR-999", work, fleetCardPick{}},
+		{"nothing", "", "", "", work, fleetCardPick{}},
+		{"bad session name", "", "x;rm -rf ~", "", work, fleetCardPick{}},
+		{"bad row display name", "", "evil", "", work, fleetCardPick{}},
+		{"bad row name via ticket", "", "", "DR-500", work, fleetCardPick{}},
+		{"dash name passes the regex", "", "-foo", "", work, fleetCardPick{Tmux: "-foo"}},
+		{"null sessions", "", "dr-100-fix", "DR-100", nil, fleetCardPick{}},
+		{"null sessions, tmux", "dr-100-fix", "", "", nil, fleetCardPick{Ended: true}},
+		{"empty sessions", "", "dr-100-fix", "DR-100", []fleetWorkSession{}, fleetCardPick{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := fleetAttachTarget(fleetAttachCard("a", tc.session, tc.ticket), tc.sessions)
+			got := fleetCardSession(fleetTmuxCard("a", tc.tmux, tc.session, tc.ticket), tc.sessions)
 			if got != tc.want {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFleetCardPickRefusal(t *testing.T) {
+	cases := []struct {
+		p      fleetCardPick
+		ticket string
+		want   string
+	}{
+		{fleetCardPick{Tmux: "a"}, "DR-1", ""},
+		{fleetCardPick{Many: 2}, "DR-1", "2 sessions for DR-1"},
+		{fleetCardPick{Many: 3}, "", "3 sessions match this card"},
+		{fleetCardPick{Ended: true}, "DR-1", "this card's session has ended"},
+		{fleetCardPick{}, "DR-1", "no session for this card"},
+	}
+	for _, c := range cases {
+		if got := fleetCardPickRefusal(c.p, c.ticket); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.p, got, c.want)
+		}
 	}
 }
 
@@ -69,7 +109,15 @@ func TestFleetAttachTargetUsesRawFields(t *testing.T) {
 	c := fleetTestCard("a", "needs-you")
 	c.Session, c.rawSession = "ab", "a\x1b[31mb"
 	c.Ticket, c.rawTicket = "DR-1", "DR-\x1b[0m1"
-	if got := fleetAttachTarget(c, work); got != (fleetAttachPick{}) {
+	if got := fleetCardSession(c, work); got != (fleetCardPick{}) {
+		t.Fatalf("got %+v, want no match", got)
+	}
+	c.rawSession, c.rawTmux = "", "a\x1b[31mb"
+	if got := fleetCardSession(c, work); got != (fleetCardPick{Ended: true}) {
+		t.Fatalf("tmux: got %+v, want ended", got)
+	}
+	c.rawTmux = ""
+	if got := fleetCardSession(c, work); got != (fleetCardPick{}) {
 		t.Fatalf("got %+v, want no match", got)
 	}
 }
@@ -239,15 +287,33 @@ func TestFleetViewAttachKey(t *testing.T) {
 	st = fleetTestState(fleetAttachView(), now)
 	st.handleKey(KeyDown, false, now)
 	st.handleKey(KeyDown, false, now)
-	if cmd := st.handleKey("a", false, now); cmd != fleetCmdNone || st.attach != nil {
+	if cmd := st.handleKey("a", false, now); cmd != fleetCmdRender || st.attach != nil {
 		t.Fatalf("no session: cmd %v attach %+v", cmd, st.attach)
+	}
+	if st.toast != "no session for this card" {
+		t.Fatalf("no session: toast %q", st.toast)
+	}
+
+	// Regression: a card that names its session only in tmux attaches.
+	v0 := fleetAttachView()
+	v0.Cards = []fleetCardView{fleetTmuxCard("p", "promote-prod-2026-11-25-247bd1", "", "")}
+	v0.Sessions = append(v0.Sessions, fleetWorkSession{Tmux: "promote-prod-2026-11-25-247bd1"})
+	st = fleetTestState(v0, now)
+	if cmd := st.handleKey("a", false, now); cmd != fleetCmdAttach || st.attach == nil || st.attach.Tmux != "promote-prod-2026-11-25-247bd1" {
+		t.Fatalf("tmux-only card: cmd %v attach %+v", cmd, st.attach)
+	}
+	// Its session ended: a toast, no attach.
+	v0.Sessions = v0.Sessions[:len(v0.Sessions)-1]
+	st = fleetTestState(v0, now)
+	if cmd := st.handleKey("a", false, now); cmd != fleetCmdRender || st.attach != nil || st.toast != "this card's session has ended" {
+		t.Fatalf("ended: cmd %v attach %+v toast %q", cmd, st.attach, st.toast)
 	}
 
 	// The server's list failed: nothing to attach to.
 	v := fleetAttachView()
 	v.Sessions = nil
 	st = fleetTestState(v, now)
-	if cmd := st.handleKey("a", false, now); cmd != fleetCmdNone || st.attach != nil {
+	if cmd := st.handleKey("a", false, now); cmd != fleetCmdRender || st.attach != nil {
 		t.Fatalf("null sessions: cmd %v attach %+v", cmd, st.attach)
 	}
 
@@ -345,19 +411,19 @@ func TestFleetLoopAttach(t *testing.T) {
 }
 
 func TestDecodeFleetStateViewSessions(t *testing.T) {
-	body := `{"fleet":{"alive":true},"cards":[{"id":"a","kind":"needs-you","session":"s\u001b[31m:0.0","ticket":"DR-\u001b[0m1"}],` +
-		`"sessions":[5,{"tmux":"dr-1","tickets":["DR-1",7]},{"tickets":["DR-2"]},{"tmux":"dr-3","tickets":"x"}]}`
+	body := `{"fleet":{"alive":true},"cards":[{"id":"a","kind":"needs-you","session":"s\u001b[31m:0.0","ticket":"DR-\u001b[0m1","tmux":"t\u001b[31m"}],` +
+		`"sessions":[5,{"tmux":"dr-1","tickets":["DR-1",7],"name":"Fix one","sessionId":"sid-1"},{"tickets":["DR-2"]},{"tmux":"dr-3","tickets":"x","name":4,"sessionId":null}]}`
 	v, err := decodeFleetStateView([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []fleetWorkSession{{Tmux: "dr-1", Tickets: []string{"DR-1"}}, {Tmux: "dr-3"}}
+	want := []fleetWorkSession{{Tmux: "dr-1", Name: "Fix one", SessionID: "sid-1", Tickets: []string{"DR-1"}}, {Tmux: "dr-3"}}
 	if !reflect.DeepEqual(v.Sessions, want) {
 		t.Fatalf("sessions = %+v, want %+v", v.Sessions, want)
 	}
 	c := v.Cards[0]
-	if c.rawSession != "s\x1b[31m:0.0" || c.rawTicket != "DR-\x1b[0m1" {
-		t.Fatalf("raw = %q %q", c.rawSession, c.rawTicket)
+	if c.rawSession != "s\x1b[31m:0.0" || c.rawTicket != "DR-\x1b[0m1" || c.rawTmux != "t\x1b[31m" {
+		t.Fatalf("raw = %q %q %q", c.rawSession, c.rawTicket, c.rawTmux)
 	}
 	assertNoEscapes(t, "session", c.Session)
 	assertNoEscapes(t, "ticket", c.Ticket)
