@@ -431,8 +431,11 @@ func TestSessionChatLoop(t *testing.T) {
 		t.Fatalf("after send: sending %v draft %q toast %q", l.st.chatSending, l.st.chatEditor().Text(), l.st.toast)
 	}
 	// FLEET hears of the chat only now, after Andy's message went through.
-	if len(l.notices) != 1 || !l.st.chatTold["p"] {
-		t.Fatalf("notice after send: %d told %v", len(l.notices), l.st.chatTold)
+	// The notice job may already have finished and been reaped in that same
+	// reap (the fake send returns at once), so only the mark is checked here;
+	// the exact one notice is checked once every job is done.
+	if !l.st.chatTold["p"] {
+		t.Fatalf("notice after send: told %v", l.st.chatTold)
 	}
 	waitFleetJobs(t, l)
 	l.reap(late)
