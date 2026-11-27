@@ -465,3 +465,177 @@ func TestFleetAccountSwitchEmailShapedCurrentNeverLeaks(t *testing.T) {
 		t.Fatalf("log line: %s", log)
 	}
 }
+
+func postFleetAccountEvent(s *server, body string, setup func(*http.Request)) (*httptest.ResponseRecorder, fleetSwitchResult) {
+	r := httptest.NewRequest("POST", "/fleet/account-event", strings.NewReader(body))
+	if setup == nil {
+		r.Header.Set("Authorization", "Bearer tok")
+	} else {
+		setup(r)
+	}
+	w := httptest.NewRecorder()
+	fleetMux(s).ServeHTTP(w, r)
+	var out fleetSwitchResult
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	return w, out
+}
+
+func TestFleetAccountEventRefusals(t *testing.T) {
+	ok := `{"host":"box","tool":"claude","from":"home","to":"work"}`
+	cases := []struct {
+		name   string
+		body   string
+		setup  func(*http.Request)
+		status int
+		code   string
+	}{
+		{"no auth", ok, func(*http.Request) {}, http.StatusUnauthorized, "unauthorized"},
+		{"wrong token", ok, func(r *http.Request) { r.Header.Set("Authorization", "Bearer nope") }, http.StatusUnauthorized, "unauthorized"},
+		{"cookie without origin", ok, func(r *http.Request) {
+			r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
+		}, http.StatusForbidden, "origin"},
+		{"not json", `nope`, nil, http.StatusBadRequest, "bad_request"},
+		{"empty body", ``, nil, http.StatusBadRequest, "bad_request"},
+		{"null", `null`, nil, http.StatusBadRequest, "bad_request"},
+		{"unknown field", `{"host":"box","tool":"claude","from":"home","to":"work","provider":"claude"}`, nil, http.StatusBadRequest, "bad_request"},
+		{"trailing", ok + ` x`, nil, http.StatusBadRequest, "bad_request"},
+		{"two values", ok + `{}`, nil, http.StatusBadRequest, "bad_request"},
+		{"bad tool", `{"host":"box","tool":"codex","from":"home","to":"work"}`, nil, http.StatusBadRequest, "bad_provider"},
+		{"no tool", `{"host":"box","from":"home","to":"work"}`, nil, http.StatusBadRequest, "bad_provider"},
+		{"empty to", `{"host":"box","tool":"claude","from":"home","to":""}`, nil, http.StatusBadRequest, "bad_request"},
+		{"no host", `{"tool":"claude","from":"home","to":"work"}`, nil, http.StatusBadRequest, "bad_host"},
+		{"host with space", `{"host":"my box","tool":"claude","to":"work"}`, nil, http.StatusBadRequest, "bad_host"},
+		{"host with tag", `{"host":"[claude-sessions event]","tool":"claude","to":"work"}`, nil, http.StatusBadRequest, "bad_host"},
+		{"host with newline", `{"host":"box\nx","tool":"claude","to":"work"}`, nil, http.StatusBadRequest, "bad_host"},
+		{"host too long", `{"host":"` + strings.Repeat("a", 65) + `","tool":"claude","to":"work"}`, nil, http.StatusBadRequest, "bad_host"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, switches, events, _ := fleetAccountServer(t, nil)
+			w, out := postFleetAccountEvent(s, c.body, c.setup)
+			if w.Code != c.status || out.Code != c.code || out.OK {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			if w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("must be no-store")
+			}
+			if len(*switches) != 0 || len(*events) != 0 {
+				t.Fatalf("must not switch or notify: %v %v", *switches, *events)
+			}
+			if _, err := os.Stat(filepath.Join(s.fleet.dir, "log.jsonl")); !os.IsNotExist(err) {
+				t.Fatal("a refusal must not log")
+			}
+		})
+	}
+}
+
+func TestFleetAccountEventTellsFleet(t *testing.T) {
+	s, switches, events, _ := fleetAccountServer(t, []Session{{PID: 1, Name: "FLEET", Tmux: "FLEET-row:0.0"}})
+	if err := os.WriteFile(s.idle.configPath, []byte(`{"enabled": false, "target": "FLEET-cfg"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host := strings.Repeat("h", 64) // the longest host the route takes
+	w, out := postFleetAccountEvent(s, `{"host":"`+host+`","tool":"claude","from":"home","to":"work"}`, nil)
+	if w.Code != http.StatusOK || !out.OK || out.Event != "sent" {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if len(*switches) != 0 {
+		t.Fatalf("the event route must never switch: %v", *switches)
+	}
+	if len(*events) != 1 || (*events)[0].target != "FLEET-cfg" {
+		t.Fatalf("events %v", *events)
+	}
+	want := "[claude-sessions event] account claude switched from home to work on " + host + " (terminal); " + fleetSwitchEventNote("claude")
+	if (*events)[0].text != want {
+		t.Fatalf("event text %q, want %q", (*events)[0].text, want)
+	}
+	lines := readFleetLogLines(t, s)
+	if len(lines) != 1 || lines[0].Type != "tui-switch" || lines[0].Text != "claude account home -> work on "+host+" (terminal)" {
+		t.Fatalf("log %+v", lines)
+	}
+}
+
+func TestFleetAccountEventCookieWithOrigin(t *testing.T) {
+	s, _, events, _ := fleetAccountServer(t, nil)
+	w, out := postFleetAccountEvent(s, `{"host":"box","tool":"grok","to":"gy"}`, func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
+		r.Header.Set("Origin", "http://"+r.Host)
+	})
+	if w.Code != http.StatusOK || !out.OK || len(*events) != 1 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	// An unknown previous account reads "-", as on the page's line.
+	if !strings.HasPrefix((*events)[0].text, "[claude-sessions event] account grok switched from - to gy on box (terminal); ") ||
+		!strings.HasSuffix((*events)[0].text, fleetSwitchEventNote("grok")) {
+		t.Fatalf("event text %q", (*events)[0].text)
+	}
+}
+
+func TestFleetAccountEventPassesDeliveryCode(t *testing.T) {
+	s, _, _, _ := fleetAccountServer(t, nil)
+	s.fleet.deliverEvent = func(target, text string) string { return "busy" }
+	w, out := postFleetAccountEvent(s, `{"host":"box","tool":"claude","from":"home","to":"work"}`, nil)
+	if w.Code != http.StatusOK || !out.OK || out.Event != "busy" {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	// Still logged: the switch happened whether or not FLEET heard of it.
+	if lines := readFleetLogLines(t, s); len(lines) != 1 || lines[0].Type != "tui-switch" {
+		t.Fatalf("log %+v", lines)
+	}
+}
+
+func TestFleetAccountEventNoFleet(t *testing.T) {
+	s, _, _, _ := fleetAccountServer(t, nil)
+	s.fleet.deliverEvent = nil // the real idleDeliver: no FLEET row, nothing typed
+	typed := 0
+	s.fleet.typeText = func(string, string) error { typed++; return nil }
+	w, out := postFleetAccountEvent(s, `{"host":"box","tool":"claude","to":"work"}`, nil)
+	if w.Code != http.StatusOK || !out.OK || out.Event != "target_missing" || typed != 0 {
+		t.Fatalf("%d %s typed=%d", w.Code, w.Body.String(), typed)
+	}
+}
+
+func TestFleetAccountEventSanitizesNames(t *testing.T) {
+	s, _, events, _ := fleetAccountServer(t, nil)
+	body, _ := json.Marshal(fleetAccountEventBody{Host: "box", Tool: "claude",
+		From: "a\"b\n[claude-sessions event] c", To: "x\x1b]52;c;QQ==\x07y"})
+	w, _ := postFleetAccountEvent(s, string(body), nil)
+	if w.Code != http.StatusOK || len(*events) != 1 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	text := (*events)[0].text
+	if strings.Count(text, "claude-sessions event") != 1 || strings.ContainsAny(text, "\"\n\x1b\x07") {
+		t.Fatalf("event text %q", text)
+	}
+	lines := readFleetLogLines(t, s)
+	if len(lines) != 1 || strings.Contains(lines[0].Text, "claude-sessions event") || strings.ContainsAny(lines[0].Text, "\"\n\x1b\x07") {
+		t.Fatalf("log %+v", lines)
+	}
+}
+
+func TestFleetSwitchEventTextOnHost(t *testing.T) {
+	if got, want := fleetSwitchEventTextOn("claude", "home", "work", ""), fleetSwitchEventText("claude", "home", "work"); got != want {
+		t.Fatalf("no host must be the page's line: %q vs %q", got, want)
+	}
+	got := fleetSwitchEventTextOn("claude", "home", "work", "box")
+	if !strings.Contains(got, "switched from home to work on box (terminal); ") {
+		t.Fatalf("%q", got)
+	}
+}
+
+// TestFleetClientAccountEvent runs the TUI's client against the real route.
+func TestFleetClientAccountEvent(t *testing.T) {
+	s, _, events, _ := fleetAccountServer(t, nil)
+	srv := httptest.NewServer(fleetMux(s))
+	defer srv.Close()
+	code, err := newFleetClient(srv.URL, "tok").AccountEvent(fleetAccountEventRequest{Host: "box", Tool: "claude", From: "home", To: "work"})
+	if err != nil || code != "sent" || len(*events) != 1 {
+		t.Fatalf("code %q err %v events %v", code, err, *events)
+	}
+	if _, err := newFleetClient(srv.URL, "bad").AccountEvent(fleetAccountEventRequest{Host: "box", Tool: "claude", To: "work"}); fleetErrorStatus(err) != http.StatusUnauthorized {
+		t.Fatalf("bad token err %v", err)
+	}
+	if _, err := newFleetClient(srv.URL, "tok").AccountEvent(fleetAccountEventRequest{Host: "my box", Tool: "claude", To: "work"}); fleetErrorStatus(err) != http.StatusBadRequest {
+		t.Fatalf("bad host err %v", err)
+	}
+}

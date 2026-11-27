@@ -316,6 +316,7 @@ func registerFleetRoutes(mux *http.ServeMux, s *server) {
 	mux.HandleFunc("POST /fleet/login/revoke", s.fleetLoginRevoke)
 	mux.HandleFunc("GET /fleet/accounts", s.fleetAccounts)
 	mux.HandleFunc("POST /fleet/account/switch", s.fleetAccountSwitch)
+	mux.HandleFunc("POST /fleet/account-event", s.fleetAccountEvent)
 	mux.HandleFunc("GET /fleet/push/key", s.fleetPushKey)
 	mux.HandleFunc("POST /fleet/push/subscribe", s.fleetPushSubscribe)
 	mux.HandleFunc("POST /fleet/push/unsubscribe", s.fleetPushUnsubscribe)

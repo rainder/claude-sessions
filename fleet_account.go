@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"time"
 )
@@ -439,8 +440,97 @@ func (s *server) fleetDoSwitch(provider, name, from string, msgs fleetSwitchMsgs
 // fleetSwitchEventText is the line typed into FLEET after a switch. Names
 // go through idleSanitize, so a name cannot forge the tag or break the line.
 func fleetSwitchEventText(provider, old, name string) string {
-	return fleetEventTag + " account " + provider + " switched from " + idleSanitize(old) +
-		" to " + idleSanitize(name) + "; " + fleetSwitchEventNote(provider)
+	return fleetSwitchEventTextOn(provider, old, name, "")
+}
+
+// fleetSwitchEventTextOn is fleetSwitchEventText for a switch made in a
+// terminal (the TUI's Ctrl+W): host names the machine whose account moved,
+// "" is the page's own line, unchanged.
+func fleetSwitchEventTextOn(provider, old, name, host string) string {
+	line := fleetEventTag + " account " + provider + " switched from " + idleSanitize(old) +
+		" to " + idleSanitize(name)
+	if host != "" {
+		line += " on " + fleetEventHostName(host) + " (terminal)"
+	}
+	return line + "; " + fleetSwitchEventNote(provider)
+}
+
+// fleetAccountEventHostRe is the host names POST /fleet/account-event takes:
+// a short host or servers.yaml name, nothing that needs scrubbing.
+var fleetAccountEventHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// fleetEventHostName scrubs a host for an event or log line as idleSanitize
+// does a name, but keeps all 64 runes the route takes (idleSanitize cuts at
+// 40).
+func fleetEventHostName(host string) string {
+	return scrubEventField(host, idleLabelRe, 64)
+}
+
+// fleetAccountEventBody is one POST /fleet/account-event: a switch the TUI
+// made on host, from the account that was live ("" when unknown) to to.
+type fleetAccountEventBody struct {
+	Host string `json:"host"`
+	Tool string `json:"tool"`
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// decodeFleetAccountEventBody reads exactly one object: an unknown field, a
+// top-level null, or trailing content is an error.
+func decodeFleetAccountEventBody(w http.ResponseWriter, r *http.Request) (fleetAccountEventBody, error) {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	dec.DisallowUnknownFields()
+	var body *fleetAccountEventBody
+	if err := dec.Decode(&body); err != nil || body == nil {
+		return fleetAccountEventBody{}, errors.New("bad json")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return fleetAccountEventBody{}, errors.New("bad json")
+	}
+	return *body, nil
+}
+
+// fleetAccountEvent is POST /fleet/account-event: the TUI switched an
+// account itself (Ctrl+W, on this host or another) and tells FLEET, as the
+// page's chip does after its own switch. The server switches nothing; it
+// builds the event line from the sanitized names, logs one tui-switch line,
+// and types the line into FLEET through fleetSwitchNotify. The answer's
+// event is the delivery code.
+func (s *server) fleetAccountEvent(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	kind := s.fleetAuth(r)
+	if kind == fleetAuthNone {
+		writeJSON(w, http.StatusUnauthorized, fleetSwitchResult{Code: "unauthorized", Error: "Unauthorized"})
+		return
+	}
+	if kind == fleetAuthCookie && !sameOrigin(r) {
+		writeJSON(w, http.StatusForbidden, fleetSwitchResult{Code: "origin", Error: "origin mismatch"})
+		return
+	}
+	body, err := decodeFleetAccountEventBody(w, r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "bad_request", Error: "bad request body"})
+		return
+	}
+	if body.Tool != accountToolClaude && body.Tool != accountToolGrok {
+		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "bad_provider", Error: "tool must be claude or grok"})
+		return
+	}
+	if body.To == "" {
+		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "bad_request", Error: "to is required"})
+		return
+	}
+	if !fleetAccountEventHostRe.MatchString(body.Host) {
+		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "bad_host", Error: "bad host name"})
+		return
+	}
+	host, from, to := fleetEventHostName(body.Host), idleSanitize(body.From), idleSanitize(body.To)
+	logText := body.Tool + " account " + from + " -> " + to + " on " + host + " (terminal)"
+	if err := s.appendFleetLog(fleetLogEntry{At: s.fleetNow().UTC().Format(time.RFC3339), Type: "tui-switch", Text: logText}); err != nil {
+		fmt.Fprintf(os.Stderr, "fleet: tui-switch log append failed: %v\n", err)
+	}
+	event := s.fleetSwitchNotify(body.Tool, fleetSwitchEventTextOn(body.Tool, body.From, body.To, body.Host))
+	writeJSON(w, http.StatusOK, fleetSwitchResult{OK: true, Event: event})
 }
 
 // fleetSwitchNotify types an account event line (a switch, or the

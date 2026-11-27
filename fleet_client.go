@@ -420,6 +420,57 @@ func (c *fleetClient) SessionSay(req fleetSessionSayRequest) fleetSayOutcome {
 	return c.postSay("/fleet/session/say", req)
 }
 
+// fleetAccountEventTimeout bounds the TUI's one POST /fleet/account-event
+// after a Ctrl+W switch: the switch already landed, so a slow FLEET host
+// must not hold the terminal for long.
+var fleetAccountEventTimeout = 5 * time.Second
+
+// fleetAccountEventRequest is one POST /fleet/account-event: the TUI
+// switched tool's account on host from From ("" unknown) to To.
+type fleetAccountEventRequest struct {
+	Host string `json:"host"`
+	Tool string `json:"tool"`
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// AccountEvent tells FLEET's server about a switch the TUI made and returns
+// the delivery code it answered ("sent" or a refusal code). An answer other
+// than 200 with ok true is a *fleetStatusError (404: a server too old for
+// the route); no answer is the transport error.
+func (c *fleetClient) AccountEvent(req fleetAccountEventRequest) (string, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fleetAccountEventTimeout)
+	defer cancel()
+	hr, err := c.newRequest(ctx, http.MethodPost, "/fleet/account-event", body)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", &fleetStatusError{Status: resp.StatusCode}
+	}
+	var out struct {
+		OK    bool   `json:"ok"`
+		Event string `json:"event"`
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, fleetSayBodyMax))
+	if err != nil {
+		return "", err
+	}
+	if json.Unmarshal(data, &out) != nil || !out.OK {
+		return "", errors.New("bad answer")
+	}
+	return fleetDisplayText(out.Event), nil
+}
+
 // postSay posts payload to a say endpoint.
 func (c *fleetClient) postSay(path string, payload any) fleetSayOutcome {
 	body, err := json.Marshal(payload)
