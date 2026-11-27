@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -55,7 +57,10 @@ func TestFleetSwitchNoticeFor(t *testing.T) {
 		{"", errors.New("dial tcp: refused"), false, "request failed"},
 		{"", &fleetStatusError{Status: http.StatusNotFound}, false, "FLEET server too old"},
 		{"", &fleetStatusError{Status: http.StatusUnauthorized}, false, "token rejected"},
-		{"", &fleetStatusError{Status: http.StatusBadRequest}, false, "request failed"},
+		{"", &fleetStatusError{Status: http.StatusBadRequest}, false, "FLEET refused the event"},
+		{"", &fleetStatusError{Status: http.StatusInternalServerError}, false, "request failed"},
+		{"", fmt.Errorf("post: %w", context.DeadlineExceeded), false, "no answer, may have been told"},
+		{"", timeoutErr{}, false, "no answer, may have been told"},
 	}
 	for _, c := range cases {
 		n := fleetSwitchNoticeFor(c.code, c.err)
@@ -72,16 +77,23 @@ func TestAccountSwitchEventRequest(t *testing.T) {
 		{Name: "gx", Tool: accountToolGrok, Active: true},
 		{Name: "gy", Tool: accountToolGrok},
 	}
-	got := accountSwitchEventRequest("ws", rows[3], rows)
+	got := accountSwitchEventRequest("ws", rows[3], rows, "")
 	if got != (fleetAccountEventRequest{Host: "ws", Tool: accountToolGrok, From: "gx", To: "gy"}) {
 		t.Fatalf("remote %+v", got)
 	}
-	got = accountSwitchEventRequest("", rows[1], rows)
-	if got.Host != shortHostname() || got.From != "home" || got.To != "work" || got.Tool != accountToolClaude {
+	got = accountSwitchEventRequest("", rows[1], rows, "")
+	if got.Host != fleetAccountEventHost(shortHostname()) || got.From != "home" || got.To != "work" || got.Tool != accountToolClaude {
 		t.Fatalf("local %+v", got)
 	}
-	if got := accountSwitchEventRequest("ws", rows[1], rows[1:2]); got.From != "" {
+	// A fresh disk read wins over the picker's snapshot.
+	if got := accountSwitchEventRequest("", rows[1], rows, "spare"); got.From != "spare" {
+		t.Fatalf("fresh from %+v", got)
+	}
+	if got := accountSwitchEventRequest("ws", rows[1], rows[1:2], ""); got.From != "" {
 		t.Fatalf("no active row must leave from empty: %+v", got)
+	}
+	if got := accountSwitchEventRequest("Mac mini", rows[1], rows, ""); got.Host != "Mac-mini" {
+		t.Fatalf("host must be scrubbed to the route's pattern: %+v", got)
 	}
 }
 
@@ -146,3 +158,10 @@ func TestFleetAccountEventVia(t *testing.T) {
 		}
 	})
 }
+
+// timeoutErr is a net.Error that timed out, as a client deadline gives.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }

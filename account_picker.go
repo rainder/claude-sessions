@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -261,11 +263,17 @@ func actSwitchAccount(c *actCtx) accountSwitchOutcome {
 		warnings []string
 		err      error
 		notice   *fleetSwitchNotice
+		liveFrom string
 	)
 	func() {
 		c.prepareLineOutput()
 		defer c.enterRaw()
 		fmt.Printf("\nswitching %s to %s... ", label, choice.Name)
+		// A local row's outgoing account is read fresh, right before the
+		// switch; a remote row keeps the picker's snapshot.
+		if host == "" && c.notifyFleet != nil {
+			liveFrom = localLiveAccountName(choice.Tool)
+		}
 		email, warnings, err = applyAccountSwitch(host, choice.Name, choice.Tool)
 		if err != nil {
 			fmt.Println("failed")
@@ -274,7 +282,7 @@ func actSwitchAccount(c *actCtx) accountSwitchOutcome {
 		fmt.Println("ok")
 		if c.notifyFleet != nil {
 			fmt.Print("telling FLEET... ")
-			n := c.notifyFleet(accountSwitchEventRequest(host, choice, rows))
+			n := c.notifyFleet(accountSwitchEventRequest(host, choice, rows, liveFrom))
 			notice = &n
 			if n.Told {
 				fmt.Println("told")
@@ -294,11 +302,18 @@ func actSwitchAccount(c *actCtx) accountSwitchOutcome {
 // accountSwitchEventRequest is the event the TUI sends FLEET after switching
 // choice's tool on host ("" is this machine, named by its short hostname).
 // From is the account the picker marked active for that tool, "" when none.
-func accountSwitchEventRequest(host string, choice accountRow, rows []accountRow) fleetAccountEventRequest {
+// The host is scrubbed to the route's pattern (fleetAccountEventHost), so a
+// servers.yaml name like "Mac mini" still notifies. liveFrom, when not "",
+// is the live account read from disk right before a local switch and wins
+// over the picker's snapshot.
+func accountSwitchEventRequest(host string, choice accountRow, rows []accountRow, liveFrom string) fleetAccountEventRequest {
 	if host == "" {
 		host = shortHostname()
 	}
-	req := fleetAccountEventRequest{Host: host, Tool: choice.Tool, To: choice.Name}
+	req := fleetAccountEventRequest{Host: fleetAccountEventHost(host), Tool: choice.Tool, To: choice.Name, From: liveFrom}
+	if req.From != "" {
+		return req
+	}
 	for _, r := range rows {
 		if r.Active && r.Tool == choice.Tool {
 			req.From = r.Name
@@ -306,6 +321,23 @@ func accountSwitchEventRequest(host string, choice accountRow, rows []accountRow
 		}
 	}
 	return req
+}
+
+// localLiveAccountName reads this machine's live account name for tool from
+// disk, as the switch itself does (currentAccountName /
+// grokCurrentAccountName); "" when it cannot be read or is not saved under
+// a valid name. A seam: tests never read a real home.
+var localLiveAccountName = func(tool string) string {
+	var name string
+	if tool == accountToolGrok {
+		name = grokCurrentAccountName()
+	} else {
+		name = currentAccountName()
+	}
+	if !accountNameOK(name) {
+		return ""
+	}
+	return name
 }
 
 // fleetSwitchNotice is how telling FLEET about a switch went: Told, or the
@@ -345,13 +377,17 @@ func fleetAccountEventVia(src *fleetLocal) func(fleetAccountEventRequest) fleetS
 // delivery refusal or a failed request is a short reason.
 func fleetSwitchNoticeFor(code string, err error) fleetSwitchNotice {
 	if err != nil {
-		switch fleetErrorStatus(err) {
-		case 0:
-			return fleetSwitchNotice{Reason: "request failed"}
-		case http.StatusNotFound:
+		var ne net.Error
+		switch status := fleetErrorStatus(err); {
+		case status == 0 && (errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) && ne.Timeout()):
+			// The server may have typed the line before the answer was lost.
+			return fleetSwitchNotice{Reason: "no answer, may have been told"}
+		case status == http.StatusNotFound:
 			return fleetSwitchNotice{Reason: "FLEET server too old"}
-		case http.StatusUnauthorized:
+		case status == http.StatusUnauthorized:
 			return fleetSwitchNotice{Reason: "token rejected"}
+		case status == http.StatusBadRequest:
+			return fleetSwitchNotice{Reason: "FLEET refused the event"}
 		default:
 			return fleetSwitchNotice{Reason: "request failed"}
 		}

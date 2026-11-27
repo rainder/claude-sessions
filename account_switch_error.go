@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -125,15 +126,56 @@ func renderAccountSwitchError(host, tool, name, errText string, cols, rows int) 
 // seam so tests can capture it.
 var accountSwitchBell = func(w io.Writer) { _, _ = io.WriteString(w, "\a") }
 
+// accountSwitchErrorGrace is how long after opening the panel ignores every
+// key: keys typed during the cooked wait (Enter, Space) must not close it
+// before it was seen.
+const accountSwitchErrorGrace = 300 * time.Millisecond
+
+// accountSwitchErrorNow is the panel's clock, a seam for tests.
+var accountSwitchErrorNow = time.Now
+
+// accountSwitchErrorGate decides which keys close an open panel: none
+// inside the grace window, then accountSwitchErrorClose's.
+type accountSwitchErrorGate struct{ opened time.Time }
+
+func newAccountSwitchErrorGate() accountSwitchErrorGate {
+	return accountSwitchErrorGate{opened: accountSwitchErrorNow()}
+}
+
+func (g accountSwitchErrorGate) closes(key string) bool {
+	if accountSwitchErrorNow().Sub(g.opened) < accountSwitchErrorGrace {
+		return false
+	}
+	return accountSwitchErrorClose(key)
+}
+
+// accountSwitchErrorDrainMax bounds the drain, so a key held down cannot
+// keep the panel from opening.
+const accountSwitchErrorDrainMax = 64
+
+// drainModalInput discards input already buffered on stdin: it reads with a
+// near-zero select timeout (pollEvents, portable) until a read finds
+// nothing.
+func drainModalInput(dec *inputDecoder) {
+	for i := 0; i < accountSwitchErrorDrainMax; i++ {
+		if events, _ := pollEvents(dec, time.Millisecond, nil); len(events) == 0 {
+			return
+		}
+	}
+}
+
 // showAccountSwitchError opens the failure panel and blocks until a close
 // key. Must be called in raw mode; it never leaves raw or the alt-screen, so
 // the caller's next render() paints over it. wakes keeps it centered across
-// a resize.
+// a resize. Bytes typed ahead are dropped on open, and keys inside the grace
+// window are ignored.
 func showAccountSwitchError(host, tool, name, errText string, wakes []wakeFD) {
-	accountSwitchBell(terminalOutput)
 	renderer := newScreenRenderer(os.Stdout)
 	decoder := newInputDecoder()
 	fd := int(os.Stdin.Fd())
+	drainModalInput(decoder)
+	gate := newAccountSwitchErrorGate()
+	accountSwitchBell(terminalOutput)
 	for {
 		cols, rows, err := term.GetSize(fd)
 		if err != nil {
@@ -142,7 +184,7 @@ func showAccountSwitchError(host, tool, name, errText string, wakes []wakeFD) {
 		_ = renderer.Draw(renderAccountSwitchError(host, tool, name, errText, cols, rows), cols, rows)
 		keys, _ := readModalEvents(decoder, wakes)
 		for _, key := range keys {
-			if accountSwitchErrorClose(key) {
+			if gate.closes(key) {
 				return
 			}
 		}

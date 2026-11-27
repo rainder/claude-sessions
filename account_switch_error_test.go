@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestAccountSwitchErrorClose(t *testing.T) {
@@ -65,5 +68,44 @@ func TestAccountSwitchBellOnce(t *testing.T) {
 	accountSwitchBell(&buf)
 	if buf.String() != "\a" {
 		t.Fatalf("bell %q", buf.String())
+	}
+}
+
+// TestAccountSwitchErrorGateIgnoresTypeAhead: inside the grace window no key
+// closes the panel, so an Enter typed during the cooked wait cannot dismiss
+// it unseen; after it, the close keys work.
+func TestAccountSwitchErrorGateIgnoresTypeAhead(t *testing.T) {
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	orig := accountSwitchErrorNow
+	accountSwitchErrorNow = func() time.Time { return now }
+	t.Cleanup(func() { accountSwitchErrorNow = orig })
+	gate := newAccountSwitchErrorGate()
+	for _, k := range []string{KeyEnter, "\r", " ", KeyEsc, "q", "\x03"} {
+		if gate.closes(k) {
+			t.Fatalf("%q closed the panel at open", k)
+		}
+	}
+	now = now.Add(accountSwitchErrorGrace - time.Millisecond)
+	if gate.closes(KeyEnter) {
+		t.Fatal("Enter closed the panel inside the grace window")
+	}
+	now = now.Add(time.Millisecond)
+	if !gate.closes(KeyEnter) || !gate.closes("\x03") || gate.closes("x") {
+		t.Fatal("after the grace window the close keys must work, others not")
+	}
+}
+
+func TestDrainModalInputDropsBufferedBytes(t *testing.T) {
+	r, w := testPipe(t)
+	orig := stdinFD
+	stdinFD = r
+	t.Cleanup(func() { stdinFD = orig })
+	if _, err := unix.Write(w, []byte("\r \rq")); err != nil {
+		t.Fatal(err)
+	}
+	dec := newInputDecoder()
+	drainModalInput(dec)
+	if events, _ := pollEvents(dec, 20*time.Millisecond, nil); len(events) != 0 {
+		t.Fatalf("buffered input survived the drain: %+v", events)
 	}
 }

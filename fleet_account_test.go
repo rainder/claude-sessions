@@ -491,9 +491,14 @@ func TestFleetAccountEventRefusals(t *testing.T) {
 	}{
 		{"no auth", ok, func(*http.Request) {}, http.StatusUnauthorized, "unauthorized"},
 		{"wrong token", ok, func(r *http.Request) { r.Header.Set("Authorization", "Bearer nope") }, http.StatusUnauthorized, "unauthorized"},
+		// Bearer only: a page cookie, with or without a same origin, is 401.
 		{"cookie without origin", ok, func(r *http.Request) {
 			r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
-		}, http.StatusForbidden, "origin"},
+		}, http.StatusUnauthorized, "unauthorized"},
+		{"cookie with origin", ok, func(r *http.Request) {
+			r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
+			r.Header.Set("Origin", "http://"+r.Host)
+		}, http.StatusUnauthorized, "unauthorized"},
 		{"not json", `nope`, nil, http.StatusBadRequest, "bad_request"},
 		{"empty body", ``, nil, http.StatusBadRequest, "bad_request"},
 		{"null", `null`, nil, http.StatusBadRequest, "bad_request"},
@@ -502,7 +507,14 @@ func TestFleetAccountEventRefusals(t *testing.T) {
 		{"two values", ok + `{}`, nil, http.StatusBadRequest, "bad_request"},
 		{"bad tool", `{"host":"box","tool":"codex","from":"home","to":"work"}`, nil, http.StatusBadRequest, "bad_provider"},
 		{"no tool", `{"host":"box","from":"home","to":"work"}`, nil, http.StatusBadRequest, "bad_provider"},
-		{"empty to", `{"host":"box","tool":"claude","from":"home","to":""}`, nil, http.StatusBadRequest, "bad_request"},
+		{"empty to", `{"host":"box","tool":"claude","from":"home","to":""}`, nil, http.StatusBadRequest, "bad_name"},
+		{"no to", `{"host":"box","tool":"claude","from":"home"}`, nil, http.StatusBadRequest, "bad_name"},
+		{"to with space", `{"host":"box","tool":"claude","from":"home","to":"my work"}`, nil, http.StatusBadRequest, "bad_name"},
+		{"to with dot", `{"host":"box","tool":"claude","to":"a.b"}`, nil, http.StatusBadRequest, "bad_name"},
+		{"to forges the tag", `{"host":"box","tool":"claude","to":"[claude-sessions event] x"}`, nil, http.StatusBadRequest, "bad_name"},
+		{"to too long", `{"host":"box","tool":"claude","to":"` + strings.Repeat("a", 65) + `"}`, nil, http.StatusBadRequest, "bad_name"},
+		{"from with newline", `{"host":"box","tool":"claude","from":"a\nb","to":"work"}`, nil, http.StatusBadRequest, "bad_name"},
+		{"from with quote", `{"host":"box","tool":"claude","from":"a\"b","to":"work"}`, nil, http.StatusBadRequest, "bad_name"},
 		{"no host", `{"tool":"claude","from":"home","to":"work"}`, nil, http.StatusBadRequest, "bad_host"},
 		{"host with space", `{"host":"my box","tool":"claude","to":"work"}`, nil, http.StatusBadRequest, "bad_host"},
 		{"host with tag", `{"host":"[claude-sessions event]","tool":"claude","to":"work"}`, nil, http.StatusBadRequest, "bad_host"},
@@ -555,12 +567,9 @@ func TestFleetAccountEventTellsFleet(t *testing.T) {
 	}
 }
 
-func TestFleetAccountEventCookieWithOrigin(t *testing.T) {
+func TestFleetAccountEventUnknownFrom(t *testing.T) {
 	s, _, events, _ := fleetAccountServer(t, nil)
-	w, out := postFleetAccountEvent(s, `{"host":"box","tool":"grok","to":"gy"}`, func(r *http.Request) {
-		r.AddCookie(&http.Cookie{Name: "cs_fleet", Value: "sec"})
-		r.Header.Set("Origin", "http://"+r.Host)
-	})
+	w, out := postFleetAccountEvent(s, `{"host":"box","tool":"grok","to":"gy"}`, nil)
 	if w.Code != http.StatusOK || !out.OK || len(*events) != 1 {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
@@ -595,21 +604,54 @@ func TestFleetAccountEventNoFleet(t *testing.T) {
 	}
 }
 
-func TestFleetAccountEventSanitizesNames(t *testing.T) {
-	s, _, events, _ := fleetAccountServer(t, nil)
-	body, _ := json.Marshal(fleetAccountEventBody{Host: "box", Tool: "claude",
-		From: "a\"b\n[claude-sessions event] c", To: "x\x1b]52;c;QQ==\x07y"})
-	w, _ := postFleetAccountEvent(s, string(body), nil)
-	if w.Code != http.StatusOK || len(*events) != 1 {
-		t.Fatalf("%d %s", w.Code, w.Body.String())
+// TestFleetAccountEventCooldown: a claude event starts the auto switch's
+// cooldown only for this host and only when this server's live account is
+// already the one named; anything else leaves it alone.
+func TestFleetAccountEventCooldown(t *testing.T) {
+	here := fleetAccountEventHost(shortHostname())
+	cases := []struct {
+		name string
+		body string
+		live string
+		want bool
+	}{
+		{"this host, live matches", `{"host":"` + here + `","tool":"claude","from":"home","to":"work"}`, "work", true},
+		{"this host, live differs", `{"host":"` + here + `","tool":"claude","from":"home","to":"work"}`, "home", false},
+		{"other host", `{"host":"` + here + `-other","tool":"claude","from":"home","to":"work"}`, "work", false},
+		{"grok", `{"host":"` + here + `","tool":"grok","from":"gx","to":"gy"}`, "gy", false},
 	}
-	text := (*events)[0].text
-	if strings.Count(text, "claude-sessions event") != 1 || strings.ContainsAny(text, "\"\n\x1b\x07") {
-		t.Fatalf("event text %q", text)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := autoSwitchTestServer(t)
+			h.current[accountToolClaude] = c.live
+			h.current[accountToolGrok] = c.live
+			w, out := postFleetAccountEvent(h.s, c.body, nil)
+			if w.Code != http.StatusOK || !out.OK {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			got := h.state(t).LastManualAt
+			if c.want && got != "2026-10-28T10:00:00Z" || !c.want && got != "" {
+				t.Fatalf("LastManualAt %q, want set %v", got, c.want)
+			}
+		})
 	}
-	lines := readFleetLogLines(t, s)
-	if len(lines) != 1 || strings.Contains(lines[0].Text, "claude-sessions event") || strings.ContainsAny(lines[0].Text, "\"\n\x1b\x07") {
-		t.Fatalf("log %+v", lines)
+}
+
+func TestFleetAccountEventHost(t *testing.T) {
+	cases := map[string]string{
+		"box":                   "box",
+		"Mac mini":              "Mac-mini",
+		"ws.ts.net":             "ws.ts.net",
+		"žalias:host/\n":        "-alias-host--",
+		"":                      "unknown",
+		strings.Repeat("a", 70): strings.Repeat("a", 64),
+		strings.Repeat("ž", 70): strings.Repeat("-", 64),
+	}
+	for in, want := range cases {
+		got := fleetAccountEventHost(in)
+		if got != want || !fleetAccountEventHostRe.MatchString(got) {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -637,5 +679,9 @@ func TestFleetClientAccountEvent(t *testing.T) {
 	}
 	if _, err := newFleetClient(srv.URL, "tok").AccountEvent(fleetAccountEventRequest{Host: "my box", Tool: "claude", To: "work"}); fleetErrorStatus(err) != http.StatusBadRequest {
 		t.Fatalf("bad host err %v", err)
+	}
+	// The TUI scrubs a servers.yaml name before sending, so it still lands.
+	if code, err := newFleetClient(srv.URL, "tok").AccountEvent(accountSwitchEventRequest("Mac mini", accountRow{Name: "work", Tool: "claude"}, nil, "")); err != nil || code != "sent" {
+		t.Fatalf("scrubbed host: %q %v", code, err)
 	}
 }

@@ -243,8 +243,9 @@ types into panes. Spec and plan: `docs/superpowers/`.
   and scoped weekly below too, in the saved list. Switches through
   `fleetDoSwitch`, the page chip's path (busy = skip, no cooldown; the live
   account must still be the one read). 30 min cooldown from the later of
-  the last attempt and the last manual claude switch on the page; a torn
-  state file starts one. A
+  the last attempt and the last manual claude switch (the page, or a
+  terminal event for this host whose `to` is already the live account); a
+  torn state file starts one. A
   failure (not `already_live`) is one FLEET line. No target = one FLEET line
   per episode; with saved accounts lacking a fresh reading the line says so
   and does not end the episode; a list error sends nothing. Kill switch:
@@ -252,13 +253,18 @@ types into panes. Spec and plan: `docs/superpowers/`.
 - **Terminal switches:** after a TUI Ctrl+W switch lands (local or remote;
   `POST /account/switch` itself tells no one), the TUI runs `fleetLocal`
   discovery and posts `POST /fleet/account-event` `{host, tool, from, to}`
-  (strict body like kill/migrate; host `[A-Za-z0-9._-]{1,64}`, else 400).
+  (bearer only; strict body like kill/migrate; `to` and a non-empty `from`
+  pass `accountNameOK`, else `bad_name`; host `[A-Za-z0-9._-]{1,64}`, which
+  the TUI scrubs to with `fleetAccountEventHost`, else `bad_host`). A local
+  switch reads `from` fresh from disk; a remote one uses the picker's row.
   The server switches nothing: it logs one `tui-switch` line and types
   `fleetSwitchEventTextOn`'s line (the page's, plus `on <host> (terminal)`)
   through `fleetSwitchNotify`, answering the delivery code. The toast says
   `FLEET told` or `FLEET not told (<reason>)`; not told or a warning is
   amber for 8 s. A failed switch opens a modal panel instead (bell once,
-  sanitized error text, closes on Enter/Esc/q/Space/Ctrl-C, never quits).
+  sanitized error text, closes on Enter/Esc/q/Space/Ctrl-C, never quits;
+  typed-ahead bytes are drained on open and keys in the first 300 ms are
+  ignored).
 - **Session view:** `fleetResolveSession` is the allowlist (a card's
   session: its `tmux` field, else its `session`, as the page's
   `cardSession` reads them; a working-list row, a local row disabled for FLEET that passes

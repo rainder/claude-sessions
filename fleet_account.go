@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -459,6 +460,29 @@ func fleetSwitchEventTextOn(provider, old, name, host string) string {
 // a short host or servers.yaml name, nothing that needs scrubbing.
 var fleetAccountEventHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// fleetAccountEventHost makes a host or servers.yaml name fit
+// fleetAccountEventHostRe: every other rune becomes '-', cut to 64; ""
+// becomes "unknown". The TUI sends it, and the server compares its own
+// short hostname through it.
+func fleetAccountEventHost(h string) string {
+	var b strings.Builder
+	for _, r := range h {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+		if b.Len() == 64 {
+			break
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
+}
+
 // fleetEventHostName scrubs a host for an event or log line as idleSanitize
 // does a name, but keeps all 64 runes the route takes (idleSanitize cuts at
 // 40).
@@ -498,13 +522,10 @@ func decodeFleetAccountEventBody(w http.ResponseWriter, r *http.Request) (fleetA
 // event is the delivery code.
 func (s *server) fleetAccountEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	kind := s.fleetAuth(r)
-	if kind == fleetAuthNone {
+	// Bearer only, as /fleet/login/arm: only the TUI calls this, and a page
+	// cookie must not be able to type account lines into FLEET.
+	if !s.authed(r) {
 		writeJSON(w, http.StatusUnauthorized, fleetSwitchResult{Code: "unauthorized", Error: "Unauthorized"})
-		return
-	}
-	if kind == fleetAuthCookie && !sameOrigin(r) {
-		writeJSON(w, http.StatusForbidden, fleetSwitchResult{Code: "origin", Error: "origin mismatch"})
 		return
 	}
 	body, err := decodeFleetAccountEventBody(w, r)
@@ -516,8 +537,10 @@ func (s *server) fleetAccountEvent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "bad_provider", Error: "tool must be claude or grok"})
 		return
 	}
-	if body.To == "" {
-		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "bad_request", Error: "to is required"})
+	// Account names follow the snapshot rule (accountNameOK); from may be
+	// "" when the live account was not saved under a name.
+	if !accountNameOK(body.To) || (body.From != "" && !accountNameOK(body.From)) {
+		writeJSON(w, http.StatusBadRequest, fleetSwitchResult{Code: "bad_name", Error: "bad account name"})
 		return
 	}
 	if !fleetAccountEventHostRe.MatchString(body.Host) {
@@ -528,6 +551,14 @@ func (s *server) fleetAccountEvent(w http.ResponseWriter, r *http.Request) {
 	logText := body.Tool + " account " + from + " -> " + to + " on " + host + " (terminal)"
 	if err := s.appendFleetLog(fleetLogEntry{At: s.fleetNow().UTC().Format(time.RFC3339), Type: "tui-switch", Text: logText}); err != nil {
 		fmt.Fprintf(os.Stderr, "fleet: tui-switch log append failed: %v\n", err)
+	}
+	// A deliberate claude switch on this very host starts the auto switch's
+	// cooldown, as the page's does. The event alone proves nothing, so it
+	// counts only when this server's own live account is now the one named.
+	if body.Tool == accountToolClaude && body.Host == fleetAccountEventHost(shortHostname()) &&
+		s.fleetAccountCurrent(accountToolClaude) == body.To {
+		at := s.auto.clock().UTC().Format(time.RFC3339)
+		s.auto.update(func(st *autoSwitchState) { st.LastManualAt = at })
 	}
 	event := s.fleetSwitchNotify(body.Tool, fleetSwitchEventTextOn(body.Tool, body.From, body.To, body.Host))
 	writeJSON(w, http.StatusOK, fleetSwitchResult{OK: true, Event: event})
