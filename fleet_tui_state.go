@@ -297,6 +297,9 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	st.unclear = ""
 	old := st.items
 	oldSel := st.sel
+	// The ship's body (no card, or only SENT ones and the list not opened),
+	// whatever chat sits over it: shipOn without the overlay checks.
+	wasShip := len(old) == 0 || (!st.listMode && fleetOnlySent(old))
 	st.err, st.view, st.items = "", v, fleetItems(v)
 	if len(st.items) == 0 || !fleetOnlySent(st.items) {
 		// An open or unconfirmed card shows the list anyway; with no card
@@ -343,6 +346,11 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		}
 	}
 	st.nextAfter = ""
+	// Leaving the ship for a list with a card that needs Andy starts at the
+	// top, where that card is, not on the SENT card the ship left selected.
+	if wasShip && len(st.items) > 0 && !fleetOnlySent(st.items) {
+		st.sel, st.scroll = 0, 0
+	}
 	if st.sel >= len(st.items) {
 		st.sel = len(st.items) - 1
 	}

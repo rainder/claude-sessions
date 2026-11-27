@@ -611,3 +611,47 @@ func TestFleetLoopFrameTimer(t *testing.T) {
 		t.Fatal("back on the ship: no frame timer")
 	}
 }
+
+// A card that needs Andy, arriving while the ship shows, is selected: the
+// list starts at the top, not on the SENT card the ship left selected.
+func TestFleetShipNewCardSelectsTop(t *testing.T) {
+	withOpen := func() fleetStateView {
+		v := fleetShipSentView(2)
+		v.Cards = append(v.Cards, fleetTestCard("z", "needs-you"))
+		v.CardHashes["z"] = "h-z"
+		return v
+	}
+	st := fleetTestState(fleetShipSentView(2), fleetShipNow)
+	st.sel, st.scroll = 1, 4
+	st.applyState(withOpen(), nil, fleetShipNow)
+	if st.shipOn() || st.sel != 0 || st.scroll != 0 || st.items[0].Card.ID != "z" {
+		t.Fatalf("from the ship: sel %d scroll %d items[0] %q", st.sel, st.scroll, st.items[0].Card.ID)
+	}
+
+	// From an empty ship too.
+	st = fleetTestState(fleetShipView(), fleetShipNow)
+	st.applyState(withOpen(), nil, fleetShipNow)
+	if st.items[st.sel].Card.ID != "z" {
+		t.Fatalf("from no card: sel on %q", st.items[st.sel].Card.ID)
+	}
+
+	// The SENT list opened with Enter is not the ship: a card there keeps
+	// the selection where Andy put it.
+	st = fleetTestState(fleetShipSentView(2), fleetShipNow)
+	st.handleKey(KeyEnter, false, fleetShipNow)
+	st.handleKey(KeyDown, false, fleetShipNow)
+	id := st.items[st.sel].Card.ID
+	st.applyState(withOpen(), nil, fleetShipNow)
+	if st.items[st.sel].Card.ID != id {
+		t.Fatalf("SENT list: selection moved from %q to %q", id, st.items[st.sel].Card.ID)
+	}
+
+	// A later poll on the list keeps the selection.
+	st = fleetTestState(withOpen(), fleetShipNow)
+	st.handleKey(KeyDown, false, fleetShipNow)
+	id = st.items[st.sel].Card.ID
+	st.applyState(withOpen(), nil, fleetShipNow)
+	if st.items[st.sel].Card.ID != id {
+		t.Fatalf("list poll: selection moved from %q to %q", id, st.items[st.sel].Card.ID)
+	}
+}
