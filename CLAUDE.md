@@ -249,6 +249,16 @@ types into panes. Spec and plan: `docs/superpowers/`.
   per episode; with saved accounts lacking a fresh reading the line says so
   and does not end the episode; a list error sends nothing. Kill switch:
   `claude-sessions auto-switch off`, which also pins the live account.
+- **Terminal switches:** after a TUI Ctrl+W switch lands (local or remote;
+  `POST /account/switch` itself tells no one), the TUI runs `fleetLocal`
+  discovery and posts `POST /fleet/account-event` `{host, tool, from, to}`
+  (strict body like kill/migrate; host `[A-Za-z0-9._-]{1,64}`, else 400).
+  The server switches nothing: it logs one `tui-switch` line and types
+  `fleetSwitchEventTextOn`'s line (the page's, plus `on <host> (terminal)`)
+  through `fleetSwitchNotify`, answering the delivery code. The toast says
+  `FLEET told` or `FLEET not told (<reason>)`; not told or a warning is
+  amber for 8 s. A failed switch opens a modal panel instead (bell once,
+  sanitized error text, closes on Enter/Esc/q/Space/Ctrl-C, never quits).
 - **Session view:** `fleetResolveSession` is the allowlist (a card's
   session: its `tmux` field, else its `session`, as the page's
   `cardSession` reads them; a working-list row, a local row disabled for FLEET that passes

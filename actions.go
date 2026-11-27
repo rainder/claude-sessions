@@ -64,6 +64,11 @@ type actCtx struct {
 	// which case Ctrl+W does nothing.
 	accounts func(host string) accountSnapshot
 
+	// notifyFleet tells FLEET about a switch Ctrl+W just made
+	// (fleetAccountEventVia in the TUI). Nil in tests, in which case no one
+	// is told and the toast says nothing about FLEET.
+	notifyFleet func(fleetAccountEventRequest) fleetSwitchNotice
+
 	// flags is this host's FlagsStore, written directly for local rows
 	// (Host == ""). Remote rows never write it — they go through
 	// actToggleDisabledRemote / actSetGroupRemote instead. May be nil in tests

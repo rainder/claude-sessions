@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -210,48 +212,202 @@ func pickAccount(host string, accounts []accountRow, wakes []wakeFD) (accountRow
 	}
 }
 
+// accountSwitchOutcome is what a Ctrl+W did, for the main loop: the toast
+// (empty for "nothing happened" or a failure the error panel already
+// showed), whether it warrants the amber 8 s style, and whether a switch
+// actually landed.
+type accountSwitchOutcome struct {
+	Toast    string
+	Warn     bool
+	Switched bool
+}
+
 // actSwitchAccount handles Ctrl+W on the selected row: pick one of that row's
 // host's accounts and apply it. Local rows switch in-process; remote rows post to
 // that host's own server, the same split actKillRemote/actAttachRemote follow.
 //
-// Returns the toast to show (empty for "nothing happened") and whether a switch
-// actually landed, so the caller can refresh and kick the account pollers — their
-// snapshots still describe the previous account until they refetch.
+// Switched tells the caller to refresh and kick the account pollers — their
+// snapshots still describe the previous account until they refetch. After a
+// switch FLEET is told (c.notifyFleet), and the toast says whether it was. A
+// failed switch opens the error panel, which stays until dismissed.
 //
 // Enter on the already-active account is a true no-op: no request is sent at all,
 // and the overlay closes cleanly. There is no confirmation step by design —
 // picker plus Enter is the whole interaction.
-func actSwitchAccount(c *actCtx) (toast string, switched bool) {
+func actSwitchAccount(c *actCtx) accountSwitchOutcome {
 	target := c.selectedTarget()
 	if target == nil || c.accounts == nil {
-		return "", false
+		return accountSwitchOutcome{}
 	}
 	host := target.host
 	label := localAccountHost
 	if host != "" {
 		label = host
 	}
-	choice, ok := pickAccount(host, hostAccountRows(label, host, c.accounts), c.modalWakes)
+	rows := hostAccountRows(label, host, c.accounts)
+	choice, ok := pickAccount(host, rows, c.modalWakes)
 	if !ok || choice.Active {
-		return "", false
+		return accountSwitchOutcome{}
 	}
 
 	// The switch itself blocks, and can block for a while: on macOS it shells
 	// out to `security`, which may sit on a Keychain dialog, and a remote switch
 	// is an HTTP round trip. Drop to cooked mode behind a status line first — the
 	// same thing actKillRemote does before its request — rather than leaving the
-	// UI frozen and silent with no explanation.
-	c.prepareLineOutput()
-	defer c.enterRaw()
-	fmt.Printf("\nswitching %s to %s... ", label, choice.Name)
-
-	email, warnings, err := applyAccountSwitch(host, choice.Name, choice.Tool)
+	// UI frozen and silent with no explanation. Telling FLEET runs in the same
+	// window: discovery plus one short POST.
+	var (
+		email    string
+		warnings []string
+		err      error
+		notice   *fleetSwitchNotice
+	)
+	func() {
+		c.prepareLineOutput()
+		defer c.enterRaw()
+		fmt.Printf("\nswitching %s to %s... ", label, choice.Name)
+		email, warnings, err = applyAccountSwitch(host, choice.Name, choice.Tool)
+		if err != nil {
+			fmt.Println("failed")
+			return
+		}
+		fmt.Println("ok")
+		if c.notifyFleet != nil {
+			fmt.Print("telling FLEET... ")
+			n := c.notifyFleet(accountSwitchEventRequest(host, choice, rows))
+			notice = &n
+			if n.Told {
+				fmt.Println("told")
+			} else {
+				fmt.Println("not told")
+			}
+		}
+	}()
 	if err != nil {
-		fmt.Printf("failed: %v\n", err)
-		return "account switch failed: " + err.Error(), false
+		showAccountSwitchError(label, choice.Tool, choice.Name, err.Error(), c.modalWakes)
+		return accountSwitchOutcome{}
 	}
-	fmt.Println("ok")
-	return accountSwitchToast(label, choice.Name, email, warnings), true
+	toast, warn := accountSwitchResultToast(accountSwitchToast(label, choice.Name, email, warnings), len(warnings) > 0, notice)
+	return accountSwitchOutcome{Toast: toast, Warn: warn, Switched: true}
+}
+
+// accountSwitchEventRequest is the event the TUI sends FLEET after switching
+// choice's tool on host ("" is this machine, named by its short hostname).
+// From is the account the picker marked active for that tool, "" when none.
+func accountSwitchEventRequest(host string, choice accountRow, rows []accountRow) fleetAccountEventRequest {
+	if host == "" {
+		host = shortHostname()
+	}
+	req := fleetAccountEventRequest{Host: host, Tool: choice.Tool, To: choice.Name}
+	for _, r := range rows {
+		if r.Active && r.Tool == choice.Tool {
+			req.From = r.Name
+			break
+		}
+	}
+	return req
+}
+
+// fleetSwitchNotice is how telling FLEET about a switch went: Told, or the
+// short Reason it was not.
+type fleetSwitchNotice struct {
+	Told   bool
+	Reason string
+}
+
+// fleetAccountEventVia is the TUI's notifyFleet: a fresh discovery (this
+// host's service first, then the servers.yaml hosts), then one POST to the
+// host that runs FLEET. It runs inside the Ctrl+W action, never on the render
+// path.
+func fleetAccountEventVia(src *fleetLocal) func(fleetAccountEventRequest) fleetSwitchNotice {
+	return func(req fleetAccountEventRequest) fleetSwitchNotice {
+		v, err := src.State()
+		var down *fleetHostDownError
+		switch {
+		case errors.As(err, &down):
+			return fleetSwitchNotice{Reason: "FLEET host down"}
+		case err != nil:
+			return fleetSwitchNotice{Reason: "no FLEET found"}
+		case len(v.Ambiguous) > 0:
+			return fleetSwitchNotice{Reason: "two FLEETs live"}
+		case !v.Fleet.Alive:
+			return fleetSwitchNotice{Reason: "no FLEET found"}
+		}
+		c, err := src.Client()
+		if err != nil || c.base != v.Source {
+			return fleetSwitchNotice{Reason: "FLEET moved"}
+		}
+		return fleetSwitchNoticeFor(c.AccountEvent(req))
+	}
+}
+
+// fleetSwitchNoticeFor reads AccountEvent's answer: "sent" is told; a
+// delivery refusal or a failed request is a short reason.
+func fleetSwitchNoticeFor(code string, err error) fleetSwitchNotice {
+	if err != nil {
+		switch fleetErrorStatus(err) {
+		case 0:
+			return fleetSwitchNotice{Reason: "request failed"}
+		case http.StatusNotFound:
+			return fleetSwitchNotice{Reason: "FLEET server too old"}
+		case http.StatusUnauthorized:
+			return fleetSwitchNotice{Reason: "token rejected"}
+		default:
+			return fleetSwitchNotice{Reason: "request failed"}
+		}
+	}
+	if code == "sent" {
+		return fleetSwitchNotice{Told: true}
+	}
+	return fleetSwitchNotice{Reason: fleetDeliveryReason(code)}
+}
+
+// fleetDeliveryReason maps idleDeliver's refusal codes to the toast's short
+// phrase. An unknown code shows as itself, cut short.
+func fleetDeliveryReason(code string) string {
+	switch code {
+	case "target_missing":
+		return "no FLEET found"
+	case "target_ambiguous":
+		return "two FLEETs live"
+	case "list_failed":
+		return "session list failed"
+	case "busy":
+		return "FLEET busy"
+	case "dialog":
+		return "FLEET shows a dialog"
+	case "input_busy":
+		return "FLEET input not empty"
+	case "pane_mode":
+		return "FLEET pane in scroll mode"
+	case "no_pane":
+		return "no FLEET pane"
+	case "not_submitted":
+		return "typed, Enter not confirmed"
+	case "double_tap", "rate_limited":
+		return "rate limited"
+	case "send_failed":
+		return "send failed"
+	case "":
+		return "no answer"
+	}
+	return "refused: " + truncateRunes(code, 24)
+}
+
+// accountSwitchResultToast folds the FLEET notice into a success toast. warn
+// (amber, 8 s) is a switch warning or FLEET not told; a nil notice (no
+// notifier) adds nothing.
+func accountSwitchResultToast(base string, warnings bool, n *fleetSwitchNotice) (string, bool) {
+	warn := warnings
+	switch {
+	case n == nil:
+	case n.Told:
+		base += " · FLEET told"
+	default:
+		base += " · FLEET not told (" + n.Reason + ")"
+		warn = true
+	}
+	return base, warn
 }
 
 // applyAccountSwitch performs the switch on the row's own host: in-process for a

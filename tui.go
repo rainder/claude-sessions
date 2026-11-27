@@ -580,6 +580,9 @@ func RunTUI(interval time.Duration) error {
 			sel:        state.sel,
 			modalWakes: modalWakes,
 			flags:      flagsStore,
+			// One fresh discovery and a short POST, run inside the Ctrl+W
+			// action after a switch landed; never on the render path.
+			notifyFleet: fleetAccountEventVia(fleetSrc),
 			// Straight from the pollers' latest snapshots (and, for a remote row,
 			// the last /sessions poll this loop already has in `remotes`), so
 			// Ctrl+W opens instantly and never fetches.
@@ -1046,8 +1049,8 @@ func RunTUI(interval time.Duration) error {
 				}
 			case "\x17": // Ctrl+W: switch the selected row's host to another account
 				screen.Invalidate()
-				msg, switched := actSwitchAccount(makeCtx())
-				if switched {
+				out := actSwitchAccount(makeCtx())
+				if out.Switched {
 					// The local account pollers still describe the *previous*
 					// account for up to two minutes; kick both so this machine's
 					// header email and picker marker catch up with the toast.
@@ -1063,9 +1066,13 @@ func RunTUI(interval time.Duration) error {
 					remoteUsageHub.Refresh()
 					refresh(true)
 				}
-				if msg != "" {
-					toast = msg
-					toastUntil = time.Now().Add(4 * time.Second)
+				if out.Toast != "" {
+					// A switch warning or FLEET not told is amber and stays
+					// twice as long; a failure has already shown its panel.
+					toast, toastUntil = out.Toast, time.Now().Add(4*time.Second)
+					if out.Warn {
+						toast, toastUntil = colorize(fleetSGRAmber, out.Toast), time.Now().Add(8*time.Second)
+					}
 				}
 				render()
 			case "d", "D":
