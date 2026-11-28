@@ -350,13 +350,113 @@ func TestFleetSentHelpHint(t *testing.T) {
 	}
 
 	st.applyState(fleetCollapseView(now), nil, now)
+	// s goes with the later parts, after the generic ones: it survives at
+	// common widths.
 	full := stripANSI(fleetBottomRowFit(st, now, 0))
 	fit := fleetFitHelp(full, cellWidth(full)-1)
-	if strings.Contains(fit, fleetHelpSentHint) || !strings.Contains(fit, "PgUp/PgDn scroll") {
-		t.Fatalf("fit drops %q first: %q", fleetHelpSentHint, fit)
+	if !strings.Contains(fit, fleetHelpSentHint) || strings.Contains(fit, "PgUp/PgDn scroll") {
+		t.Fatalf("fit drops PgUp/PgDn before %q: %q", fleetHelpSentHint, fit)
+	}
+	for _, cols := range []int{80, 100} {
+		if row := stripANSI(fleetBottomRowFit(st, now, cols)); !strings.Contains(row, fleetHelpSentHint) {
+			t.Fatalf("%d cols footer %q", cols, row)
+		}
 	}
 
 	if !slices.ContainsFunc(fleetHelpText, func(l string) bool { return strings.HasPrefix(l, "  s ") }) {
 		t.Fatal("the ? panel has no s line")
+	}
+}
+
+// A toggle rebuilds the list, so the rest of the same read must not hit the
+// rows the last frame drew: a double click toggles once, and a row click
+// after s selects nothing until the next render.
+func TestFleetSentToggleClearsHitMap(t *testing.T) {
+	now := fleetCollapseNow
+	st := fleetTestState(fleetCollapseView(now), now)
+	out := fleetRendered(st, 100, 30, now)
+	y := fleetScreenRow(out, "+2 earlier")
+	st.handleEvent(fleetClick(y), false, now)
+	if cmd := st.handleEvent(fleetClick(y), false, now); cmd != fleetCmdNone || !st.sentOpen {
+		t.Fatalf("second press in the read: cmd %v open %v", cmd, st.sentOpen)
+	}
+
+	// Expanded: a row click after s in the same read must not select by the
+	// old indexes (the c row's line now shows nothing it showed).
+	out = fleetRendered(st, 100, 30, now)
+	yc := fleetScreenRow(out, "DR-C  You chose")
+	if yc < 0 {
+		t.Fatalf("no c row:\n%s", out)
+	}
+	st.handleKey("s", false, now)
+	if cmd := st.handleEvent(fleetClick(yc), false, now); cmd != fleetCmdNone || fleetSelID(st) != "o" {
+		t.Fatalf("row click after s: cmd %v on %q", cmd, fleetSelID(st))
+	}
+	// The next frame's rows work again.
+	out = fleetRendered(st, 100, 30, now)
+	if st.handleEvent(fleetClick(fleetScreenRow(out, "DR-B  You chose")), false, now); fleetSelID(st) != "b" {
+		t.Fatalf("click after the redraw: on %q", fleetSelID(st))
+	}
+}
+
+// Clarify's draft still opens the Other panel on its own card after a new
+// state hides that SENT card and moves the selection off it.
+func TestFleetSentHiddenClarifyDraft(t *testing.T) {
+	now := fleetCollapseNow
+	st := fleetTestState(fleetCollapseView(now), now)
+	st.sel = fleetItemIndexT(t, st, "b")
+	st.clarify = &fleetClarifyMode{item: st.items[st.sel], openedAt: now,
+		view: fleetClarifyView{Draft: &clarifyDraft{Text: "Pick B"}}}
+	v := fleetCollapseView(now)
+	v.Answered["c"] = fleetSentAnswer(now.UTC().Format(time.RFC3339))
+	st.applyState(v, nil, now)
+	if fleetSelID(st) != "c" || st.clarify == nil {
+		t.Fatalf("on %q clarify %v", fleetSelID(st), st.clarify)
+	}
+	if cmd := st.handleKey("s", false, now); cmd != fleetCmdRender || st.panel == nil ||
+		!st.panel.other || st.panel.item.Card.ID != "b" || st.panel.comment != "Pick B" || st.clarify != nil {
+		t.Fatalf("s: cmd %v panel %+v clarify %v", cmd, st.panel, st.clarify)
+	}
+
+	// A card no state holds any more: a toast, the chat stays.
+	st = fleetTestState(fleetCollapseView(now), now)
+	gone := fleetItem{Card: fleetTestCard("gone", "needs-you")}
+	st.clarify = &fleetClarifyMode{item: gone, openedAt: now,
+		view: fleetClarifyView{Draft: &clarifyDraft{Text: "Pick B"}}}
+	if cmd := st.handleKey("s", false, now); cmd != fleetCmdRender || st.panel != nil || st.clarify == nil || st.toast != "card is gone" {
+		t.Fatalf("gone card: cmd %v panel %v toast %q", cmd, st.panel, st.toast)
+	}
+}
+
+// On a screen whose list window holds fewer lines than the list, selecting
+// the last card brings SENT's toggle row into view with it.
+func TestFleetSentToggleRowScrollsIntoView(t *testing.T) {
+	now := fleetCollapseNow
+	v := fleetCollapseView(now)
+	for _, id := range []string{"p", "q", "r", "u"} {
+		c := fleetTestCard(id, "needs-you")
+		c.Ticket = "DR-" + strings.ToUpper(id)
+		v.Cards = append(v.Cards, c)
+		v.CardHashes[id] = "h-" + id
+	}
+	st := fleetTestState(v, now)
+	out := fleetRendered(st, 100, 16, now)
+	if strings.Contains(out, "+2 earlier") {
+		t.Fatalf("the toggle row fits at the top; make the screen shorter:\n%s", out)
+	}
+	for range len(st.items) {
+		st.handleKey(KeyDown, false, now)
+		out = fleetRendered(st, 100, 16, now)
+	}
+	if fleetSelID(st) != "b" {
+		t.Fatalf("on %q", fleetSelID(st))
+	}
+	lines := strings.Split(out, "\n")
+	if b, r := fleetRowOf(lines, "DR-B  You chose"), fleetRowOf(lines, "+2 earlier"); b < 0 || r != b+1 {
+		t.Fatalf("last card at %d, toggle row at %d:\n%s", b, r, out)
+	}
+	// And the row works there.
+	if st.handleEvent(fleetClick(fleetScreenRow(out, "+2 earlier")), false, now); !st.sentOpen {
+		t.Fatal("click on the scrolled-in toggle row")
 	}
 }

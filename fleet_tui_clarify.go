@@ -167,8 +167,12 @@ func (st *fleetViewState) handleClarifyKey(k string, inBatch bool, now time.Time
 func (st *fleetViewState) draftToOther(now time.Time) fleetCmd {
 	c := st.clarify
 	draft := strings.Join(strings.Fields(c.view.Draft.Text), " ")
-	if it := st.selected(); it == nil || it.Card.ID != c.item.Card.ID {
-		return fleetCmdNone
+	// The card from all, not the selection: a SENT card the list hides
+	// since the chat opened is still this chat's card.
+	i := fleetItemIndex(st.all, c.item.Card.ID)
+	if i < 0 {
+		st.setToast("card is gone", fleetToastWarn, now)
+		return fleetCmdRender
 	}
 	if st.view.Source != c.source {
 		// FLEET is on another host than the chat was opened on.
@@ -182,7 +186,7 @@ func (st *fleetViewState) draftToOther(now time.Time) fleetCmd {
 		return fleetCmdRender
 	}
 	st.clarify = nil
-	cmd := st.openOther(now)
+	cmd := st.openOtherOn(&st.all[i], now)
 	if st.panel == nil {
 		st.clarify = c
 		st.setToast("cannot answer this card now", fleetToastWarn, now)

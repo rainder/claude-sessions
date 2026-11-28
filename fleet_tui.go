@@ -1216,6 +1216,12 @@ func fleetStackedBody(st *fleetViewState, cols, bodyRows int, now time.Time) []s
 	listH, rule, panelH := fleetStackedLayout(bodyRows, len(list), st.panel != nil || st.batch != nil)
 	headAbove := len(st.items) > 0 && (st.sel == 0 || st.items[st.sel-1].Section != st.items[st.sel].Section)
 	st.listTop = fleetListWindow(st.listTop, selRow, len(list), listH, headAbove)
+	// SENT's toggle row is no card, so the window never follows the
+	// selection onto it: it comes into view with the last card.
+	if n := len(list); listH > 0 && n > listH && lineItems[n-1] == fleetSentToggle &&
+		st.listTop+listH == n-1 && selRow > st.listTop {
+		st.listTop++
+	}
 	st.panelRows = max(panelH, 0)
 
 	out := append([]string(nil), list[st.listTop:st.listTop+listH]...)
@@ -1400,12 +1406,12 @@ func fleetBottomRowFit(st *fleetViewState, now time.Time, cols int) string {
 
 // fleetHelpDropOrder is the key help's parts in the order they go when the
 // row is wider than the screen: what the full help (?) or the screen itself
-// already says goes first (the SENT toggle row says s itself). fleetHelpDropLater goes next: the keys not about
+// already says goes first. fleetHelpDropLater goes next: the keys not about
 // the selected card alone. Then the card's own keys go from the right, and
 // "? keys" never: it is the way to every key that went.
 var (
-	fleetHelpDropOrder = []string{fleetHelpSentHint, "PgUp/PgDn scroll", "↑↓ card", "t raw text", "Esc back", "o other", "1-9 pick option"}
-	fleetHelpDropLater = []string{fleetHelpChatHint, fleetHelpBatchHint}
+	fleetHelpDropOrder = []string{"PgUp/PgDn scroll", "↑↓ card", "t raw text", "Esc back", "o other", "1-9 pick option"}
+	fleetHelpDropLater = []string{fleetHelpSentHint, fleetHelpChatHint, fleetHelpBatchHint}
 )
 
 // fleetHelpKeysHint is the key help's last part, kept while anything else

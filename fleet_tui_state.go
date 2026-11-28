@@ -366,6 +366,9 @@ func (st *fleetViewState) refilter() {
 	}
 	st.items = fleetVisibleItems(st.all, st.sentExpanded())
 	st.selectVisible(id, st.sel)
+	// The rows on screen show the old list until the next render: a later
+	// mouse event in the same read must not hit them.
+	st.hit = fleetHitMap{}
 }
 
 // selectVisible puts the selection on card id in items. A card still in all
@@ -893,7 +896,12 @@ func fleetOptionRequest(item fleetItem, opt int, hash, source, comment string, c
 // answer is a plain line the card does not track, so it is never a second
 // answer. The card hash only lets a poll close the panel when the card moves.
 func (st *fleetViewState) openOther(now time.Time) fleetCmd {
-	it := st.selected()
+	return st.openOtherOn(st.selected(), now)
+}
+
+// openOtherOn is openOther on card it, which may be a SENT card the list
+// hides (Clarify's draft keeps its own card).
+func (st *fleetViewState) openOtherOn(it *fleetItem, now time.Time) fleetCmd {
 	if it == nil || len(it.Card.Options) == 0 || it.Card.ID == "" || !st.view.Fleet.Alive || st.sending {
 		return fleetCmdNone
 	}
