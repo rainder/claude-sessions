@@ -318,7 +318,7 @@ func fleetShipBody(st *fleetViewState, cols, bodyRows int, now time.Time) []stri
 	if bodyRows == 0 {
 		return nil
 	}
-	text := fleetShipTextLines(st.view, len(st.items), now)
+	text := fleetShipTextLines(st.view, len(st.all), now)
 	art := fleetShipPick(cols, bodyRows, len(text))
 	if art == nil && bodyRows >= 0 {
 		for len(text) > bodyRows {
@@ -397,6 +397,7 @@ func (st *fleetViewState) handleShipKey(k string) (cmd fleetCmd, handled bool) {
 			return fleetCmdNone, true
 		}
 		st.listMode = true
+		st.refilter() // the SENT list shows every SENT card
 		return fleetCmdRender, true
 	}
 	return fleetCmdNone, true

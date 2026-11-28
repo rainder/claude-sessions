@@ -91,8 +91,10 @@ type fleetPanel struct {
 type fleetViewState struct {
 	view          fleetStateView
 	loaded        bool
-	err           string // non-empty: the one line shown instead of the cards
-	items         []fleetItem
+	err           string      // non-empty: the one line shown instead of the cards
+	all           []fleetItem // every card fleetItems lists; lookups that must see a hidden card use it
+	items         []fleetItem // the cards the list shows (fleetVisibleItems of all); selection indexes it
+	sentOpen      bool        // s: the SENT section lists every card, not only the newest; memory only
 	sel           int
 	scroll        int    // details panel scroll, in lines; 0 on a new selection
 	listTop       int    // first list line in the list window (renderFleetView keeps it)
@@ -271,6 +273,122 @@ func fleetItemIndex(items []fleetItem, id string) int {
 	return -1
 }
 
+// fleetSentToggle is the lineItems value of the SENT section's last row,
+// "+N earlier · s show" or "s hide earlier": a click on it does what s does.
+const fleetSentToggle = -2
+
+// fleetNewestSent is the index in items of the SENT card answered last: the
+// one whose latest attempt has the newest time. A time that does not parse
+// is older than any that does; on a tie the later card in state.json order
+// wins (FLEET appends new cards). -1 when no item is SENT.
+func fleetNewestSent(items []fleetItem) int {
+	best := -1
+	var bestAt time.Time
+	for i, it := range items {
+		if it.Section != fleetSecSent {
+			continue
+		}
+		var at time.Time
+		if it.Answer != nil {
+			at, _ = time.Parse(time.RFC3339, it.Answer.latest().At)
+		}
+		if best < 0 || !at.Before(bestAt) {
+			best, bestAt = i, at
+		}
+	}
+	return best
+}
+
+// fleetSentCount is how many items are SENT.
+func fleetSentCount(items []fleetItem) int {
+	n := 0
+	for _, it := range items {
+		if it.Section == fleetSecSent {
+			n++
+		}
+	}
+	return n
+}
+
+// fleetVisibleItems is the part of all the card list shows: every card when
+// open, else every card outside SENT and only the newest SENT one
+// (fleetNewestSent), in all's order.
+func fleetVisibleItems(all []fleetItem, open bool) []fleetItem {
+	newest := fleetNewestSent(all)
+	if open || newest < 0 {
+		return all
+	}
+	out := make([]fleetItem, 0, len(all))
+	for i, it := range all {
+		if it.Section != fleetSecSent || i == newest {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// sentExpanded reports whether the list shows every SENT card: s opened
+// them, or the list is the SENT list opened from the ship screen, which is
+// there to show them all.
+func (st *fleetViewState) sentExpanded() bool { return st.sentOpen || st.listMode }
+
+// sentHidden is how many SENT cards the list leaves out.
+func (st *fleetViewState) sentHidden() int {
+	return fleetSentCount(st.all) - fleetSentCount(st.items)
+}
+
+// sentToggleable reports whether the list draws the SENT section's toggle
+// row, which is when s and a click on that row act and the key help offers
+// s: the card list shows (not the ship, an error or the ambiguous line), it
+// is not the SENT list from the ship, and SENT holds more than one card.
+func (st *fleetViewState) sentToggleable() bool {
+	return st.err == "" && st.loaded && len(st.view.Ambiguous) == 0 && !st.listMode && !st.shipOn() &&
+		fleetSentCount(st.all) > 1
+}
+
+// toggleSent is s: show or hide the earlier SENT cards.
+func (st *fleetViewState) toggleSent() fleetCmd {
+	if !st.sentToggleable() {
+		return fleetCmdNone
+	}
+	st.sentOpen = !st.sentOpen
+	st.refilter()
+	return fleetCmdRender
+}
+
+// refilter rebuilds items from all after the expanded state changed (s, or
+// the SENT list opened or left from the ship). The selection keeps its card
+// while that card shows; a card now hidden hands it to the newest SENT card.
+func (st *fleetViewState) refilter() {
+	id := ""
+	if st.sel >= 0 && st.sel < len(st.items) {
+		id = st.items[st.sel].Card.ID
+	}
+	st.items = fleetVisibleItems(st.all, st.sentExpanded())
+	st.selectVisible(id, st.sel)
+}
+
+// selectVisible puts the selection on card id in items. A card still in all
+// but hidden moves it to the newest SENT card shown; any other miss keeps
+// index fallback, clamped. The details panel goes back to its top when the
+// selected card changes.
+func (st *fleetViewState) selectVisible(id string, fallback int) {
+	if i := fleetItemIndex(st.items, id); i >= 0 {
+		st.sel = i
+		return
+	}
+	if fleetItemIndex(st.all, id) >= 0 {
+		st.sel, st.scroll = max(fleetNewestSent(st.items), 0), 0
+		return
+	}
+	st.sel = fallback
+	if id != "" {
+		st.scroll = 0
+	}
+	st.sel = min(st.sel, len(st.items)-1)
+	st.sel = max(st.sel, 0)
+}
+
 // applyState takes one /fleet/state result.
 func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time) {
 	st.loaded = true
@@ -300,27 +418,22 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	// The ship's body (no card, or only SENT ones and the list not opened),
 	// whatever chat sits over it: shipOn without the overlay checks.
 	wasShip := len(old) == 0 || (!st.listMode && fleetOnlySent(old))
-	st.err, st.view, st.items = "", v, fleetItems(v)
-	if len(st.items) == 0 || !fleetOnlySent(st.items) {
+	st.err, st.view, st.all = "", v, fleetItems(v)
+	if len(st.all) == 0 || !fleetOnlySent(st.all) {
 		// An open or unconfirmed card shows the list anyway; with no card
 		// at all there is nothing to list. Either way the next all-sent
 		// state starts on the ship again.
 		st.listMode = false
 	}
+	st.items = fleetVisibleItems(st.all, st.sentExpanded())
 
-	// Keep the selection on its card; an id-less card keeps its index.
+	// Keep the selection on its card; an id-less card keeps its index, and
+	// a card the collapsed SENT section now hides hands it to the newest.
 	selID := ""
 	if oldSel >= 0 && oldSel < len(old) {
 		selID = old[oldSel].Card.ID
 	}
-	if i := fleetItemIndex(st.items, selID); i >= 0 {
-		st.sel = i
-	} else {
-		st.sel = oldSel
-		if selID != "" {
-			st.scroll = 0
-		}
-	}
+	st.selectVisible(selID, oldSel)
 
 	// After a send, move on to the next open card, in the order the list
 	// had before the answered card moved to SENT, but only while the
@@ -357,8 +470,10 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	if st.sel < 0 {
 		st.sel = 0
 	}
+	// The locks and Clarify follow their card in all: a SENT card the list
+	// hides is still there.
 	if st.unlocked != "" {
-		if i := fleetItemIndex(st.items, st.unlocked); i < 0 || st.items[i].Answer == nil {
+		if i := fleetItemIndex(st.all, st.unlocked); i < 0 || st.all[i].Answer == nil {
 			st.unlocked = ""
 		}
 	}
@@ -367,20 +482,20 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 	// card gone. A poll read before the answer landed keeps the lock.
 	ownSent := st.justSent
 	if st.justSent != "" {
-		if i := fleetItemIndex(st.items, st.justSent); i < 0 || st.items[i].Answer != nil {
+		if i := fleetItemIndex(st.all, st.justSent); i < 0 || st.all[i].Answer != nil {
 			st.justSent = ""
 		}
 	}
 
 	if c := st.clarify; c != nil {
-		if i := fleetItemIndex(st.items, c.item.Card.ID); i < 0 {
+		if i := fleetItemIndex(st.all, c.item.Card.ID); i < 0 {
 			st.clarify = nil
 			st.setToast("card is gone", fleetToastWarn, now)
 		} else if v.Source != c.source {
 			st.clarify = nil
 			st.setToast(errFleetMoved.Error(), fleetToastWarn, now)
 		} else {
-			c.item = st.items[i]
+			c.item = st.all[i]
 		}
 	}
 
@@ -406,7 +521,7 @@ func (st *fleetViewState) applyState(v fleetStateView, err error, now time.Time)
 		}
 	}
 	for id := range st.batchSent {
-		if i := fleetItemIndex(st.items, id); i < 0 || st.items[i].Answer != nil {
+		if i := fleetItemIndex(st.all, id); i < 0 || st.all[i].Answer != nil {
 			delete(st.batchSent, id)
 		}
 	}
@@ -525,6 +640,7 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		if st.listMode {
 			// The SENT list opened from the ship screen: one level back.
 			st.listMode = false
+			st.refilter()
 			return fleetCmdRender
 		}
 		return fleetCmdClose
@@ -583,6 +699,13 @@ func (st *fleetViewState) handleKey(k string, inBatch bool, now time.Time) fleet
 		return st.pickLean(inBatch, now)
 	case "R":
 		return st.openBatch(now)
+	case "s":
+		// The ship screen took s above; a panel, the R panel, a chat,
+		// Clarify and the help own input before this switch.
+		if inBatch {
+			return fleetCmdNone
+		}
+		return st.toggleSent()
 	case "t":
 		// The ship screen shows no card, so there is no card text to show.
 		if inBatch || st.shipOn() || st.selected() == nil {
@@ -850,14 +973,15 @@ const fleetMouseStep = 3
 type fleetHitMap struct {
 	on        bool
 	listY     int   // screen row of the list window's first line
-	listItems []int // item index each list window line shows; -1 for a heading
+	listItems []int // item index each list window line shows; -1 for a heading, fleetSentToggle for SENT's toggle row
 	panelY    int   // screen row of the panel's first line
 	panelH    int   // panel rows
 	scrolls   bool  // the panel is the details panel, which scrolls (the confirm panel does not)
 }
 
 // listItemAt is the item index of the list line at screen row y, -1 for a
-// heading, and ok false when y is not in the list window.
+// heading, fleetSentToggle for SENT's toggle row, and ok false when y is not
+// in the list window.
 func (h fleetHitMap) listItemAt(y int) (item int, ok bool) {
 	if !h.on || y < h.listY || y >= h.listY+len(h.listItems) {
 		return -1, false
@@ -899,7 +1023,7 @@ func (st *fleetViewState) handleEvent(ev inputEvent, inBatch bool, now time.Time
 // wheel over the details panel scrolls it fleetMouseStep lines; over the card
 // list (rows and headings) it moves the selection one card, as ↑↓ do, since
 // the list window always follows the selection. A left press on a card row
-// selects that card. While a confirm panel is open it owns input: it does not
+// selects that card; on the SENT toggle row it does what s does. While a confirm panel is open it owns input: it does not
 // scroll, and the list under it must not change, so every event is ignored.
 // Releases, other buttons, and every row outside the list and the panel do
 // nothing, and so does every body but the card list (st.hit.on).
@@ -975,6 +1099,9 @@ func (st *fleetViewState) handleMouse(m mouseEvent) fleetCmd {
 		return fleetCmdRender
 	case mouseLeft:
 		i, ok := h.listItemAt(m.y)
+		if ok && i == fleetSentToggle {
+			return st.toggleSent()
+		}
 		if !ok || i < 0 || i >= len(st.items) {
 			return fleetCmdNone
 		}

@@ -339,6 +339,10 @@ types into panes. Spec and plan: `docs/superpowers/`.
   opens the key help (fleet_tui_help.go), which swallows every other key.
   The key help row offers `c`/`x` only through `canCorrect`/`canDismiss`,
   the keys' own checks, and `fleetFitHelp` drops its generic parts first.
+  SENT shows only its newest card (latest attempt time) plus a `+N
+  earlier` row; `s` or a click on that row toggles the rest (memory only;
+  the ship's SENT list shows all), and hidden cards stay out of
+  `st.items`, so no key or click reaches them (`st.all` holds every card).
 - **Uploads:** type sniffed from the bytes, server-chosen file names, pruned
   after 7 days.
 - **Web Push:** stdlib RFC 8291/8292. The endpoint host allowlist is the SSRF

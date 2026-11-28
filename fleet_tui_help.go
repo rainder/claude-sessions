@@ -31,6 +31,7 @@ var fleetHelpText = []string{
 	"  i / →          chat with the card's session",
 	"  f              chat with FLEET",
 	"  t              the card's raw text (drag to select)",
+	"  s              show / hide the earlier SENT cards (the newest always shows)",
 	"  ?              this help",
 	"  Esc / q        back, or close the Fleet view",
 	"",

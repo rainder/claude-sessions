@@ -1614,7 +1614,7 @@ func renderHelp(sortMode string, groupSortOn bool) string {
 	fmt.Fprintln(&b, "    i            show session info (ticket + conversation summary)")
 	fmt.Fprintln(&b, "    Ctrl-W       switch that host's Claude account (⏎ applies · esc cancels)")
 	fmt.Fprintln(&b, "    f / F        FLEET decision cards (1-9 pick · r FLEET's pick · o other · a attach")
-	fmt.Fprintln(&b, "                 · i/→ session chat · f FLEET chat · k clarify · t raw text · Esc back)")
+	fmt.Fprintln(&b, "                 · i/→ session chat · f FLEET chat · k clarify · t raw text · s earlier sent · Esc back)")
 	fmt.Fprintln(&b, "                 ? in the Fleet view lists all keys; links are Cmd+click")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "  "+bold("INSPECTOR"))

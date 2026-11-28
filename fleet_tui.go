@@ -990,6 +990,9 @@ const (
 	// when c and x would act on the selected card (canCorrect, canDismiss).
 	fleetHelpCorrectHint = "c correct"
 	fleetHelpDismissHint = "x dismiss"
+	// fleetHelpSentHint goes before "? keys" while the SENT section can show
+	// or hide its earlier cards (sentToggleable).
+	fleetHelpSentHint = "s earlier"
 
 	// The Clarify screen's help rows, without and with a draft.
 	// Esc keeps the typed question for the card's next Clarify; Ctrl-C clears it.
@@ -1389,16 +1392,19 @@ func fleetBottomRowFit(st *fleetViewState, now time.Time, cols int) string {
 	if answer != "" {
 		row = strings.Replace(row, " · t raw text · ", " · t raw text · "+answer, 1)
 	}
+	if st.sentToggleable() {
+		row = strings.Replace(row, " · ? keys", " · "+fleetHelpSentHint+" · ? keys", 1)
+	}
 	return dim(fleetFitHelp(row, cols))
 }
 
 // fleetHelpDropOrder is the key help's parts in the order they go when the
 // row is wider than the screen: what the full help (?) or the screen itself
-// already says goes first. fleetHelpDropLater goes next: the keys not about
+// already says goes first (the SENT toggle row says s itself). fleetHelpDropLater goes next: the keys not about
 // the selected card alone. Then the card's own keys go from the right, and
 // "? keys" never: it is the way to every key that went.
 var (
-	fleetHelpDropOrder = []string{"PgUp/PgDn scroll", "↑↓ card", "t raw text", "Esc back", "o other", "1-9 pick option"}
+	fleetHelpDropOrder = []string{fleetHelpSentHint, "PgUp/PgDn scroll", "↑↓ card", "t raw text", "Esc back", "o other", "1-9 pick option"}
 	fleetHelpDropLater = []string{fleetHelpChatHint, fleetHelpBatchHint}
 )
 
@@ -1456,7 +1462,9 @@ var fleetSectionTitles = map[fleetSection]string{
 
 // fleetListLines is one line per card under its section headings, the
 // selected card's line index, and the item index each line shows (-1 for a
-// heading or the empty-list line).
+// heading or the empty-list line). SENT, the last section, ends in its
+// toggle row (fleetSentToggleRow) when s can toggle it, lineItems
+// fleetSentToggle.
 func fleetListLines(st *fleetViewState, cols int, now time.Time) (lines []string, selRow int, lineItems []int) {
 	if len(st.items) == 0 {
 		return []string{dim("No cards wait for you.")}, 0, []int{-1}
@@ -1475,7 +1483,22 @@ func fleetListLines(st *fleetViewState, cols int, now time.Time) (lines []string
 		lines = append(lines, fleetCollapsedRow(it, i == st.sel, chat, cols, now))
 		lineItems = append(lineItems, i)
 	}
+	if st.sentToggleable() {
+		lines = append(lines, fleetSentToggleRow(st.sentHidden(), cols))
+		lineItems = append(lineItems, fleetSentToggle)
+	}
 	return lines, selRow, lineItems
+}
+
+// fleetSentToggleRow is the dim last row of the SENT section: how many
+// earlier SENT cards hide and that s shows them, or with none hidden that s
+// hides them again.
+func fleetSentToggleRow(hidden, cols int) string {
+	t := "  s hide earlier"
+	if hidden > 0 {
+		t = "  +" + strconv.Itoa(hidden) + " earlier · s show"
+	}
+	return dim(truncateRunes(t, cols))
 }
 
 // fleetClarifyMark follows an open card's title on its row when the card has
